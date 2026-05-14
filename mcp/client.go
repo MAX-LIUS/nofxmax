@@ -249,6 +249,10 @@ func (client *Client) BuildMCPRequestBody(systemPrompt, userPrompt string) map[s
 	// OpenAI newer models use max_completion_tokens instead of max_tokens
 	if client.Provider == ProviderOpenAI {
 		requestBody["max_completion_tokens"] = client.MaxTokens
+		// For reasoning models (o-series, gpt-5.5+), set reasoning_effort to reduce thinking tokens
+		if isReasoningModel(client.Model) {
+			requestBody["reasoning_effort"] = "low"
+		}
 	} else {
 		requestBody["max_tokens"] = client.MaxTokens
 	}
@@ -539,6 +543,15 @@ func (client *Client) String() string {
 		client.Provider, client.Model)
 }
 
+func isReasoningModel(model string) bool {
+	for _, prefix := range []string{"o1", "o3", "o4", "gpt-5"} {
+		if strings.HasPrefix(model, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsRetryableError determines if error is retryable (network errors, timeouts, etc.)
 func (client *Client) IsRetryableError(err error) bool {
 	errStr := err.Error()
@@ -768,6 +781,15 @@ func (client *Client) BuildRequestBodyFromRequest(req *Request) map[string]any {
 	} else {
 		// If not set in Request, use Client's MaxTokens
 		requestBody[tokenKey] = client.MaxTokens
+	}
+
+	// For reasoning models, set reasoning_effort to reduce thinking tokens
+	model := req.Model
+	if model == "" {
+		model = client.Model
+	}
+	if client.Provider == ProviderOpenAI && isReasoningModel(model) {
+		requestBody["reasoning_effort"] = "low"
 	}
 
 	if req.TopP != nil {
