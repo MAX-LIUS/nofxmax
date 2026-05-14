@@ -335,6 +335,14 @@ export interface IndicatorConfig {
   enable_price_ranking?: boolean
   price_ranking_duration?: string // "1h", "4h", "24h" or "1h,4h,24h"
   price_ranking_limit?: number
+
+  // 衍生品增强数据（Derivatives Enhancement）
+  enable_cvd?: boolean // Cumulative Volume Delta
+  enable_oi_growth_rate?: boolean // OI 增长率
+  enable_funding_history?: boolean // 资金费率历史趋势
+  enable_vwap?: boolean // 成交量加权均价
+  enable_taker_delta?: boolean // Taker 买卖压力
+  enable_depth_change_rate?: boolean // 盘口深度变化率
 }
 
 export interface KlineConfig {

@@ -746,6 +746,64 @@ export function IndicatorEditor({
           </div>
         </div>
       </div>
+
+      {/* ============================================ */}
+      {/* Section 4: Derivatives Enhancement          */}
+      {/* ============================================ */}
+      <div className="rounded-lg overflow-hidden" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
+        <div className="px-3 py-2 flex items-center gap-2" style={{ background: '#1E2329', borderBottom: '1px solid #2B3139' }}>
+          <Activity className="w-4 h-4" style={{ color: '#f59e0b' }} />
+          <span className="text-sm font-medium" style={{ color: '#EAECEF' }}>{language === 'zh-CN' ? '衍生品增强' : 'Derivatives Enhancement'}</span>
+          <span className="text-xs" style={{ color: '#848E9C' }}>- {language === 'zh-CN' ? '深度衍生品分析数据' : 'Deep derivatives analysis data'}</span>
+        </div>
+
+        <div className="p-3">
+          <div className="flex items-start gap-2 mb-3 p-2 rounded" style={{ background: 'rgba(245, 158, 11, 0.05)' }}>
+            <Info className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" style={{ color: '#f59e0b' }} />
+            <p className="text-[10px]" style={{ color: '#848E9C' }}>
+              {language === 'zh-CN'
+                ? '从K线数据计算的衍生品深度指标，帮助AI判断买卖压力、资金费率趋势和市场微观结构'
+                : 'Derivatives indicators computed from kline data, helping AI assess buy/sell pressure, funding trends and market microstructure'}
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            {[
+              { key: 'enable_cvd', label: 'CVD', desc: language === 'zh-CN' ? '累积成交量差值，判断买卖方主导' : 'Cumulative Volume Delta, buyer/seller dominance', color: '#f59e0b' },
+              { key: 'enable_oi_growth_rate', label: language === 'zh-CN' ? 'OI增长率' : 'OI Growth', desc: language === 'zh-CN' ? '持仓量增长速率，判断资金进出' : 'OI growth rate, capital flow direction', color: '#22c55e' },
+              { key: 'enable_funding_history', label: language === 'zh-CN' ? '资金费率趋势' : 'Funding Trend', desc: language === 'zh-CN' ? '历史资金费率趋势，判断多空拥挤' : 'Funding rate history, crowding detection', color: '#a855f7' },
+              { key: 'enable_vwap', label: 'VWAP', desc: language === 'zh-CN' ? '成交量加权均价，判断价格偏离' : 'Volume-weighted avg price, deviation detection', color: '#60a5fa' },
+              { key: 'enable_taker_delta', label: language === 'zh-CN' ? 'Taker压力' : 'Taker Delta', desc: language === 'zh-CN' ? '主动买卖比，判断即时压力方向' : 'Taker buy/sell ratio, immediate pressure', color: '#ec4899' },
+              { key: 'enable_depth_change_rate', label: language === 'zh-CN' ? '盘口变化' : 'Depth Change', desc: language === 'zh-CN' ? '盘口深度变化率，判断支撑/压力变化' : 'Order book depth change rate', color: '#2dd4bf' },
+            ].map(({ key, label, desc, color }) => (
+              <div
+                key={key}
+                className="p-2.5 rounded-lg transition-all cursor-pointer"
+                style={{
+                  background: config[key as keyof IndicatorConfig] ? `${color}08` : 'transparent',
+                  border: `1px solid ${config[key as keyof IndicatorConfig] ? `${color}30` : '#2B3139'}`,
+                }}
+                onClick={() => !disabled && onChange({ ...config, [key]: !config[key as keyof IndicatorConfig] })}
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full" style={{ background: color }} />
+                    <span className="text-xs font-medium" style={{ color: '#EAECEF' }}>{label}</span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={config[key as keyof IndicatorConfig] as boolean || false}
+                    onChange={(e) => { e.stopPropagation(); !disabled && onChange({ ...config, [key]: e.target.checked }) }}
+                    disabled={disabled}
+                    className="w-4 h-4 rounded accent-yellow-500"
+                  />
+                </div>
+                <p className="text-[10px]" style={{ color: '#5E6673' }}>{desc}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
