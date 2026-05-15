@@ -20,6 +20,8 @@ import {
   type Kline,
 } from '../../utils/indicators'
 import { Settings, BarChart2 } from 'lucide-react'
+import { type RefreshRate } from '../../hooks/useChartPrefs'
+import { useStructuralLevels, type CompositeMarketLine } from '../../hooks/useStructuralLevels'
 
 // Order marker interface
 interface OrderMarker {
@@ -50,9 +52,17 @@ interface AdvancedChartProps {
   interval?: string
   traderID?: string
   height?: number
-  exchange?: string // Exchange type: binance, bybit, okx, bitget, hyperliquid, aster, lighter
-  onSymbolChange?: (symbol: string) => void // Symbol change callback
+  exchange?: string
+  onSymbolChange?: (symbol: string) => void
   autoRefresh?: boolean
+  refreshRate?: RefreshRate
+  showStructuralLevels?: boolean
+  showFibonacci?: boolean
+  showVWAP?: boolean
+  initialIndicators?: Record<string, boolean>
+  onIndicatorsChange?: (indicators: Record<string, boolean>) => void
+  onOrderMarkersChange?: (show: boolean) => void
+  initialShowOrderMarkers?: boolean
 }
 
 // Indicator configuration
@@ -101,31 +111,48 @@ export function AdvancedChart({
   interval = '5m',
   traderID,
   height = 550,
-  exchange = 'binance', // Default to binance
-  onSymbolChange: _onSymbolChange, // Available for future use
+  exchange = 'binance',
+  onSymbolChange: _onSymbolChange,
   autoRefresh = true,
+  refreshRate = '5s',
+  showStructuralLevels = true,
+  showFibonacci = true,
+  showVWAP = true,
+  initialIndicators,
+  onIndicatorsChange,
+  onOrderMarkersChange,
+  initialShowOrderMarkers = true,
 }: AdvancedChartProps) {
-  void _onSymbolChange // Prevent unused warning
+  void _onSymbolChange
   const { language } = useLanguage()
   const quoteUnit = getQuoteUnit(exchange)
   const baseUnit = getBaseUnit(exchange, symbol, language)
   const chartContainerRef = useRef<HTMLDivElement>(null)
+  const volumeChartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
+  const volumeChartRef = useRef<IChartApi | null>(null)
   const candlestickSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const indicatorSeriesRef = useRef<Map<string, ISeriesApi<any>>>(new Map())
-  const seriesMarkersRef = useRef<any>(null) // Markers primitive for v5
-  const currentMarkersDataRef = useRef<any[]>([]) // Store current marker data
-  const klineDataRef = useRef<Map<number, { volume: number; quoteVolume: number }>>(new Map()) // Store kline extra data
-  const priceLinesRef = useRef<any[]>([]) // Store open order price lines
+  const seriesMarkersRef = useRef<any>(null)
+  const currentMarkersDataRef = useRef<any[]>([])
+  const klineDataRef = useRef<Map<number, { volume: number; quoteVolume: number }>>(new Map())
+  const klineDataCacheRef = useRef<Kline[]>([])
+  const priceLinesRef = useRef<any[]>([])
+  const structuralLinesRef = useRef<Map<string, any>>(new Map())
+  const isInitialLoadRef = useRef(true)
+  const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showIndicatorPanel, setShowIndicatorPanel] = useState(false)
-  const [showOrderMarkers, setShowOrderMarkers] = useState(true) // Order marker toggle, default on
-  const isInitialLoadRef = useRef(true) // Track if this is initial load
+  const [showOrderMarkers, setShowOrderMarkers] = useState(initialShowOrderMarkers)
   const [tooltipData, setTooltipData] = useState<any>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)
+
+  // Structural levels from composite API
+  const structuralLevelsEnabled = showStructuralLevels || showFibonacci || showVWAP
+  const structuralLines = useStructuralLevels(symbol, exchange, structuralLevelsEnabled)
 
   // Market stats (current candle)
   const [marketStats, setMarketStats] = useState<{
@@ -139,16 +166,19 @@ export function AdvancedChart({
   } | null>(null)
 
   // Indicator configuration
-  const [indicators, setIndicators] = useState<IndicatorConfig[]>([
-    { id: 'volume', name: 'Volume', enabled: true, color: '#3B82F6' },
-    { id: 'ma5', name: 'MA5', enabled: false, color: '#FF6B6B', params: { period: 5 } },
-    { id: 'ma10', name: 'MA10', enabled: false, color: '#4ECDC4', params: { period: 10 } },
-    { id: 'ma20', name: 'MA20', enabled: false, color: '#FFD93D', params: { period: 20 } },
-    { id: 'ma60', name: 'MA60', enabled: false, color: '#95E1D3', params: { period: 60 } },
-    { id: 'ema12', name: 'EMA12', enabled: false, color: '#A8E6CF', params: { period: 12 } },
-    { id: 'ema26', name: 'EMA26', enabled: false, color: '#FFD3B6', params: { period: 26 } },
-    { id: 'bb', name: 'Bollinger Bands', enabled: false, color: '#9B59B6' },
-  ])
+  const [indicators, setIndicators] = useState<IndicatorConfig[]>(() => {
+    const saved = initialIndicators || {}
+    return [
+      { id: 'volume', name: 'Volume', enabled: saved.volume ?? true, color: '#3B82F6' },
+      { id: 'ma5', name: 'MA5', enabled: saved.ma5 ?? false, color: '#FF6B6B', params: { period: 5 } },
+      { id: 'ma10', name: 'MA10', enabled: saved.ma10 ?? false, color: '#4ECDC4', params: { period: 10 } },
+      { id: 'ma20', name: 'MA20', enabled: saved.ma20 ?? false, color: '#FFD93D', params: { period: 20 } },
+      { id: 'ma60', name: 'MA60', enabled: saved.ma60 ?? false, color: '#95E1D3', params: { period: 60 } },
+      { id: 'ema12', name: 'EMA12', enabled: saved.ema12 ?? false, color: '#A8E6CF', params: { period: 12 } },
+      { id: 'ema26', name: 'EMA26', enabled: saved.ema26 ?? false, color: '#FFD3B6', params: { period: 26 } },
+      { id: 'bb', name: 'Bollinger Bands', enabled: saved.bb ?? false, color: '#9B59B6' },
+    ]
+  })
 
   // Fetch kline data from service
   const fetchKlineData = async (symbol: string, interval: string) => {
@@ -386,8 +416,8 @@ export function AdvancedChart({
       rightPriceScale: {
         borderColor: '#2B3139',
         scaleMargins: {
-          top: 0.1,
-          bottom: 0.25,
+          top: 0.05,
+          bottom: 0.05,
         },
         borderVisible: true,
         entireTextOnly: false,
@@ -438,23 +468,58 @@ export function AdvancedChart({
     })
     candlestickSeriesRef.current = candlestickSeries as any
 
-    // Create volume series
-    const volumeSeries = chart.addSeries(HistogramSeries, {
-      color: '#26a69a',
-      priceFormat: {
-        type: 'volume',
-      },
-      priceScaleId: '',
-      lastValueVisible: false,
-      priceLineVisible: false,
-    })
-    volumeSeriesRef.current = volumeSeries as any
+    // Create volume sub-chart
+    if (volumeChartContainerRef.current) {
+      const volumeChart = createChart(volumeChartContainerRef.current, {
+        width: volumeChartContainerRef.current.clientWidth || 800,
+        height: 80,
+        layout: {
+          background: { color: '#0B0E11' },
+          textColor: '#6B7280',
+          fontSize: 10,
+        },
+        grid: {
+          vertLines: { visible: false },
+          horzLines: { color: 'rgba(43, 49, 57, 0.15)', visible: true },
+        },
+        rightPriceScale: {
+          borderColor: '#2B3139',
+          scaleMargins: { top: 0.1, bottom: 0 },
+          borderVisible: true,
+        },
+        timeScale: { visible: false },
+        handleScroll: false,
+        handleScale: false,
+        crosshair: {
+          vertLine: { visible: false, labelVisible: false },
+          horzLine: { visible: false, labelVisible: false },
+        },
+      })
+      volumeChartRef.current = volumeChart
+
+      const volumeSeries = volumeChart.addSeries(HistogramSeries, {
+        priceFormat: { type: 'volume' },
+        lastValueVisible: false,
+        priceLineVisible: false,
+      })
+      volumeSeriesRef.current = volumeSeries as any
+
+      // Sync time scales
+      chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+        if (range && volumeChartRef.current) {
+          volumeChartRef.current.timeScale().setVisibleLogicalRange(range)
+        }
+      })
+    }
 
     // Responsive resize (ResizeObserver)
     const resizeObserver = new ResizeObserver((entries) => {
       if (entries.length === 0 || !entries[0].contentRect) return
-      const { width, height } = entries[0].contentRect
-      chart.applyOptions({ width, height })
+      const { width, height: h } = entries[0].contentRect
+      chart.applyOptions({ width, height: h })
+      if (volumeChartRef.current && volumeChartContainerRef.current) {
+        volumeChartRef.current.applyOptions({ width })
+      }
     })
 
     if (chartContainerRef.current) {
@@ -475,8 +540,6 @@ export function AdvancedChart({
       }
 
       const candleData = data as any
-
-      // Get volume and quoteVolume from stored data
       const klineExtra = klineDataRef.current.get(param.time as number) || { volume: 0, quoteVolume: 0 }
 
       setTooltipData({
@@ -495,6 +558,10 @@ export function AdvancedChart({
     return () => {
       resizeObserver.disconnect()
       chart.remove()
+      if (volumeChartRef.current) {
+        volumeChartRef.current.remove()
+        volumeChartRef.current = null
+      }
     }
   }, []) // Chart is created once, ResizeObserver handles dimension changes
 
@@ -530,6 +597,7 @@ export function AdvancedChart({
         const klineData = await fetchKlineData(symbol, interval)
         console.log('[AdvancedChart] Loaded', klineData.length, 'klines')
         candlestickSeriesRef.current.setData(klineData)
+        klineDataCacheRef.current = klineData
 
         // Store volume/quoteVolume data for tooltip
         klineDataRef.current.clear()
@@ -568,18 +636,17 @@ export function AdvancedChart({
           })
         }
 
-        // 2. Display volume
+        // 2. Display volume in sub-chart
         if (volumeSeriesRef.current) {
           const volumeEnabled = indicators.find(i => i.id === 'volume')?.enabled
           if (volumeEnabled) {
             const volumeData = klineData.map((k: Kline) => ({
               time: k.time,
               value: k.volume || 0,
-              color: k.close >= k.open ? 'rgba(14, 203, 129, 0.5)' : 'rgba(246, 70, 93, 0.5)',
+              color: k.close >= k.open ? 'rgba(14, 203, 129, 0.6)' : 'rgba(246, 70, 93, 0.6)',
             }))
             volumeSeriesRef.current.setData(volumeData)
           } else {
-            // Clear data when volume is disabled
             volumeSeriesRef.current.setData([])
           }
         }
@@ -739,14 +806,19 @@ export function AdvancedChart({
 
     loadData(false) // Initial load
 
-    if (!autoRefresh) {
+    if (!autoRefresh || refreshRate === 'off') {
       return
     }
 
-    // Real-time auto-refresh (every 5 seconds)
-    const refreshInterval = setInterval(() => loadData(true), 5000)
-    return () => clearInterval(refreshInterval)
-  }, [symbol, interval, traderID, exchange])
+    const intervalMs = refreshRate === 'realtime' || refreshRate === '1s' ? 1000 : 5000
+    refreshIntervalRef.current = setInterval(() => loadData(true), intervalMs)
+    return () => {
+      if (refreshIntervalRef.current) {
+        clearInterval(refreshIntervalRef.current)
+        refreshIntervalRef.current = null
+      }
+    }
+  }, [symbol, interval, traderID, exchange, refreshRate])
 
   // Refresh open order price lines separately (every 60s, avoid frequent exchange API calls)
   useEffect(() => {
@@ -909,10 +981,66 @@ export function AdvancedChart({
 
   // Toggle indicator
   const toggleIndicator = (id: string) => {
-    setIndicators(prev =>
-      prev.map(ind => (ind.id === id ? { ...ind, enabled: !ind.enabled } : ind))
-    )
+    setIndicators(prev => {
+      const next = prev.map(ind => (ind.id === id ? { ...ind, enabled: !ind.enabled } : ind))
+      if (onIndicatorsChange) {
+        const map: Record<string, boolean> = {}
+        next.forEach(ind => { map[ind.id] = ind.enabled })
+        onIndicatorsChange(map)
+      }
+      return next
+    })
   }
+
+  // Re-render indicators when toggled (fix: indicators not in loadData deps)
+  useEffect(() => {
+    if (klineDataCacheRef.current.length > 0) {
+      updateIndicators(klineDataCacheRef.current)
+    }
+  }, [indicators])
+
+  // Render structural levels as price lines
+  useEffect(() => {
+    if (!candlestickSeriesRef.current) return
+
+    // Clear old structural lines
+    structuralLinesRef.current.forEach(line => {
+      try { candlestickSeriesRef.current?.removePriceLine(line) } catch {}
+    })
+    structuralLinesRef.current.clear()
+
+    const LEVEL_COLORS: Record<string, string> = {
+      support: '#10B981',
+      resistance: '#EF4444',
+      fibonacci: '#A855F7',
+      vwap: '#3B82F6',
+    }
+    const LEVEL_STYLES: Record<string, number> = {
+      support: 3,    // dotted
+      resistance: 3, // dotted
+      fibonacci: 3,  // dotted
+      vwap: 0,       // solid
+    }
+
+    const filtered = structuralLines.filter((line: CompositeMarketLine) => {
+      if (line.kind === 'support' || line.kind === 'resistance') return showStructuralLevels
+      if (line.kind === 'fibonacci') return showFibonacci
+      if (line.kind === 'vwap') return showVWAP
+      return showStructuralLevels
+    })
+
+    filtered.forEach((line: CompositeMarketLine) => {
+      const priceLine = candlestickSeriesRef.current?.createPriceLine({
+        price: line.price,
+        color: LEVEL_COLORS[line.kind] ?? '#6B7280',
+        lineWidth: 1,
+        lineStyle: LEVEL_STYLES[line.kind] ?? 3,
+        axisLabelVisible: true,
+        title: `${line.label}${line.timeframe ? ' ' + line.timeframe : ''}${line.strength && line.strength > 2 ? ' ★' : ''}`,
+      })
+      if (priceLine) structuralLinesRef.current.set(line.id, priceLine)
+    })
+  }, [structuralLines, showStructuralLevels, showFibonacci, showVWAP])
 
   return (
     <div
@@ -1003,7 +1131,11 @@ export function AdvancedChart({
           </button>
 
           <button
-            onClick={() => setShowOrderMarkers(!showOrderMarkers)}
+            onClick={() => {
+              const next = !showOrderMarkers
+              setShowOrderMarkers(next)
+              onOrderMarkersChange?.(next)
+            }}
             className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium transition-all"
             style={{
               background: showOrderMarkers ? 'rgba(16, 185, 129, 0.15)' : 'transparent',
@@ -1083,12 +1215,61 @@ export function AdvancedChart({
           >
             {t('advancedChart.clickToToggle', language)}
           </div>
+
+          {/* Structural Levels section */}
+          <div className="border-t border-white/10 mx-3 pt-2 pb-3">
+            <div className="text-[10px] text-gray-500 px-2 mb-1 uppercase tracking-wider font-bold">
+              Structural Levels
+            </div>
+            {[
+              { key: 'structural', label: 'Support / Resistance', color: '#10B981', enabled: showStructuralLevels },
+              { key: 'fibonacci', label: 'Fibonacci', color: '#A855F7', enabled: showFibonacci },
+              { key: 'vwap', label: 'VWAP', color: '#3B82F6', enabled: showVWAP },
+            ].map(item => (
+              <label
+                key={item.key}
+                className="flex items-center gap-3 p-2 rounded-md hover:bg-white/5 cursor-pointer transition-all group"
+              >
+                <input
+                  type="checkbox"
+                  checked={item.enabled}
+                  readOnly
+                  className="w-4 h-4 rounded border-gray-600 text-yellow-500 focus:ring-2 focus:ring-yellow-500/50"
+                />
+                <div
+                  className="w-8 h-3 rounded-sm border border-white/10"
+                  style={{ backgroundColor: item.color }}
+                ></div>
+                <span className="text-sm text-gray-300 group-hover:text-white transition-colors flex-1">
+                  {item.label}
+                </span>
+                {item.enabled && (
+                  <span className="text-xs text-yellow-400">●</span>
+                )}
+              </label>
+            ))}
+            <div className="text-[9px] text-gray-600 px-2 mt-1">
+              Data from composite market API (60s refresh)
+            </div>
+          </div>
         </div>
       )}
 
       {/* Chart container */}
-      <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
-        <div ref={chartContainerRef} style={{ height: '100%', width: '100%' }} />
+      <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        <div ref={chartContainerRef} style={{ flex: 1, minHeight: 0 }} />
+
+        {/* Volume sub-chart */}
+        <div
+          ref={volumeChartContainerRef}
+          style={{
+            height: indicators.find(i => i.id === 'volume')?.enabled ? 80 : 0,
+            flexShrink: 0,
+            borderTop: '1px solid rgba(43, 49, 57, 0.3)',
+            transition: 'height 0.2s ease',
+            overflow: 'hidden',
+          }}
+        />
 
         {/* OHLC Tooltip */}
         {tooltipData && (

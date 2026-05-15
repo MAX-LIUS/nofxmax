@@ -9,6 +9,7 @@ import { t } from '../../i18n/translations'
 import { chartTabs, ts } from '../../i18n/strategy-translations'
 import { BarChart3, CandlestickChart, ChevronDown, Search } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useChartPrefs, type RefreshRate } from '../../hooks/useChartPrefs'
 
 interface ChartTabsProps {
   traderId: string
@@ -58,15 +59,23 @@ function getMarketTypeFromExchange(exchangeId: string | undefined): MarketType {
 
 export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, disableAutoRefresh = false }: ChartTabsProps) {
   const { language } = useLanguage()
+  const { prefs, updatePrefs } = useChartPrefs()
   const [activeTab, setActiveTab] = useState<ChartTab>('equity')
   const [chartSymbol, setChartSymbol] = useState<string>('BTC')
-  const [interval, setInterval] = useState<Interval>('5m')
+  const [interval, setInterval] = useState<Interval>(() => (prefs.interval as Interval) || '5m')
   const [symbolInput, setSymbolInput] = useState('')
   const [marketType, setMarketType] = useState<MarketType>(() => getMarketTypeFromExchange(exchangeId))
   const [availableSymbols, setAvailableSymbols] = useState<SymbolInfo[]>([])
   const [showDropdown, setShowDropdown] = useState(false)
   const [searchFilter, setSearchFilter] = useState('')
   const dropdownRef = useRef<HTMLDivElement>(null)
+
+  const REFRESH_RATES: { value: RefreshRate; label: string }[] = [
+    { value: 'realtime', label: 'RT' },
+    { value: '1s', label: '1s' },
+    { value: '5s', label: '5s' },
+    { value: 'off', label: 'Off' },
+  ]
 
   // Auto-switch market type when exchange ID changes
   useEffect(() => {
@@ -221,9 +230,9 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
           )}
         </div>
 
-        {/* Right: Symbol + Interval */}
+        {/* Right: Symbol + Interval + Refresh */}
         {activeTab === 'kline' && (
-          <div className="flex items-center gap-2 md:gap-3 w-full md:w-auto min-w-0">
+          <div className="flex items-center gap-2 md:gap-3 w-full md:w-auto min-w-0 overflow-x-auto no-scrollbar">
             {/* Symbol Dropdown */}
             <div className="shrink-0 relative" ref={dropdownRef}>
               {marketConfig.hasDropdown ? (
@@ -285,13 +294,30 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
               {INTERVALS.map((int) => (
                 <button
                   key={int.value}
-                  onClick={() => setInterval(int.value)}
-                  className={`px-2 py-1 text-[10px] font-medium transition-all ${interval === int.value
+                  onClick={() => { setInterval(int.value); updatePrefs({ interval: int.value }) }}
+                  className={`px-2 py-1 text-[10px] font-medium transition-all whitespace-nowrap ${interval === int.value
                     ? 'bg-nofx-gold/20 text-nofx-gold'
                     : 'text-nofx-text-muted hover:text-white hover:bg-white/5'
                     }`}
                 >
                   {int.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Refresh Rate Selector */}
+            <div className="flex items-center bg-black/40 rounded border border-white/10 overflow-hidden">
+              {REFRESH_RATES.map((rate) => (
+                <button
+                  key={rate.value}
+                  onClick={() => updatePrefs({ refreshRate: rate.value })}
+                  className={`px-2 py-1 text-[10px] font-medium transition-all whitespace-nowrap ${prefs.refreshRate === rate.value
+                    ? 'bg-cyan-500/20 text-cyan-400'
+                    : 'text-nofx-text-muted hover:text-white hover:bg-white/5'
+                    }`}
+                  title={rate.value === 'realtime' ? 'Real-time (1s polling)' : rate.value === 'off' ? 'No auto-refresh' : `Refresh every ${rate.label}`}
+                >
+                  {rate.label}
                 </button>
               ))}
             </div>
@@ -342,10 +368,17 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
                 symbol={chartSymbol}
                 interval={interval}
                 traderID={traderId}
-                // Dynamic auto-sizing via ResizeObserver
                 exchange={currentExchange}
                 onSymbolChange={setChartSymbol}
                 autoRefresh={!disableAutoRefresh}
+                refreshRate={prefs.refreshRate}
+                showStructuralLevels={prefs.showStructuralLevels}
+                showFibonacci={prefs.showFibonacci}
+                showVWAP={prefs.showVWAP}
+                initialIndicators={prefs.indicators}
+                initialShowOrderMarkers={prefs.showOrderMarkers}
+                onIndicatorsChange={(indicators) => updatePrefs({ indicators })}
+                onOrderMarkersChange={(show) => updatePrefs({ showOrderMarkers: show })}
               />
             </motion.div>
           )}
