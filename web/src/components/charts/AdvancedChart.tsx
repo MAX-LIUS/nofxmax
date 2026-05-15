@@ -147,7 +147,6 @@ export function AdvancedChart({
   const klineDataCacheRef = useRef<Kline[]>([])
   const priceLinesRef = useRef<any[]>([])
   const structuralLinesRef = useRef<Map<string, any>>(new Map())
-  const leftScaleSeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
   const isInitialLoadRef = useRef(true)
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const lastTickerPriceRef = useRef<number>(0)
@@ -476,15 +475,6 @@ export function AdvancedChart({
         borderVisible: true,
         entireTextOnly: false,
       },
-      leftPriceScale: {
-        visible: true,
-        borderColor: '#2B3139',
-        scaleMargins: {
-          top: 0.05,
-          bottom: 0.05,
-        },
-        borderVisible: false,
-      },
       timeScale: {
         borderColor: '#2B3139',
         timeVisible: true,
@@ -500,7 +490,10 @@ export function AdvancedChart({
         vertTouchDrag: true,
       },
       handleScale: {
-        axisPressedMouseMove: true,
+        axisPressedMouseMove: {
+          time: true,
+          price: true,
+        },
         mouseWheel: true,
         pinch: true,
       },
@@ -530,17 +523,6 @@ export function AdvancedChart({
       wickDownColor: '#F6465D',
     })
     candlestickSeriesRef.current = candlestickSeries as any
-
-    // Hidden series on left price scale (for structural level labels)
-    const leftSeries = chart.addSeries(LineSeries, {
-      priceScaleId: 'left',
-      color: 'transparent',
-      lineWidth: 1,
-      lastValueVisible: false,
-      priceLineVisible: false,
-      crosshairMarkerVisible: false,
-    })
-    leftScaleSeriesRef.current = leftSeries as any
 
     // Create volume sub-chart
     if (volumeChartContainerRef.current) {
@@ -1174,13 +1156,13 @@ export function AdvancedChart({
     }
   }, [indicators])
 
-  // Render structural levels as price lines on left scale
+  // Render structural levels as price lines on main candlestick series (shared price axis)
   useEffect(() => {
-    if (!leftScaleSeriesRef.current) return
+    if (!candlestickSeriesRef.current) return
 
     // Clear old structural lines
     structuralLinesRef.current.forEach(line => {
-      try { leftScaleSeriesRef.current?.removePriceLine(line) } catch {}
+      try { candlestickSeriesRef.current?.removePriceLine(line) } catch {}
     })
     structuralLinesRef.current.clear()
 
@@ -1191,10 +1173,10 @@ export function AdvancedChart({
       vwap: '#3B82F6',
     }
     const LEVEL_STYLES: Record<string, number> = {
-      support: 3,    // dotted
-      resistance: 3, // dotted
-      fibonacci: 3,  // dotted
-      vwap: 0,       // solid
+      support: 3,
+      resistance: 3,
+      fibonacci: 3,
+      vwap: 0,
     }
 
     const filtered = structuralLines.filter((line: CompositeMarketLine) => {
@@ -1212,17 +1194,11 @@ export function AdvancedChart({
       return true
     })
 
-    // Feed price data to left series so it scales correctly
-    if (klineDataCacheRef.current.length > 0) {
-      const priceData = klineDataCacheRef.current.map(k => ({ time: k.time, value: k.close }))
-      leftScaleSeriesRef.current.setData(priceData as any)
-    }
-
     filtered.forEach((line: CompositeMarketLine) => {
       const strengthLabel = line.strength ? '●'.repeat(Math.min(line.strength, 5)) : ''
       const tfLabel = line.timeframe || ''
       const label = `${line.label} ${tfLabel} ${strengthLabel}`.trim()
-      const priceLine = leftScaleSeriesRef.current?.createPriceLine({
+      const priceLine = candlestickSeriesRef.current?.createPriceLine({
         price: line.price,
         color: LEVEL_COLORS[line.kind] ?? '#6B7280',
         lineWidth: line.strength && line.strength >= 3 ? 2 : 1,
@@ -1341,14 +1317,14 @@ export function AdvancedChart({
         </div>
       </div>
 
-      {/* Indicator panel - professional design */}
+      {/* Indicator panel - floats on right side, can overlap other panels */}
       {showIndicatorPanel && (
         <div
-          className="absolute top-16 right-4 z-10 rounded-lg shadow-2xl backdrop-blur-sm"
+          className="fixed top-24 right-4 z-50 rounded-lg shadow-2xl backdrop-blur-sm"
           style={{
             background: 'linear-gradient(135deg, #1A1E23 0%, #0F1215 100%)',
             border: '1px solid rgba(240, 185, 11, 0.2)',
-            maxHeight: '500px',
+            maxHeight: 'calc(100vh - 120px)',
             minWidth: '280px',
             overflowY: 'auto',
           }}
