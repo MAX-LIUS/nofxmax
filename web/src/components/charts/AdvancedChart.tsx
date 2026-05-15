@@ -879,12 +879,12 @@ export function AdvancedChart({
           })
         }
 
-        // Auto-fit view only on initial load — show last 90 bars
+        // Auto-fit view only on initial load — show last 200 bars
         if (isInitialLoadRef.current) {
           const totalBars = klineData.length
-          if (totalBars > 90) {
+          if (totalBars > 200) {
             chartRef.current?.timeScale().setVisibleLogicalRange({
-              from: totalBars - 90,
+              from: totalBars - 200,
               to: totalBars + 5,
             })
           } else {
@@ -1137,14 +1137,15 @@ export function AdvancedChart({
 
     filtered.forEach((line: CompositeMarketLine) => {
       const strengthLabel = line.strength ? '●'.repeat(Math.min(line.strength, 5)) : ''
-      const tfLabel = line.timeframe ? `[${line.timeframe}]` : ''
+      const tfLabel = line.timeframe ? `${line.timeframe}` : ''
       const title = `${line.label} ${tfLabel} ${strengthLabel}`.trim()
       const priceLine = candlestickSeriesRef.current?.createPriceLine({
         price: line.price,
         color: LEVEL_COLORS[line.kind] ?? '#6B7280',
         lineWidth: line.strength && line.strength >= 3 ? 2 : 1,
         lineStyle: LEVEL_STYLES[line.kind] ?? 3,
-        axisLabelVisible: false,
+        axisLabelVisible: true,
+        axisLabelColor: LEVEL_COLORS[line.kind] ?? '#6B7280',
         title,
       })
       if (priceLine) structuralLinesRef.current.set(line.id, priceLine)
