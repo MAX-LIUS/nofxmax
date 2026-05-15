@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	protectionPriceTolerancePct = 0.005 // 0.5% — widened to handle exchange price precision truncation
+	protectionPriceTolerancePct = 0.002 // 0.2% — tightened to avoid BE/DD price confusion
 	protectionSetupMaxAttempts  = 2
 	protectionVerifyMaxAttempts = 6 // retry GetOpenOrders verification up to 6 times for OKX TP visibility lag
 )
