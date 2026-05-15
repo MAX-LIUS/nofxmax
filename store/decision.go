@@ -97,10 +97,11 @@ type DecisionAction struct {
 	Quantity      float64                      `json:"quantity"`
 	Leverage      int                          `json:"leverage"`
 	Price         float64                      `json:"price"`
-	StopLoss      float64                      `json:"stop_loss,omitempty"`   // Stop loss price
-	TakeProfit    float64                      `json:"take_profit,omitempty"` // Take profit price
-	Confidence    int                          `json:"confidence,omitempty"`  // AI confidence (0-100)
-	Reasoning     string                       `json:"reasoning,omitempty"`   // Brief reasoning
+	StopLoss      float64                      `json:"stop_loss,omitempty"`
+	TakeProfit    float64                      `json:"take_profit,omitempty"`
+	Confidence    int                          `json:"confidence,omitempty"`
+	Reasoning     string                       `json:"reasoning,omitempty"`
+	TriggerType   string                       `json:"trigger_type,omitempty"`
 	ReviewContext *DecisionActionReviewContext `json:"review_context,omitempty"`
 	OrderID       int64                        `json:"order_id"`
 	Timestamp     time.Time                    `json:"timestamp"`

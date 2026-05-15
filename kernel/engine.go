@@ -137,10 +137,11 @@ type Decision struct {
 	OrderID    string  `json:"order_id,omitempty"`    // Order ID (for cancel)
 
 	// Common parameters
-	Confidence   int             `json:"confidence,omitempty"` // Confidence level (0-100)
-	RiskUSD      float64         `json:"risk_usd,omitempty"`   // Maximum USD risk
+	Confidence   int             `json:"confidence,omitempty"`
+	RiskUSD      float64         `json:"risk_usd,omitempty"`
 	Regime       string          `json:"regime,omitempty"`
 	SetupType    string          `json:"setup_type,omitempty"`
+	TriggerType  string          `json:"trigger_type,omitempty"`
 	QualityScore *AIQualityScore `json:"quality_score,omitempty"`
 	Reasoning    string          `json:"reasoning"`
 

@@ -118,6 +118,46 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 	d := input.Decision
 	data := input.MarketData
 
+	// 1.0 Trigger type validation — must have a valid confirmed trigger
+	triggerType := d.TriggerType
+	validTriggers := map[string]bool{
+		"support_rejection_confirmed":           true,
+		"resistance_breakout_retest_successful": true,
+		"higher_low_breakout_confirmed":         true,
+		"resistance_rejection_confirmed":        true,
+		"support_breakdown_retest_failed":       true,
+		"lower_high_breakdown_confirmed":        true,
+	}
+	if triggerType == "" {
+		// AI hasn't learned to output trigger_type yet — warn but don't block
+		checks = append(checks, EntryGateCheck{
+			Code:     "trigger_type_missing",
+			Stage:    string(EntryGateStageMarketState),
+			Passed:   true,
+			Enforced: false,
+			Detail:   "trigger_type not provided (warn only, not blocking)",
+		})
+	} else if !validTriggers[triggerType] {
+		// AI provided an invalid trigger_type — block
+		checks = append(checks, EntryGateCheck{
+			Code:     "trigger_type_invalid",
+			Stage:    string(EntryGateStageMarketState),
+			Passed:   false,
+			Enforced: true,
+			Detail:   fmt.Sprintf("trigger_type=%q is not a valid confirmed trigger", triggerType),
+			Values:   fmt.Sprintf("trigger_type=%s", triggerType),
+		})
+	} else {
+		checks = append(checks, EntryGateCheck{
+			Code:     "trigger_type_valid",
+			Stage:    string(EntryGateStageMarketState),
+			Passed:   true,
+			Enforced: true,
+			Detail:   fmt.Sprintf("trigger_type=%q confirmed", triggerType),
+			Values:   fmt.Sprintf("trigger_type=%s", triggerType),
+		})
+	}
+
 	regimeCfg := getRegimeFilterConfig(input.StrategyConfig)
 	if !regimeCfg.Enabled {
 		return checks
