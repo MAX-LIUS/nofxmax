@@ -150,6 +150,7 @@ export function AdvancedChart({
   const leftScaleSeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
   const isInitialLoadRef = useRef(true)
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const lastTickerPriceRef = useRef<number>(0)
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -172,6 +173,7 @@ export function AdvancedChart({
         const result = await httpClient.get(`/api/ticker?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}`)
         if (!result.success || !result.data?.price) return
         const price = result.data.price as number
+        lastTickerPriceRef.current = price
 
         // Update current candle's close in real-time
         if (candlestickSeriesRef.current && klineDataCacheRef.current.length > 0) {
@@ -715,13 +717,14 @@ export function AdvancedChart({
               }
             }
 
-            // Update market stats from latest bar
+            // Update market stats — use ticker price if available
             const latestBar = recentData[recentData.length - 1]
             const prevBar = recentData.length > 1 ? recentData[recentData.length - 2] : existing[existing.length - 1]
             if (latestBar && prevBar) {
-              const priceChange = latestBar.close - prevBar.close
+              const displayPrice = lastTickerPriceRef.current > 0 ? lastTickerPriceRef.current : latestBar.close
+              const priceChange = displayPrice - prevBar.close
               setMarketStats({
-                price: latestBar.close,
+                price: displayPrice,
                 priceChange,
                 priceChangePercent: (priceChange / prevBar.close) * 100,
                 high: latestBar.high,
@@ -729,6 +732,17 @@ export function AdvancedChart({
                 volume: latestBar.volume || 0,
                 quoteVolume: latestBar.quoteVolume || 0,
               })
+            }
+
+            // Apply latest ticker price to override stale kline close
+            if (lastTickerPriceRef.current > 0) {
+              const cache = klineDataCacheRef.current
+              const last = { ...cache[cache.length - 1] }
+              last.close = lastTickerPriceRef.current
+              if (lastTickerPriceRef.current > last.high) last.high = lastTickerPriceRef.current
+              if (lastTickerPriceRef.current < last.low) last.low = lastTickerPriceRef.current
+              candlestickSeriesRef.current.update(last as any)
+              cache[cache.length - 1] = last
             }
           }
           setLoading(false)
