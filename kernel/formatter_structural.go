@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"fmt"
+	"math"
 	"nofx/market"
 	"nofx/store"
 	"sort"
@@ -136,8 +137,14 @@ func formatStructuralLevelsEN(mdata *market.Data) string {
 	return formatStructuralLevelsEvaluated(mdata, false)
 }
 
-// formatStructuralLevelsEvaluated formats structural levels grouped by trading usage
+// formatStructuralLevelsEvaluated formats structural levels grouped by trading usage.
+// When zones are available, uses the new zone-based format (top 3 per direction).
 func formatStructuralLevelsEvaluated(mdata *market.Data, zh bool) string {
+	// Use zone-based format if zones are available
+	if len(mdata.StructuralZones) > 0 {
+		return formatStructuralZones(mdata, zh)
+	}
+
 	if len(mdata.StructuralLevels) == 0 && mdata.FibonacciLevels == nil {
 		return ""
 	}
@@ -284,6 +291,143 @@ func formatStructuralLevelsEvaluated(mdata *market.Data, zh bool) string {
 
 	sb.WriteString("\n")
 	return sb.String()
+}
+
+// formatStructuralZones formats zones in the new compact zone-based format for AI.
+func formatStructuralZones(mdata *market.Data, zh bool) string {
+	currentPrice := mdata.CurrentPrice
+	atr14 := extractPrimaryATR14(mdata)
+
+	zones := market.FilterTopZonesForAI(mdata.StructuralZones, currentPrice, 3)
+
+	var support, resistance []market.StructuralZone
+	for _, z := range zones {
+		if z.Type == "support" {
+			support = append(support, z)
+		} else {
+			resistance = append(resistance, z)
+		}
+	}
+
+	var sb strings.Builder
+	if zh {
+		sb.WriteString("**关键结构区间** (每方向 top 3):\n")
+	} else {
+		sb.WriteString("**Key Structural Zones** (top 3 per direction):\n")
+	}
+
+	if atr14 > 0 {
+		atrPct := (atr14 / currentPrice) * 100
+		sb.WriteString(fmt.Sprintf("- context: current_price=%s atr14=%s (%.2f%%)\n\n",
+			formatAIFloat(currentPrice), formatAIFloat(atr14), atrPct))
+	}
+
+	// Resistance zones
+	if len(resistance) > 0 {
+		if zh {
+			sb.WriteString("阻力区间 (价格上方):\n")
+		} else {
+			sb.WriteString("RESISTANCE ZONES (above price):\n")
+		}
+		for i, z := range resistance {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, formatZoneRow(z, atr14, currentPrice)))
+		}
+	}
+
+	// Support zones
+	if len(support) > 0 {
+		if zh {
+			sb.WriteString("支撑区间 (价格下方):\n")
+		} else {
+			sb.WriteString("SUPPORT ZONES (below price):\n")
+		}
+		for i, z := range support {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, formatZoneRow(z, atr14, currentPrice)))
+		}
+	}
+
+	// Nearest zone summary
+	nearest := findNearestZone(zones, currentPrice)
+	if nearest != nil {
+		dist := ""
+		if atr14 > 0 {
+			atrDist := math.Abs(nearest.MidPrice-currentPrice) / atr14
+			pos := "below"
+			if nearest.MidPrice > currentPrice {
+				pos = "above"
+			}
+			if zh {
+				pos = "下方"
+				if nearest.MidPrice > currentPrice {
+					pos = "上方"
+				}
+			}
+			dist = fmt.Sprintf("at %.1fx ATR %s", atrDist, pos)
+		}
+		if zh {
+			sb.WriteString(fmt.Sprintf("\n最近区间: %s [%s – %s] %s\n",
+				nearest.Type, formatAIFloat(nearest.Low), formatAIFloat(nearest.High), dist))
+		} else {
+			sb.WriteString(fmt.Sprintf("\nNEAREST ZONE: %s [%s – %s] %s\n",
+				nearest.Type, formatAIFloat(nearest.Low), formatAIFloat(nearest.High), dist))
+		}
+	}
+
+	// Fibonacci context (still useful)
+	if mdata.FibonacciLevels != nil {
+		fib := mdata.FibonacciLevels
+		dir := fib.Direction
+		if zh {
+			dir = "回撤向下"
+			if fib.Direction == "retracement_up" {
+				dir = "回撤向上"
+			}
+		}
+		sb.WriteString(fmt.Sprintf("- fibonacci_context: timeframe=%s swing_low=%s swing_high=%s direction=%s\n",
+			fib.Timeframe, formatAIFloat(fib.SwingLow), formatAIFloat(fib.SwingHigh), dir))
+	}
+
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func formatZoneRow(z market.StructuralZone, atr14, currentPrice float64) string {
+	tfs := strings.Join(z.Timeframes, "+")
+	sources := strings.Join(z.Sources, "+")
+
+	atrDist := ""
+	if atr14 > 0 {
+		dist := math.Abs(z.MidPrice-currentPrice) / atr14
+		atrDist = fmt.Sprintf(", %.1fx ATR", dist)
+	}
+
+	extra := ""
+	if z.TouchCount > 1 {
+		extra += fmt.Sprintf(", %d touches", z.TouchCount)
+	}
+	if z.Flipped {
+		extra += ", flipped"
+	}
+
+	return fmt.Sprintf("[%s] %s – %s (%s, %s, conf=%.0f%s%s)",
+		z.QualityGrade, formatAIFloat(z.Low), formatAIFloat(z.High),
+		tfs, sources, z.Confidence, atrDist, extra)
+}
+
+func findNearestZone(zones []market.StructuralZone, currentPrice float64) *market.StructuralZone {
+	if len(zones) == 0 {
+		return nil
+	}
+	nearest := &zones[0]
+	minDist := math.Abs(zones[0].MidPrice - currentPrice)
+	for i := 1; i < len(zones); i++ {
+		d := math.Abs(zones[i].MidPrice - currentPrice)
+		if d < minDist {
+			minDist = d
+			nearest = &zones[i]
+		}
+	}
+	return nearest
 }
 
 func formatEvaluatedLevelRow(l market.EvaluatedLevel, zh bool) string {

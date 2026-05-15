@@ -111,7 +111,8 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString("- A trigger REQUIRES candle-close confirmation on 5m or 15m.\n")
 	sb.WriteString("- If price is still approaching a level (has not yet touched it and been rejected), output wait.\n")
 	sb.WriteString("- If trigger is missing or unclear, output wait.\n")
-	sb.WriteString("- You MUST include `trigger_type` field in every open decision (one of the 6 types above).\n\n")
+	sb.WriteString("- You MUST include `trigger_type` field in every open decision (one of the 6 types above). Entry without trigger_type will be BLOCKED by the system.\n")
+	sb.WriteString("- Only reference structural ZONES provided in the market data. Do not invent levels that are not listed.\n\n")
 
 	// 3. Hard constraints (risk control)
 	btcEthPosValueRatio := riskControl.BTCETHMaxPositionValueRatio

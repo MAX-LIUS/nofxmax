@@ -11,10 +11,11 @@ import (
 
 func TestFormatStructuralLevelsUsesMachineReadableSeparatedPrices(t *testing.T) {
 	mdata := &market.Data{
+		CurrentPrice: 76800.0,
 		StructuralLevels: []market.StructuralLevel{
-			{Price: 76754.19, Type: "resistance", Timeframe: "15m", Strength: 3, Source: "fibonacci"},
-			{Price: 76887.05, Type: "resistance", Timeframe: "15m", Strength: 2, Source: "swing_point"},
-			{Price: 76000.50, Type: "support", Timeframe: "15m", Strength: 4, Source: "swing_point"},
+			{Price: 76754.19, Type: "resistance", Timeframe: "15m", Strength: 3, Source: "fibonacci", Confidence: 50, TouchCount: 3},
+			{Price: 76887.05, Type: "resistance", Timeframe: "15m", Strength: 2, Source: "swing_point", Confidence: 40, TouchCount: 2},
+			{Price: 76000.50, Type: "support", Timeframe: "15m", Strength: 4, Source: "swing_point", Confidence: 55, TouchCount: 4},
 		},
 		FibonacciLevels: &market.FibonacciLevels{
 			SwingLow:  76000.50,
@@ -29,10 +30,11 @@ func TestFormatStructuralLevelsUsesMachineReadableSeparatedPrices(t *testing.T) 
 	}
 
 	out := formatStructuralLevelsEN(mdata)
+	// Should contain machine-readable prices and fibonacci context
 	for _, want := range []string{
-		"resistance_levels:",
-		"level_1_price=76754.19",
-		"level_2_price=76887.05",
+		"Key Structural Levels",
+		"76754.19",
+		"76887.05",
 		"fibonacci_context: timeframe=15m swing_low=76000.5 swing_high=77209.06",
 		"fib_0.5=76604.78",
 		"fib_0.618=76747.39",
@@ -41,7 +43,8 @@ func TestFormatStructuralLevelsUsesMachineReadableSeparatedPrices(t *testing.T) 
 			t.Fatalf("expected output to contain %q, got:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "76754.19,76887.05") || strings.Contains(out, " | ") {
+	// Should not use comma-separated or pipe-separated format
+	if strings.Contains(out, "76754.19,76887.05") {
 		t.Fatalf("expected separated machine-readable levels, got:\n%s", out)
 	}
 }

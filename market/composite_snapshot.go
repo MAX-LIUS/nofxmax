@@ -54,6 +54,7 @@ type CompositeMarketSnapshot struct {
 	Context       *MarketContextV2                    `json:"context,omitempty"`
 	Timeframes    map[string]CompositeMarketTimeframe `json:"timeframes,omitempty"`
 	Lines         []CompositeMarketLine               `json:"lines,omitempty"`
+	Zones         []StructuralZone                    `json:"zones,omitempty"`
 	AICompact     string                              `json:"ai_compact,omitempty"`
 }
 
@@ -167,6 +168,10 @@ func buildCompositeMarketSnapshotFromData(exchange string, timeframes []string, 
 				break // only add one VWAP (prefer 1h)
 			}
 		}
+	}
+	// Add structural zones
+	if len(data.StructuralZones) > 0 {
+		s.Zones = data.StructuralZones
 	}
 	s.AICompact = FormatCompositeMarketForAI(s)
 	return s

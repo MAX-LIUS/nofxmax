@@ -26,6 +26,7 @@ type Data struct {
 	DepthImbalance     *float64          `json:"depth_imbalance,omitempty"`
 	FibonacciLevels    *FibonacciLevels  `json:"fibonacci_levels,omitempty"`
 	StructuralLevels   []StructuralLevel `json:"structural_levels,omitempty"`
+	StructuralZones    []StructuralZone  `json:"structural_zones,omitempty"`
 	QuantContext       *QuantContext     `json:"quant_context,omitempty"`
 	FundingRateHistory []float64         // last 8 funding rates (newest first)
 	OIHistory1h        float64           // OI value from 1h ago
@@ -87,6 +88,7 @@ type TimeframeSeriesData struct {
 	// Structural analysis per timeframe
 	FibonacciLevels  *FibonacciLevels  `json:"fibonacci_levels,omitempty"`
 	StructuralLevels []StructuralLevel `json:"structural_levels,omitempty"`
+	StructuralZones  []StructuralZone  `json:"structural_zones,omitempty"`
 }
 
 // OIData Open Interest data

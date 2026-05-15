@@ -129,13 +129,12 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 		"lower_high_breakdown_confirmed":        true,
 	}
 	if triggerType == "" {
-		// AI hasn't learned to output trigger_type yet — warn but don't block
 		checks = append(checks, EntryGateCheck{
 			Code:     "trigger_type_missing",
 			Stage:    string(EntryGateStageMarketState),
-			Passed:   true,
-			Enforced: false,
-			Detail:   "trigger_type not provided (warn only, not blocking)",
+			Passed:   false,
+			Enforced: true,
+			Detail:   "trigger_type is required — must confirm candle-close at structural zone before entry",
 		})
 	} else if !validTriggers[triggerType] {
 		// AI provided an invalid trigger_type — block

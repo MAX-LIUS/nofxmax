@@ -242,11 +242,33 @@ func GetWithTimeframesExchange(symbol string, timeframes []string, primaryTimefr
 		seriesData.StructuralLevels = DetectStructuralLevels(klines, tfCurrentPrice, tf)
 		seriesData.FibonacciLevels = CalculateFibonacciLevels(klines, tf)
 
+		// Merge levels into zones using ATR-scaled tolerance
+		tfATR14 := seriesData.ATR14
+		zones := MergeIntoZones(seriesData.StructuralLevels, tfATR14, tfCurrentPrice)
+		zones = ApplyFlipLogic(zones, klines, tfCurrentPrice)
+		zones = ApplyTimeframeBoost(zones)
+		zones = AssignZoneQualityGrade(zones)
+		seriesData.StructuralZones = zones
+
 		timeframeData[tf] = seriesData
 	}
 
 	// Cross-timeframe confirmation: count how many timeframes confirm each level
 	enrichMultiTFConfirmation(timeframeData)
+
+	// Cross-timeframe zone confirmation
+	zonesByTF := make(map[string][]StructuralZone)
+	for tf, sd := range timeframeData {
+		if sd != nil {
+			zonesByTF[tf] = sd.StructuralZones
+		}
+	}
+	EnrichZoneMultiTF(zonesByTF)
+	for tf, zones := range zonesByTF {
+		if timeframeData[tf] != nil {
+			timeframeData[tf].StructuralZones = AssignZoneQualityGrade(zones)
+		}
+	}
 
 	// If primary timeframe data is empty, return error
 	if len(primaryKlines) == 0 {
@@ -392,6 +414,10 @@ func GetWithTimeframesExchange(symbol string, timeframes []string, primaryTimefr
 
 	// Detect structural levels from primary timeframe
 	data.StructuralLevels = DetectStructuralLevels(primaryKlines, currentPrice, primaryTimeframe)
+
+	// Build consolidated zones from all timeframes
+	allZones := collectAllZones(timeframeData, currentPrice)
+	data.StructuralZones = allZones
 
 	return data, nil
 }
