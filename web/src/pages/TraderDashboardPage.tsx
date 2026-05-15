@@ -155,7 +155,7 @@ export function TraderDashboardPage({
   exchanges,
 }: TraderDashboardPageProps) {
   const [closingPosition, setClosingPosition] = useState<string | null>(null)
-  const [showOnlyActionable, setShowOnlyActionable] = useState(true)
+  const [showOnlyActionable, setShowOnlyActionable] = useState(false)
   const [selectedChartSymbol, setSelectedChartSymbol] = useState<
     string | undefined
   >(undefined)
@@ -916,7 +916,7 @@ export function TraderDashboardPage({
                     selectedTrader.exchange_id,
                     exchanges
                   )}
-                  disableAutoRefresh={true}
+                  disableAutoRefresh={false}
                 />
               </Suspense>
             </div>
@@ -1185,122 +1185,127 @@ export function TraderDashboardPage({
 
           </div>
 
-          {/* Right Column: Recent Decisions */}
+          {/* Right Column: Position Protection */}
           <div
-            className="nofx-glass p-6 animate-slide-in h-fit lg:sticky lg:top-24 lg:max-h-[calc(100vh-120px)] flex flex-col"
+            className="animate-slide-in h-fit lg:sticky lg:top-24 lg:max-h-[calc(100vh-120px)] overflow-y-auto"
             style={{ animationDelay: '0.2s' }}
           >
-            {/* Header */}
-            <div className="flex items-center gap-3 mb-5 pb-4 border-b border-white/5 shrink-0">
-              <div
-                className="w-10 h-10 rounded-xl flex items-center justify-center text-xl shadow-[0_4px_14px_rgba(99,102,241,0.4)]"
-                style={{
-                  background:
-                    'linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%)',
-                }}
-              >
-                🧠
-              </div>
-              <div className="flex-1">
-                <h2 className="text-xl font-bold text-nofx-text-main">
-                  {t('recentDecisions', language)}
-                </h2>
-                {decisions && decisions.length > 0 && (
-                  <div className="text-xs text-nofx-text-muted">
-                    {t('lastCycles', language, { count: decisions.length })}
-                  </div>
-                )}
-              </div>
-              {/* Filter Toggle */}
-              <button
-                onClick={() => setShowOnlyActionable(!showOnlyActionable)}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all border"
-                style={{
-                  background: showOnlyActionable
-                    ? 'rgba(99, 102, 241, 0.15)'
-                    : 'rgba(0,0,0,0.3)',
-                  color: showOnlyActionable ? '#818CF8' : '#848E9C',
-                  borderColor: showOnlyActionable
-                    ? 'rgba(99, 102, 241, 0.3)'
-                    : 'rgba(255,255,255,0.1)',
-                }}
-                title={
-                  showOnlyActionable
-                    ? 'Showing actionable decisions only'
-                    : 'Showing all decisions'
-                }
-              >
-                {showOnlyActionable ? '⚡ Key' : '📋 All'}
-              </button>
-              {/* Limit Selector */}
-              <select
-                value={decisionsLimit}
-                onChange={(e) => onDecisionsLimitChange(Number(e.target.value))}
-                className="px-3 py-1.5 rounded-lg text-sm font-medium cursor-pointer transition-all bg-black/40 text-nofx-text-main border border-white/10 hover:border-nofx-accent focus:outline-none"
-              >
-                <option value={5}>5</option>
-                <option value={10}>10</option>
-                <option value={20}>20</option>
-                <option value={50}>50</option>
-                <option value={100}>100</option>
-              </select>
-            </div>
-
-            {/* Decisions List - Scrollable */}
-            <div
-              className="space-y-4 overflow-y-auto pr-2 custom-scrollbar"
-              style={{ maxHeight: 'calc(100vh - 280px)' }}
-            >
-              {(() => {
-                const filteredDecisions = showOnlyActionable
-                  ? (decisions || []).filter((d) =>
-                      d.decisions?.some(
-                        (a) =>
-                          a.action.includes('open') ||
-                          a.action.includes('close') ||
-                          a.review_context?.control?.decision === 'rejected' ||
-                          a.review_context?.control?.decision ===
-                            'downgraded_to_wait'
-                      )
-                    )
-                  : decisions || []
-                return filteredDecisions.length > 0 ? (
-                  filteredDecisions.map((decision, i) => (
-                    <DecisionCard
-                      key={i}
-                      decision={decision}
-                      language={language}
-                      onSymbolClick={handleSymbolClick}
-                    />
-                  ))
-                ) : (
-                  <div className="py-16 text-center text-nofx-text-muted opacity-60">
-                    <div className="text-6xl mb-4 opacity-30 grayscale">🧠</div>
-                    <div className="text-lg font-semibold mb-2 text-nofx-text-main">
-                      {t('noDecisionsYet', language)}
-                    </div>
-                    <div className="text-sm">
-                      {t('aiDecisionsWillAppear', language)}
-                    </div>
-                  </div>
-                )
-              })()}
-            </div>
+            <PositionProtectionPanel
+              traderId={selectedTraderId}
+              positions={positions}
+              language={language}
+              exchange={getExchangeTypeFromList(
+                selectedTrader?.exchange_id,
+                exchanges
+              )}
+              onSymbolClick={handleSymbolClick}
+            />
           </div>
         </div>
 
-        {/* Position Protection — Full Width */}
-        <div className="mb-6 animate-slide-in" style={{ animationDelay: '0.2s' }}>
-          <PositionProtectionPanel
-            traderId={selectedTraderId}
-            positions={positions}
-            language={language}
-            exchange={getExchangeTypeFromList(
-              selectedTrader?.exchange_id,
-              exchanges
-            )}
-            onSymbolClick={handleSymbolClick}
-          />
+        {/* Recent Decisions — Full Width */}
+        <div
+          className="nofx-glass p-6 mb-6 animate-slide-in"
+          style={{ animationDelay: '0.2s' }}
+        >
+          {/* Header */}
+          <div className="flex items-center gap-3 mb-5 pb-4 border-b border-white/5 shrink-0">
+            <div
+              className="w-10 h-10 rounded-xl flex items-center justify-center text-xl shadow-[0_4px_14px_rgba(99,102,241,0.4)]"
+              style={{
+                background:
+                  'linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%)',
+              }}
+            >
+              🧠
+            </div>
+            <div className="flex-1">
+              <h2 className="text-xl font-bold text-nofx-text-main">
+                {t('recentDecisions', language)}
+              </h2>
+              {decisions && decisions.length > 0 && (
+                <div className="text-xs text-nofx-text-muted">
+                  {t('lastCycles', language, { count: decisions.length })}
+                </div>
+              )}
+            </div>
+            {/* Filter Toggle */}
+            <button
+              onClick={() => setShowOnlyActionable(!showOnlyActionable)}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all border"
+              style={{
+                background: showOnlyActionable
+                  ? 'rgba(99, 102, 241, 0.15)'
+                  : 'rgba(0,0,0,0.3)',
+                color: showOnlyActionable ? '#818CF8' : '#848E9C',
+                borderColor: showOnlyActionable
+                  ? 'rgba(99, 102, 241, 0.3)'
+                  : 'rgba(255,255,255,0.1)',
+              }}
+              title={
+                showOnlyActionable
+                  ? 'Showing actionable decisions only'
+                  : 'Showing all decisions'
+              }
+            >
+              {showOnlyActionable ? '⚡ Key' : '📋 All'}
+            </button>
+            {/* Limit Selector */}
+            <select
+              value={decisionsLimit}
+              onChange={(e) => onDecisionsLimitChange(Number(e.target.value))}
+              className="px-3 py-1.5 rounded-lg text-sm font-medium cursor-pointer transition-all bg-black/40 text-nofx-text-main border border-white/10 hover:border-nofx-accent focus:outline-none"
+            >
+              <option value={5}>5</option>
+              <option value={10}>10</option>
+              <option value={20}>20</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+              <option value={300}>300</option>
+              <option value={500}>500</option>
+            </select>
+          </div>
+
+          {/* Decisions List */}
+          <div
+            className="space-y-4 overflow-y-auto pr-2 custom-scrollbar"
+            style={{ maxHeight: '600px' }}
+          >
+            {(() => {
+              const filteredDecisions = showOnlyActionable
+                ? (decisions || []).filter((d) =>
+                    d.decisions?.some(
+                      (a) =>
+                        a.action.includes('open') ||
+                        a.action.includes('close') ||
+                        a.review_context?.control?.decision === 'rejected' ||
+                        a.review_context?.control?.decision ===
+                          'downgraded_to_wait'
+                    )
+                  )
+                : decisions || []
+              return filteredDecisions.length > 0 ? (
+                filteredDecisions.map((decision, i) => (
+                  <DecisionCard
+                    key={i}
+                    decision={decision}
+                    language={language}
+                    onSymbolClick={handleSymbolClick}
+                  />
+                ))
+              ) : (
+                <div className="py-16 text-center text-nofx-text-muted opacity-60">
+                  <div className="text-6xl mb-4 opacity-30 grayscale">🧠</div>
+                  <div className="text-lg font-semibold mb-2 text-nofx-text-main">
+                    {t('noDecisionsYet', language)}
+                  </div>
+                  <div className="text-sm">
+                    {t('aiDecisionsWillAppear', language)}
+                  </div>
+                </div>
+              )
+            })()}
+          </div>
         </div>
 
         {/* Position History Section */}

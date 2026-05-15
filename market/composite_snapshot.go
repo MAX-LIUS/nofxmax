@@ -146,6 +146,28 @@ func buildCompositeMarketSnapshotFromData(exchange string, timeframes []string, 
 	if len(s.Lines) == 0 {
 		s.Lines = buildLinesForTimeframe(data.CurrentPrice, data.StructuralLevels, data.FibonacciLevels)
 	}
+	// Add VWAP as a line if available
+	if data.TimeframeData != nil {
+		for _, tf := range []string{"1h", "15m", "4h"} {
+			series := data.TimeframeData[tf]
+			if series == nil || len(series.Klines) < 20 {
+				continue
+			}
+			vwap := calculateVWAPFromBars(series.Klines)
+			if vwap > 0 {
+				s.Lines = append(s.Lines, CompositeMarketLine{
+					ID:          "vwap-" + tf,
+					Price:       vwap,
+					Kind:        "vwap",
+					Label:       "VWAP",
+					Timeframe:   tf,
+					Source:      "volume_weighted",
+					DistancePct: distancePct(data.CurrentPrice, vwap),
+				})
+				break // only add one VWAP (prefer 1h)
+			}
+		}
+	}
 	s.AICompact = FormatCompositeMarketForAI(s)
 	return s
 }
@@ -314,4 +336,17 @@ func absFloat(v float64) float64 {
 		return -v
 	}
 	return v
+}
+
+func calculateVWAPFromBars(bars []KlineBar) float64 {
+	var sumPV, sumV float64
+	for _, b := range bars {
+		tp := (b.High + b.Low + b.Close) / 3
+		sumPV += tp * b.Volume
+		sumV += b.Volume
+	}
+	if sumV == 0 {
+		return 0
+	}
+	return sumPV / sumV
 }

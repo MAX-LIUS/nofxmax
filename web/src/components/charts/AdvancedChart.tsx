@@ -59,6 +59,7 @@ interface AdvancedChartProps {
   showStructuralLevels?: boolean
   showFibonacci?: boolean
   showVWAP?: boolean
+  onStructuralToggle?: (key: 'showStructuralLevels' | 'showFibonacci' | 'showVWAP', value: boolean) => void
   initialIndicators?: Record<string, boolean>
   onIndicatorsChange?: (indicators: Record<string, boolean>) => void
   onOrderMarkersChange?: (show: boolean) => void
@@ -118,6 +119,7 @@ export function AdvancedChart({
   showStructuralLevels = true,
   showFibonacci = true,
   showVWAP = true,
+  onStructuralToggle,
   initialIndicators,
   onIndicatorsChange,
   onOrderMarkersChange,
@@ -133,6 +135,7 @@ export function AdvancedChart({
   const volumeChartRef = useRef<IChartApi | null>(null)
   const candlestickSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
+  const volumeMASeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
   const indicatorSeriesRef = useRef<Map<string, ISeriesApi<any>>>(new Map())
   const seriesMarkersRef = useRef<any>(null)
   const currentMarkersDataRef = useRef<any[]>([])
@@ -504,6 +507,15 @@ export function AdvancedChart({
       })
       volumeSeriesRef.current = volumeSeries as any
 
+      // Volume MA line
+      const volumeMA = volumeChart.addSeries(LineSeries, {
+        color: '#F0B90B',
+        lineWidth: 1,
+        lastValueVisible: false,
+        priceLineVisible: false,
+      })
+      volumeMASeriesRef.current = volumeMA as any
+
       // Sync time scales
       chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
         if (range && volumeChartRef.current) {
@@ -646,8 +658,20 @@ export function AdvancedChart({
               color: k.close >= k.open ? 'rgba(14, 203, 129, 0.6)' : 'rgba(246, 70, 93, 0.6)',
             }))
             volumeSeriesRef.current.setData(volumeData)
+
+            // Volume MA20
+            if (volumeMASeriesRef.current && klineData.length >= 20) {
+              const volMA: Array<{ time: number; value: number }> = []
+              for (let i = 19; i < klineData.length; i++) {
+                let sum = 0
+                for (let j = 0; j < 20; j++) sum += (klineData[i - j].volume || 0)
+                volMA.push({ time: klineData[i].time, value: sum / 20 })
+              }
+              volumeMASeriesRef.current.setData(volMA as any)
+            }
           } else {
             volumeSeriesRef.current.setData([])
+            volumeMASeriesRef.current?.setData([])
           }
         }
 
@@ -1030,13 +1054,17 @@ export function AdvancedChart({
     })
 
     filtered.forEach((line: CompositeMarketLine) => {
+      const strengthLabel = line.strength ? '●'.repeat(Math.min(line.strength, 5)) : ''
+      const tfLabel = line.timeframe ? `[${line.timeframe}]` : ''
+      const title = `${line.label} ${tfLabel} ${strengthLabel}`.trim()
       const priceLine = candlestickSeriesRef.current?.createPriceLine({
         price: line.price,
         color: LEVEL_COLORS[line.kind] ?? '#6B7280',
-        lineWidth: 1,
+        lineWidth: line.strength && line.strength >= 3 ? 2 : 1,
         lineStyle: LEVEL_STYLES[line.kind] ?? 3,
         axisLabelVisible: true,
-        title: `${line.label}${line.timeframe ? ' ' + line.timeframe : ''}${line.strength && line.strength > 2 ? ' ★' : ''}`,
+        title,
+        axisLabelColor: LEVEL_COLORS[line.kind] ?? '#6B7280',
       })
       if (priceLine) structuralLinesRef.current.set(line.id, priceLine)
     })
@@ -1222,9 +1250,9 @@ export function AdvancedChart({
               Structural Levels
             </div>
             {[
-              { key: 'structural', label: 'Support / Resistance', color: '#10B981', enabled: showStructuralLevels },
-              { key: 'fibonacci', label: 'Fibonacci', color: '#A855F7', enabled: showFibonacci },
-              { key: 'vwap', label: 'VWAP', color: '#3B82F6', enabled: showVWAP },
+              { key: 'showStructuralLevels' as const, label: 'Support / Resistance', color: '#10B981', enabled: showStructuralLevels },
+              { key: 'showFibonacci' as const, label: 'Fibonacci', color: '#A855F7', enabled: showFibonacci },
+              { key: 'showVWAP' as const, label: 'VWAP', color: '#3B82F6', enabled: showVWAP },
             ].map(item => (
               <label
                 key={item.key}
@@ -1233,7 +1261,7 @@ export function AdvancedChart({
                 <input
                   type="checkbox"
                   checked={item.enabled}
-                  readOnly
+                  onChange={() => onStructuralToggle?.(item.key, !item.enabled)}
                   className="w-4 h-4 rounded border-gray-600 text-yellow-500 focus:ring-2 focus:ring-yellow-500/50"
                 />
                 <div
@@ -1248,9 +1276,23 @@ export function AdvancedChart({
                 )}
               </label>
             ))}
-            <div className="text-[9px] text-gray-600 px-2 mt-1">
-              Data from composite market API (60s refresh)
-            </div>
+            {/* Timeframe breakdown */}
+            {structuralLines.length > 0 && (
+              <div className="mt-2 px-2 text-[10px] text-gray-500">
+                {(() => {
+                  const tfCounts: Record<string, number> = {}
+                  structuralLines.forEach(l => {
+                    const tf = l.timeframe || 'unknown'
+                    tfCounts[tf] = (tfCounts[tf] || 0) + 1
+                  })
+                  return Object.entries(tfCounts).map(([tf, count]) => (
+                    <span key={tf} className="inline-block mr-2 px-1.5 py-0.5 rounded bg-white/5 text-gray-400">
+                      {tf}: {count}
+                    </span>
+                  ))
+                })()}
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -375,6 +375,7 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
                 showStructuralLevels={prefs.showStructuralLevels}
                 showFibonacci={prefs.showFibonacci}
                 showVWAP={prefs.showVWAP}
+                onStructuralToggle={(key, value) => updatePrefs({ [key]: value })}
                 initialIndicators={prefs.indicators}
                 initialShowOrderMarkers={prefs.showOrderMarkers}
                 onIndicatorsChange={(indicators) => updatePrefs({ indicators })}
