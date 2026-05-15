@@ -1422,51 +1422,82 @@ export function AdvancedChart({
       vwap: 0,
     }
 
-    // Render zones (A/B grade: two lines for low/high; C grade: single midPrice line)
+    // Render zones (only A/B grade, max 5 per direction, within ±8% of price)
     if (structuralZones.length > 0 && showStructuralLevels) {
-      structuralZones.forEach((zone: StructuralZone, idx: number) => {
+      const currentPrice =
+        klineDataCacheRef.current.length > 0
+          ? klineDataCacheRef.current[klineDataCacheRef.current.length - 1]
+              .close
+          : 0
+
+      // Filter: A/B only, within 8% of current price
+      const relevantZones = structuralZones.filter((z: StructuralZone) => {
+        if (z.quality_grade === 'C') return false
+        if (currentPrice <= 0) return true
+        const distPct = Math.abs(z.mid_price - currentPrice) / currentPrice
+        return distPct <= 0.08
+      })
+
+      // Split by type, sort by distance, limit to 5 each
+      const supportZones = relevantZones
+        .filter((z: StructuralZone) => z.type === 'support')
+        .sort(
+          (a: StructuralZone, b: StructuralZone) =>
+            Math.abs(a.mid_price - currentPrice) -
+            Math.abs(b.mid_price - currentPrice)
+        )
+        .slice(0, 5)
+      const resistanceZones = relevantZones
+        .filter((z: StructuralZone) => z.type === 'resistance')
+        .sort(
+          (a: StructuralZone, b: StructuralZone) =>
+            Math.abs(a.mid_price - currentPrice) -
+            Math.abs(b.mid_price - currentPrice)
+        )
+        .slice(0, 5)
+
+      const visibleZones = [...supportZones, ...resistanceZones]
+
+      visibleZones.forEach((zone: StructuralZone, idx: number) => {
         const color = zone.type === 'support' ? '#10B981' : '#EF4444'
-        const gradeLabel = `[${zone.quality_grade}]`
-        const confLabel = `${Math.round(zone.confidence)}`
+        const isA = zone.quality_grade === 'A'
         const tfs = zone.timeframes?.join('+') || ''
         const flippedMark = zone.flipped ? ' ⟳' : ''
 
-        if (zone.quality_grade === 'C') {
-          // C-grade: single gray dotted line at midPrice
-          const priceLine = candlestickSeriesRef.current?.createPriceLine({
-            price: zone.mid_price,
-            color: '#6B7280',
-            lineWidth: 1,
-            lineStyle: 3,
-            axisLabelVisible: false,
-            title: `C ${tfs}`,
-          })
-          if (priceLine)
-            structuralLinesRef.current.set(`zone-c-${idx}`, priceLine)
-        } else {
-          // A/B grade: two lines (low + high) to show zone range
-          const lowLine = candlestickSeriesRef.current?.createPriceLine({
-            price: zone.low,
-            color,
-            lineWidth: zone.quality_grade === 'A' ? 2 : 1,
-            lineStyle: 3,
-            axisLabelVisible: false,
-            title: '',
-          })
-          if (lowLine) structuralLinesRef.current.set(`zone-lo-${idx}`, lowLine)
-
-          const highLine = candlestickSeriesRef.current?.createPriceLine({
-            price: zone.high,
-            color,
-            lineWidth: zone.quality_grade === 'A' ? 2 : 1,
-            lineStyle: 3,
-            axisLabelVisible: true,
-            axisLabelColor: color,
-            title: `${gradeLabel} ${confLabel} ${tfs}${flippedMark}`,
-          })
-          if (highLine)
-            structuralLinesRef.current.set(`zone-hi-${idx}`, highLine)
+        // Expand zero-width zones to ±0.15% for visual band
+        let lo = zone.low
+        let hi = zone.high
+        if (hi - lo < zone.mid_price * 0.001) {
+          const expand = zone.mid_price * 0.0015
+          lo = zone.mid_price - expand
+          hi = zone.mid_price + expand
         }
+
+        // Lower boundary line (no label)
+        const lowLine = candlestickSeriesRef.current?.createPriceLine({
+          price: lo,
+          color,
+          lineWidth: isA ? 2 : 1,
+          lineStyle: 3,
+          axisLabelVisible: false,
+          title: '',
+        })
+        if (lowLine) structuralLinesRef.current.set(`zone-lo-${idx}`, lowLine)
+
+        // Upper boundary line (with label for A-grade only)
+        const title = isA
+          ? `[A] ${Math.round(zone.confidence)} ${tfs}${flippedMark}`
+          : `${tfs}`
+        const highLine = candlestickSeriesRef.current?.createPriceLine({
+          price: hi,
+          color,
+          lineWidth: isA ? 2 : 1,
+          lineStyle: 3,
+          axisLabelVisible: isA,
+          axisLabelColor: color,
+          title,
+        })
+        if (highLine) structuralLinesRef.current.set(`zone-hi-${idx}`, highLine)
       })
     }
 

@@ -2,6 +2,7 @@ package market
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -187,20 +188,59 @@ func ProjectCompositeMarketSnapshot(s *CompositeMarketSnapshot, view string) *Co
 		cp.Context = nil
 		cp.Timeframes = nil
 		cp.Lines = compactNearestLines(cp.Lines, 12)
+		cp.Zones = FilterTopZonesForAI(cp.Zones, cp.Price, 3)
 	case "summary":
 		cp.Timeframes = nil
 		cp.Lines = compactNearestLines(cp.Lines, 16)
+		cp.Zones = filterZonesForChart(cp.Zones, cp.Price, 5)
 	case "chart":
 		cp.Context = nil
 		cp.Timeframes = compactChartTimeframes(cp.Timeframes, 120)
 		cp.Lines = compactNearestLines(cp.Lines, 24)
+		cp.Zones = filterZonesForChart(cp.Zones, cp.Price, 5)
 	case "full", "":
 		return &cp
 	default:
 		cp.Timeframes = nil
 		cp.Lines = compactNearestLines(cp.Lines, 16)
+		cp.Zones = filterZonesForChart(cp.Zones, cp.Price, 5)
 	}
 	return &cp
+}
+
+// filterZonesForChart returns only A/B grade zones within 8% of current price,
+// limited to maxPerDirection per side, sorted by proximity.
+func filterZonesForChart(zones []StructuralZone, currentPrice float64, maxPerDirection int) []StructuralZone {
+	if len(zones) == 0 || currentPrice <= 0 {
+		return zones
+	}
+	var support, resistance []StructuralZone
+	for _, z := range zones {
+		if z.QualityGrade == "C" {
+			continue
+		}
+		distPct := math.Abs(z.MidPrice-currentPrice) / currentPrice
+		if distPct > 0.08 {
+			continue
+		}
+		if z.Type == "support" {
+			support = append(support, z)
+		} else {
+			resistance = append(resistance, z)
+		}
+	}
+	sortZonesByPriority(support, currentPrice)
+	sortZonesByPriority(resistance, currentPrice)
+	if len(support) > maxPerDirection {
+		support = support[:maxPerDirection]
+	}
+	if len(resistance) > maxPerDirection {
+		resistance = resistance[:maxPerDirection]
+	}
+	result := make([]StructuralZone, 0, len(support)+len(resistance))
+	result = append(result, support...)
+	result = append(result, resistance...)
+	return result
 }
 
 func compactNearestLines(lines []CompositeMarketLine, limit int) []CompositeMarketLine {
