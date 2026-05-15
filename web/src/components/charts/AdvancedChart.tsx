@@ -59,7 +59,9 @@ interface AdvancedChartProps {
   showStructuralLevels?: boolean
   showFibonacci?: boolean
   showVWAP?: boolean
+  levelTimeframes?: Record<string, boolean>
   onStructuralToggle?: (key: 'showStructuralLevels' | 'showFibonacci' | 'showVWAP', value: boolean) => void
+  onLevelTimeframeToggle?: (key: string, value: boolean) => void
   initialIndicators?: Record<string, boolean>
   onIndicatorsChange?: (indicators: Record<string, boolean>) => void
   onOrderMarkersChange?: (show: boolean) => void
@@ -119,7 +121,9 @@ export function AdvancedChart({
   showStructuralLevels = true,
   showFibonacci = true,
   showVWAP = true,
+  levelTimeframes = {},
   onStructuralToggle,
+  onLevelTimeframeToggle,
   initialIndicators,
   onIndicatorsChange,
   onOrderMarkersChange,
@@ -184,9 +188,9 @@ export function AdvancedChart({
   })
 
   // Fetch kline data from service
-  const fetchKlineData = async (symbol: string, interval: string) => {
+  const fetchKlineData = async (symbol: string, interval: string, refreshOnly = false) => {
     try {
-      const limit = 1500
+      const limit = refreshOnly ? 200 : 1500
       const klineUrl = `/api/klines?symbol=${symbol}&interval=${interval}&limit=${limit}&exchange=${exchange}`
       const result = await httpClient.get(klineUrl)
 
@@ -201,8 +205,8 @@ export function AdvancedChart({
         high: candle.high,
         low: candle.low,
         close: candle.close,
-        volume: candle.volume,           // Quantity (BTC/shares)
-        quoteVolume: candle.quoteVolume, // Turnover (USDT/USD)
+        volume: candle.volume,
+        quoteVolume: candle.quoteVolume,
       }))
 
       // Sort by time and deduplicate (lightweight-charts requires ascending, unique times)
@@ -597,8 +601,6 @@ export function AdvancedChart({
     const loadData = async (isRefresh = false) => {
       if (!candlestickSeriesRef.current) return
 
-      console.log('[AdvancedChart] Loading data for', symbol, interval, isRefresh ? '(refresh)' : '')
-      // Only show loading on first load, avoid flicker on refresh
       if (!isRefresh) {
         setLoading(true)
       }
@@ -606,8 +608,70 @@ export function AdvancedChart({
 
       try {
         // 1. Fetch kline data
+        if (isRefresh && klineDataCacheRef.current.length > 0) {
+          // On refresh: fetch only recent bars and update the last ones
+          const recentData = await fetchKlineData(symbol, interval, true)
+          if (recentData.length > 0) {
+            // Update existing data with recent bars (handles new bar + current bar update)
+            const existing = klineDataCacheRef.current
+            const lastExistingTime = existing[existing.length - 1]?.time || 0
+
+            for (const bar of recentData) {
+              if (bar.time >= lastExistingTime) {
+                candlestickSeriesRef.current.update(bar)
+              }
+            }
+
+            // Merge into cache
+            const merged = [...existing]
+            for (const bar of recentData) {
+              const idx = merged.findIndex((b: any) => b.time === bar.time)
+              if (idx >= 0) {
+                merged[idx] = bar
+              } else if (bar.time > lastExistingTime) {
+                merged.push(bar)
+              }
+            }
+            klineDataCacheRef.current = merged
+
+            // Update volume
+            if (volumeSeriesRef.current) {
+              const volumeEnabled = indicators.find(i => i.id === 'volume')?.enabled
+              if (volumeEnabled) {
+                for (const bar of recentData) {
+                  if (bar.time >= lastExistingTime) {
+                    volumeSeriesRef.current.update({
+                      time: bar.time,
+                      value: bar.volume || 0,
+                      color: bar.close >= bar.open ? 'rgba(14, 203, 129, 0.6)' : 'rgba(246, 70, 93, 0.6)',
+                    } as any)
+                  }
+                }
+              }
+            }
+
+            // Update market stats from latest bar
+            const latestBar = recentData[recentData.length - 1]
+            const prevBar = recentData.length > 1 ? recentData[recentData.length - 2] : existing[existing.length - 1]
+            if (latestBar && prevBar) {
+              const priceChange = latestBar.close - prevBar.close
+              setMarketStats({
+                price: latestBar.close,
+                priceChange,
+                priceChangePercent: (priceChange / prevBar.close) * 100,
+                high: latestBar.high,
+                low: latestBar.low,
+                volume: latestBar.volume || 0,
+                quoteVolume: latestBar.quoteVolume || 0,
+              })
+            }
+          }
+          setLoading(false)
+          return
+        }
+
+        // Full load (initial)
         const klineData = await fetchKlineData(symbol, interval)
-        console.log('[AdvancedChart] Loaded', klineData.length, 'klines')
         candlestickSeriesRef.current.setData(klineData)
         klineDataCacheRef.current = klineData
 
@@ -815,9 +879,17 @@ export function AdvancedChart({
           })
         }
 
-        // Auto-fit view only on initial load, avoid jitter on refresh
+        // Auto-fit view only on initial load — show last 90 bars
         if (isInitialLoadRef.current) {
-          chartRef.current?.timeScale().fitContent()
+          const totalBars = klineData.length
+          if (totalBars > 90) {
+            chartRef.current?.timeScale().setVisibleLogicalRange({
+              from: totalBars - 90,
+              to: totalBars + 5,
+            })
+          } else {
+            chartRef.current?.timeScale().fitContent()
+          }
           isInitialLoadRef.current = false
         }
         setLoading(false)
@@ -1047,10 +1119,20 @@ export function AdvancedChart({
     }
 
     const filtered = structuralLines.filter((line: CompositeMarketLine) => {
-      if (line.kind === 'support' || line.kind === 'resistance') return showStructuralLevels
-      if (line.kind === 'fibonacci') return showFibonacci
-      if (line.kind === 'vwap') return showVWAP
-      return showStructuralLevels
+      // Check type-level toggle
+      if (line.kind === 'support' || line.kind === 'resistance') {
+        if (!showStructuralLevels) return false
+      }
+      if (line.kind === 'fibonacci') {
+        if (!showFibonacci) return false
+      }
+      if (line.kind === 'vwap') {
+        if (!showVWAP) return false
+      }
+      // Check per-timeframe toggle (if explicitly disabled)
+      const tfKey = `${line.kind}-${line.timeframe || 'all'}`
+      if (levelTimeframes[tfKey] === false) return false
+      return true
     })
 
     filtered.forEach((line: CompositeMarketLine) => {
@@ -1062,13 +1144,12 @@ export function AdvancedChart({
         color: LEVEL_COLORS[line.kind] ?? '#6B7280',
         lineWidth: line.strength && line.strength >= 3 ? 2 : 1,
         lineStyle: LEVEL_STYLES[line.kind] ?? 3,
-        axisLabelVisible: true,
+        axisLabelVisible: false,
         title,
-        axisLabelColor: LEVEL_COLORS[line.kind] ?? '#6B7280',
       })
       if (priceLine) structuralLinesRef.current.set(line.id, priceLine)
     })
-  }, [structuralLines, showStructuralLevels, showFibonacci, showVWAP])
+  }, [structuralLines, showStructuralLevels, showFibonacci, showVWAP, levelTimeframes])
 
   return (
     <div
@@ -1271,25 +1352,38 @@ export function AdvancedChart({
                 <span className="text-sm text-gray-300 group-hover:text-white transition-colors flex-1">
                   {item.label}
                 </span>
-                {item.enabled && (
-                  <span className="text-xs text-yellow-400">●</span>
-                )}
               </label>
             ))}
-            {/* Timeframe breakdown */}
+            {/* Per-timeframe toggles */}
             {structuralLines.length > 0 && (
-              <div className="mt-2 px-2 text-[10px] text-gray-500">
+              <div className="mt-2 space-y-0.5">
+                <div className="text-[9px] text-gray-600 px-2 mb-1 uppercase">By Timeframe</div>
                 {(() => {
-                  const tfCounts: Record<string, number> = {}
+                  const groups: Record<string, { kind: string; tf: string; count: number }> = {}
                   structuralLines.forEach(l => {
-                    const tf = l.timeframe || 'unknown'
-                    tfCounts[tf] = (tfCounts[tf] || 0) + 1
+                    const key = `${l.kind}-${l.timeframe || 'all'}`
+                    if (!groups[key]) groups[key] = { kind: l.kind, tf: l.timeframe || 'all', count: 0 }
+                    groups[key].count++
                   })
-                  return Object.entries(tfCounts).map(([tf, count]) => (
-                    <span key={tf} className="inline-block mr-2 px-1.5 py-0.5 rounded bg-white/5 text-gray-400">
-                      {tf}: {count}
-                    </span>
-                  ))
+                  return Object.entries(groups).map(([key, g]) => {
+                    const enabled = levelTimeframes[key] !== false
+                    const color = g.kind === 'support' || g.kind === 'resistance' ? '#10B981'
+                      : g.kind === 'fibonacci' ? '#A855F7' : '#3B82F6'
+                    return (
+                      <label key={key} className="flex items-center gap-2 px-2 py-1 rounded hover:bg-white/5 cursor-pointer text-[11px]">
+                        <input
+                          type="checkbox"
+                          checked={enabled}
+                          onChange={() => onLevelTimeframeToggle?.(key, !enabled)}
+                          className="w-3 h-3 rounded border-gray-700 text-yellow-500"
+                        />
+                        <span style={{ color }} className="w-2 h-2 rounded-full inline-block" />
+                        <span className="text-gray-400">{g.kind}</span>
+                        <span className="text-gray-500 font-mono">{g.tf}</span>
+                        <span className="text-gray-600 ml-auto">{g.count}</span>
+                      </label>
+                    )
+                  })
                 })()}
               </div>
             )}

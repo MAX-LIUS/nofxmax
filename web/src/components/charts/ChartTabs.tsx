@@ -60,7 +60,7 @@ function getMarketTypeFromExchange(exchangeId: string | undefined): MarketType {
 export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, disableAutoRefresh = false }: ChartTabsProps) {
   const { language } = useLanguage()
   const { prefs, updatePrefs } = useChartPrefs()
-  const [activeTab, setActiveTab] = useState<ChartTab>('equity')
+  const [activeTab, setActiveTab] = useState<ChartTab>('kline')
   const [chartSymbol, setChartSymbol] = useState<string>('BTC')
   const [interval, setInterval] = useState<Interval>(() => (prefs.interval as Interval) || '5m')
   const [symbolInput, setSymbolInput] = useState('')
@@ -375,7 +375,9 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
                 showStructuralLevels={prefs.showStructuralLevels}
                 showFibonacci={prefs.showFibonacci}
                 showVWAP={prefs.showVWAP}
+                levelTimeframes={prefs.levelTimeframes}
                 onStructuralToggle={(key, value) => updatePrefs({ [key]: value })}
+                onLevelTimeframeToggle={(key, value) => updatePrefs({ levelTimeframes: { ...prefs.levelTimeframes, [key]: value } })}
                 initialIndicators={prefs.indicators}
                 initialShowOrderMarkers={prefs.showOrderMarkers}
                 onIndicatorsChange={(indicators) => updatePrefs({ indicators })}

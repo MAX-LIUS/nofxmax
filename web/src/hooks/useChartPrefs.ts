@@ -12,6 +12,8 @@ export interface ChartPrefs {
   showFibonacci: boolean
   showVWAP: boolean
   showOrderMarkers: boolean
+  // Per-timeframe toggles: e.g. { "support-5m": true, "fib-1h": false }
+  levelTimeframes: Record<string, boolean>
 }
 
 const DEFAULT_PREFS: ChartPrefs = {
@@ -22,6 +24,7 @@ const DEFAULT_PREFS: ChartPrefs = {
   showFibonacci: true,
   showVWAP: true,
   showOrderMarkers: true,
+  levelTimeframes: {},
 }
 
 function loadPrefs(): ChartPrefs {
