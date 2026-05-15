@@ -147,6 +147,7 @@ export function AdvancedChart({
   const klineDataCacheRef = useRef<Kline[]>([])
   const priceLinesRef = useRef<any[]>([])
   const structuralLinesRef = useRef<Map<string, any>>(new Map())
+  const leftScaleSeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
   const isInitialLoadRef = useRef(true)
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -160,6 +161,50 @@ export function AdvancedChart({
   // Structural levels from composite API
   const structuralLevelsEnabled = showStructuralLevels || showFibonacci || showVWAP
   const structuralLines = useStructuralLevels(symbol, exchange, structuralLevelsEnabled)
+
+  // Real-time ticker price polling (1s) — updates current candle + header price
+  useEffect(() => {
+    if (!autoRefresh || refreshRate === 'off') return
+    const tickMs = refreshRate === 'realtime' ? 500 : refreshRate === '1s' ? 1000 : 2000
+
+    const pollTicker = async () => {
+      try {
+        const result = await httpClient.get(`/api/ticker?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}`)
+        if (!result.success || !result.data?.price) return
+        const price = result.data.price as number
+
+        // Update current candle's close in real-time
+        if (candlestickSeriesRef.current && klineDataCacheRef.current.length > 0) {
+          const lastBar = { ...klineDataCacheRef.current[klineDataCacheRef.current.length - 1] }
+          lastBar.close = price
+          if (price > lastBar.high) lastBar.high = price
+          if (price < lastBar.low) lastBar.low = price
+          candlestickSeriesRef.current.update(lastBar as any)
+          klineDataCacheRef.current[klineDataCacheRef.current.length - 1] = lastBar
+        }
+
+        // Update header price
+        setMarketStats(prev => {
+          if (!prev) return prev
+          const openPrice = prev.price - prev.priceChange // recover the reference price
+          return {
+            ...prev,
+            price,
+            priceChange: price - openPrice,
+            priceChangePercent: openPrice > 0 ? ((price - openPrice) / openPrice) * 100 : 0,
+            high: Math.max(prev.high, price),
+            low: Math.min(prev.low, price),
+          }
+        })
+      } catch {
+        // silently ignore ticker errors
+      }
+    }
+
+    const id = setInterval(pollTicker, tickMs)
+    pollTicker() // immediate first call
+    return () => clearInterval(id)
+  }, [symbol, exchange, autoRefresh, refreshRate])
 
   // Market stats (current candle)
   const [marketStats, setMarketStats] = useState<{
@@ -429,6 +474,15 @@ export function AdvancedChart({
         borderVisible: true,
         entireTextOnly: false,
       },
+      leftPriceScale: {
+        visible: true,
+        borderColor: '#2B3139',
+        scaleMargins: {
+          top: 0.05,
+          bottom: 0.05,
+        },
+        borderVisible: false,
+      },
       timeScale: {
         borderColor: '#2B3139',
         timeVisible: true,
@@ -474,6 +528,17 @@ export function AdvancedChart({
       wickDownColor: '#F6465D',
     })
     candlestickSeriesRef.current = candlestickSeries as any
+
+    // Hidden series on left price scale (for structural level labels)
+    const leftSeries = chart.addSeries(LineSeries, {
+      priceScaleId: 'left',
+      color: 'transparent',
+      lineWidth: 1,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      crosshairMarkerVisible: false,
+    })
+    leftScaleSeriesRef.current = leftSeries as any
 
     // Create volume sub-chart
     if (volumeChartContainerRef.current) {
@@ -1095,13 +1160,13 @@ export function AdvancedChart({
     }
   }, [indicators])
 
-  // Render structural levels as price lines
+  // Render structural levels as price lines on left scale
   useEffect(() => {
-    if (!candlestickSeriesRef.current) return
+    if (!leftScaleSeriesRef.current) return
 
     // Clear old structural lines
     structuralLinesRef.current.forEach(line => {
-      try { candlestickSeriesRef.current?.removePriceLine(line) } catch {}
+      try { leftScaleSeriesRef.current?.removePriceLine(line) } catch {}
     })
     structuralLinesRef.current.clear()
 
@@ -1119,7 +1184,6 @@ export function AdvancedChart({
     }
 
     const filtered = structuralLines.filter((line: CompositeMarketLine) => {
-      // Check type-level toggle
       if (line.kind === 'support' || line.kind === 'resistance') {
         if (!showStructuralLevels) return false
       }
@@ -1129,24 +1193,29 @@ export function AdvancedChart({
       if (line.kind === 'vwap') {
         if (!showVWAP) return false
       }
-      // Check per-timeframe toggle (if explicitly disabled)
       const tfKey = `${line.kind}-${line.timeframe || 'all'}`
       if (levelTimeframes[tfKey] === false) return false
       return true
     })
 
+    // Feed price data to left series so it scales correctly
+    if (klineDataCacheRef.current.length > 0) {
+      const priceData = klineDataCacheRef.current.map(k => ({ time: k.time, value: k.close }))
+      leftScaleSeriesRef.current.setData(priceData as any)
+    }
+
     filtered.forEach((line: CompositeMarketLine) => {
       const strengthLabel = line.strength ? '●'.repeat(Math.min(line.strength, 5)) : ''
-      const tfLabel = line.timeframe ? `${line.timeframe}` : ''
-      const title = `${line.label} ${tfLabel} ${strengthLabel}`.trim()
-      const priceLine = candlestickSeriesRef.current?.createPriceLine({
+      const tfLabel = line.timeframe || ''
+      const label = `${line.label} ${tfLabel} ${strengthLabel}`.trim()
+      const priceLine = leftScaleSeriesRef.current?.createPriceLine({
         price: line.price,
         color: LEVEL_COLORS[line.kind] ?? '#6B7280',
         lineWidth: line.strength && line.strength >= 3 ? 2 : 1,
         lineStyle: LEVEL_STYLES[line.kind] ?? 3,
         axisLabelVisible: true,
         axisLabelColor: LEVEL_COLORS[line.kind] ?? '#6B7280',
-        title,
+        title: label,
       })
       if (priceLine) structuralLinesRef.current.set(line.id, priceLine)
     })
