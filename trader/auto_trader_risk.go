@@ -179,6 +179,26 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			}
 		}
 
+		// ===== Tier alloc state update (always runs, needed for high-water-mark tracking) =====
+		// Initialize tier allocations if not set yet (e.g. position opened before this code deployed).
+		// MUST happen before native trailing arm so getCumulativeCloseRatioByRule can find allocs.
+		allocs := at.getDrawdownTierAllocs(symbol, side)
+		if len(allocs) == 0 {
+			at.initDrawdownTiersFromResolvedRules(symbol, side, quantity, rules)
+			allocs = at.getDrawdownTierAllocs(symbol, side)
+		}
+
+		if len(allocs) > 0 {
+			// Update tier states (tracking/superseded) based on current P&L — needed for
+			// cumulative ratio calculation and high-water-mark tracking.
+			// MUST run before native trailing arm so lower tiers are properly superseded.
+			at.updateDrawdownTierStates(symbol, side, currentPnLPct, peakPnLPct)
+
+			// Detect native trailing order fills: if position quantity decreased below
+			// expected remaining, mark the highest tracking tier as executed.
+			at.detectNativeTrailingFills(symbol, side, quantity)
+		}
+
 		// For exchange-native trailing protections, arm all tiers whose min-profit gate is already met.
 		nativeTrailingHandled := false
 		if at.supportsNativeTrailingStop() {
@@ -201,23 +221,7 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			}
 		}
 
-		// ===== Tier alloc state update (always runs, needed for high-water-mark tracking) =====
-		// Initialize tier allocations if not set yet (e.g. position opened before this code deployed)
-		allocs := at.getDrawdownTierAllocs(symbol, side)
-		if len(allocs) == 0 {
-			at.initDrawdownTiersFromResolvedRules(symbol, side, quantity, rules)
-			allocs = at.getDrawdownTierAllocs(symbol, side)
-		}
-
 		if len(allocs) > 0 {
-			// Update tier states (tracking/superseded) based on current P&L — needed for
-			// high-water-mark even when native trailing handles the actual exchange orders.
-			at.updateDrawdownTierStates(symbol, side, currentPnLPct, peakPnLPct)
-
-			// Detect native trailing order fills: if position quantity decreased below
-			// expected remaining, mark the highest tracking tier as executed.
-			at.detectNativeTrailingFills(symbol, side, quantity)
-
 			if nativeTrailingHandled {
 				// Native trailing is handling exchange orders; skip managed market-close execution
 				// but tier state has been updated above for high-water-mark tracking.
@@ -1143,7 +1147,7 @@ func (at *AutoTrader) findExistingFullTrailingOrder(side string, openOrders []Op
 func (at *AutoTrader) findEquivalentPartialTrailingOrder(symbol, side string, rule store.DrawdownTakeProfitRule, entryPrice float64, openOrders []OpenOrder) (*nativeTrailingOrder, float64, float64, float64) {
 	plannedActivationPrice := calculateProfitBasedTrailingTriggerPrice(entryPrice, side, rule.MinProfitPct)
 	plannedCallbackRate := calculateDrawdownRuleCallbackRatio(entryPrice, side, rule)
-	qtyTarget := 0.0
+	currentQty := 0.0
 	positions, err := at.trader.GetPositions()
 	if err == nil {
 		for _, pos := range positions {
@@ -1152,15 +1156,32 @@ func (at *AutoTrader) findEquivalentPartialTrailingOrder(symbol, side string, ru
 			if ps != symbol || !strings.EqualFold(pd, side) {
 				continue
 			}
-			qtyTarget, _ = pos["positionAmt"].(float64)
-			if qtyTarget < 0 {
-				qtyTarget = -qtyTarget
+			currentQty, _ = pos["positionAmt"].(float64)
+			if currentQty < 0 {
+				currentQty = -currentQty
 			}
 			break
 		}
 	}
-	if qtyTarget > 0 {
-		qtyTarget = qtyTarget * rule.CloseRatioPct / 100.0
+	if currentQty > 0 {
+		// Use cumulative ratio (this tier + all lower tiers) to match the actual
+		// trailing order quantity on exchange. E.g. T2 armed = T1(65%)+T2(25%)=90%.
+		cumulativeRatio := at.getCumulativeCloseRatioByRule(symbol, side, rule)
+		originalQty := currentQty
+		if at.store != nil {
+			if dbPos, err := at.store.Position().GetOpenPositionBySymbol(at.id, symbol, strings.ToUpper(side)); err == nil && dbPos != nil && dbPos.EntryQuantity > 0 {
+				originalQty = dbPos.EntryQuantity
+			}
+		}
+		var qtyTarget float64
+		if cumulativeRatio >= 100 {
+			qtyTarget = currentQty
+		} else {
+			qtyTarget = originalQty * cumulativeRatio / 100.0
+			if qtyTarget > currentQty {
+				qtyTarget = currentQty
+			}
+		}
 		callbackTolerance := 0.0002
 		qtyTolerance := math.Max(0.0001, qtyTarget*0.1)
 		for _, order := range openOrders {
@@ -1180,8 +1201,9 @@ func (at *AutoTrader) findEquivalentPartialTrailingOrder(symbol, side string, ru
 				}, qtyTarget, plannedActivationPrice, plannedCallbackRate
 			}
 		}
+		return nil, qtyTarget, plannedActivationPrice, plannedCallbackRate
 	}
-	return nil, qtyTarget, plannedActivationPrice, plannedCallbackRate
+	return nil, 0, plannedActivationPrice, plannedCallbackRate
 }
 
 func activationMatches(actual, planned float64) bool {
@@ -1477,7 +1499,7 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 					}
 					if err := binanceTrader.SetTrailingStopLoss(symbol, positionSide, activationPrice, binanceCallbackPercent, partialQty); err == nil {
 						at.setProtectionState(symbol, side, "native_partial_trailing_armed")
-						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.4f close=%.1f%% qty=%.4f", symbol, side, activationPrice, binanceCallbackPercent, rule.CloseRatioPct, partialQty)
+						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.4f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, binanceCallbackPercent, cumulativeRatio, partialQty, rule.StageName)
 						at.cancelImmediateTrailing(symbol, side)
 						return true
 					} else {
@@ -1499,7 +1521,7 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 					}
 					if err := bitgetTrader.SetTrailingStopLoss(symbol, positionSide, activationPrice, bitgetCallbackPercent, partialQty); err == nil {
 						at.setProtectionState(symbol, side, "native_partial_trailing_armed")
-						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.4f close=%.1f%% qty=%.4f", symbol, side, activationPrice, bitgetCallbackPercent, rule.CloseRatioPct, partialQty)
+						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.4f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, bitgetCallbackPercent, cumulativeRatio, partialQty, rule.StageName)
 						at.cancelImmediateTrailing(symbol, side)
 						return true
 					} else {
@@ -1589,8 +1611,8 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 									}
 								}
 								at.setProtectionState(symbol, side, "native_partial_trailing_armed")
-								at.persistDynamicProtectionRecordWithDetails(symbol, side, "native_partial_trailing", stableDrawdownRuleFingerprint(entryPrice, rule), rule.CloseRatioPct, "armed", newOrderID, activationPrice, okxCallbackRatio, partialQty)
-								logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.6f close=%.1f%% qty=%.4f", symbol, side, activationPrice, okxCallbackRatio, rule.CloseRatioPct, partialQty)
+								at.persistDynamicProtectionRecordWithDetails(symbol, side, "native_partial_trailing", stableDrawdownRuleFingerprint(entryPrice, rule), cumulativeRatio, "armed", newOrderID, activationPrice, okxCallbackRatio, partialQty)
+								logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.6f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, okxCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
 								at.cancelImmediateTrailing(symbol, side)
 								return true
 							}
@@ -1600,7 +1622,7 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 						}
 					} else if err := okxTrader.SetTrailingStopLoss(symbol, positionSide, activationPrice, okxCallbackRatio, partialQty); err == nil {
 						at.setProtectionState(symbol, side, "native_partial_trailing_armed")
-						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.6f close=%.1f%% qty=%.4f", symbol, side, activationPrice, okxCallbackRatio, rule.CloseRatioPct, partialQty)
+						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.6f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, okxCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
 						at.cancelImmediateTrailing(symbol, side)
 						return true
 					} else {

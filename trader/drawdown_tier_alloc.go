@@ -249,9 +249,9 @@ func (at *AutoTrader) getExecutedTierCloseRatio(symbol, side string) float64 {
 }
 
 // getCumulativeCloseRatio returns the cumulative CloseRatioPct for a tier including
-// all lower tiers that were superseded by it. When a higher tier activates, it inherits
-// the position responsibility of all lower tiers. E.g. T1=65%, T2=25% → when T2 triggers,
-// it closes 65+25=90% of original position using T2's profit/drawdown parameters.
+// all lower tiers. When a higher tier activates, it inherits the position responsibility
+// of all lower tiers. E.g. T1=65%, T2=25% → when T2 triggers, close 65+25=90% of
+// original position using T2's profit/drawdown parameters.
 func (at *AutoTrader) getCumulativeCloseRatio(symbol, side string, tierIndex int) float64 {
 	key := positionKey(symbol, side)
 	at.drawdownTierAllocMu.Lock()
@@ -259,7 +259,7 @@ func (at *AutoTrader) getCumulativeCloseRatio(symbol, side string, tierIndex int
 	allocs := at.drawdownTierAllocs[key]
 	var total float64
 	for _, tier := range allocs {
-		if tier.TierIndex <= tierIndex && (tier.Status == "superseded" || tier.Status == "tracking" || tier.TierIndex == tierIndex) {
+		if tier.TierIndex <= tierIndex {
 			total += tier.CloseRatioPct
 		}
 	}
@@ -270,17 +270,32 @@ func (at *AutoTrader) getCumulativeCloseRatio(symbol, side string, tierIndex int
 }
 
 // getCumulativeCloseRatioByRule finds the tier matching the given rule and returns
-// the cumulative close ratio (this tier + all superseded lower tiers).
+// the cumulative close ratio (this tier + all lower tiers). When a higher tier is
+// armed on the exchange, it must protect all lower tiers' position as well.
+// E.g. T1=65%, T2=25%: when T2 triggers, close 65+25=90% of original position.
 func (at *AutoTrader) getCumulativeCloseRatioByRule(symbol, side string, rule store.DrawdownTakeProfitRule) float64 {
 	key := positionKey(symbol, side)
 	at.drawdownTierAllocMu.Lock()
 	defer at.drawdownTierAllocMu.Unlock()
 	allocs := at.drawdownTierAllocs[key]
+	if len(allocs) == 0 {
+		return rule.CloseRatioPct
+	}
 	tierIndex := -1
 	for _, tier := range allocs {
 		if math.Abs(tier.MinProfitPct-rule.MinProfitPct) < 0.01 {
 			tierIndex = tier.TierIndex
 			break
+		}
+	}
+	if tierIndex < 0 {
+		// Fallback: find the highest tier whose MinProfitPct <= rule.MinProfitPct
+		for _, tier := range allocs {
+			if tier.MinProfitPct <= rule.MinProfitPct+0.01 {
+				if tier.TierIndex > tierIndex {
+					tierIndex = tier.TierIndex
+				}
+			}
 		}
 	}
 	if tierIndex < 0 {
