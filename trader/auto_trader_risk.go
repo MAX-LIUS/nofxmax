@@ -9,6 +9,7 @@ import (
 	"nofx/logger"
 	"nofx/store"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -736,7 +737,7 @@ func (at *AutoTrader) getDrawdownArmRulesForNativeExposure(currentPnLPct, entryP
 }
 
 // getHighestArmedTierMinProfit returns the MinProfitPct of the highest tier that has been
-// armed (tracking or superseded or executed). Returns 0 if no tier has been armed yet.
+// armed (tracking or superseded or executed). Also checks DB records to survive restarts.
 func (at *AutoTrader) getHighestArmedTierMinProfit(symbol, side string) float64 {
 	allocs := at.getDrawdownTierAllocs(symbol, side)
 	var highest float64
@@ -744,6 +745,16 @@ func (at *AutoTrader) getHighestArmedTierMinProfit(symbol, side string) float64 
 		if a.Status == "tracking" || a.Status == "superseded" || a.Status == "executed" {
 			if a.MinProfitPct > highest {
 				highest = a.MinProfitPct
+			}
+		}
+	}
+	// Also check persisted DB records to survive container restarts.
+	// Fingerprint format: entryPrice|quantity|MinProfitPct|MaxDrawdownPct|...
+	for _, record := range at.getArmedDrawdownRecordsForPosition(symbol, side, 0, 0) {
+		parts := strings.Split(record.RuleFingerprint, "|")
+		if len(parts) >= 3 {
+			if minProfit, err := strconv.ParseFloat(parts[2], 64); err == nil && minProfit > highest {
+				highest = minProfit
 			}
 		}
 	}
