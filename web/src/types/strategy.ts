@@ -220,8 +220,10 @@ export interface RegimeFilterConfig {
   momentum_gate_enabled?: boolean
   momentum_stale_chg1h?: number // abs(chg1h) below this = stale (default 0.15)
   momentum_stale_chg4h?: number // abs(chg4h) below this AND chg1h stale = stale (default 0.4)
-  momentum_exhausted_chg4h?: number // abs(chg4h) above this = exhausted (default 4.5)
+  momentum_exhausted_chg4h?: number // abs(chg4h) above this = exhausted (default 4.5 major, 3.5 alt)
   momentum_counter_chg1h?: number // chg1h opposing direction above this = counter (default 0.3)
+  momentum_fading_chg4h?: number // chg4h above this triggers fading check (default 2.5)
+  max_sl_distance_pct?: number // max SL distance as % of entry price (default 2.0)
 
   // Entry confidence gate (moved from RiskControl)
   min_confidence?: number // 0-100, minimum AI confidence to open

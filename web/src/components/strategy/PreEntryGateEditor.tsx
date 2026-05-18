@@ -533,6 +533,55 @@ export function PreEntryGateEditor({
                 {ts(preEntryGate.momentumCounterDesc, language)}
               </div>
             </div>
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {ts(preEntryGate.momentumFadingChg4h, language)}
+              </label>
+              <input
+                type="number"
+                value={config.momentum_fading_chg4h ?? 2.5}
+                min={0}
+                step={0.5}
+                onChange={(e) =>
+                  update(
+                    'momentum_fading_chg4h',
+                    parseFloat(e.target.value) || 0
+                  )
+                }
+                disabled={disabled}
+                className="w-full px-3 py-2 rounded"
+                style={inputStyle}
+              />
+              <div className="text-[10px] mt-1" style={{ color: '#848E9C' }}>
+                {ts(preEntryGate.momentumFadingDesc, language)}
+              </div>
+            </div>
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {ts(preEntryGate.maxSlDistancePct, language)}
+              </label>
+              <input
+                type="number"
+                value={config.max_sl_distance_pct ?? 2.0}
+                min={0.5}
+                step={0.5}
+                onChange={(e) =>
+                  update('max_sl_distance_pct', parseFloat(e.target.value) || 0)
+                }
+                disabled={disabled}
+                className="w-full px-3 py-2 rounded"
+                style={inputStyle}
+              />
+              <div className="text-[10px] mt-1" style={{ color: '#848E9C' }}>
+                {ts(preEntryGate.maxSlDistanceDesc, language)}
+              </div>
+            </div>
           </div>
         )}
       </div>

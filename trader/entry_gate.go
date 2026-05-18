@@ -585,7 +585,13 @@ func evaluateConfidenceRiskGate(input entryGateInput) []EntryGateCheck {
 			// the coin has already moved too far and "support" is unreliable.
 			if rr.Entry > 0 {
 				slPctDist := slDist / rr.Entry * 100
-				maxSLPct := 2.0 // default cap: 2% SL distance
+				maxSLPct := 2.0
+				if input.StrategyConfig != nil {
+					rfCfg := getRegimeFilterConfig(input.StrategyConfig)
+					if rfCfg.MaxSLDistancePct > 0 {
+						maxSLPct = rfCfg.MaxSLDistancePct
+					}
+				}
 				slPctPassed := slPctDist <= maxSLPct
 				slPctCheck := EntryGateCheck{
 					Code:     "sl_distance_pct_too_wide",
@@ -791,9 +797,11 @@ func evaluateCoinMomentumGate(action string, data *market.Data, cfg store.Regime
 	}
 
 	// Check 2b: Momentum fading — 4h move is large but 1h momentum is weak or reversing
-	// This catches "chasing after a big move" where the trend is losing steam.
-	// e.g. chg4h=+4% but chg1h=+0.2% means the move happened earlier and is now stalling.
-	if absChg4h > 2.5 {
+	fadingThreshold := cfg.MomentumFadingChg4h
+	if fadingThreshold == 0 {
+		fadingThreshold = 2.5
+	}
+	if absChg4h > fadingThreshold {
 		momentumRatio := absChg1h / absChg4h
 		fading := false
 		if momentumRatio < 0.1 {

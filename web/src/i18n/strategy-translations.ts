@@ -1070,6 +1070,19 @@ export const preEntryGate = {
     zh: '1h 动量与开仓方向相反超过阈值 → 逆势开仓，拒绝',
     en: '1h momentum opposes trade direction beyond threshold → fighting the tape',
   },
+  momentumFadingChg4h: {
+    zh: '动量衰减阈值 4h (%)',
+    en: 'Fading threshold 4h (%)',
+  },
+  momentumFadingDesc: {
+    zh: '|chg4h| > 阈值 且 1h 动量占比 <10% → 大涨/大跌后追单，拒绝',
+    en: '|chg4h| > threshold AND 1h ratio <10% → chasing after big move, block',
+  },
+  maxSlDistancePct: { zh: '止损距离上限 (%)', en: 'Max SL Distance (%)' },
+  maxSlDistanceDesc: {
+    zh: '止损距离超过此百分比 → 结构太松散，拒绝开仓',
+    en: 'SL distance exceeds this % → structure too loose, block entry',
+  },
   maxFundingAbs: { zh: '资金费率绝对值上限', en: 'Max Funding Rate (abs)' },
   maxAtr14Pct: { zh: 'ATR14 波动率上限 %', en: 'Max ATR14 %' },
   minConfidence: { zh: 'AI信心门槛', en: 'AI Confidence Threshold' },
