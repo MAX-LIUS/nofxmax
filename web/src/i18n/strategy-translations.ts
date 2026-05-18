@@ -1041,6 +1041,35 @@ export const preEntryGate = {
   blockHighFunding: { zh: '屏蔽高资金费率', en: 'Block high funding' },
   blockHighVolatility: { zh: '屏蔽高波动', en: 'Block high volatility' },
   requireTrendAlignment: { zh: '要求趋势同向', en: 'Require trend alignment' },
+  // Momentum Gate
+  momentumGate: { zh: '币种动量门禁', en: 'Coin Momentum Gate' },
+  momentumGateDesc: {
+    zh: '过滤无方向动量（横盘）或动量耗尽（追高追低）的币种',
+    en: 'Filter coins with no directional momentum (flat) or exhausted momentum (late entry)',
+  },
+  enableMomentumGate: { zh: '启用动量门禁', en: 'Enable Momentum Gate' },
+  momentumStaleChg1h: { zh: '横盘阈值 1h (%)', en: 'Stale threshold 1h (%)' },
+  momentumStaleChg4h: { zh: '横盘阈值 4h (%)', en: 'Stale threshold 4h (%)' },
+  momentumExhaustedChg4h: {
+    zh: '耗尽阈值 4h (%)',
+    en: 'Exhausted threshold 4h (%)',
+  },
+  momentumCounterChg1h: {
+    zh: '逆向阈值 1h (%)',
+    en: 'Counter threshold 1h (%)',
+  },
+  momentumStaleDesc: {
+    zh: '|chg1h| < 阈值 且 |chg4h| < 阈值 → 判定为横盘，拒绝开仓',
+    en: '|chg1h| < threshold AND |chg4h| < threshold → stale, block entry',
+  },
+  momentumExhaustedDesc: {
+    zh: '|chg4h| > 阈值 → 趋势末期，均值回归风险高',
+    en: '|chg4h| > threshold → late trend, high mean-reversion risk',
+  },
+  momentumCounterDesc: {
+    zh: '1h 动量与开仓方向相反超过阈值 → 逆势开仓，拒绝',
+    en: '1h momentum opposes trade direction beyond threshold → fighting the tape',
+  },
   maxFundingAbs: { zh: '资金费率绝对值上限', en: 'Max Funding Rate (abs)' },
   maxAtr14Pct: { zh: 'ATR14 波动率上限 %', en: 'Max ATR14 %' },
   minConfidence: { zh: 'AI信心门槛', en: 'AI Confidence Threshold' },

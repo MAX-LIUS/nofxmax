@@ -216,6 +216,13 @@ export interface RegimeFilterConfig {
   require_trend_alignment: boolean
   trend_alignment_mode?: 'strict' | 'allow_range_edge_reversal'
 
+  // Coin momentum gate
+  momentum_gate_enabled?: boolean
+  momentum_stale_chg1h?: number // abs(chg1h) below this = stale (default 0.15)
+  momentum_stale_chg4h?: number // abs(chg4h) below this AND chg1h stale = stale (default 0.4)
+  momentum_exhausted_chg4h?: number // abs(chg4h) above this = exhausted (default 4.5)
+  momentum_counter_chg1h?: number // chg1h opposing direction above this = counter (default 0.3)
+
   // Entry confidence gate (moved from RiskControl)
   min_confidence?: number // 0-100, minimum AI confidence to open
   min_risk_reward_ratio?: number // minimum TP/SL ratio (e.g., 3 = 1:3)

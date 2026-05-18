@@ -451,6 +451,12 @@ type RegimeFilterConfig struct {
 	MaxATR14Pct           float64                  `json:"max_atr14_pct,omitempty"`
 	RequireTrendAlignment bool                     `json:"require_trend_alignment"`
 	TrendAlignmentMode    RegimeTrendAlignmentMode `json:"trend_alignment_mode,omitempty"`
+	// Coin momentum gate — blocks entries on coins with insufficient or excessive momentum
+	MomentumGateEnabled   bool    `json:"momentum_gate_enabled"`
+	MomentumStaleChg1h    float64 `json:"momentum_stale_chg1h,omitempty"`    // abs(chg1h) below this = stale (default 0.15)
+	MomentumStaleChg4h    float64 `json:"momentum_stale_chg4h,omitempty"`    // abs(chg4h) below this AND chg1h stale = stale (default 0.4)
+	MomentumExhaustedChg4h float64 `json:"momentum_exhausted_chg4h,omitempty"` // abs(chg4h) above this = exhausted (default 4.5)
+	MomentumCounterChg1h  float64 `json:"momentum_counter_chg1h,omitempty"`  // chg1h opposing direction above this = counter (default 0.3)
 }
 
 // GridStrategyConfig grid trading specific configuration

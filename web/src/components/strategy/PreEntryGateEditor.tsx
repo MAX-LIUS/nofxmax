@@ -404,6 +404,139 @@ export function PreEntryGateEditor({
         </div>
       </div>
 
+      {/* Section 1.5: Coin Momentum Gate */}
+      <div className="p-3 rounded-lg space-y-2" style={sectionStyle}>
+        <div className="flex items-center gap-2">
+          <Radio className="w-4 h-4" style={{ color: '#F59E0B' }} />
+          <h4 className="text-sm font-medium" style={{ color: '#EAECEF' }}>
+            {ts(preEntryGate.momentumGate, language)}
+          </h4>
+        </div>
+        <div className="text-[11px]" style={{ color: '#848E9C' }}>
+          {ts(preEntryGate.momentumGateDesc, language)}
+        </div>
+
+        <label
+          className="flex items-center gap-2 text-sm"
+          style={{ color: '#EAECEF' }}
+        >
+          <input
+            type="checkbox"
+            checked={config.momentum_gate_enabled ?? false}
+            onChange={(e) => update('momentum_gate_enabled', e.target.checked)}
+            disabled={disabled}
+            className="h-4 w-4 accent-amber-500"
+          />
+          {ts(preEntryGate.enableMomentumGate, language)}
+        </label>
+
+        {config.momentum_gate_enabled && (
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {ts(preEntryGate.momentumStaleChg1h, language)}
+              </label>
+              <input
+                type="number"
+                value={config.momentum_stale_chg1h ?? 0.15}
+                min={0}
+                step={0.01}
+                onChange={(e) =>
+                  update(
+                    'momentum_stale_chg1h',
+                    parseFloat(e.target.value) || 0
+                  )
+                }
+                disabled={disabled}
+                className="w-full px-3 py-2 rounded"
+                style={inputStyle}
+              />
+              <div className="text-[10px] mt-1" style={{ color: '#848E9C' }}>
+                {ts(preEntryGate.momentumStaleDesc, language)}
+              </div>
+            </div>
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {ts(preEntryGate.momentumStaleChg4h, language)}
+              </label>
+              <input
+                type="number"
+                value={config.momentum_stale_chg4h ?? 0.4}
+                min={0}
+                step={0.1}
+                onChange={(e) =>
+                  update(
+                    'momentum_stale_chg4h',
+                    parseFloat(e.target.value) || 0
+                  )
+                }
+                disabled={disabled}
+                className="w-full px-3 py-2 rounded"
+                style={inputStyle}
+              />
+            </div>
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {ts(preEntryGate.momentumExhaustedChg4h, language)}
+              </label>
+              <input
+                type="number"
+                value={config.momentum_exhausted_chg4h ?? 4.5}
+                min={0}
+                step={0.5}
+                onChange={(e) =>
+                  update(
+                    'momentum_exhausted_chg4h',
+                    parseFloat(e.target.value) || 0
+                  )
+                }
+                disabled={disabled}
+                className="w-full px-3 py-2 rounded"
+                style={inputStyle}
+              />
+              <div className="text-[10px] mt-1" style={{ color: '#848E9C' }}>
+                {ts(preEntryGate.momentumExhaustedDesc, language)}
+              </div>
+            </div>
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {ts(preEntryGate.momentumCounterChg1h, language)}
+              </label>
+              <input
+                type="number"
+                value={config.momentum_counter_chg1h ?? 0.3}
+                min={0}
+                step={0.05}
+                onChange={(e) =>
+                  update(
+                    'momentum_counter_chg1h',
+                    parseFloat(e.target.value) || 0
+                  )
+                }
+                disabled={disabled}
+                className="w-full px-3 py-2 rounded"
+                style={inputStyle}
+              />
+              <div className="text-[10px] mt-1" style={{ color: '#848E9C' }}>
+                {ts(preEntryGate.momentumCounterDesc, language)}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Section 2: Entry Structure */}
       <div className="p-3 rounded-lg space-y-2" style={sectionStyle}>
         <div className="flex items-center gap-2">

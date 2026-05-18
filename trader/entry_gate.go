@@ -244,10 +244,8 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 
 	// 1d2. Coin-specific momentum gate — reject entries where the coin itself
 	// shows no directional momentum (stale) or excessive momentum (late trend).
-	// This catches cases where the broad regime is trending_up but the specific
-	// coin is flat or lagging, which historically leads to stop-hunted losses.
-	if data != nil && regimeCfg.Enabled {
-		checks = append(checks, evaluateCoinMomentumGate(d.Action, data)...)
+	if data != nil && regimeCfg.MomentumGateEnabled {
+		checks = append(checks, evaluateCoinMomentumGate(d.Action, data, regimeCfg)...)
 	}
 
 	// 1e. Blocked regime (AI-reported chop/news_risk/no_trade)
@@ -692,16 +690,29 @@ func getRegimeFilterConfig(cfg *store.StrategyConfig) store.RegimeFilterConfig {
 // evaluateCoinMomentumGate checks whether the specific coin has sufficient
 // directional momentum to justify entry. Prevents opening positions on coins
 // that are flat (stale momentum) or have already moved too far (exhausted).
-//
-// Momentum phases:
-//   - Stale: |chg1h| < 0.15% AND |chg4h| < 0.5% → no directional energy, high stop-hunt risk
-//   - Early/healthy: moderate momentum aligned with trade direction → good entry
-//   - Exhausted: |chg4h| > 4.5% → trend late stage, mean-reversion risk high
-//   - Counter-momentum: short-term moving against trade direction → fighting the tape
-func evaluateCoinMomentumGate(action string, data *market.Data) []EntryGateCheck {
+func evaluateCoinMomentumGate(action string, data *market.Data, cfg store.RegimeFilterConfig) []EntryGateCheck {
 	if data == nil {
 		return nil
 	}
+
+	// Thresholds from config, with sensible defaults
+	staleChg1h := cfg.MomentumStaleChg1h
+	if staleChg1h == 0 {
+		staleChg1h = 0.15
+	}
+	staleChg4h := cfg.MomentumStaleChg4h
+	if staleChg4h == 0 {
+		staleChg4h = 0.4
+	}
+	exhaustedChg4h := cfg.MomentumExhaustedChg4h
+	if exhaustedChg4h == 0 {
+		exhaustedChg4h = 4.5
+	}
+	counterChg1h := cfg.MomentumCounterChg1h
+	if counterChg1h == 0 {
+		counterChg1h = 0.3
+	}
+
 	chg1h := data.PriceChange1h
 	chg4h := data.PriceChange4h
 	absChg1h := chg1h
@@ -718,11 +729,9 @@ func evaluateCoinMomentumGate(action string, data *market.Data) []EntryGateCheck
 
 	var checks []EntryGateCheck
 
-	// Check 1: Stale momentum — coin's short-term momentum is too weak.
-	// Even if 4h shows some direction, if 1h is flat the immediate momentum
-	// is insufficient — price is likely range-bound and vulnerable to stop hunts.
-	staleMomentum := absChg1h < 0.15 && absChg4h < 0.4
-	if !staleMomentum && absChg1h < 0.10 {
+	// Check 1: Stale momentum
+	staleMomentum := absChg1h < staleChg1h && absChg4h < staleChg4h
+	if !staleMomentum && absChg1h < staleChg1h*0.67 {
 		staleMomentum = true
 	}
 	if staleMomentum {
@@ -732,29 +741,29 @@ func evaluateCoinMomentumGate(action string, data *market.Data) []EntryGateCheck
 			Passed:   false,
 			Enforced: true,
 			Detail:   fmt.Sprintf("coin has no directional momentum (chg1h=%.2f%% chg4h=%.2f%%) — high stop-hunt risk in flat market", chg1h, chg4h),
-			Values:   fmt.Sprintf("chg1h=%.4f chg4h=%.4f threshold_1h=0.15 threshold_4h=0.50", chg1h, chg4h),
+			Values:   fmt.Sprintf("chg1h=%.4f chg4h=%.4f threshold_1h=%.2f threshold_4h=%.2f", chg1h, chg4h, staleChg1h, staleChg4h),
 		})
 		return checks
 	}
 
-	// Check 2: Exhausted momentum — coin already moved too far, late entry risk
-	if absChg4h > 4.5 {
+	// Check 2: Exhausted momentum
+	if absChg4h > exhaustedChg4h {
 		checks = append(checks, EntryGateCheck{
 			Code:     "coin_momentum_exhausted",
 			Stage:    string(EntryGateStageMarketState),
 			Passed:   false,
 			Enforced: true,
 			Detail:   fmt.Sprintf("coin momentum exhausted (chg4h=%.2f%%) — late trend entry, mean-reversion risk", chg4h),
-			Values:   fmt.Sprintf("chg4h=%.4f threshold=4.50", chg4h),
+			Values:   fmt.Sprintf("chg4h=%.4f threshold=%.2f", chg4h, exhaustedChg4h),
 		})
 		return checks
 	}
 
-	// Check 3: Counter-momentum — short-term price moving against trade direction
+	// Check 3: Counter-momentum
 	counterMomentum := false
-	if isLong && chg1h < -0.3 {
+	if isLong && chg1h < -counterChg1h {
 		counterMomentum = true
-	} else if isShort && chg1h > 0.3 {
+	} else if isShort && chg1h > counterChg1h {
 		counterMomentum = true
 	}
 	if counterMomentum {
@@ -764,7 +773,7 @@ func evaluateCoinMomentumGate(action string, data *market.Data) []EntryGateCheck
 			Passed:   false,
 			Enforced: true,
 			Detail:   fmt.Sprintf("coin short-term momentum opposes %s (chg1h=%.2f%%) — fighting the tape", action, chg1h),
-			Values:   fmt.Sprintf("action=%s chg1h=%.4f threshold=0.30", action, chg1h),
+			Values:   fmt.Sprintf("action=%s chg1h=%.4f threshold=%.2f", action, chg1h, counterChg1h),
 		})
 		return checks
 	}
