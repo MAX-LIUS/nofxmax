@@ -335,7 +335,34 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 		sb.WriteString("- You MUST set `\"is_stop_loss\": false`.\n")
 		sb.WriteString("- You are NOT allowed to close for stop-loss. Protection orders handle that.\n\n")
 	}
-	// Both allowed: no gate injected
+	// Both allowed: inject proactive close guidance
+	if allowAIClose && allowAIStopClose && allowAITakeProfit {
+		if lang == LangChinese {
+			sb.WriteString("# AI 主动平仓指南\n\n")
+			sb.WriteString("你可以输出 `close_long` 或 `close_short`。以下情况你**应该**主动平仓而非继续 hold：\n\n")
+			sb.WriteString("**止损平仓条件**（设置 `is_stop_loss: true`）：\n")
+			sb.WriteString("- 开仓结构已失效：价格收盘跌破/突破你的 entry_trigger 锚点且无法收回\n")
+			sb.WriteString("- Regime 翻转：开仓时 regime 为 trending_down 但现在已转为 trending_up（或反之）\n")
+			sb.WriteString("- 持仓浮亏超过 -3% 且价格持续远离入场方向，无反转迹象\n")
+			sb.WriteString("- 关联资产异动：BTC 突然暴跌/暴涨，你的持仓方向与之相反\n\n")
+			sb.WriteString("**止盈平仓条件**（设置 `is_stop_loss: false`）：\n")
+			sb.WriteString("- 价格已到达或接近 first_target 且出现反转 K 线形态\n")
+			sb.WriteString("- 动量衰竭：价格接近目标但 RSI 极端/MACD 背离\n\n")
+			sb.WriteString("**不要 hold 等死** — 如果结构已破、方向已反，主动平仓比等止损单触发更好。保护系统是最后防线，不是唯一防线。\n\n")
+		} else {
+			sb.WriteString("# AI Proactive Close Guide\n\n")
+			sb.WriteString("You may output `close_long` or `close_short`. You **should** proactively close rather than hold when:\n\n")
+			sb.WriteString("**Stop-loss close** (set `is_stop_loss: true`):\n")
+			sb.WriteString("- Entry structure invalidated: price closed beyond your entry_trigger anchor and failed to reclaim\n")
+			sb.WriteString("- Regime flipped: regime was trending_down at entry but now trending_up (or vice versa)\n")
+			sb.WriteString("- Unrealized loss > -3% with price continuing against your direction, no reversal signs\n")
+			sb.WriteString("- Correlated asset shock: BTC sudden crash/pump opposing your position direction\n\n")
+			sb.WriteString("**Take-profit close** (set `is_stop_loss: false`):\n")
+			sb.WriteString("- Price reached or nearing first_target with reversal candle pattern\n")
+			sb.WriteString("- Momentum exhaustion: price near target but RSI extreme / MACD divergence\n\n")
+			sb.WriteString("**Do not hold and wait for stop-loss** — if structure is broken and direction reversed, proactive close is better than letting the protection system hit the hard stop. Protection is the last line of defense, not the only one.\n\n")
+		}
+	}
 
 	// AI Open permission gate
 	if !allowAIOpen {

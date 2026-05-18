@@ -580,6 +580,28 @@ func evaluateConfidenceRiskGate(input entryGateInput) []EntryGateCheck {
 				checks = append(checks, volCheck)
 			}
 
+			// SL distance percentage cap — reject entries where SL is too far from entry
+			// A wide SL means the structure is too loose for the position size, or
+			// the coin has already moved too far and "support" is unreliable.
+			if rr.Entry > 0 {
+				slPctDist := slDist / rr.Entry * 100
+				maxSLPct := 2.0 // default cap: 2% SL distance
+				slPctPassed := slPctDist <= maxSLPct
+				slPctCheck := EntryGateCheck{
+					Code:     "sl_distance_pct_too_wide",
+					Stage:    string(EntryGateStageConfidenceRisk),
+					Passed:   slPctPassed,
+					Enforced: true,
+					Values:   fmt.Sprintf("sl_pct=%.2f%% max=%.1f%% entry=%.4f invalidation=%.4f", slPctDist, maxSLPct, rr.Entry, rr.Invalidation),
+				}
+				if slPctPassed {
+					slPctCheck.Detail = fmt.Sprintf("SL distance %.2f%% within %.1f%% cap — risk per trade acceptable", slPctDist, maxSLPct)
+				} else {
+					slPctCheck.Detail = fmt.Sprintf("SL distance %.2f%% exceeds %.1f%% cap — structure too loose, invalidation too far from entry", slPctDist, maxSLPct)
+				}
+				checks = append(checks, slPctCheck)
+			}
+
 			rewardDist := math.Abs(rr.FirstTarget - rr.Entry)
 			rewardATRMul := rewardDist / atrAbs
 			minRewardMul := gate.MinRewardATRMul
@@ -708,6 +730,15 @@ func evaluateCoinMomentumGate(action string, data *market.Data, cfg store.Regime
 	if exhaustedChg4h == 0 {
 		exhaustedChg4h = 4.5
 	}
+	// Altcoins use a tighter exhausted threshold — they reverse faster after big moves
+	sym := ""
+	if data != nil {
+		sym = strings.ToUpper(data.Symbol)
+	}
+	isMajor := strings.HasPrefix(sym, "BTC") || strings.HasPrefix(sym, "ETH")
+	if !isMajor && exhaustedChg4h > 3.5 {
+		exhaustedChg4h = 3.5
+	}
 	counterChg1h := cfg.MomentumCounterChg1h
 	if counterChg1h == 0 {
 		counterChg1h = 0.3
@@ -757,6 +788,34 @@ func evaluateCoinMomentumGate(action string, data *market.Data, cfg store.Regime
 			Values:   fmt.Sprintf("chg4h=%.4f threshold=%.2f", chg4h, exhaustedChg4h),
 		})
 		return checks
+	}
+
+	// Check 2b: Momentum fading — 4h move is large but 1h momentum is weak or reversing
+	// This catches "chasing after a big move" where the trend is losing steam.
+	// e.g. chg4h=+4% but chg1h=+0.2% means the move happened earlier and is now stalling.
+	if absChg4h > 2.5 {
+		momentumRatio := absChg1h / absChg4h
+		fading := false
+		if momentumRatio < 0.1 {
+			fading = true // 1h is <10% of 4h move — momentum has stalled
+		}
+		if isLong && chg4h > 2.5 && chg1h < 0 {
+			fading = true // 4h up big but 1h turning negative — reversal starting
+		}
+		if isShort && chg4h < -2.5 && chg1h > 0 {
+			fading = true // 4h down big but 1h turning positive — bounce starting
+		}
+		if fading {
+			checks = append(checks, EntryGateCheck{
+				Code:     "coin_momentum_fading",
+				Stage:    string(EntryGateStageMarketState),
+				Passed:   false,
+				Enforced: true,
+				Detail:   fmt.Sprintf("coin momentum fading (chg4h=%.2f%% but chg1h=%.2f%%) — big move already happened, chasing risk", chg4h, chg1h),
+				Values:   fmt.Sprintf("chg1h=%.4f chg4h=%.4f ratio=%.2f", chg1h, chg4h, momentumRatio),
+			})
+			return checks
+		}
 	}
 
 	// Check 3: Counter-momentum
