@@ -739,10 +739,19 @@ func (at *AutoTrader) persistDynamicProtectionRecordWithDetails(symbol, side, pr
 	if at == nil || at.store == nil {
 		return
 	}
+	// Build PositionFingerprint from actual position state (entry + qty),
+	// not from ruleFingerprint which always has qty=0.
 	positionFingerprint := ""
 	parts := strings.Split(ruleFingerprint, "|")
-	if len(parts) >= 2 {
-		positionFingerprint = parts[0] + "|" + parts[1]
+	if len(parts) >= 1 {
+		entryStr := parts[0]
+		// Get actual position quantity from cache
+		posQty := at.getPositionQuantityForFingerprint(symbol, side)
+		if posQty > 0 {
+			positionFingerprint = fmt.Sprintf("%s|%.8f", entryStr, posQty)
+		} else if len(parts) >= 2 {
+			positionFingerprint = parts[0] + "|" + parts[1]
+		}
 	}
 	record := store.DynamicProtectionRecord{
 		TraderID:            at.id,
@@ -764,6 +773,26 @@ func (at *AutoTrader) persistDynamicProtectionRecordWithDetails(symbol, side, pr
 	if err := at.store.SaveDynamicProtectionRecord(record); err != nil {
 		logger.Warnf("⚠️ Dynamic protection state: failed to persist %s for %s %s: %v", protectionType, symbol, side, err)
 	}
+}
+
+func (at *AutoTrader) getPositionQuantityForFingerprint(symbol, side string) float64 {
+	positions, err := at.trader.GetPositions()
+	if err != nil {
+		return 0
+	}
+	for _, pos := range positions {
+		ps, _ := pos["symbol"].(string)
+		pd, _ := pos["side"].(string)
+		if strings.EqualFold(ps, symbol) && strings.EqualFold(pd, side) {
+			if qty, ok := pos["positionAmt"].(float64); ok && qty > 0 {
+				return qty
+			}
+			if qty, ok := pos["quantity"].(float64); ok && qty > 0 {
+				return qty
+			}
+		}
+	}
+	return 0
 }
 
 func drawdownRuleFingerprint(entryPrice, quantity float64, rule store.DrawdownTakeProfitRule) string {
