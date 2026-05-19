@@ -658,7 +658,8 @@ func (at *AutoTrader) getArmedDrawdownRecordsForPosition(symbol, side string, en
 	currentFingerprint := positionFingerprint(entryPrice, quantity)
 	currentEntryFingerprint := entryPositionFingerprint(entryPrice)
 	records := make([]store.DynamicProtectionRecord, 0)
-	for _, record := range state.Records {
+	var staleKeys []string
+	for key, record := range state.Records {
 		if record.TraderID != "" && record.TraderID != at.id {
 			continue
 		}
@@ -673,18 +674,31 @@ func (at *AutoTrader) getArmedDrawdownRecordsForPosition(symbol, side string, en
 				logger.Infof("🟣 Drawdown record ignored for current position: %s %s record_fp=%s current_fp=%s type=%s", symbol, side, record.PositionFingerprint, currentFingerprint, record.ProtectionType)
 				continue
 			}
-			// Ignore records from a closed position (qty=0 in fingerprint) when current position is open
+			// Ignore and mark stale records from a closed position (qty=0) when current position is open
 			if quantity > 0 {
 				parts := strings.Split(record.PositionFingerprint, "|")
 				if len(parts) >= 2 {
 					if recordQty, err := strconv.ParseFloat(parts[1], 64); err == nil && recordQty == 0 {
-						logger.Infof("🟣 Drawdown record ignored (closed position qty=0): %s %s record_fp=%s current_fp=%s type=%s", symbol, side, record.PositionFingerprint, currentFingerprint, record.ProtectionType)
+						logger.Infof("🟠 Drawdown record stale (closed position qty=0): %s %s record_fp=%s current_fp=%s — marking cleared", symbol, side, record.PositionFingerprint, currentFingerprint)
+						staleKeys = append(staleKeys, key)
 						continue
 					}
 				}
 			}
 		}
 		records = append(records, record)
+	}
+	// Proactively clear stale records so they don't accumulate
+	if len(staleKeys) > 0 {
+		for _, key := range staleKeys {
+			r := state.Records[key]
+			r.Status = "cleared_stale_qty0"
+			r.UpdatedAt = time.Now().UTC().UnixMilli()
+			state.Records[key] = r
+		}
+		if data, err := json.Marshal(state); err == nil {
+			_ = at.store.SetSystemConfig(store.DynamicProtectionStateConfigKey, string(data))
+		}
 	}
 	return records
 }
