@@ -640,6 +640,16 @@ func (at *AutoTrader) getArmedDrawdownRecordsForPosition(symbol, side string, en
 				logger.Infof("🟣 Drawdown record ignored for current position: %s %s record_fp=%s current_fp=%s type=%s", symbol, side, record.PositionFingerprint, currentFingerprint, record.ProtectionType)
 				continue
 			}
+			// Ignore records from a closed position (qty=0 in fingerprint) when current position is open
+			if quantity > 0 {
+				parts := strings.Split(record.PositionFingerprint, "|")
+				if len(parts) >= 2 {
+					if recordQty, err := strconv.ParseFloat(parts[1], 64); err == nil && recordQty == 0 {
+						logger.Infof("🟣 Drawdown record ignored (closed position qty=0): %s %s record_fp=%s current_fp=%s type=%s", symbol, side, record.PositionFingerprint, currentFingerprint, record.ProtectionType)
+						continue
+					}
+				}
+			}
 		}
 		records = append(records, record)
 	}
@@ -728,7 +738,7 @@ func (at *AutoTrader) getDrawdownArmRulesForNativeExposure(currentPnLPct, entryP
 	// High-water-mark protection: use tier alloc state to prevent downgrade.
 	// If a higher tier was previously armed (lower tiers are superseded), never
 	// fall back to a lower tier even if currentPnL drops below the higher tier's threshold.
-	highestArmedMinProfit := at.getHighestArmedTierMinProfit(symbol, side, entryPrice)
+	highestArmedMinProfit := at.getHighestArmedTierMinProfit(symbol, side, entryPrice, quantity)
 	rule, ok := selectNativeDrawdownExposureRuleWithFloor(currentPnLPct, rules, highestArmedMinProfit)
 	if !ok {
 		return nil
@@ -738,7 +748,7 @@ func (at *AutoTrader) getDrawdownArmRulesForNativeExposure(currentPnLPct, entryP
 
 // getHighestArmedTierMinProfit returns the MinProfitPct of the highest tier that has been
 // armed (tracking or superseded or executed). Also checks DB records to survive restarts.
-func (at *AutoTrader) getHighestArmedTierMinProfit(symbol, side string, entryPrice float64) float64 {
+func (at *AutoTrader) getHighestArmedTierMinProfit(symbol, side string, entryPrice, quantity float64) float64 {
 	allocs := at.getDrawdownTierAllocs(symbol, side)
 	var highest float64
 	for _, a := range allocs {
@@ -750,7 +760,7 @@ func (at *AutoTrader) getHighestArmedTierMinProfit(symbol, side string, entryPri
 	}
 	// Also check persisted DB records to survive container restarts.
 	// Fingerprint format: entryPrice|quantity|MinProfitPct|MaxDrawdownPct|...
-	for _, record := range at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, 0) {
+	for _, record := range at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, quantity) {
 		parts := strings.Split(record.RuleFingerprint, "|")
 		if len(parts) >= 3 {
 			if minProfit, err := strconv.ParseFloat(parts[2], 64); err == nil && minProfit > highest {
