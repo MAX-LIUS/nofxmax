@@ -159,7 +159,8 @@ func (at *AutoTrader) checkPositionDrawdown() {
 		}
 
 		if fingerprintChanged := at.refreshDrawdownExecutionFingerprint(symbol, side, entryPrice); fingerprintChanged {
-			logger.Infof("🟠 Drawdown monitor: %s %s drawdown entry fingerprint changed, clearing previous execution guard", symbol, side)
+			logger.Infof("🟠 Drawdown monitor: %s %s drawdown entry fingerprint changed, clearing previous execution guard and armed records", symbol, side)
+			at.clearArmedDrawdownRecords(symbol, side)
 		}
 
 		// Break-even: apply exchange-side BE stops when profit thresholds are met.
@@ -608,6 +609,38 @@ func (at *AutoTrader) isManagedDrawdownRecord(symbol, side, fingerprint string) 
 
 func isDrawdownRuleSatisfied(currentPnLPct float64, rule store.DrawdownTakeProfitRule) bool {
 	return currentPnLPct >= rule.MinProfitPct
+}
+
+// clearArmedDrawdownRecords removes all armed drawdown records for a symbol/side
+// when the position entry fingerprint changes (new position opened after old one closed).
+func (at *AutoTrader) clearArmedDrawdownRecords(symbol, side string) {
+	if at.store == nil {
+		return
+	}
+	state, err := at.store.LoadDynamicProtectionState()
+	if err != nil || state == nil {
+		return
+	}
+	changed := false
+	for key, record := range state.Records {
+		if record.TraderID != "" && record.TraderID != at.id {
+			continue
+		}
+		if !strings.EqualFold(record.Symbol, symbol) || !strings.EqualFold(record.Side, side) {
+			continue
+		}
+		if record.Status == "armed" && isDynamicNativeProtectionType(record.ProtectionType) {
+			record.Status = "cleared_new_position"
+			record.UpdatedAt = time.Now().UTC().UnixMilli()
+			state.Records[key] = record
+			changed = true
+			logger.Infof("🟠 Cleared stale armed record for %s %s: type=%s fp=%s", symbol, side, record.ProtectionType, record.RuleFingerprint)
+		}
+	}
+	if changed {
+		data, _ := json.Marshal(state)
+		_ = at.store.SetSystemConfig(store.DynamicProtectionStateConfigKey, string(data))
+	}
 }
 
 func (at *AutoTrader) getArmedDrawdownRecords(symbol, side string) []store.DynamicProtectionRecord {
