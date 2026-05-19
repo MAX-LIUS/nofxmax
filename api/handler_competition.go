@@ -51,13 +51,13 @@ func (s *Server) handleLatestDecisions(c *gin.Context) {
 		return
 	}
 
-	// Get limit from query parameter, default to 5
-	limit := 5
+	// Get limit from query parameter, default to 10
+	limit := 10
 	if limitStr := c.Query("limit"); limitStr != "" {
 		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
 			limit = parsedLimit
-			if limit > 100 {
-				limit = 100 // Max 100 to prevent abuse
+			if limit > 500 {
+				limit = 500
 			}
 		}
 	}

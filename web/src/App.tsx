@@ -208,7 +208,7 @@ function App() {
     )
   }
   const [lastUpdate, setLastUpdate] = useState<string>('--:--:--')
-  const [decisionsLimit, setDecisionsLimit] = useState<number>(5)
+  const [decisionsLimit, setDecisionsLimit] = useState<number>(10)
 
   // 监听URL变化，同步页面状态
   useEffect(() => {

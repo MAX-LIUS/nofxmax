@@ -1254,6 +1254,8 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
   // Pagination state
   const [pageSize, setPageSize] = useState<number>(20)
   const [currentPage, setCurrentPage] = useState<number>(1)
+  const [loadedAll, setLoadedAll] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
 
   // Filter state
   const [filterSymbol, setFilterSymbol] = useState<string>('all')
@@ -1266,8 +1268,7 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
       try {
         setLoading(true)
         setError(null)
-        // Fetch more data than needed to support filtering, but respect pageSize for initial load
-        const data = await api.getPositionHistory(traderId, Math.max(200, pageSize * 5))
+        const data = await api.getPositionHistory(traderId, 50)
         setPositions(data.positions || [])
         setStats(data.stats)
         setSymbolStats(data.symbol_stats || [])
@@ -1282,7 +1283,22 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
     if (traderId) {
       fetchData()
     }
-  }, [traderId, pageSize])
+  }, [traderId])
+
+  const loadAllPositions = async () => {
+    if (loadedAll || loadingMore) return
+    try {
+      setLoadingMore(true)
+      const data = await api.getPositionHistory(traderId, 500)
+      setPositions(data.positions || [])
+      if (data.stats) setStats(data.stats)
+      setLoadedAll(true)
+    } catch {
+      // silently fail, keep existing data
+    } finally {
+      setLoadingMore(false)
+    }
+  }
 
   // Get unique symbols for filter
   const uniqueSymbols = useMemo(() => {
@@ -1817,6 +1833,20 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
                   »
                 </button>
               </div>
+            )}
+            {!loadedAll && positions.length >= 50 && (
+              <button
+                onClick={loadAllPositions}
+                disabled={loadingMore}
+                className="px-3 py-1 rounded text-xs transition-colors"
+                style={{
+                  background: '#2B3139',
+                  color: '#818CF8',
+                  border: '1px solid rgba(129, 140, 248, 0.3)',
+                }}
+              >
+                {loadingMore ? '加载中...' : '加载全部'}
+              </button>
             )}
           </div>
         </div>

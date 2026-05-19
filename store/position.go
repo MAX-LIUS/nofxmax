@@ -705,6 +705,25 @@ func (s *PositionStore) GetClosedPositions(traderID string, limit int) ([]*Trade
 	return positions, nil
 }
 
+func (s *PositionStore) GetClosedPositionsWithOffset(traderID string, limit, offset int) ([]*TraderPosition, error) {
+	var positions []*TraderPosition
+	err := s.db.Where("trader_id = ? AND status = ?", traderID, "CLOSED").
+		Order("exit_time DESC").
+		Limit(limit).
+		Offset(offset).
+		Find(&positions).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to query closed positions: %w", err)
+	}
+
+	for _, pos := range positions {
+		if pos.EntryQuantity == 0 {
+			pos.EntryQuantity = pos.Quantity
+		}
+	}
+	return positions, nil
+}
+
 // GetRecentlyClosedSyncAbsentPosition returns the most recent position closed via
 // sync_absent_from_exchange for the same symbol/side within the specified delay window.
 func (s *PositionStore) GetRecentlyClosedSyncAbsentPosition(traderID, symbol, side string, tradeTimeMs int64, maxDelay time.Duration) (*TraderPosition, error) {

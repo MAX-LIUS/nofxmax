@@ -270,11 +270,22 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 	}
 
 	// Get optional query parameters
-	limitStr := c.DefaultQuery("limit", "100")
-	limit := 100
+	limitStr := c.DefaultQuery("limit", "50")
+	limit := 50
 	if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 500 {
 		limit = l
 	}
+
+	// Pagination: offset-based
+	offset := 0
+	if offsetStr := c.Query("offset"); offsetStr != "" {
+		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+
+	// Enrichment level: "full" (default for small requests) or "light" (skip decision reviews)
+	enrich := c.DefaultQuery("enrich", "auto")
 
 	// Get store
 	traderStore := trader.GetStore()
@@ -283,12 +294,19 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 		return
 	}
 
-	// Get closed positions
-	positions, err := traderStore.Position().GetClosedPositions(trader.GetID(), limit)
+	// Get closed positions with offset
+	positions, err := traderStore.Position().GetClosedPositionsWithOffset(trader.GetID(), limit, offset)
 	if err != nil {
-		SafeInternalError(c, "Get position history", err)
-		return
+		// Fallback to old method if offset not supported
+		positions, err = traderStore.Position().GetClosedPositions(trader.GetID(), limit)
+		if err != nil {
+			SafeInternalError(c, "Get position history", err)
+			return
+		}
 	}
+
+	// Determine enrichment level
+	doFullEnrich := enrich == "full" || (enrich == "auto" && len(positions) <= 30)
 
 	type decisionReviewRef struct {
 		DecisionRecordID   int64                  `json:"decision_record_id"`
@@ -425,19 +443,20 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 		}
 
 		closeEvents := make([]map[string]interface{}, 0)
-		if eventStore := traderStore.PositionClose(); eventStore != nil {
-			if events, err := eventStore.ListByPositionID(pos.ID); err == nil {
-				for _, ev := range events {
-					orderID := int64(0)
-					fillCount := 0
-					if orderStore := traderStore.Order(); orderStore != nil && ev.ExchangeOrderID != "" {
-						if ord, err := orderStore.GetOrderByExchangeID(ev.ExchangeID, ev.ExchangeOrderID); err == nil && ord != nil {
-							orderID = ord.ID
-							if fills, err := orderStore.GetOrderFills(ord.ID); err == nil {
-								fillCount = len(fills)
+		if doFullEnrich {
+			if eventStore := traderStore.PositionClose(); eventStore != nil {
+				if events, err := eventStore.ListByPositionID(pos.ID); err == nil {
+					for _, ev := range events {
+						orderID := int64(0)
+						fillCount := 0
+						if orderStore := traderStore.Order(); orderStore != nil && ev.ExchangeOrderID != "" {
+							if ord, err := orderStore.GetOrderByExchangeID(ev.ExchangeID, ev.ExchangeOrderID); err == nil && ord != nil {
+								orderID = ord.ID
+								if fills, err := orderStore.GetOrderFills(ord.ID); err == nil {
+									fillCount = len(fills)
+								}
 							}
 						}
-					}
 					closeEvents = append(closeEvents, map[string]interface{}{
 						"id":                  ev.ID,
 						"position_id":         ev.PositionID,
@@ -467,38 +486,43 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 				}
 			}
 		}
+		}
 
-		enrichedPositions = append(enrichedPositions, map[string]interface{}{
-			"id":                    pos.ID,
-			"trader_id":             pos.TraderID,
-			"exchange_id":           pos.ExchangeID,
-			"exchange_type":         pos.ExchangeType,
-			"symbol":                pos.Symbol,
-			"side":                  pos.Side,
-			"quantity":              pos.Quantity,
-			"entry_quantity":        pos.EntryQuantity,
-			"entry_price":           pos.EntryPrice,
-			"entry_order_id":        pos.EntryOrderID,
-			"entry_decision_cycle":  pos.EntryDecisionCycle,
-			"entry_decision_review": buildDecisionReviewRef(pos.EntryDecisionCycle, pos.Symbol, sideToOpenAction(pos.Side)),
-			"entry_review_summary":  buildEntryReviewSummary(pos.EntryDecisionCycle, pos.Symbol, sideToOpenAction(pos.Side)),
-			"entry_time":            time.UnixMilli(pos.EntryTime).UTC().Format(time.RFC3339),
-			"exit_price":            pos.ExitPrice,
-			"exit_order_id":         pos.ExitOrderID,
-			"exit_decision_cycle":   pos.ExitDecisionCycle,
-			"exit_decision_review":  buildDecisionReviewRef(pos.ExitDecisionCycle, pos.Symbol, closeActionFromSide(pos.Side)),
-			"exit_time":             time.UnixMilli(pos.ExitTime).UTC().Format(time.RFC3339),
-			"realized_pnl":          pos.RealizedPnL,
-			"fee":                   pos.Fee,
-			"leverage":              pos.Leverage,
-			"status":                pos.Status,
-			"close_reason":          pos.CloseReason,
-			"execution_source":      executionSource,
-			"execution_order_type":  executionOrderType,
-			"close_ratio_pct":       closeRatioPct,
-			"close_value_usdt":      pos.ExitPrice * closedQty,
-			"close_events":          closeEvents,
-			"protection_snapshot": func() any {
+		enrichedPos := map[string]interface{}{
+			"id":                   pos.ID,
+			"trader_id":            pos.TraderID,
+			"exchange_id":          pos.ExchangeID,
+			"exchange_type":        pos.ExchangeType,
+			"symbol":               pos.Symbol,
+			"side":                 pos.Side,
+			"quantity":             pos.Quantity,
+			"entry_quantity":       pos.EntryQuantity,
+			"entry_price":          pos.EntryPrice,
+			"entry_order_id":       pos.EntryOrderID,
+			"entry_decision_cycle": pos.EntryDecisionCycle,
+			"entry_time":           time.UnixMilli(pos.EntryTime).UTC().Format(time.RFC3339),
+			"exit_price":           pos.ExitPrice,
+			"exit_order_id":        pos.ExitOrderID,
+			"exit_decision_cycle":  pos.ExitDecisionCycle,
+			"exit_time":            time.UnixMilli(pos.ExitTime).UTC().Format(time.RFC3339),
+			"realized_pnl":         pos.RealizedPnL,
+			"fee":                  pos.Fee,
+			"leverage":             pos.Leverage,
+			"status":               pos.Status,
+			"close_reason":         pos.CloseReason,
+			"execution_source":     executionSource,
+			"execution_order_type": executionOrderType,
+			"close_ratio_pct":      closeRatioPct,
+			"close_value_usdt":     pos.ExitPrice * closedQty,
+			"close_events":         closeEvents,
+			"created_at":           time.UnixMilli(pos.CreatedAt).UTC().Format(time.RFC3339),
+			"updated_at":           time.UnixMilli(pos.UpdatedAt).UTC().Format(time.RFC3339),
+		}
+		if doFullEnrich {
+			enrichedPos["entry_decision_review"] = buildDecisionReviewRef(pos.EntryDecisionCycle, pos.Symbol, sideToOpenAction(pos.Side))
+			enrichedPos["entry_review_summary"] = buildEntryReviewSummary(pos.EntryDecisionCycle, pos.Symbol, sideToOpenAction(pos.Side))
+			enrichedPos["exit_decision_review"] = buildDecisionReviewRef(pos.ExitDecisionCycle, pos.Symbol, closeActionFromSide(pos.Side))
+			enrichedPos["protection_snapshot"] = func() any {
 				if ref := buildDecisionReviewRef(pos.ExitDecisionCycle, pos.Symbol, closeActionFromSide(pos.Side)); ref != nil {
 					return ref["protection_snapshot"]
 				}
@@ -506,26 +530,31 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 					return ref["protection_snapshot"]
 				}
 				return nil
-			}(),
-			"created_at": time.UnixMilli(pos.CreatedAt).UTC().Format(time.RFC3339),
-			"updated_at": time.UnixMilli(pos.UpdatedAt).UTC().Format(time.RFC3339),
-		})
+			}()
+		}
+		enrichedPositions = append(enrichedPositions, enrichedPos)
 	}
 
-	// Get statistics
-	stats, _ := traderStore.Position().GetFullStats(trader.GetID())
-
-	// Get symbol stats
-	symbolStats, _ := traderStore.Position().GetSymbolStats(trader.GetID(), 10)
-
-	// Get direction stats
-	directionStats, _ := traderStore.Position().GetDirectionStats(trader.GetID())
+	// Get statistics (only on first page to avoid redundant queries)
+	var stats interface{}
+	var symbolStats interface{}
+	var directionStats interface{}
+	if offset == 0 {
+		stats, _ = traderStore.Position().GetFullStats(trader.GetID())
+		symbolStats, _ = traderStore.Position().GetSymbolStats(trader.GetID(), 10)
+		directionStats, _ = traderStore.Position().GetDirectionStats(trader.GetID())
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"positions":       enrichedPositions,
 		"stats":           stats,
 		"symbol_stats":    symbolStats,
 		"direction_stats": directionStats,
+		"pagination": gin.H{
+			"offset": offset,
+			"limit":  limit,
+			"count":  len(enrichedPositions),
+		},
 	})
 }
 
