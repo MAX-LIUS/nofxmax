@@ -424,7 +424,9 @@ func TestCleanupInactiveProtectionState_DoesNotCancelOrdersWhenOppositeSideStill
 func TestProtectionReconciler_SkipsBreakEvenWhenRunnerSuppressesIt(t *testing.T) {
 	ft := &fakeReconcileTrader{
 		fakeOrderProtectionTrader: fakeOrderProtectionTrader{
-			openOrders: []tradertypes.OpenOrder{},
+			openOrders: []tradertypes.OpenOrder{
+				{OrderID: "trailing_123", Symbol: "BTCUSDT", Side: "SELL", PositionSide: "LONG", Type: "TRAILING_STOP_MARKET", StopPrice: 105.0, Quantity: 0.3},
+			},
 		},
 		positions: []map[string]interface{}{{
 			"symbol":      "BTCUSDT",

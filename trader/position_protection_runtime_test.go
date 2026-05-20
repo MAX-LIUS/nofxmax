@@ -55,7 +55,9 @@ func (f *runtimeProtectionTestTrader) GetClosedPnL(startTime time.Time, limit in
 	return nil, nil
 }
 func (f *runtimeProtectionTestTrader) GetOpenOrders(symbol string) ([]tradertypes.OpenOrder, error) {
-	return nil, nil
+	return []tradertypes.OpenOrder{
+		{OrderID: "trailing_1", Symbol: "BTCUSDT", Side: "SELL", PositionSide: "LONG", Type: "TRAILING_STOP_MARKET", Quantity: 0.3},
+	}, nil
 }
 
 func TestBuildPositionProtectionRuntimeSurfacesLadderDegradation(t *testing.T) {

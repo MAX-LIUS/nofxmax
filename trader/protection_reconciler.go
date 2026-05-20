@@ -861,7 +861,30 @@ func (at *AutoTrader) clearDrawdownRunnerState(symbol, side string) {
 
 func (at *AutoTrader) isBreakEvenSuppressedByRunner(symbol, side string) bool {
 	state := at.getDrawdownRunnerState(symbol, side)
-	return state != nil && state.BreakEvenSuppressedByRunner
+	if state == nil || !state.BreakEvenSuppressedByRunner {
+		return false
+	}
+	// On exchanges with native trailing, runner semantics only suppress BE if there's
+	// an actual trailing order on the exchange protecting the runner. If the trailing
+	// stop failed to place or was already filled, BE should not remain suppressed.
+	if !at.supportsNativeTrailingStop() {
+		return true
+	}
+	openOrders, err := at.trader.GetOpenOrders(symbol)
+	if err != nil {
+		return true // can't verify, keep suppressed to be safe
+	}
+	posSide := strings.ToUpper(side)
+	for _, order := range openOrders {
+		if order.PositionSide != "" && !strings.EqualFold(order.PositionSide, posSide) {
+			continue
+		}
+		if strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
+			return true
+		}
+	}
+	// No trailing order found — runner protection is not active, allow BE
+	return false
 }
 
 func isNativeTrailingArmingState(state string) bool {
