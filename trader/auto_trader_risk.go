@@ -900,6 +900,13 @@ func (at *AutoTrader) getDrawdownArmRulesForSelectedRule(entryPrice, quantity fl
 			logger.Infof("🟣 Drawdown tier already executed: %s %s fingerprint=%s (trailing order filled, not re-arming)", symbol, side, fingerprint)
 			return nil
 		}
+		// Prevent re-arm loop: if we recently armed this fingerprint (within 90s) and
+		// the trailing order is not visible, OKX likely activated and filled it immediately
+		// (activation price already breached). Don't re-arm to avoid spamming orders.
+		if lastArm, ok := at.nativeTrailingArmTime[fingerprint]; ok && time.Since(lastArm) < 90*time.Second {
+			logger.Infof("🟠 Drawdown native trailing arm cooldown: %s %s fingerprint=%s (armed %.0fs ago, not re-arming)", symbol, side, fingerprint, time.Since(lastArm).Seconds())
+			return nil
+		}
 		logger.Infof("⚠️ Drawdown native exposure record stale: %s %s fingerprint=%s has no matching exchange trailing order, re-arming", symbol, side, fingerprint)
 	}
 	logger.Infof("🟣 Drawdown native exposure selected: %s %s min=%.4f close=%.1f%% fingerprint=%s", symbol, side, rule.MinProfitPct, rule.CloseRatioPct, fingerprint)
@@ -932,6 +939,11 @@ func (at *AutoTrader) getDrawdownArmRules(currentPnLPct, entryPrice, quantity fl
 	if _, ok := armedFingerprints[fingerprint]; ok {
 		if at.hasMatchingNativeTrailingOrderForRule(symbol, side, entryPrice, bestRule, openOrders) {
 			logger.Infof("🟣 Drawdown arm skipped: %s %s highest tier already armed fingerprint=%s (min=%.4f close=%.1f%%)", symbol, side, fingerprint, bestRule.MinProfitPct, bestRule.CloseRatioPct)
+			return nil
+		}
+		// Prevent re-arm loop when OKX immediately fills trailing orders (activation already breached)
+		if lastArm, ok := at.nativeTrailingArmTime[fingerprint]; ok && time.Since(lastArm) < 90*time.Second {
+			logger.Infof("🟠 Drawdown arm cooldown: %s %s fingerprint=%s (armed %.0fs ago, not re-arming)", symbol, side, fingerprint, time.Since(lastArm).Seconds())
 			return nil
 		}
 		logger.Infof("⚠️ Drawdown arm record stale: %s %s fingerprint=%s has no matching exchange trailing order, re-arming highest tier (min=%.4f close=%.1f%%)", symbol, side, fingerprint, bestRule.MinProfitPct, bestRule.CloseRatioPct)
@@ -1680,6 +1692,7 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 								}
 								at.setProtectionState(symbol, side, "native_partial_trailing_armed")
 								at.persistDynamicProtectionRecordWithDetails(symbol, side, "native_partial_trailing", stableDrawdownRuleFingerprint(entryPrice, rule), cumulativeRatio, "armed", newOrderID, activationPrice, okxCallbackRatio, partialQty)
+								at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
 								logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.6f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, okxCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
 								at.cancelImmediateTrailing(symbol, side)
 								return true
@@ -1690,6 +1703,7 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 						}
 					} else if err := okxTrader.SetTrailingStopLoss(symbol, positionSide, activationPrice, okxCallbackRatio, partialQty); err == nil {
 						at.setProtectionState(symbol, side, "native_partial_trailing_armed")
+						at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
 						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.6f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, okxCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
 						at.cancelImmediateTrailing(symbol, side)
 						return true
