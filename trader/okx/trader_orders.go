@@ -1190,12 +1190,23 @@ func (t *OKXTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
 	}
 
 	// 3. Get pending trailing stop algo orders (native move_order_stop)
-	trailingPath := fmt.Sprintf("%s?instId=%s&instType=SWAP&ordType=move_order_stop", okxAlgoPendingPath, instId)
-	trailingData, err := t.doRequest("GET", trailingPath, nil)
-	if err != nil {
-		logger.Warnf("[OKX] Failed to get trailing algo orders: %v", err)
-	}
-	if err == nil && trailingData != nil {
+	// Query both default (live) and effective states — OKX moves trailing orders
+	// to "effective" once activation price is reached, and they no longer appear
+	// in the default pending query.
+	seenTrailingIDs := make(map[string]bool)
+	for _, trailingState := range []string{"", "effective"} {
+		trailingPath := fmt.Sprintf("%s?instId=%s&instType=SWAP&ordType=move_order_stop", okxAlgoPendingPath, instId)
+		if trailingState != "" {
+			trailingPath += "&state=" + trailingState
+		}
+		trailingData, err := t.doRequest("GET", trailingPath, nil)
+		if err != nil {
+			logger.Warnf("[OKX] Failed to get trailing algo orders (state=%s): %v", trailingState, err)
+			continue
+		}
+		if trailingData == nil {
+			continue
+		}
 		var trailingOrders []struct {
 			AlgoId        string `json:"algoId"`
 			InstId        string `json:"instId"`
@@ -1208,6 +1219,10 @@ func (t *OKXTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
 		}
 		if err := json.Unmarshal(trailingData, &trailingOrders); err == nil {
 			for _, order := range trailingOrders {
+				if seenTrailingIDs[order.AlgoId] {
+					continue
+				}
+				seenTrailingIDs[order.AlgoId] = true
 				quantityContracts, _ := strconv.ParseFloat(order.Sz, 64)
 				quantity := quantityContracts * ctVal
 				activePx, _ := strconv.ParseFloat(order.ActivePx, 64)
