@@ -2080,11 +2080,18 @@ func (at *AutoTrader) applyBreakEvenStops(symbol, side string, quantity, entryPr
 		return nil
 	}
 
+	// If BE is already armed at this price in this session, skip.
+	if at.getBreakEvenState(symbol, side) == "armed" {
+		return nil
+	}
+
 	// Check if a higher-tier BE upgrade is needed by comparing the new price
 	// against the currently armed stop. Skip if already at this tier or better.
+	// Only skip if there's a dedicated BE order (identified by tag), not a ladder SL
+	// that happens to be at the same price.
 	positionSide := strings.ToUpper(side)
 	if openOrders, err := at.trader.GetOpenOrders(symbol); err == nil {
-		if hasMatchingProtectionOrder(openOrders, positionSide, false, newBEPrice) {
+		if hasMatchingBreakEvenOrder(openOrders, positionSide, newBEPrice) {
 			logger.Infof("🟠 Break-even stop already live: %s %s | stop=%.6f", symbol, side, newBEPrice)
 			at.persistDynamicProtectionRecordWithDetails(symbol, side, "break_even_stop", fmt.Sprintf("%.8f|%.8f|%.4f|%.4f|%s", entryPrice, quantity, rule.TriggerValue, rule.OffsetPct, stage), 0, "armed", "", newBEPrice, 0, ruleQty)
 			return nil
@@ -2139,9 +2146,10 @@ func (at *AutoTrader) applyBreakEvenStop(symbol, side string, quantity, entryPri
 	positionSide := strings.ToUpper(side)
 	// If a matching break-even stop is already live (for example after a restart
 	// before local BE state has been restored), treat it as armed instead of
-	// placing another native stop.
+	// placing another native stop. Only match orders tagged as BE, not ladder SL
+	// that happens to be at the same price.
 	if openOrders, err := at.trader.GetOpenOrders(symbol); err == nil {
-		if hasMatchingProtectionOrder(openOrders, positionSide, false, breakEvenPrice) {
+		if hasMatchingBreakEvenOrder(openOrders, positionSide, breakEvenPrice) {
 			logger.Infof("🟠 Break-even stop already live: %s %s | stop=%.6f", symbol, side, breakEvenPrice)
 			at.persistDynamicProtectionRecordWithDetails(symbol, side, "break_even_stop", fmt.Sprintf("%.8f|%.8f|%.4f|%.4f|%s", entryPrice, quantity, cfg.TriggerValue, cfg.OffsetPct, stage), 0, "armed", "", breakEvenPrice, 0, quantity)
 			return nil
