@@ -1692,7 +1692,9 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 								}
 								at.setProtectionState(symbol, side, "native_partial_trailing_armed")
 								at.persistDynamicProtectionRecordWithDetails(symbol, side, "native_partial_trailing", stableDrawdownRuleFingerprint(entryPrice, rule), cumulativeRatio, "armed", newOrderID, activationPrice, okxCallbackRatio, partialQty)
-								at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
+								if at.nativeTrailingArmTime != nil {
+									at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
+								}
 								logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.6f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, okxCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
 								at.cancelImmediateTrailing(symbol, side)
 								return true
@@ -1703,7 +1705,9 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 						}
 					} else if err := okxTrader.SetTrailingStopLoss(symbol, positionSide, activationPrice, okxCallbackRatio, partialQty); err == nil {
 						at.setProtectionState(symbol, side, "native_partial_trailing_armed")
-						at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
+						if at.nativeTrailingArmTime != nil {
+							at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
+						}
 						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.6f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, okxCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
 						at.cancelImmediateTrailing(symbol, side)
 						return true

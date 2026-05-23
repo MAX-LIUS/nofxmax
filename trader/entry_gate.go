@@ -631,6 +631,85 @@ func evaluateConfidenceRiskGate(input entryGateInput) []EntryGateCheck {
 		}
 	}
 
+	// 3d-fallback. Minimum SL percentage (hard floor when ATR is unavailable or as belt-and-suspenders)
+	if d.EntryProtection != nil {
+		rr := d.EntryProtection.RiskReward
+		if rr.Entry > 0 && rr.Invalidation > 0 {
+			slDist := math.Abs(rr.Entry - rr.Invalidation)
+			slPct := slDist / rr.Entry * 100
+			minSLPct := 0.15 // absolute floor: 0.15% minimum SL distance
+			passed := slPct >= minSLPct
+			check := EntryGateCheck{
+				Code:     "sl_pct_floor",
+				Stage:    string(EntryGateStageConfidenceRisk),
+				Passed:   passed,
+				Enforced: true,
+				Values:   fmt.Sprintf("sl_pct=%.3f%% min=%.2f%% entry=%.6f invalidation=%.6f", slPct, minSLPct, rr.Entry, rr.Invalidation),
+			}
+			if passed {
+				check.Detail = fmt.Sprintf("SL distance %.3f%% >= %.2f%% floor", slPct, minSLPct)
+			} else {
+				check.Detail = fmt.Sprintf("⚠️ SL distance %.3f%% < %.2f%% floor — garbage SL, will be swept by any tick noise", slPct, minSLPct)
+			}
+			checks = append(checks, check)
+		}
+	}
+
+	// 3d-diag. Data diagnostics — surface key data availability and anomalies
+	if d.EntryProtection != nil {
+		rr := d.EntryProtection.RiskReward
+		atrPct := d.EntryProtection.VolatilityAdjustment.ATR14Pct
+		if atrPct <= 0 && input.MarketData != nil {
+			atrPct = computeATR14Pct(input.MarketData)
+		}
+		var diagParts []string
+		if atrPct <= 0 {
+			diagParts = append(diagParts, "⚠️ATR=MISSING")
+		} else {
+			diagParts = append(diagParts, fmt.Sprintf("ATR=%.2f%%", atrPct))
+		}
+		if rr.Entry > 0 && rr.Invalidation > 0 {
+			slPct := math.Abs(rr.Entry-rr.Invalidation) / rr.Entry * 100
+			diagParts = append(diagParts, fmt.Sprintf("SL=%.3f%%", slPct))
+			if slPct < 0.3 {
+				diagParts = append(diagParts, "⚠️SL_TIGHT")
+			}
+		}
+		if rr.NetEstimatedRR > 10 {
+			diagParts = append(diagParts, fmt.Sprintf("⚠️RR_SUSPICIOUS=%.1f", rr.NetEstimatedRR))
+		}
+		if input.MarketData != nil {
+			if input.MarketData.CurrentPrice <= 0 {
+				diagParts = append(diagParts, "⚠️PRICE=0")
+			}
+			if input.MarketData.TimeframeData == nil || len(input.MarketData.TimeframeData) == 0 {
+				diagParts = append(diagParts, "⚠️NO_TF_DATA")
+			}
+		} else {
+			diagParts = append(diagParts, "⚠️MARKET_DATA=NIL")
+		}
+		hasAnomaly := false
+		for _, p := range diagParts {
+			if strings.Contains(p, "⚠️") {
+				hasAnomaly = true
+				break
+			}
+		}
+		diagCheck := EntryGateCheck{
+			Code:     "data_diagnostics",
+			Stage:    string(EntryGateStageConfidenceRisk),
+			Passed:   !hasAnomaly,
+			Enforced: false,
+			Values:   strings.Join(diagParts, " | "),
+		}
+		if hasAnomaly {
+			diagCheck.Detail = "⚠️ Data quality issues detected — review values"
+		} else {
+			diagCheck.Detail = "data inputs OK"
+		}
+		checks = append(checks, diagCheck)
+	}
+
 	// 3e. Short-specific: non-trending regime requires higher confidence
 	if data := input.MarketData; data != nil {
 		regime := classifyProtectionRegime(data)
@@ -872,6 +951,21 @@ func computeATR14Pct(data *market.Data) float64 {
 	}
 	if data.LongerTermContext != nil && data.LongerTermContext.ATR14 > 0 {
 		return data.LongerTermContext.ATR14 / data.CurrentPrice * 100
+	}
+	// Fallback: extract ATR14 from multi-timeframe data (GetWithTimeframesExchange path)
+	if data.TimeframeData != nil {
+		// Prefer smaller timeframes for tighter SL validation
+		for _, tf := range []string{"5m", "15m", "3m", "1h", "4h", "1d"} {
+			if sd, ok := data.TimeframeData[tf]; ok && sd != nil && sd.ATR14 > 0 {
+				return sd.ATR14 / data.CurrentPrice * 100
+			}
+		}
+		// If none of the preferred TFs matched, use any available
+		for _, sd := range data.TimeframeData {
+			if sd != nil && sd.ATR14 > 0 {
+				return sd.ATR14 / data.CurrentPrice * 100
+			}
+		}
 	}
 	return 0
 }
