@@ -1637,8 +1637,14 @@ func (at *AutoTrader) getCurrentPositionPnLPct(symbol, action string) float64 {
 		if !strings.EqualFold(pSym, symbol) || !strings.EqualFold(pSide, side) {
 			continue
 		}
-		entryPrice, _ := p["entry_price"].(float64)
-		markPrice, _ := p["mark_price"].(float64)
+		entryPrice, _ := p["entryPrice"].(float64)
+		if entryPrice <= 0 {
+			entryPrice, _ = p["entry_price"].(float64)
+		}
+		markPrice, _ := p["markPrice"].(float64)
+		if markPrice <= 0 {
+			markPrice, _ = p["mark_price"].(float64)
+		}
 		if entryPrice <= 0 || markPrice <= 0 {
 			return 0
 		}
