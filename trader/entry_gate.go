@@ -955,7 +955,7 @@ func computeATR14Pct(data *market.Data) float64 {
 	// Fallback: extract ATR14 from multi-timeframe data (GetWithTimeframesExchange path)
 	if data.TimeframeData != nil {
 		// Prefer smaller timeframes for tighter SL validation
-		for _, tf := range []string{"5m", "15m", "3m", "1h", "4h", "1d"} {
+		for _, tf := range []string{"1h", "15m", "4h", "30m", "5m", "1d"} {
 			if sd, ok := data.TimeframeData[tf]; ok && sd != nil && sd.ATR14 > 0 {
 				return sd.ATR14 / data.CurrentPrice * 100
 			}

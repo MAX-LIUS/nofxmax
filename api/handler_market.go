@@ -131,12 +131,12 @@ func (s *Server) handleCoinData(c *gin.Context) {
 		return
 	}
 
-	timeframes := []string{"5m", "15m", "1h", "4h"}
+	timeframes := []string{"15m", "1h", "4h"}
 	exchange := c.Query("exchange")
 	if exchange == "" {
 		exchange = "okx"
 	}
-	data, err := market.GetWithTimeframesExchange(symbol, timeframes, "15m", 100, exchange)
+	data, err := market.GetWithTimeframesExchange(symbol, timeframes, "1h", 100, exchange)
 	if err != nil {
 		SafeInternalError(c, "Get coin data", err)
 		return
@@ -171,7 +171,7 @@ func (s *Server) handleCompositeMarket(c *gin.Context) {
 		return
 	}
 	exchange := c.DefaultQuery("exchange", "okx")
-	primary := c.DefaultQuery("primary", "15m")
+	primary := c.DefaultQuery("primary", "1h")
 	count, _ := strconv.Atoi(c.DefaultQuery("count", "120"))
 	if count <= 0 || count > 300 {
 		count = 120
@@ -183,7 +183,7 @@ func (s *Server) handleCompositeMarket(c *gin.Context) {
 	if ttlSeconds > 600 {
 		ttlSeconds = 300
 	}
-	timeframes := []string{"3m", "5m", "15m", "1h", "4h", "1d"}
+	timeframes := []string{"15m", "1h", "4h", "1d"}
 	if raw := strings.TrimSpace(c.Query("timeframes")); raw != "" {
 		timeframes = parseExcluded(raw)
 	}

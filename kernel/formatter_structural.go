@@ -460,7 +460,7 @@ func extractPrimaryATR14(mdata *market.Data) float64 {
 		return 0
 	}
 	// Prefer 15m > 5m > 1h as primary ATR reference
-	for _, tf := range []string{"15m", "5m", "1h", "3m", "4h"} {
+	for _, tf := range []string{"1h", "15m", "4h", "30m", "5m"} {
 		if series, ok := mdata.TimeframeData[tf]; ok && series.ATR14 > 0 {
 			return series.ATR14
 		}

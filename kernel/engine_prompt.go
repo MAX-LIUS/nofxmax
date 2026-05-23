@@ -99,16 +99,16 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString("## Entry Trigger Gate (MANDATORY)\n\n")
 	sb.WriteString("Open only if thesis + trigger + invalidation + target are ALL clear.\n\n")
 	sb.WriteString("**Long trigger must be one of:**\n")
-	sb.WriteString("- `support_rejection_confirmed`: price touches/enters support zone, then 5m/15m candle closes back above it\n")
+	sb.WriteString("- `support_rejection_confirmed`: price touches/enters support zone, then 15m/1h candle closes back above it\n")
 	sb.WriteString("- `resistance_breakout_retest_successful`: price breaks resistance, pulls back to it, holds and closes above\n")
 	sb.WriteString("- `higher_low_breakout_confirmed`: price forms higher low above support, then breaks trigger candle high\n\n")
 	sb.WriteString("**Short trigger must be one of:**\n")
-	sb.WriteString("- `resistance_rejection_confirmed`: price touches/enters resistance zone, then 5m/15m candle closes back below it\n")
+	sb.WriteString("- `resistance_rejection_confirmed`: price touches/enters resistance zone, then 15m/1h candle closes back below it\n")
 	sb.WriteString("- `support_breakdown_retest_failed`: price breaks support, pulls back to it, fails and closes below\n")
 	sb.WriteString("- `lower_high_breakdown_confirmed`: price forms lower high below resistance, then breaks trigger candle low\n\n")
 	sb.WriteString("**HARD RULES:**\n")
 	sb.WriteString("- \"Near support/resistance\" is NOT a trigger. Price moving toward a level is NOT a trigger.\n")
-	sb.WriteString("- A trigger REQUIRES candle-close confirmation on 5m or 15m.\n")
+	sb.WriteString("- A trigger REQUIRES candle-close confirmation on 15m or 1h.\n")
 	sb.WriteString("- If price is still approaching a level (has not yet touched it and been rejected), output wait.\n")
 	sb.WriteString("- If trigger is missing or unclear, output wait.\n")
 	sb.WriteString("- You MUST include `trigger_type` field in every open decision (one of the 6 types above). Entry without trigger_type will be BLOCKED by the system.\n")
@@ -192,7 +192,7 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	// Structural analysis requirements
 	sb.WriteString("# 🏗️ Structural Analysis Requirements\n\n")
 	sb.WriteString("You receive auto-detected support/resistance levels and Fibonacci retracements for EACH timeframe in the market data.\n")
-	sb.WriteString("Higher timeframes (1h, 4h) provide stronger structural levels; lower timeframes (5m, 15m) provide precision.\n\n")
+	sb.WriteString("Higher timeframes (4h, 1d) provide stronger structural levels; lower timeframes (15m) provide precision.\n\n")
 
 	// Backend entry gates explanation
 	sb.WriteString("## Backend Entry Gates (for your awareness)\n\n")
@@ -388,7 +388,7 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString("<decision>\n")
 	sb.WriteString("[\n")
 	examplePositionSize := accountEquity * btcEthPosValueRatio
-	sb.WriteString(fmt.Sprintf("  {\"symbol\":\"BTCUSDT\",\"action\":\"open_short\",\"leverage\":%d,\"position_size_usd\":%.0f,\"stop_loss\":97000,\"take_profit\":91000,\"confidence\":85,\"risk_usd\":300,\"entry_protection_rationale\":{\"timeframe_context\":{\"primary\":\"15m\",\"lower\":[\"5m\"],\"higher\":[\"1h\"]},\"risk_reward\":{\"entry\":95000,\"invalidation\":97000,\"first_target\":91000,\"gross_estimated_rr\":2.0,\"net_estimated_rr\":1.8,\"min_required_rr\":%.1f,\"passed\":true},\"key_levels\":{\"support\":[91000],\"resistance\":[97000]},\"anchors\":[{\"type\":\"resistance\",\"timeframe\":\"15m\",\"price\":96000,\"reason\":\"primary rejection\"}]},\"protection_plan\":{\"mode\":\"combined\",\"ladder_rules\":[{\"take_profit_price\":93000,\"take_profit_close_ratio_pct\":35,\"stop_loss_price\":97000,\"stop_loss_close_ratio_pct\":50,\"structural_anchor\":\"15m support target / 15m invalidation resistance with ATR buffer\",\"volatility_buffer_reason\":\"ATR/wick buffer applied\"},{\"take_profit_price\":91000,\"take_profit_close_ratio_pct\":35,\"stop_loss_price\":98200,\"stop_loss_close_ratio_pct\":50,\"structural_anchor\":\"1h support extension / higher invalidation with ATR buffer\",\"volatility_buffer_reason\":\"ATR/wick buffer applied\"}],\"drawdown_rules\":[{\"timeframe\":\"15m\",\"min_profit_pct\":0.75,\"max_drawdown_pct\":60,\"close_ratio_pct\":65,\"runner_keep_pct\":35,\"stage_name\":\"partial_profit_lock\",\"reason_anchor\":\"15m first structural target (inside of nearest structure)\"},{\"timeframe\":\"1h\",\"min_profit_pct\":1.4,\"max_drawdown_pct\":55,\"close_ratio_pct\":80,\"runner_keep_pct\":20,\"stage_name\":\"runner_extension\",\"reason_anchor\":\"1h runner structure\"}]}}},\n", riskControl.BTCETHMaxLeverage, examplePositionSize, riskControl.MinRiskRewardRatio))
+	sb.WriteString(fmt.Sprintf("  {\"symbol\":\"BTCUSDT\",\"action\":\"open_short\",\"leverage\":%d,\"position_size_usd\":%.0f,\"stop_loss\":97000,\"take_profit\":91000,\"confidence\":85,\"risk_usd\":300,\"entry_protection_rationale\":{\"timeframe_context\":{\"primary\":\"1h\",\"lower\":[\"15m\"],\"higher\":[\"4h\"]},\"risk_reward\":{\"entry\":95000,\"invalidation\":97000,\"first_target\":91000,\"gross_estimated_rr\":2.0,\"net_estimated_rr\":1.8,\"min_required_rr\":%.1f,\"passed\":true},\"key_levels\":{\"support\":[91000],\"resistance\":[97000]},\"anchors\":[{\"type\":\"resistance\",\"timeframe\":\"1h\",\"price\":96000,\"reason\":\"primary rejection\"}]},\"protection_plan\":{\"mode\":\"combined\",\"ladder_rules\":[{\"take_profit_price\":93000,\"take_profit_close_ratio_pct\":35,\"stop_loss_price\":97000,\"stop_loss_close_ratio_pct\":50,\"structural_anchor\":\"1h support target / 1h invalidation resistance with ATR buffer\",\"volatility_buffer_reason\":\"ATR/wick buffer applied\"},{\"take_profit_price\":91000,\"take_profit_close_ratio_pct\":35,\"stop_loss_price\":98200,\"stop_loss_close_ratio_pct\":50,\"structural_anchor\":\"4h support extension / higher invalidation with ATR buffer\",\"volatility_buffer_reason\":\"ATR/wick buffer applied\"}],\"drawdown_rules\":[{\"timeframe\":\"1h\",\"min_profit_pct\":0.75,\"max_drawdown_pct\":60,\"close_ratio_pct\":65,\"runner_keep_pct\":35,\"stage_name\":\"partial_profit_lock\",\"reason_anchor\":\"1h first structural target (inside of nearest structure)\"},{\"timeframe\":\"4h\",\"min_profit_pct\":1.4,\"max_drawdown_pct\":55,\"close_ratio_pct\":80,\"runner_keep_pct\":20,\"stage_name\":\"runner_extension\",\"reason_anchor\":\"4h runner structure\"}]}}},\n", riskControl.BTCETHMaxLeverage, examplePositionSize, riskControl.MinRiskRewardRatio))
 	sb.WriteString("  {\"symbol\":\"ETHUSDT\",\"action\":\"wait\"}\n")
 	sb.WriteString("]\n")
 	sb.WriteString("</decision>\n\n")
@@ -402,7 +402,7 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString("- Ladder prices MUST be absolute executable structural prices, not percent-only placeholders. Long: TP > entry and SL < entry. Short: TP < entry and SL > entry.\n")
 	sb.WriteString("- Every ladder rule MUST include `structural_anchor` or side-specific anchors, plus `volatility_buffer_pct` or `volatility_buffer_reason`.\n")
 	sb.WriteString("- **CRITICAL LADDER CONSTRAINTS**:\n")
-	sb.WriteString("  - **All ladder SL must use the SAME nearest primary-timeframe invalidation structure** (e.g., all use 15m resistance + buffer). Do NOT use different timeframe structures for different ladder tiers. The tiers must still have distinct prices: split near the structure into inside/near-buffer and outside/beyond-buffer prices protecting at least 75% total size; at most one farther tier may remain, and it must be <=25%.\n")
+	sb.WriteString("  - **All ladder SL must use the SAME nearest primary-timeframe invalidation structure** (e.g., all use 1h resistance + buffer). Do NOT use different timeframe structures for different ladder tiers. The tiers must still have distinct prices: split near the structure into inside/near-buffer and outside/beyond-buffer prices protecting at least 75% total size; at most one farther tier may remain, and it must be <=25%.\n")
 	sb.WriteString("  - Ladder[0] and Ladder[1] TP: MUST be within 0.5% of a structural support/resistance/fibonacci level.\n")
 	sb.WriteString("  - Ladder[2] (TP3) extended target: MAY deviate from structure to pursue larger profit, but `take_profit_close_ratio_pct` MUST be ≤ 20%. If you want TP3 > 20%, move it closer to structure.\n")
 	sb.WriteString("  - **When drawdown_rules are present, drawdown owns TP/profit-taking. Do NOT output ladder take_profit_price/take_profit_close_ratio_pct unless explicitly needed for audit; prefer ladder rules with stop-loss side only.**\n")
@@ -431,8 +431,8 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString("  - For ladder_rules, output 2~3 structurally distinct tiers. Prefer both TP and SL sides when the strategy route owns ladder: each rule should include absolute `take_profit_price`, `take_profit_close_ratio_pct`, absolute `stop_loss_price`, `stop_loss_close_ratio_pct`, and anchor text.\n")
 	sb.WriteString("  - **Position sizing rules**: When `drawdown_rules` are present, drawdown owns TP/profit-taking, so prefer omitting ladder TP fields entirely and provide ladder stop-loss side only. Without drawdown, TP ratios should total 60~90%. SL ratios may total up to 100%. For ladder SL, at least 75% of total position protection must be near the nearest primary invalidation structure; any farther stop tier is optional and must be <=25%.\n")
 	sb.WriteString("  - **TP3 extended target rule**: Ladder[2] (TP3) MAY deviate from structure to pursue larger profit, but `take_profit_close_ratio_pct` MUST be ≤ 20%. If you want more than 20% at TP3, move TP3 closer to a structural level.\n")
-	sb.WriteString("  - **Unified SL structure rule**: All ladder SL prices must reference the SAME nearest primary-timeframe invalidation structure (e.g., all use 15m resistance 5.444 + ATR buffer). Do NOT use 1h structure for Ladder[1] and 15m for Ladder[0]. Use the same base structure, only vary the buffer; do not repeat the same stop price.\n")
-	sb.WriteString("  - Example long ladder rule: `{\"take_profit_price\": 0.2538, \"take_profit_close_ratio_pct\": 35, \"stop_loss_price\": 0.2472, \"stop_loss_close_ratio_pct\": 50, \"structural_anchor\": \"15m resistance 0.2540 / 15m invalidation support 0.2475, buffered by ATR\"}`. Percent-only ladder rules are rejected when structure exists.\n")
+	sb.WriteString("  - **Unified SL structure rule**: All ladder SL prices must reference the SAME nearest primary-timeframe invalidation structure (e.g., all use 1h resistance 5.444 + ATR buffer). Do NOT use 4h structure for Ladder[1] and 1h for Ladder[0]. Use the same base structure, only vary the buffer; do not repeat the same stop price.\n")
+	sb.WriteString("  - Example long ladder rule: `{\"take_profit_price\": 0.2538, \"take_profit_close_ratio_pct\": 35, \"stop_loss_price\": 0.2472, \"stop_loss_close_ratio_pct\": 50, \"structural_anchor\": \"1h resistance 0.2540 / 1h invalidation support 0.2475, buffered by ATR\"}`. Percent-only ladder rules are rejected when structure exists.\n")
 	sb.WriteString("  - Use `mode=drawdown` when the strategy route enables AI drawdown profit protection; then `drawdown_rules` must be non-empty\n")
 	sb.WriteString("  - Use `mode=break_even` when the strategy enables Break-even Stop as an AI-required runtime stop layer; include break_even_trigger_mode/value/offset\n")
 	sb.WriteString("  - In drawdown/break-even AI mode, reasoning must reference the primary timeframe, adjacent timeframes, and structural anchors such as support/resistance, fibonacci, and volatility\n")
@@ -1134,7 +1134,7 @@ func (e *StrategyEngine) formatTimeframeSeriesData(sb *strings.Builder, data *ma
 }
 
 func (e *StrategyEngine) formatMarketContextV2(symbol string, data *market.Data) string {
-	ctx := market.BuildMarketContextV2(symbol, data, []string{"3m", "15m", "1h", "4h", "1d"}, "15m")
+	ctx := market.BuildMarketContextV2(symbol, data, []string{"15m", "1h", "4h", "1d"}, "1h")
 	if ctx == nil || ctx.RegimeRules == nil {
 		return ""
 	}

@@ -124,15 +124,15 @@ func (pb *PromptBuilder) buildSystemPromptZH() string {
 - **protection_plan**: 可选的结构化保护计划。mode=full/ladder 都优先提供结构绝对价 take_profit_price/stop_loss_price，同时给等价百分比；百分比只是审计/显示值，不是结构止损来源
   - **严格要求 — drawdown_rules 必须基于结构位计算，禁止模板值**：
     - T1 min_profit_pct = 入场到最近 TP 结构位/fib/阻力的距离(%) 减去 0.1-0.2% 缓冲。确保 drawdown 在价格到达目标前就 arm，防止差一点没到就回撤而无保护。
-    - T2 min_profit_pct = 到下一个结构位的距离（相邻更高时间框架的阻力、fib extension、成交量集中区）。如主框架=15m，T2/T3 用 1h 级别目标。
+    - T2 min_profit_pct = 到下一个结构位的距离（相邻更高时间框架的阻力、fib extension、成交量集中区）。如主框架=1h，T2/T3 用 4h 级别目标。
     - T3 min_profit_pct = 到最远合理目标的距离（1h/4h 结构、fib 1.618 extension）。
     - max_drawdown_pct 应随 tier 递减（如 T1=55-60%, T2=45-50%, T3=35-40%）— 利润越大保护越紧。
     - close_ratio_pct: T1 平 50-65%（锁定大部分），T2 平 20-30%（部分），T3 平 100%（全部退出）。除非策略另有指定。
     - 如果只有一个 TP 结构位，用 fibonacci extension (1.272, 1.618, 2.0) 推导 T2/T3 目标。
     - 禁止：所有币种使用相同的固定值如 0.75/1.45/2.45。每个币的 DD tiers 必须反映其独特的结构位分布。
-  - 示例：entry=81100, 15m阻力=81838(0.91%), 1h fib_0.618=82200(1.36%), 1h前高=83500(2.96%)
+  - 示例：entry=81100, 1h阻力=81838(0.91%), 4h fib_0.618=82200(1.36%), 4h前高=83500(2.96%)
     → T1: min_profit=0.71%(0.91%-0.2%), T2: min_profit=1.16%(1.36%-0.2%), T3: min_profit=2.76%(2.96%-0.2%)
-  - stage_name 必须包含实际价位：如 "15m阻力81838缓冲"，禁止泛泛的 "第一压力利润保护"。
+  - stage_name 必须包含实际价位：如 "1h阻力81838缓冲"，禁止泛泛的 "第一压力利润保护"。
 - **confidence**: 信心度（0-100）
 - **reasoning**: 推理过程（必需，必须详细说明决策依据）
 
@@ -207,12 +207,12 @@ func (pb *PromptBuilder) getDecisionRequirementsZH() string {
     "protection_plan": {
       "mode": "drawdown",
       "drawdown_rules": [
-        {"timeframe":"15m","min_profit_pct":1.35,"max_drawdown_pct":55,"close_ratio_pct":55,"poll_interval_seconds":20,"reason_anchor":"15m resistance 1.015 minus 0.15% buffer","stage_name":"15m阻力1.015缓冲"},
+        {"timeframe":"1h","min_profit_pct":1.35,"max_drawdown_pct":55,"close_ratio_pct":55,"poll_interval_seconds":20,"reason_anchor":"1h resistance 1.015 minus 0.15% buffer","stage_name":"1h阻力1.015缓冲"},
         {"timeframe":"1h","min_profit_pct":2.8,"max_drawdown_pct":45,"close_ratio_pct":25,"poll_interval_seconds":20,"reason_anchor":"1h fib 0.618 extension minus 0.2% buffer","stage_name":"1h fib ext缓冲"},
-        {"timeframe":"1h","min_profit_pct":4.3,"max_drawdown_pct":40,"close_ratio_pct":100,"poll_interval_seconds":20,"reason_anchor":"1h swing high target minus 0.2% buffer","stage_name":"1h前高目标缓冲"}
+        {"timeframe":"1h","min_profit_pct":4.3,"max_drawdown_pct":40,"close_ratio_pct":100,"poll_interval_seconds":20,"reason_anchor":"1h swing high target minus 0.2% buffer","stage_name":"4h前高目标缓冲"}
       ]
     },
-    "reasoning": "XRPUSDT 与 15m 主趋势和 5m 延续结构一致，适合使用 drawdown protection_plan；每个 tier 的 min_profit_pct 基于实际结构位距离减去缓冲计算。"
+    "reasoning": "XRPUSDT 与 1h 主趋势和 15m 延续结构一致，适合使用 drawdown protection_plan；每个 tier 的 min_profit_pct 基于实际结构位距离减去缓冲计算。"
   },
   {
     "symbol": "HUSDT",
@@ -286,7 +286,7 @@ func (pb *PromptBuilder) buildSystemPromptEN() string {
       "stop_loss_pct": 3,
       "drawdown_rules": [
         {
-          "timeframe": "15m",
+          "timeframe": "1h",
           "min_profit_pct": 4,
           "max_drawdown_pct": 55,
           "close_ratio_pct": 50,
@@ -321,7 +321,7 @@ func (pb *PromptBuilder) buildSystemPromptEN() string {
       "anchors": [
         {
           "type": "support",
-          "timeframe": "15m",
+          "timeframe": "1h",
           "price": 41850,
           "reason": "breakout retest"
         }
@@ -351,7 +351,7 @@ func (pb *PromptBuilder) buildSystemPromptEN() string {
 - **protection_plan**: Optional structured protection plan. Use mode=full/ladder with structural absolute prices plus equivalent pct where applicable, or mode=drawdown/combined with at least 2 drawdown_rules. When drawdown_rules are present, drawdown owns TP/profit-taking; do not output ladder take_profit_price/take_profit_close_ratio_pct unless explicitly needed for audit, and prefer ladder stop-loss side only. In drawdown_rules, max_drawdown_pct is peak-profit giveback percentage: 55 means give back 55% of peak profit; do not output 0.55 unless you truly mean 0.55% of peak profit.
   - **CRITICAL — drawdown_rules MUST be calculated from multi-TF structural data with pessimistic buffer**:
     - Each tier uses a DIFFERENT timeframe's structural target:
-      - T1: primary TF (e.g. 15m) nearest resistance/fib → min_profit = distance × 0.70~0.80 (pessimistic: assume price may reverse BEFORE reaching the level)
+      - T1: primary TF (e.g. 1h) nearest resistance/fib → min_profit = distance × 0.70~0.80 (pessimistic: assume price may reverse BEFORE reaching the level)
       - T2: higher TF (e.g. 1h) structural level → min_profit = distance × 0.70~0.80
       - T3+: highest TF or fib extension → min_profit = distance × 0.75~0.85
     - The pessimistic factor ensures DD protection activates even if price falls short of the target by 20-30%.
@@ -359,9 +359,9 @@ func (pb *PromptBuilder) buildSystemPromptEN() string {
     - close_ratio_pct is FIXED by strategy config — do NOT output or override it.
     - If only ONE TP structural level exists, use fibonacci extensions (1.272, 1.618, 2.0) from the swing range to derive T2/T3 targets.
     - FORBIDDEN: using fixed values like 0.75/1.45/2.45 across all coins. Each coin's DD tiers must reflect its unique structural landscape.
-  - Example: entry=81100, 15m resistance=81838 (0.91% away), 1h fib_0.618=82200 (1.36% away), 1h swing_high=83500 (2.96% away)
+  - Example: entry=81100, 1h resistance=81838 (0.91% away), 4h fib_0.618=82200 (1.36% away), 1h swing_high=83500 (2.96% away)
     → T1: min_profit=0.91%×0.75=0.68%, T2: min_profit=1.36%×0.75=1.02%, T3: min_profit=2.96%×0.80=2.37%
-  - stage_name MUST include the actual price level: e.g. "15m resistance 81838 pessimistic" not generic "第一压力利润保护".
+  - stage_name MUST include the actual price level: e.g. "1h resistance 81838 pessimistic" not generic "第一压力利润保护".
 - **entry_protection_rationale**: Required for open_long/open_short. Must include structured timeframe/key-level/RR rationale. At minimum include risk_reward.entry, risk_reward.invalidation, risk_reward.first_target, risk_reward.gross_estimated_rr, and preferably risk_reward.net_estimated_rr plus structural anchors.
   - Opening decisions MUST include a first-target anchor. Use either anchors[].type="first_target", or structural_key_levels[].used_for="first_target"/"tp1"/"take_profit", with the target price and reason.
   - If you do not have a concrete higher-timeframe anchor, leave timeframe_context.higher empty/omitted. If timeframe_context.higher is present, you MUST include higher_timeframe_anchors or timeframe_structures with explicit higher-TF price anchors for runner/drawdown context.
@@ -432,9 +432,9 @@ func (pb *PromptBuilder) getDecisionRequirementsEN() string {
       "stop_loss_pct": 3
     },
     "entry_protection_rationale": {
-      "timeframe_context": {"primary": "15m", "lower": ["5m"], "higher": ["1h"]},
+      "timeframe_context": {"primary": "1h", "lower": ["15m"], "higher": ["4h"]},
       "risk_reward": {"entry": 62000, "invalidation": 61200, "first_target": 63600, "gross_estimated_rr": 2.0, "net_estimated_rr": 1.8, "min_required_rr": 1.5, "passed": true},
-      "anchors": [{"type": "support", "timeframe": "15m", "price": 61850, "reason": "pullback confirmation"}],
+      "anchors": [{"type": "support", "timeframe": "1h", "price": 61850, "reason": "pullback confirmation"}],
       "alignment_notes": ["full stop remains beyond invalidation"]
     },
     "reasoning": "BTCUSDT completed a pullback confirmation in the primary trend direction, so a single unified TP/SL structure is sufficient and full protection_plan is appropriate. The entry_protection_rationale records the key support anchor and confirms RR stays above the minimum threshold even after costs. Express TP/SL as percentage fields rather than absolute prices."
@@ -453,7 +453,7 @@ func (pb *PromptBuilder) getDecisionRequirementsEN() string {
       ]
     },
     "entry_protection_rationale": {
-      "timeframe_context": {"primary": "5m", "lower": ["3m"], "higher": ["15m"]},
+      "timeframe_context": {"primary": "15m", "lower": ["5m"], "higher": ["1h"]},
       "risk_reward": {"entry": 1.2, "invalidation": 1.15, "first_target": 1.32, "gross_estimated_rr": 2.4, "net_estimated_rr": 2.1, "min_required_rr": 1.5, "passed": true},
       "anchors": [{"type": "support", "timeframe": "5m", "price": 1.18, "reason": "breakout base"}],
       "alignment_notes": ["first ladder target remains before the final target"]

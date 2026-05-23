@@ -71,10 +71,10 @@ func BuildCompositeMarketSnapshot(symbol, exchange string, timeframes []string, 
 		exchange = "okx"
 	}
 	if primaryTF == "" {
-		primaryTF = "15m"
+		primaryTF = "1h"
 	}
 	if len(timeframes) == 0 {
-		timeframes = []string{"3m", "5m", "15m", "1h", "4h", "1d"}
+		timeframes = []string{"15m", "1h", "4h", "1d"}
 	}
 	if count <= 0 {
 		count = 120
@@ -108,10 +108,10 @@ func BuildCompositeMarketSnapshotFromExistingData(exchange string, timeframes []
 		exchange = "okx"
 	}
 	if primaryTF == "" {
-		primaryTF = "15m"
+		primaryTF = "1h"
 	}
 	if len(timeframes) == 0 {
-		timeframes = []string{"3m", "15m", "1h", "4h", "1d"}
+		timeframes = []string{"15m", "1h", "4h", "1d"}
 	}
 	if ttl <= 0 {
 		ttl = 180 * time.Second
