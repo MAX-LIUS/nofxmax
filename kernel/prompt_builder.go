@@ -305,9 +305,9 @@ func (pb *PromptBuilder) buildSystemPromptEN() string {
     },
     "entry_protection_rationale": {
       "timeframe_context": {
-        "primary": "15m",
-        "lower": ["5m"],
-        "higher": ["1h"]
+        "primary": "1h",
+        "lower": ["15m"],
+        "higher": ["4h"]
       },
       "risk_reward": {
         "entry": 42000,
@@ -453,9 +453,9 @@ func (pb *PromptBuilder) getDecisionRequirementsEN() string {
       ]
     },
     "entry_protection_rationale": {
-      "timeframe_context": {"primary": "15m", "lower": ["5m"], "higher": ["1h"]},
+      "timeframe_context": {"primary": "1h", "lower": ["15m"], "higher": ["4h"]},
       "risk_reward": {"entry": 1.2, "invalidation": 1.15, "first_target": 1.32, "gross_estimated_rr": 2.4, "net_estimated_rr": 2.1, "min_required_rr": 1.5, "passed": true},
-      "anchors": [{"type": "support", "timeframe": "5m", "price": 1.18, "reason": "breakout base"}],
+      "anchors": [{"type": "support", "timeframe": "15m", "price": 1.18, "reason": "breakout base"}],
       "alignment_notes": ["first ladder target remains before the final target"]
     },
     "reasoning": "HUSDT shows a low-timeframe breakout with multi-timeframe alignment, so staged TP/SL management is more suitable and ladder protection_plan is preferred. The entry_protection_rationale captures the breakout base, invalidation, and RR logic for the open_long decision."

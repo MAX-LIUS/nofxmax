@@ -1138,7 +1138,7 @@ func (e *StrategyEngine) formatMarketContextV2(symbol string, data *market.Data)
 	if ctx == nil || ctx.RegimeRules == nil {
 		return ""
 	}
-	snapshot := market.BuildCompositeMarketSnapshotFromExistingData("okx", []string{"3m", "15m", "1h", "4h", "1d"}, "15m", 180*time.Second, data)
+	snapshot := market.BuildCompositeMarketSnapshotFromExistingData("okx", []string{"15m", "1h", "4h", "1d"}, "1h", 180*time.Second, data)
 	if snapshot != nil && snapshot.AICompact != "" {
 		return "Composite Market Context (shared human/AI source):\n" + snapshot.AICompact + "  rule: open only when setup_type is compatible with allowed_setups and structural anchors satisfy structure_mode; otherwise wait. For any open with ladder protection, stop_loss_price must be an explicit structural invalidation price beyond support/resistance/fibonacci plus ATR/wick buffer; stop_loss_pct is only a derived display value, never the planning input.\n"
 	}
@@ -1292,8 +1292,8 @@ func buildDrawdownTierConstraintPrompt(cfg store.DrawdownTakeProfitConfig) strin
 	sb.WriteString("- CRITICAL: drawdown_rules min_profit_pct MUST be derived from multi-timeframe structural levels for each coin.\n")
 	sb.WriteString("- Calculation logic:\n")
 	sb.WriteString("  1. For each tier, pick a structural target from a DIFFERENT timeframe:\n")
-	sb.WriteString("     - T1: primary TF (e.g. 15m) nearest resistance/support target\n")
-	sb.WriteString("     - T2: higher TF (e.g. 1h) structural level or fib retracement\n")
+	sb.WriteString("     - T1: primary TF (e.g. 1h) nearest resistance/support target\n")
+	sb.WriteString("     - T2: higher TF (e.g. 4h) structural level or fib retracement\n")
 	sb.WriteString("     - T3+: highest TF or fib extension targets\n")
 	sb.WriteString("  2. min_profit_pct = (distance from entry to target) × pessimistic_factor\n")
 	sb.WriteString("     - pessimistic_factor = 0.70~0.85 (assume price may reverse BEFORE reaching the level)\n")

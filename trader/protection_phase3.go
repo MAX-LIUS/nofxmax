@@ -22,6 +22,13 @@ func classifyProtectionRegime(data *market.Data) string {
 			atrPct = data.IntradaySeries.ATR14 / data.CurrentPrice * 100
 		} else if data.LongerTermContext != nil && data.LongerTermContext.ATR14 > 0 {
 			atrPct = data.LongerTermContext.ATR14 / data.CurrentPrice * 100
+		} else if data.TimeframeData != nil {
+			for _, tf := range []string{"1h", "15m", "4h", "30m", "5m"} {
+				if sd, ok := data.TimeframeData[tf]; ok && sd != nil && sd.ATR14 > 0 {
+					atrPct = sd.ATR14 / data.CurrentPrice * 100
+					break
+				}
+			}
 		}
 	}
 

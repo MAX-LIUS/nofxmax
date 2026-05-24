@@ -245,7 +245,11 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 	// 1d2. Coin-specific momentum gate — reject entries where the coin itself
 	// shows no directional momentum (stale) or excessive momentum (late trend).
 	if data != nil && regimeCfg.MomentumGateEnabled {
-		checks = append(checks, evaluateCoinMomentumGate(d.Action, data, regimeCfg)...)
+		primaryTF := ""
+		if input.StrategyConfig != nil {
+			primaryTF = input.StrategyConfig.Indicators.Klines.PrimaryTimeframe
+		}
+		checks = append(checks, evaluateCoinMomentumGate(d.Action, data, regimeCfg, primaryTF)...)
 	}
 
 	// 1e. Blocked regime (AI-reported chop/news_risk/no_trade)
@@ -797,7 +801,7 @@ func getRegimeFilterConfig(cfg *store.StrategyConfig) store.RegimeFilterConfig {
 // evaluateCoinMomentumGate checks whether the specific coin has sufficient
 // directional momentum to justify entry. Prevents opening positions on coins
 // that are flat (stale momentum) or have already moved too far (exhausted).
-func evaluateCoinMomentumGate(action string, data *market.Data, cfg store.RegimeFilterConfig) []EntryGateCheck {
+func evaluateCoinMomentumGate(action string, data *market.Data, cfg store.RegimeFilterConfig, primaryTimeframe string) []EntryGateCheck {
 	if data == nil {
 		return nil
 	}
@@ -829,8 +833,26 @@ func evaluateCoinMomentumGate(action string, data *market.Data, cfg store.Regime
 		counterChg1h = 0.3
 	}
 
+	// When primary timeframe >= 1h, PriceChange1h is only 1 bar which is too
+	// granular for momentum assessment. Try to compute a better 1h change from
+	// the lower timeframe (15m) klines if available.
 	chg1h := data.PriceChange1h
 	chg4h := data.PriceChange4h
+	if primaryTimeframe == "1h" || primaryTimeframe == "4h" {
+		if betterChg1h := computeChg1hFromLowerTF(data); betterChg1h != 0 || chg1h == 0 {
+			chg1h = betterChg1h
+		}
+		// Widen thresholds: 1h primary means PriceChange1h is noisier (single bar)
+		// and PriceChange4h covers fewer bars, so normal moves appear larger.
+		staleChg1h *= 0.5  // 0.15 → 0.075: only block truly dead coins
+		staleChg4h *= 0.5  // 0.4 → 0.2
+		if isMajor {
+			exhaustedChg4h = 6.0
+		} else {
+			exhaustedChg4h = 5.0
+		}
+		counterChg1h *= 1.5 // 0.3 → 0.45: allow more counter-move before blocking
+	}
 	absChg1h := chg1h
 	if absChg1h < 0 {
 		absChg1h = -absChg1h
@@ -846,8 +868,10 @@ func evaluateCoinMomentumGate(action string, data *market.Data, cfg store.Regime
 	var checks []EntryGateCheck
 
 	// Check 1: Stale momentum
+	// Both 1h AND 4h must be flat, OR 1h must be extremely flat (but only if 4h
+	// also lacks meaningful direction).
 	staleMomentum := absChg1h < staleChg1h && absChg4h < staleChg4h
-	if !staleMomentum && absChg1h < staleChg1h*0.67 {
+	if !staleMomentum && absChg1h < staleChg1h*0.67 && absChg4h < staleChg4h*2.5 {
 		staleMomentum = true
 	}
 	if staleMomentum {
@@ -940,6 +964,31 @@ func evaluateCoinMomentumGate(action string, data *market.Data, cfg store.Regime
 		Values:   fmt.Sprintf("chg1h=%.4f chg4h=%.4f phase=%s", chg1h, chg4h, phase),
 	})
 	return checks
+}
+
+// computeChg1hFromLowerTF calculates 1-hour price change from the 15m kline
+// data in TimeframeData. This gives a more accurate momentum reading when the
+// primary timeframe is 1h (where PriceChange1h is just 1 bar).
+func computeChg1hFromLowerTF(data *market.Data) float64 {
+	if data == nil || data.TimeframeData == nil {
+		return 0
+	}
+	sd, ok := data.TimeframeData["15m"]
+	if !ok || sd == nil || len(sd.Klines) < 5 {
+		return 0
+	}
+	klines := sd.Klines
+	current := klines[len(klines)-1].Close
+	// 4 bars of 15m = 1 hour
+	idx := len(klines) - 1 - 4
+	if idx < 0 {
+		idx = 0
+	}
+	old := klines[idx].Close
+	if old <= 0 || current <= 0 {
+		return 0
+	}
+	return (current - old) / old * 100
 }
 
 func computeATR14Pct(data *market.Data) float64 {
