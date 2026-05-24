@@ -833,25 +833,33 @@ func evaluateCoinMomentumGate(action string, data *market.Data, cfg store.Regime
 		counterChg1h = 0.3
 	}
 
-	// When primary timeframe >= 1h, PriceChange1h is only 1 bar which is too
-	// granular for momentum assessment. Try to compute a better 1h change from
-	// the lower timeframe (15m) klines if available.
+	// When primary timeframe >= 1h, PriceChange1h covers too few bars for
+	// reliable momentum assessment. Recompute from lower-TF klines and widen
+	// thresholds proportionally. This makes the gate work correctly regardless
+	// of which timeframe is configured as primary.
 	chg1h := data.PriceChange1h
 	chg4h := data.PriceChange4h
-	if primaryTimeframe == "1h" || primaryTimeframe == "4h" {
+	tfMinutes := parseTimeframeMinutes(primaryTimeframe)
+	if tfMinutes >= 60 {
 		if betterChg1h := computeChg1hFromLowerTF(data); betterChg1h != 0 || chg1h == 0 {
 			chg1h = betterChg1h
 		}
-		// Widen thresholds: 1h primary means PriceChange1h is noisier (single bar)
-		// and PriceChange4h covers fewer bars, so normal moves appear larger.
-		staleChg1h *= 0.5  // 0.15 → 0.075: only block truly dead coins
-		staleChg4h *= 0.5  // 0.4 → 0.2
-		if isMajor {
-			exhaustedChg4h = 6.0
-		} else {
-			exhaustedChg4h = 5.0
+		// Scale thresholds: the coarser the primary TF, the noisier the raw
+		// PriceChange values. Factor = 15 / tfMinutes (baseline is 15m).
+		scale := 15.0 / float64(tfMinutes) // 1h→0.25, 4h→0.0625
+		if scale > 1 {
+			scale = 1
 		}
-		counterChg1h *= 1.5 // 0.3 → 0.45: allow more counter-move before blocking
+		staleChg1h *= scale + 0.25  // 1h: ×0.5, 4h: ×0.31
+		staleChg4h *= scale + 0.25  // same
+		counterChg1h *= 2 - scale   // 1h: ×1.75, 4h: ×1.94
+		// Exhausted: larger TF means 4h change covers fewer bars, normal
+		// trending moves look bigger. Widen proportionally.
+		if isMajor {
+			exhaustedChg4h = 4.5 + float64(tfMinutes)/30.0 // 1h→6.5, 4h→12.5
+		} else {
+			exhaustedChg4h = 3.5 + float64(tfMinutes)/40.0 // 1h→5.0, 4h→9.5
+		}
 	}
 	absChg1h := chg1h
 	if absChg1h < 0 {
@@ -966,29 +974,74 @@ func evaluateCoinMomentumGate(action string, data *market.Data, cfg store.Regime
 	return checks
 }
 
-// computeChg1hFromLowerTF calculates 1-hour price change from the 15m kline
-// data in TimeframeData. This gives a more accurate momentum reading when the
-// primary timeframe is 1h (where PriceChange1h is just 1 bar).
+// computeChg1hFromLowerTF calculates 1-hour price change from the best
+// available lower-timeframe kline data in TimeframeData. This gives a more
+// accurate momentum reading when the primary timeframe is >= 1h.
 func computeChg1hFromLowerTF(data *market.Data) float64 {
 	if data == nil || data.TimeframeData == nil {
 		return 0
 	}
-	sd, ok := data.TimeframeData["15m"]
-	if !ok || sd == nil || len(sd.Klines) < 5 {
-		return 0
+	// Try progressively coarser timeframes; pick the finest available
+	// that has enough bars to cover 1 hour.
+	type candidate struct {
+		tf       string
+		barsFor1h int
 	}
-	klines := sd.Klines
-	current := klines[len(klines)-1].Close
-	// 4 bars of 15m = 1 hour
-	idx := len(klines) - 1 - 4
-	if idx < 0 {
-		idx = 0
+	candidates := []candidate{
+		{"5m", 12},
+		{"15m", 4},
+		{"30m", 2},
+		{"1h", 1},
 	}
-	old := klines[idx].Close
-	if old <= 0 || current <= 0 {
-		return 0
+	for _, c := range candidates {
+		sd, ok := data.TimeframeData[c.tf]
+		if !ok || sd == nil || len(sd.Klines) < c.barsFor1h+1 {
+			continue
+		}
+		klines := sd.Klines
+		current := klines[len(klines)-1].Close
+		idx := len(klines) - 1 - c.barsFor1h
+		if idx < 0 {
+			idx = 0
+		}
+		old := klines[idx].Close
+		if old <= 0 || current <= 0 {
+			continue
+		}
+		return (current - old) / old * 100
 	}
-	return (current - old) / old * 100
+	return 0
+}
+
+func parseTimeframeMinutes(tf string) int {
+	switch tf {
+	case "1m":
+		return 1
+	case "3m":
+		return 3
+	case "5m":
+		return 5
+	case "15m":
+		return 15
+	case "30m":
+		return 30
+	case "1h":
+		return 60
+	case "2h":
+		return 120
+	case "4h":
+		return 240
+	case "6h":
+		return 360
+	case "8h":
+		return 480
+	case "12h":
+		return 720
+	case "1d":
+		return 1440
+	default:
+		return 15
+	}
 }
 
 func computeATR14Pct(data *market.Data) float64 {

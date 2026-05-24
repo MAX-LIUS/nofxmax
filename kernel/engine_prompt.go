@@ -108,7 +108,7 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString("- `lower_high_breakdown_confirmed`: price forms lower high below resistance, then breaks trigger candle low\n\n")
 	sb.WriteString("**HARD RULES:**\n")
 	sb.WriteString("- \"Near support/resistance\" is NOT a trigger. Price moving toward a level is NOT a trigger.\n")
-	sb.WriteString("- A trigger REQUIRES candle-close confirmation on 15m or 1h.\n")
+	sb.WriteString("- A trigger REQUIRES candle-close confirmation on 15m or 1h. This means a COMPLETED (closed) candle — check the historical kline data for a closed candle that confirms the pattern. You do NOT need to wait for the current live candle to close; if the most recent closed 15m or 1h candle already shows the confirmation (e.g., closed back above support after touching it), the trigger is satisfied NOW.\n")
 	sb.WriteString("- If price is still approaching a level (has not yet touched it and been rejected), output wait.\n")
 	sb.WriteString("- If trigger is missing or unclear, output wait.\n")
 	sb.WriteString("- You MUST include `trigger_type` field in every open decision (one of the 6 types above). Entry without trigger_type will be BLOCKED by the system.\n")
