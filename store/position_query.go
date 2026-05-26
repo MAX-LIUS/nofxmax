@@ -433,3 +433,29 @@ func (s *PositionStore) GetDirectionStats(traderID string) ([]DirectionStats, er
 
 	return stats, nil
 }
+
+// GetConsecutiveLossCount returns the number of consecutive losing trades
+// for a given symbol+side, counting backwards from the most recent closed trade.
+func (s *PositionStore) GetConsecutiveLossCount(traderID, symbol, side string) int {
+	if traderID == "" || symbol == "" || side == "" {
+		return 0
+	}
+	side = strings.ToUpper(strings.TrimSpace(side))
+	var positions []TraderPosition
+	err := s.db.Where("trader_id = ? AND symbol = ? AND side = ? AND status = ?",
+		traderID, symbol, side, "CLOSED").
+		Order("exit_time DESC").
+		Limit(5).
+		Find(&positions).Error
+	if err != nil || len(positions) == 0 {
+		return 0
+	}
+	count := 0
+	for _, pos := range positions {
+		if pos.RealizedPnL >= 0 {
+			break
+		}
+		count++
+	}
+	return count
+}

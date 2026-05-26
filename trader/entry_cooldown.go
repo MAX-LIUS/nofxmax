@@ -40,6 +40,19 @@ func (m *entryCooldownManager) SetCooldown(symbol string) {
 	m.cooldowns[symbol] = time.Now().Add(m.duration)
 }
 
+// SetCooldownWithMultiplier sets cooldown with a duration multiplier for consecutive losses.
+func (m *entryCooldownManager) SetCooldownWithMultiplier(symbol string, multiplier int) {
+	if multiplier < 1 {
+		multiplier = 1
+	}
+	if multiplier > 4 {
+		multiplier = 4
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cooldowns[symbol] = time.Now().Add(m.duration * time.Duration(multiplier))
+}
+
 func (m *entryCooldownManager) IsCoolingDown(symbol string) (bool, time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

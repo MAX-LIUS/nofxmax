@@ -650,11 +650,17 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 		if !currentPositionKeys[key] {
 			delete(at.positionFirstSeenTime, key)
 			// Trigger cooldown if the position closed at a loss
-			symbol, _ := splitPositionKey(key)
+			symbol, side := splitPositionKey(key)
 			if symbol != "" {
 				if lastTrade, err := at.store.Position().GetLastClosedTrade(at.id, symbol); err == nil && lastTrade != nil && lastTrade.RealizedPnL < 0 {
-					at.cooldownManager.SetCooldown(symbol)
-					logger.Infof("⏳ [%s] Entry cooldown set for %s (%.2f USDT loss)", at.name, symbol, lastTrade.RealizedPnL)
+					consecutiveLosses := at.store.Position().GetConsecutiveLossCount(at.id, symbol, side)
+					if consecutiveLosses < 1 {
+						consecutiveLosses = 1
+					}
+					at.cooldownManager.SetCooldownWithMultiplier(symbol, consecutiveLosses)
+					logger.Infof("⏳ [%s] Entry cooldown set for %s (%.2f USDT loss, %dx consecutive → %v)",
+						at.name, symbol, lastTrade.RealizedPnL, consecutiveLosses,
+						at.cooldownManager.duration*time.Duration(consecutiveLosses))
 				}
 			}
 		}

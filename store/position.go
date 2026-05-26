@@ -976,10 +976,24 @@ func (s *PositionStore) MarkOpenPositionsAbsentFromExchangeClosed(traderID strin
 		if ok && quantitiesEquivalent(pos.Quantity, liveQty) {
 			continue
 		}
+
+		exitPrice := pos.EntryPrice
+		realizedPnl := 0.0
+		totalFee := pos.Fee
+
+		// Try to compute real PnL from close fills/orders
+		if computed, compFee, compExit, ok := s.computePnlFromFills(pos); ok {
+			exitPrice = compExit
+			realizedPnl = computed
+			totalFee = pos.Fee + compFee
+		}
+
 		res := s.db.Model(&TraderPosition{}).Where("id = ? AND status = ?", pos.ID, "OPEN").Updates(map[string]interface{}{
 			"quantity":     0,
-			"exit_price":   pos.EntryPrice,
+			"exit_price":   exitPrice,
 			"exit_time":    nowMs,
+			"realized_pnl": realizedPnl,
+			"fee":          totalFee,
 			"status":       "CLOSED",
 			"close_reason": closeReason,
 			"updated_at":   nowMs,
@@ -990,6 +1004,72 @@ func (s *PositionStore) MarkOpenPositionsAbsentFromExchangeClosed(traderID strin
 		updated += res.RowsAffected
 	}
 	return updated, nil
+}
+
+// computePnlFromFills attempts to calculate realized PnL from filled close orders
+// associated with a position. Returns (pnl, closeFee, avgExitPrice, success).
+func (s *PositionStore) computePnlFromFills(pos *TraderPosition) (float64, float64, float64, bool) {
+	if pos == nil || pos.ID == 0 {
+		return 0, 0, 0, false
+	}
+	entryQty := pos.EntryQuantity
+	if entryQty <= 0 {
+		entryQty = pos.Quantity
+	}
+	if entryQty <= 0 {
+		return 0, 0, 0, false
+	}
+
+	// Look for close orders linked to this position
+	var orders []TraderOrder
+	closeSide := "SELL"
+	if strings.EqualFold(pos.Side, "SHORT") {
+		closeSide = "BUY"
+	}
+	err := s.db.Where("related_position_id = ? AND side = ? AND status = ? AND filled_quantity > 0",
+		pos.ID, closeSide, "FILLED").Find(&orders).Error
+	if err != nil || len(orders) == 0 {
+		// Fallback: search by symbol+side+time window
+		windowStart := pos.EntryTime
+		err = s.db.Where("trader_id = ? AND symbol = ? AND side = ? AND status = ? AND filled_quantity > 0 AND created_at > ?",
+			pos.TraderID, pos.Symbol, closeSide, "FILLED", windowStart).
+			Order("created_at ASC").Find(&orders).Error
+		if err != nil || len(orders) == 0 {
+			return 0, 0, 0, false
+		}
+	}
+
+	var totalCloseQty, totalCloseValue, totalCloseFee float64
+	for _, o := range orders {
+		qty := o.FilledQuantity
+		if totalCloseQty+qty > entryQty*1.01 {
+			break
+		}
+		price := o.AvgFillPrice
+		if price <= 0 {
+			price = o.Price
+		}
+		if price <= 0 {
+			continue
+		}
+		totalCloseQty += qty
+		totalCloseValue += qty * price
+		totalCloseFee += o.Commission
+	}
+
+	if totalCloseQty <= 0 || totalCloseValue <= 0 {
+		return 0, 0, 0, false
+	}
+
+	avgExit := totalCloseValue / totalCloseQty
+	var pnl float64
+	if strings.EqualFold(pos.Side, "LONG") {
+		pnl = (avgExit - pos.EntryPrice) * totalCloseQty
+	} else {
+		pnl = (pos.EntryPrice - avgExit) * totalCloseQty
+	}
+
+	return pnl, totalCloseFee, avgExit, true
 }
 
 func positionPresenceKey(symbol, side string) string {
