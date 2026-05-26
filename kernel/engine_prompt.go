@@ -112,7 +112,8 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString("- If price is still approaching a level (has not yet touched it and been rejected), output wait.\n")
 	sb.WriteString("- If trigger is missing or unclear, output wait.\n")
 	sb.WriteString("- You MUST include `trigger_type` field in every open decision (one of the 6 types above). Entry without trigger_type will be BLOCKED by the system.\n")
-	sb.WriteString("- Only reference structural ZONES provided in the market data. Do not invent levels that are not listed.\n\n")
+	sb.WriteString("- Only reference structural ZONES provided in the market data. Do not invent levels that are not listed.\n")
+	sb.WriteString("- When price has touched a structural level and the most recent closed 15m candle shows a wick rejection (long lower shadow at support, or long upper shadow at resistance) with body closing on the correct side, that counts as confirmation even if the move is small in ATR terms.\n\n")
 
 	// 3. Hard constraints (risk control)
 	btcEthPosValueRatio := riskControl.BTCETHMaxPositionValueRatio
@@ -230,7 +231,7 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString("5. **selected_levels in output (REQUIRED for open)**: Include a `selected_levels` array listing every structural level you chose for protection/entry. For each, state basis_type (structural/atr_based/percentage/fibonacci) and a brief reason. If input SL/TP candidates have low quality, use ATR-based alternatives and mark basis_type accordingly.\n")
 	sb.WriteString("6. **structural_key_levels in output**: When opening, include a `structural_key_levels` array listing the structural levels that influenced your entry/TP/SL/drawdown decisions, with the timeframe each came from\n")
 	sb.WriteString("6. **Higher-timeframe runner context**: If `timeframe_context.higher` is present, include `higher_timeframe_anchors` or `timeframe_structures` with explicit higher-TF price anchors. Outer drawdown/runner stages must cite those higher-TF anchors, not only primary-TF resistance/support text.\n")
-	sb.WriteString("7. **Target distance sanity check**: Before opening, verify that first_target distance from entry >= 1.5× stop_loss distance. If the only available target is too close, the risk-reward is insufficient — output `wait` instead of forcing a trade with a cramped target.\n\n")
+	sb.WriteString("7. **Target distance sanity check**: first_target can be the nearest structural level OR a higher-timeframe level if the nearest one is too close. When calculating RR, use the most reasonable target that the trade thesis supports — you are not limited to only the nearest structure. Minimum: first_target distance >= 1.2× stop_loss distance.\n\n")
 	sb.WriteString("## Protection Plan Requirements (when mode = ai):\n\n")
 	sb.WriteString("### For ladder mode=ai:\n")
 	sb.WriteString("- Each ladder TP target MUST correspond to a nearby structural level (support/resistance/fibonacci) from the relevant timeframe\n")
