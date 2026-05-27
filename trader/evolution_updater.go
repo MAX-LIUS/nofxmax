@@ -2,6 +2,7 @@ package trader
 
 import (
 	"encoding/json"
+	"fmt"
 	"nofx/kernel"
 	"nofx/logger"
 	"nofx/market"
@@ -221,10 +222,11 @@ func (at *AutoTrader) applyEvolutionAdaptations(d *kernel.Decision, data *market
 		case "chg4h_gt_2.5":
 			matched = chg4hAbs > 2.5
 		case "trigger_low_quality":
-			// Matches when the trigger type is in the "worst" category for this coin
-			// For now, always apply when condition exists (the adaptation itself is only
-			// generated when trigger quality score is very low)
 			matched = true
+		case "phase=establishment_relax":
+			matched = phase == "establishment"
+		case "ema20_strong_alignment":
+			matched = !ema20Contradicted
 		case "trigger_tf=15m":
 			continue
 		}
@@ -233,20 +235,28 @@ func (at *AutoTrader) applyEvolutionAdaptations(d *kernel.Decision, data *market
 			continue
 		}
 
+		// Apply effectiveness weighting: reduce action impact based on effectiveness
+		effectivenessMultiplier := adapt.Effectiveness
+		if effectivenessMultiplier <= 0 {
+			effectivenessMultiplier = 1.0
+		}
+
 		// Parse and apply actions
 		actions := strings.Split(adapt.Action, ",")
 		for _, action := range actions {
 			action = strings.TrimSpace(action)
 			switch {
 			case action == "reduce_size_50%":
-				d.PositionSizeUSD *= 0.5
-				applied = append(applied, "size×0.5")
+				reduction := 0.5 * effectivenessMultiplier
+				d.PositionSizeUSD *= (1 - reduction)
+				applied = append(applied, fmt.Sprintf("size×%.2f", 1-reduction))
 			case action == "reduce_size_30%":
-				d.PositionSizeUSD *= 0.3
-				applied = append(applied, "size×0.3")
+				reduction := 0.7 * effectivenessMultiplier
+				d.PositionSizeUSD *= (1 - reduction)
+				applied = append(applied, fmt.Sprintf("size×%.2f", 1-reduction))
 			case action == "require_confidence_85":
 				if d.Confidence < 85 {
-					d.PositionSizeUSD *= 0.6 // Don't block, but reduce size significantly
+					d.PositionSizeUSD *= 0.6
 					applied = append(applied, "conf<85→size×0.6")
 				}
 			case action == "require_confidence_90":
@@ -254,6 +264,16 @@ func (at *AutoTrader) applyEvolutionAdaptations(d *kernel.Decision, data *market
 					d.PositionSizeUSD *= 0.5
 					applied = append(applied, "conf<90→size×0.5")
 				}
+			case action == "allow_confidence_65":
+				// Relaxation: if confidence >= 65, boost size slightly (reward good history)
+				if d.Confidence >= 65 {
+					d.PositionSizeUSD *= 1.15
+					applied = append(applied, "conf≥65→size×1.15(放宽)")
+				}
+			case action == "allow_deviation_1.0":
+				// Relaxation: this is informational — the gate already uses 0.5% threshold
+				// A strong EMA20 alignment history means we trust this coin's EMA20 signal
+				applied = append(applied, "ema20_tolerance_relaxed")
 			}
 		}
 	}

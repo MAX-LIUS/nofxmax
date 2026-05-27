@@ -834,6 +834,7 @@ export function StrategyStudioPage() {
           config={editingConfig.evolution}
           onChange={(evolution) => updateConfig('evolution', evolution)}
           disabled={selectedStrategy?.is_default}
+          strategyId={selectedStrategy?.id}
         />
       ),
     },

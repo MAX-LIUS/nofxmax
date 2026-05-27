@@ -447,6 +447,7 @@ const (
 
 type RegimeFilterConfig struct {
 	Enabled               bool                     `json:"enabled"`
+	AuditOnly             bool                     `json:"audit_only,omitempty"`              // Log rejections but don't block (observation mode)
 	AllowedRegimes        []string                 `json:"allowed_regimes,omitempty"`
 	BlockHighFunding      bool                     `json:"block_high_funding"`
 	MaxFundingRateAbs     float64                  `json:"max_funding_rate_abs,omitempty"`

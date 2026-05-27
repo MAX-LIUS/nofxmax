@@ -32,6 +32,7 @@ type EntryGateCheck struct {
 // EntryGateResult is the consolidated outcome of the 3-stage gate pipeline.
 type EntryGateResult struct {
 	Allowed       bool             `json:"allowed"`
+	AuditOnly     bool             `json:"audit_only,omitempty"`
 	Stage         EntryGateStage   `json:"rejected_stage,omitempty"`
 	BlockedBy     string           `json:"blocked_by,omitempty"`
 	BlockReason   string           `json:"block_reason,omitempty"`

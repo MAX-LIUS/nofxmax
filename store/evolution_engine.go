@@ -16,7 +16,8 @@ type EvolutionFactor struct {
 	SampleSize int     `json:"sample_size"` // number of trades contributing
 	Confidence float64 `json:"confidence"`  // 0-1, based on sample size
 	Insight    string  `json:"insight"`
-	UpdatedAt  int64   `json:"updated_at"` // unix ms
+	Stale      bool    `json:"stale,omitempty"` // true if sample<3 and last update >14 days ago
+	UpdatedAt  int64   `json:"updated_at"`      // unix ms
 }
 
 // Adaptation represents a personalized trading adjustment generated from factor analysis.
@@ -216,6 +217,14 @@ func ComputeFactors(trades []TradeOutcome) []EvolutionFactor {
 
 	// Factor 8: Trigger Quality
 	factors = append(factors, computeTriggerQuality(trades, now))
+
+	// Mark stale factors: sample < 3 and last update > 14 days ago
+	staleCutoff := now.Add(-14 * 24 * time.Hour).UnixMilli()
+	for i := range factors {
+		if factors[i].SampleSize < 3 && factors[i].UpdatedAt < staleCutoff {
+			factors[i].Stale = true
+		}
+	}
 
 	return factors
 }
@@ -697,6 +706,35 @@ func GenerateAdaptations(factors []EvolutionFactor) []Adaptation {
 				})
 			}
 		}
+
+		// "放宽" adaptations for high-score factors (score > thresholdHigh)
+		// These RELAX requirements when historical data shows strong performance
+		if f.Score > 65 && !f.Stale {
+			switch f.Name {
+			case FactorTrendPhaseFit:
+				// Strong trend phase fit → allow lower confidence in establishment
+				adaptations = append(adaptations, Adaptation{
+					Condition:     "phase=establishment_relax",
+					Action:        "allow_confidence_65",
+					Reason:        f.Insight,
+					Effectiveness: 0.6,
+					CreatedAt:     now,
+					ExpiresAt:     now + ttl,
+				})
+			case FactorEMA20Alignment:
+				// Strong EMA20 alignment → allow slightly wider deviation tolerance
+				if f.Score > 75 {
+					adaptations = append(adaptations, Adaptation{
+						Condition:     "ema20_strong_alignment",
+						Action:        "allow_deviation_1.0",
+						Reason:        f.Insight,
+						Effectiveness: 0.5,
+						CreatedAt:     now,
+						ExpiresAt:     now + ttl,
+					})
+				}
+			}
+		}
 	}
 
 	return adaptations
@@ -770,11 +808,11 @@ func BuildEvolutionContext(profile *CoinEvolutionProfile) string {
 		return ""
 	}
 
-	// Compute overall fitness score (average of all factors)
+	// Compute overall fitness score (average of non-stale factors)
 	totalScore := 0.0
 	count := 0
 	for _, f := range factors {
-		if f.SampleSize >= 3 {
+		if f.SampleSize >= 3 && !f.Stale {
 			totalScore += f.Score
 			count++
 		}
@@ -786,11 +824,14 @@ func BuildEvolutionContext(profile *CoinEvolutionProfile) string {
 
 	result := fmt.Sprintf("适配度: %.0f/100 (样本%d笔)", avgScore, profile.SampleSize)
 
-	// Add top insights — only the most actionable ones
+	// Add top insights — only the most actionable ones (skip stale)
 	insightCount := 0
 	for _, f := range factors {
 		if insightCount >= 3 {
 			break
+		}
+		if f.Stale {
+			continue
 		}
 		if f.Insight != "" && f.SampleSize >= minSampleForAdaptation && (f.Score < 35 || f.Score > 65) {
 			result += " | " + f.Insight

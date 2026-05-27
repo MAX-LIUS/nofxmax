@@ -48,6 +48,7 @@ export function EvolutionProfilePanel({
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState(false)
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
+  const [hasNewInsight, setHasNewInsight] = useState(false)
 
   useEffect(() => {
     if (!traderId) return
@@ -56,6 +57,17 @@ export function EvolutionProfilePanel({
       .getEvolutionProfiles(traderId)
       .then((data) => {
         setProfiles(data || [])
+        // Check for new insights since last viewed
+        const lastSeen = Number(
+          localStorage.getItem(`evo_last_seen_${traderId}`) || '0'
+        )
+        const latestUpdate = Math.max(
+          ...(data || []).map((p) => p.updated_at || 0),
+          0
+        )
+        if (latestUpdate > lastSeen && lastSeen > 0) {
+          setHasNewInsight(true)
+        }
       })
       .catch(() => setProfiles([]))
       .finally(() => setLoading(false))
@@ -82,14 +94,33 @@ export function EvolutionProfilePanel({
     <div className="mt-4">
       {/* Collapsed summary */}
       <button
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => {
+          const newExpanded = !expanded
+          setExpanded(newExpanded)
+          if (newExpanded && hasNewInsight) {
+            setHasNewInsight(false)
+            const latestUpdate = Math.max(
+              ...profiles.map((p) => p.updated_at || 0),
+              0
+            )
+            localStorage.setItem(
+              `evo_last_seen_${traderId}`,
+              String(latestUpdate)
+            )
+          }
+        }}
         className="w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all hover:bg-white/5"
         style={{
           background: expanded ? 'rgba(99,102,241,0.08)' : 'rgba(0,0,0,0.2)',
           border: `1px solid ${expanded ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.05)'}`,
         }}
       >
-        <span className="text-lg">🧬</span>
+        <span className="text-lg relative">
+          🧬
+          {hasNewInsight && !expanded && (
+            <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+          )}
+        </span>
         <span className="text-sm font-medium text-nofx-text-main">
           进化画像
         </span>

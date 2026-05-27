@@ -1,16 +1,24 @@
+import { useState, useEffect } from 'react'
+import { api } from '../../lib/api'
 import type { EvolutionConfig } from '../../types/strategy'
+import type { EvolutionProfile } from '../../types/trading'
 
 interface EvolutionEditorProps {
   config?: EvolutionConfig
   onChange: (config: EvolutionConfig) => void
   disabled?: boolean
+  strategyId?: string
 }
 
 export function EvolutionEditor({
   config,
   onChange,
   disabled,
+  strategyId,
 }: EvolutionEditorProps) {
+  const [profiles, setProfiles] = useState<EvolutionProfile[]>([])
+  const [loadingProfiles, setLoadingProfiles] = useState(false)
+
   const current: EvolutionConfig = config || {
     enabled: false,
     half_life_days: 14,
@@ -21,9 +29,32 @@ export function EvolutionEditor({
     inject_to_prompt: true,
   }
 
+  // Fetch profiles for the trader using this strategy
+  useEffect(() => {
+    if (!strategyId || !current.enabled) return
+    setLoadingProfiles(true)
+    // Find traders using this strategy via the traders list
+    api
+      .getTraders()
+      .then(async (traders) => {
+        const matching = traders.find((t: any) => t.strategy_id === strategyId)
+        if (matching) {
+          const profs = await api.getEvolutionProfiles(matching.trader_id)
+          setProfiles(profs || [])
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoadingProfiles(false))
+  }, [strategyId, current.enabled])
+
   const update = (patch: Partial<EvolutionConfig>) => {
     onChange({ ...current, ...patch })
   }
+
+  // Collect all active adaptations across all profiles
+  const allAdaptations = profiles.flatMap((p) =>
+    (p.adaptations || []).map((a) => ({ ...a, symbol: p.symbol, side: p.side }))
+  )
 
   return (
     <div className="space-y-4">
@@ -174,6 +205,55 @@ export function EvolutionEditor({
             </div>
           </div>
 
+          {/* Global adaptations preview */}
+          {allAdaptations.length > 0 && (
+            <div
+              className="p-3 rounded-lg"
+              style={{
+                background: 'rgba(0,0,0,0.3)',
+                border: '1px solid rgba(255,255,255,0.05)',
+              }}
+            >
+              <div className="text-xs font-medium text-nofx-text-main mb-2">
+                全局活跃调整 ({allAdaptations.length})
+              </div>
+              <div className="space-y-1 max-h-[200px] overflow-y-auto custom-scrollbar">
+                {allAdaptations.map((a, i) => (
+                  <div key={i} className="flex items-center gap-2 text-[11px]">
+                    <span className="text-nofx-text-main font-medium w-16">
+                      {a.symbol.replace('USDT', '')}{' '}
+                      {a.side.toUpperCase().slice(0, 1)}
+                    </span>
+                    <span
+                      className="px-1.5 py-0.5 rounded text-[9px] font-mono"
+                      style={{
+                        background: 'rgba(246,70,93,0.1)',
+                        color: '#F6465D',
+                        border: '1px solid rgba(246,70,93,0.2)',
+                      }}
+                    >
+                      {a.condition}
+                    </span>
+                    <span className="text-nofx-text-muted">→</span>
+                    <span className="text-nofx-text-main text-[10px]">
+                      {a.action}
+                    </span>
+                    {a.contradictions > 0 && (
+                      <span className="text-amber-400 text-[9px] ml-auto">
+                        ⚠{a.contradictions}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {loadingProfiles && (
+            <div className="text-xs text-nofx-text-muted text-center py-2">
+              加载调整方案...
+            </div>
+          )}
+
           {/* Info box */}
           <div
             className="p-3 rounded-lg text-xs text-nofx-text-muted"
@@ -193,6 +273,7 @@ export function EvolutionEditor({
               <li>
                 评分偏离中性区时，自动生成个性化调整方案（非禁止，而是调参）
               </li>
+              <li>高评分因素会放宽要求（如降低confidence门槛、增加仓位）</li>
               <li>旧数据按半衰期衰减，调整方案到期自动失效，避免信息臃肿</li>
             </ul>
           </div>

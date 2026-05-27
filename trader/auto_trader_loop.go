@@ -477,9 +477,22 @@ func (at *AutoTrader) runCycle() error {
 
 		if !gateResult.Allowed {
 			blockReason := entryGateResultToBlockReason(gateResult)
-			appendRuntimePolicyNote(&d, blockReason)
-			logger.Infof("🚫 Entry gate blocked %s %s: %s", d.Symbol, d.Action, blockReason)
-			logger.Infof("   Gate checks: %s", entryGateChecksLog(gateResult))
+			// Audit-only mode: log the block but allow execution
+			auditOnly := policyMode == store.StrategyControlPolicyModeAuditOnly
+			if !auditOnly && at.config.StrategyConfig != nil {
+				auditOnly = at.config.StrategyConfig.Protection.RegimeFilter.AuditOnly
+			}
+			if auditOnly {
+				gateResult.Allowed = true
+				gateResult.AuditOnly = true
+				gateResult.SizeMultiplier = 0.5
+				logger.Infof("👁 [AUDIT] Gate would block %s %s: %s — allowing with 50%% size", d.Symbol, d.Action, blockReason)
+				logger.Infof("   Gate checks: %s", entryGateChecksLog(gateResult))
+			} else {
+				appendRuntimePolicyNote(&d, blockReason)
+				logger.Infof("🚫 Entry gate blocked %s %s: %s", d.Symbol, d.Action, blockReason)
+				logger.Infof("   Gate checks: %s", entryGateChecksLog(gateResult))
+			}
 		}
 
 		actionRecord := store.DecisionAction{
