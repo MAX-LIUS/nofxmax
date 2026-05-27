@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState, useRef } from 'react'
+import { lazy, Suspense, useEffect, useState, useRef, useMemo } from 'react'
 import { mutate } from 'swr'
 import { api } from '../lib/api'
 const ChartTabs = lazy(() =>
@@ -848,7 +848,7 @@ export function TraderDashboardPage({
         )}
 
         {/* Account Overview */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
           <StatCard
             title={t('totalEquity', language)}
             value={`${account?.total_equity?.toFixed(2) || '0.00'}`}
@@ -879,6 +879,7 @@ export function TraderDashboardPage({
             subtitle={`${t('margin', language)}: ${account?.margin_used_pct?.toFixed(1) || '0.0'}%`}
             icon="📊"
           />
+          <SystemHealthCard decisions={decisions} language={language} />
         </div>
 
         {/* Grid Risk Panel - Only show for grid trading strategy */}
@@ -1398,6 +1399,102 @@ function StatCard({
           {subtitle}
         </div>
       )}
+    </div>
+  )
+}
+
+function SystemHealthCard({
+  decisions,
+  language,
+}: {
+  decisions: DecisionRecord[] | undefined
+  language: string
+}) {
+  const { score, label, color } = useMemo(() => {
+    if (!decisions || decisions.length === 0) {
+      return {
+        score: 50,
+        label: language === 'zh' ? '无数据' : 'No data',
+        color: '#848E9C',
+      }
+    }
+
+    let wins = 0
+    let total = 0
+    let consecutiveLosses = 0
+    let maxConsecutiveLosses = 0
+    let blocks = 0
+    let totalActions = 0
+
+    for (const d of decisions) {
+      for (const a of d.decisions || []) {
+        if (a.action.includes('open')) {
+          totalActions++
+          if (a.success) {
+            wins++
+            total++
+            consecutiveLosses = 0
+          } else if (a.review_context?.control?.decision === 'rejected') {
+            blocks++
+          } else if (a.error) {
+            total++
+            consecutiveLosses++
+            maxConsecutiveLosses = Math.max(
+              maxConsecutiveLosses,
+              consecutiveLosses
+            )
+          }
+        }
+      }
+    }
+
+    const winRate = total > 0 ? wins / total : 0.5
+    const blockRate = totalActions > 0 ? blocks / totalActions : 0
+
+    // Score: base from win rate (0-60), penalty for consecutive losses (-20), block rate adjustment
+    let s = Math.round(winRate * 80)
+    s -= maxConsecutiveLosses * 5
+    if (blockRate > 0.7) s -= 10 // too conservative
+    s = Math.max(0, Math.min(100, s + 20)) // base offset
+
+    let lbl: string
+    let clr: string
+    if (s >= 70) {
+      lbl = language === 'zh' ? '健康' : 'Healthy'
+      clr = '#0ECB81'
+    } else if (s >= 50) {
+      lbl = language === 'zh' ? '一般' : 'Fair'
+      clr = '#F0B90B'
+    } else {
+      lbl = language === 'zh' ? '注意' : 'Caution'
+      clr = '#F6465D'
+    }
+
+    return { score: s, label: lbl, color: clr }
+  }, [decisions, language])
+
+  return (
+    <div className="group nofx-glass p-5 rounded-lg transition-all duration-300 hover:bg-white/5 hover:translate-y-[-2px] border border-white/5 hover:border-nofx-gold/20 relative overflow-hidden">
+      <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity text-4xl grayscale group-hover:grayscale-0">
+        🧬
+      </div>
+      <div className="text-xs mb-2 font-mono uppercase tracking-wider text-nofx-text-muted flex items-center gap-2">
+        {language === 'zh' ? '系统健康' : 'HEALTH'}
+      </div>
+      <div className="flex items-baseline gap-1 mb-1">
+        <div
+          className="text-2xl font-bold font-mono tracking-tight transition-colors"
+          style={{ color }}
+        >
+          {score}
+        </div>
+        <span className="text-xs font-mono text-nofx-text-muted opacity-60">
+          /100
+        </span>
+      </div>
+      <div className="text-xs mt-2 mono opacity-80" style={{ color }}>
+        {label}
+      </div>
     </div>
   )
 }
