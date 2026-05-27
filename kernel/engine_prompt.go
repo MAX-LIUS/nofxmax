@@ -747,6 +747,12 @@ func (e *StrategyEngine) BuildUserPrompt(ctx *Context) string {
 				sb.WriteString(e.formatQuantData(quantData))
 			}
 		}
+		// Evolution profile context (if available)
+		if ctx.EvolutionContexts != nil {
+			if evoCtx, hasEvo := ctx.EvolutionContexts[coin.Symbol]; hasEvo && evoCtx != "" {
+				sb.WriteString("**进化画像**: " + evoCtx + "\n")
+			}
+		}
 		sb.WriteString("\n")
 	}
 	sb.WriteString("\n")

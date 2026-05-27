@@ -665,6 +665,8 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 						at.name, symbol, lastTrade.RealizedPnL, consecutiveLosses,
 						at.cooldownManager.duration*time.Duration(consecutiveLosses))
 				}
+				// Update evolution profile for the closed position
+				go at.updateEvolutionProfile(symbol, side)
 			}
 		}
 	}
@@ -780,6 +782,33 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 		}
 	} else {
 		logger.Infof("⚠️ [%s] Store is nil, cannot get recent trades", at.name)
+	}
+
+	// 7b. Load evolution profiles for candidate coins (non-blocking, best-effort)
+	if at.store != nil {
+		evoContexts := make(map[string]string)
+		for _, coin := range candidateCoins {
+			// Try both long and short profiles, combine
+			for _, side := range []string{"long", "short"} {
+				profile, err := at.store.Evolution().GetProfile(at.id, coin.Symbol, side)
+				if err != nil || profile == nil || profile.SampleSize < 3 {
+					continue
+				}
+				snippet := store.BuildEvolutionContext(profile)
+				if snippet != "" {
+					key := coin.Symbol
+					if existing, ok := evoContexts[key]; ok {
+						evoContexts[key] = existing + " | " + strings.ToUpper(side) + ": " + snippet
+					} else {
+						evoContexts[key] = strings.ToUpper(side) + ": " + snippet
+					}
+				}
+			}
+		}
+		if len(evoContexts) > 0 {
+			ctx.EvolutionContexts = evoContexts
+			logger.Infof("🧬 [%s] Loaded evolution profiles for %d coins", at.name, len(evoContexts))
+		}
 	}
 
 	// 8. Get quantitative data (if enabled in strategy config)

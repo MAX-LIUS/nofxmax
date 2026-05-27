@@ -1096,3 +1096,19 @@ func normalizePositionSideForStore(side string) string {
 func quantitiesEquivalent(a, b float64) bool {
 	return math.Abs(a-b) <= math.Max(0.00000001, math.Max(math.Abs(a), math.Abs(b))*0.0001)
 }
+
+// GetClosedTradesForEvolution fetches recent closed trades for a specific symbol+side,
+// used by the evolution engine to compute factor scores.
+func (s *PositionStore) GetClosedTradesForEvolution(traderID, symbol, side string, limit int) ([]*TraderPosition, error) {
+	var positions []*TraderPosition
+	normalizedSide := strings.ToUpper(side)
+	err := s.db.Where("trader_id = ? AND symbol = ? AND side = ? AND status = ?",
+		traderID, symbol, normalizedSide, "CLOSED").
+		Order("exit_time DESC").
+		Limit(limit).
+		Find(&positions).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to query evolution trades: %w", err)
+	}
+	return positions, nil
+}

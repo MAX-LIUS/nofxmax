@@ -30,6 +30,7 @@ type Store struct {
 	order          *OrderStore
 	grid           *GridStore
 	aiCharge       *AIChargeStore
+	evolution      *EvolutionStore
 	telegramConfig TelegramConfigStore
 
 	mu sync.RWMutex
@@ -168,6 +169,9 @@ func (s *Store) initTables() error {
 	if err := s.AICharge().initTables(); err != nil {
 		return fmt.Errorf("failed to initialize AI charge tables: %w", err)
 	}
+	if err := s.Evolution().AutoMigrate(); err != nil {
+		return fmt.Errorf("failed to initialize evolution tables: %w", err)
+	}
 	return nil
 }
 
@@ -259,6 +263,16 @@ func (s *Store) PositionClose() *PositionCloseEventStore {
 		s.positionClose = NewPositionCloseEventStore(s.gdb)
 	}
 	return s.positionClose
+}
+
+// Evolution gets evolution engine storage
+func (s *Store) Evolution() *EvolutionStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.evolution == nil {
+		s.evolution = NewEvolutionStore(s.gdb)
+	}
+	return s.evolution
 }
 
 // Strategy gets strategy storage
