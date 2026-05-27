@@ -157,14 +157,32 @@ type TradeOutcome struct {
 	CloseReason string
 }
 
-// halfLifeDays controls how quickly old trades lose weight.
-const halfLifeDays = 14.0
+// Default constants for evolution engine. These can be overridden via EvolutionEngineConfig.
+const (
+	defaultHalfLifeDays        = 14.0
+	defaultAdaptationTTLDays   = 30
+	defaultMinSampleAdaptation = 5
+)
 
-// adaptationTTLDays is how long an adaptation stays active without validation.
-const adaptationTTLDays = 30
+// Package-level variables that can be overridden by SetEvolutionConfig.
+var (
+	halfLifeDays          = defaultHalfLifeDays
+	adaptationTTLDays     = defaultAdaptationTTLDays
+	minSampleForAdaptation = defaultMinSampleAdaptation
+)
 
-// minSampleForAdaptation is the minimum trades needed to generate an adaptation.
-const minSampleForAdaptation = 5
+// ApplyEvolutionConfig updates the engine parameters from strategy config.
+func ApplyEvolutionConfig(cfg EvolutionConfig) {
+	if cfg.HalfLifeDays > 0 {
+		halfLifeDays = float64(cfg.HalfLifeDays)
+	}
+	if cfg.AdaptationTTLDays > 0 {
+		adaptationTTLDays = cfg.AdaptationTTLDays
+	}
+	if cfg.MinSampleSize > 0 {
+		minSampleForAdaptation = cfg.MinSampleSize
+	}
+}
 
 // ComputeFactors calculates all factor scores from a set of trade outcomes.
 func ComputeFactors(trades []TradeOutcome) []EvolutionFactor {

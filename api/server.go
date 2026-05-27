@@ -360,6 +360,7 @@ Returns the most recent AI decision for each symbol analyzed in the last scan cy
 Returns: {"total_trades":<int>,"winning_trades":<int>,"win_rate":<float>,"total_pnl":<float>,"sharpe_ratio":<float>,"max_drawdown":<float>}`,
 				s.handleStatistics)
 			s.route(protected, "GET", "/evolution/profiles", "Evolution engine profiles for all coins", s.handleEvolutionProfiles)
+			s.route(protected, "POST", "/evolution/reset", "Reset a specific evolution profile", s.handleResetEvolutionProfile)
 			s.routeWithSchema(protected, "POST", "/traders/:id/backfill-scene-tags", "Backfill entry scene tags for historical positions",
 				`:id = trader_id. Retroactively fills entry_scene_tags from decision record prompts.`,
 				s.handleBackfillSceneTags)

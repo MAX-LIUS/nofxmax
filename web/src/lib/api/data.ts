@@ -153,4 +153,16 @@ export const dataApi = {
     if (!result.success) return []
     return result.data?.blocks || []
   },
+
+  async resetEvolutionProfile(
+    traderId: string,
+    symbol: string,
+    side: string
+  ): Promise<boolean> {
+    const result = await httpClient.post<{ message: string }>(
+      `${API_BASE}/evolution/reset`,
+      { trader_id: traderId, symbol, side }
+    )
+    return result.success
+  },
 }

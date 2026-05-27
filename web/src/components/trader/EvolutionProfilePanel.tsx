@@ -160,6 +160,37 @@ export function EvolutionProfilePanel({
                     样本 {profile.sample_size} 笔 · v{profile.version} · 更新{' '}
                     {formatTimeAgo(profile.updated_at)}
                   </span>
+                  <button
+                    onClick={async (e) => {
+                      e.stopPropagation()
+                      if (
+                        !confirm(
+                          `确认重置 ${profile.symbol} ${profile.side} 的进化画像？将从历史数据重新学习。`
+                        )
+                      )
+                        return
+                      const ok = await api.resetEvolutionProfile(
+                        traderId,
+                        profile.symbol,
+                        profile.side
+                      )
+                      if (ok) {
+                        setProfiles(
+                          profiles.filter(
+                            (p) =>
+                              !(
+                                p.symbol === profile.symbol &&
+                                p.side === profile.side
+                              )
+                          )
+                        )
+                      }
+                    }}
+                    className="ml-auto text-[10px] px-2 py-0.5 rounded text-nofx-text-muted hover:text-red-400 hover:bg-red-500/10 transition-all"
+                    title="重置画像，从历史数据重新学习"
+                  >
+                    重置
+                  </button>
                 </div>
 
                 {/* Factor scores */}

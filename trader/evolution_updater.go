@@ -17,6 +17,11 @@ func (at *AutoTrader) updateEvolutionProfile(symbol, side string) {
 		return
 	}
 
+	// Apply config if available
+	if at.config.StrategyConfig != nil && at.config.StrategyConfig.Evolution.Enabled {
+		store.ApplyEvolutionConfig(at.config.StrategyConfig.Evolution)
+	}
+
 	normalizedSide := strings.ToLower(side)
 	if normalizedSide != "long" && normalizedSide != "short" {
 		return
