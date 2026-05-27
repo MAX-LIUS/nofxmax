@@ -58,6 +58,9 @@ type StrategyConfig struct {
 	// Omitted or unknown modes default to strict to preserve current runtime blocks.
 	StrategyControlPolicy StrategyControlPolicyConfig `json:"strategy_control_policy,omitempty"`
 
+	// Evolution engine configuration
+	Evolution EvolutionConfig `json:"evolution,omitempty"`
+
 	// Grid trading configuration (only used when StrategyType == "grid_trading")
 	GridConfig *GridStrategyConfig `json:"grid_config,omitempty"`
 }
@@ -505,6 +508,17 @@ type PromptSectionsConfig struct {
 	EntryStandards string `json:"entry_standards,omitempty"`
 	// decision process
 	DecisionProcess string `json:"decision_process,omitempty"`
+}
+
+// EvolutionConfig controls the self-evolution engine behavior.
+type EvolutionConfig struct {
+	Enabled            bool    `json:"enabled"`                         // Master switch
+	HalfLifeDays       int     `json:"half_life_days,omitempty"`        // Time decay half-life (default 14)
+	MinSampleSize      int     `json:"min_sample_size,omitempty"`       // Min trades before generating adaptations (default 5)
+	AdaptationTTLDays  int     `json:"adaptation_ttl_days,omitempty"`   // Adaptation expiry (default 30)
+	ScoreThresholdLow  float64 `json:"score_threshold_low,omitempty"`   // Below this triggers adaptation (default 35)
+	ScoreThresholdHigh float64 `json:"score_threshold_high,omitempty"`  // Above this is positive signal (default 65)
+	InjectToPrompt     bool    `json:"inject_to_prompt,omitempty"`      // Whether to inject profiles into AI prompt
 }
 
 // CoinSourceConfig coin source configuration

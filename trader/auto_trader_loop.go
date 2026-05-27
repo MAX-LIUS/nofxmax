@@ -785,7 +785,7 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 	}
 
 	// 7b. Load evolution profiles for candidate coins (non-blocking, best-effort)
-	if at.store != nil {
+	if at.store != nil && strategyConfig.Evolution.Enabled {
 		evoContexts := make(map[string]string)
 		for _, coin := range candidateCoins {
 			// Try both long and short profiles, combine
@@ -805,7 +805,7 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 				}
 			}
 		}
-		if len(evoContexts) > 0 {
+		if len(evoContexts) > 0 && strategyConfig.Evolution.InjectToPrompt {
 			ctx.EvolutionContexts = evoContexts
 			logger.Infof("🧬 [%s] Loaded evolution profiles for %d coins", at.name, len(evoContexts))
 		}
