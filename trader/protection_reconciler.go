@@ -2,7 +2,6 @@ package trader
 
 import (
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -159,7 +158,7 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 	at.reconcileLocalOpenOrderStatuses(symbol, openOrders)
 
 	if currentProtectionState == "native_trailing_armed" || currentProtectionState == "native_partial_trailing_armed" || currentProtectionState == "native_trailing_arming" || currentProtectionState == "native_partial_trailing_arming" {
-		if len(at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, quantity)) == 0 {
+		if len(at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, quantity, 0)) == 0 {
 			logger.Infof("🟣 Protection reconciler: %s %s native trailing state belongs to an old position fingerprint, re-arming current position", symbol, positionSide)
 			currentProtectionState = ""
 			at.clearProtectionState(symbol, side)
@@ -743,11 +742,13 @@ func (at *AutoTrader) persistDynamicProtectionRecordWithDetails(symbol, side, pr
 	// Build PositionFingerprint from actual position state (entry + qty),
 	// not from ruleFingerprint which always has qty=0.
 	positionFingerprint := ""
+	var posCreatedTime int64
 	parts := strings.Split(ruleFingerprint, "|")
 	if len(parts) >= 1 {
 		entryStr := parts[0]
-		// Get actual position quantity from cache
-		posQty := at.getPositionQuantityForFingerprint(symbol, side)
+		// Get actual position quantity and createdTime from cache
+		posQty, posCTime := at.getPositionDetailsForFingerprint(symbol, side)
+		posCreatedTime = posCTime
 		if posQty > 0 {
 			positionFingerprint = fmt.Sprintf("%s|%.8f", entryStr, posQty)
 		} else if len(parts) >= 2 {
@@ -760,6 +761,7 @@ func (at *AutoTrader) persistDynamicProtectionRecordWithDetails(symbol, side, pr
 		Symbol:              symbol,
 		Side:                strings.ToLower(side),
 		PositionFingerprint: positionFingerprint,
+		PositionCreatedTime: posCreatedTime,
 		ProtectionType:      protectionType,
 		RuleFingerprint:     ruleFingerprint,
 		CloseRatioPct:       closeRatioPct,
@@ -776,24 +778,31 @@ func (at *AutoTrader) persistDynamicProtectionRecordWithDetails(symbol, side, pr
 	}
 }
 
-func (at *AutoTrader) getPositionQuantityForFingerprint(symbol, side string) float64 {
+func (at *AutoTrader) getPositionDetailsForFingerprint(symbol, side string) (float64, int64) {
 	positions, err := at.trader.GetPositions()
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	for _, pos := range positions {
 		ps, _ := pos["symbol"].(string)
 		pd, _ := pos["side"].(string)
 		if strings.EqualFold(ps, symbol) && strings.EqualFold(pd, side) {
-			if qty, ok := pos["positionAmt"].(float64); ok && qty > 0 {
-				return qty
+			var qty float64
+			if q, ok := pos["positionAmt"].(float64); ok && q > 0 {
+				qty = q
+			} else if q, ok := pos["quantity"].(float64); ok && q > 0 {
+				qty = q
 			}
-			if qty, ok := pos["quantity"].(float64); ok && qty > 0 {
-				return qty
+			var cTime int64
+			if ct, ok := pos["createdTime"].(int64); ok {
+				cTime = ct
+			} else if ct, ok := pos["createdTime"].(float64); ok {
+				cTime = int64(ct)
 			}
+			return qty, cTime
 		}
 	}
-	return 0
+	return 0, 0
 }
 
 func drawdownRuleFingerprint(entryPrice, quantity float64, rule store.DrawdownTakeProfitRule) string {
@@ -805,7 +814,11 @@ func stableDrawdownRuleFingerprint(entryPrice float64, rule store.DrawdownTakePr
 	return drawdownRuleFingerprint(entryPrice, 0, rule)
 }
 
-func (at *AutoTrader) refreshDrawdownExecutionFingerprint(symbol, side string, entryPrice float64) bool {
+// refreshDrawdownExecutionFingerprint detects if the current position is a
+// completely new position (not just a partial close of the same one).
+// Uses position created time (cTime from exchange) as the identity — this never
+// changes during partial closes, only when a brand new position is opened.
+func (at *AutoTrader) refreshDrawdownExecutionFingerprint(symbol, side string, posCreatedTime int64) bool {
 	key := positionKey(symbol, side)
 
 	at.protectionStateMutex.Lock()
@@ -815,21 +828,24 @@ func (at *AutoTrader) refreshDrawdownExecutionFingerprint(symbol, side string, e
 	}
 	prev, ok := at.drawdownState[key]
 	if !ok || prev == "" {
+		// First time seeing this position — store its identity, no change
+		if posCreatedTime > 0 {
+			at.drawdownState[key] = fmt.Sprintf("%d", posCreatedTime)
+		}
 		return false
 	}
-	// Extract previous entry price and compare with tolerance.
-	// Partial closes cause OKX to recalculate avg entry price (tiny drift <0.1%).
-	// Only treat as "new position" if drift > 0.5%.
-	parts := strings.Split(prev, "|")
-	if len(parts) == 0 {
+	// If posCreatedTime is 0 (exchange didn't provide it), fall back to no-op
+	if posCreatedTime <= 0 {
 		return false
 	}
-	prevEntry, err := strconv.ParseFloat(parts[0], 64)
-	if err != nil || prevEntry <= 0 {
+	storedTime, err := strconv.ParseInt(strings.Split(prev, "|")[0], 10, 64)
+	if err != nil {
+		// Legacy format (was entry price) — migrate to new format, don't clear
+		at.drawdownState[key] = fmt.Sprintf("%d", posCreatedTime)
 		return false
 	}
-	drift := math.Abs(entryPrice-prevEntry) / prevEntry
-	if drift > 0.005 {
+	if storedTime != posCreatedTime {
+		// Different position entirely — clear armed records
 		delete(at.drawdownState, key)
 		return true
 	}

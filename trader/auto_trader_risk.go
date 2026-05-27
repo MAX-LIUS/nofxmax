@@ -138,6 +138,14 @@ func (at *AutoTrader) checkPositionDrawdown() {
 		if quantity < 0 {
 			quantity = -quantity
 		}
+		var posCreatedTime int64
+		if ct, ok := pos["createdTime"]; ok {
+			if ctInt, ok2 := ct.(int64); ok2 {
+				posCreatedTime = ctInt
+			} else if ctFloat, ok3 := ct.(float64); ok3 {
+				posCreatedTime = int64(ctFloat)
+			}
+		}
 
 		rules := at.getActiveDrawdownRulesForPosition(symbol, side)
 		if len(rules) == 0 {
@@ -158,8 +166,8 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			at.UpdatePeakPnL(symbol, side, currentPnLPct)
 		}
 
-		if fingerprintChanged := at.refreshDrawdownExecutionFingerprint(symbol, side, entryPrice); fingerprintChanged {
-			logger.Infof("🟠 Drawdown monitor: %s %s drawdown entry fingerprint changed, clearing previous execution guard and armed records", symbol, side)
+		if fingerprintChanged := at.refreshDrawdownExecutionFingerprint(symbol, side, posCreatedTime); fingerprintChanged {
+			logger.Infof("🟠 Drawdown monitor: %s %s position identity changed (new position), clearing previous execution guard and armed records", symbol, side)
 			at.clearArmedDrawdownRecords(symbol, side)
 		}
 
@@ -644,10 +652,10 @@ func (at *AutoTrader) clearArmedDrawdownRecords(symbol, side string) {
 }
 
 func (at *AutoTrader) getArmedDrawdownRecords(symbol, side string) []store.DynamicProtectionRecord {
-	return at.getArmedDrawdownRecordsForPosition(symbol, side, 0, 0)
+	return at.getArmedDrawdownRecordsForPosition(symbol, side, 0, 0, 0)
 }
 
-func (at *AutoTrader) getArmedDrawdownRecordsForPosition(symbol, side string, entryPrice, quantity float64) []store.DynamicProtectionRecord {
+func (at *AutoTrader) getArmedDrawdownRecordsForPosition(symbol, side string, entryPrice, quantity float64, posCreatedTime int64) []store.DynamicProtectionRecord {
 	if at.store == nil {
 		return nil
 	}
@@ -669,20 +677,27 @@ func (at *AutoTrader) getArmedDrawdownRecordsForPosition(symbol, side string, en
 		if record.Status != "armed" || !isDynamicNativeProtectionType(record.ProtectionType) {
 			continue
 		}
-		if currentEntryFingerprint != "" && record.PositionFingerprint != "" {
-			if !entryPriceWithinTolerance(recordEntryFingerprint(record.PositionFingerprint), currentEntryFingerprint, 0.005) {
-				logger.Infof("🟣 Drawdown record ignored for current position: %s %s record_fp=%s current_fp=%s type=%s", symbol, side, record.PositionFingerprint, currentFingerprint, record.ProtectionType)
+		// Position identity check: prefer cTime (exact, never changes during partial close)
+		if posCreatedTime > 0 && record.PositionCreatedTime > 0 {
+			if record.PositionCreatedTime != posCreatedTime {
+				logger.Infof("🟣 Drawdown record ignored (cTime mismatch): %s %s record_ctime=%d current_ctime=%d type=%s", symbol, side, record.PositionCreatedTime, posCreatedTime, record.ProtectionType)
 				continue
 			}
-			// Ignore and mark stale records from a closed position (qty=0) when current position is open
-			if quantity > 0 {
-				parts := strings.Split(record.PositionFingerprint, "|")
-				if len(parts) >= 2 {
-					if recordQty, err := strconv.ParseFloat(parts[1], 64); err == nil && recordQty == 0 {
-						logger.Infof("🟠 Drawdown record stale (closed position qty=0): %s %s record_fp=%s current_fp=%s — marking cleared", symbol, side, record.PositionFingerprint, currentFingerprint)
-						staleKeys = append(staleKeys, key)
-						continue
-					}
+		} else if currentEntryFingerprint != "" && record.PositionFingerprint != "" {
+			// Fallback for old records without cTime: use entry price tolerance
+			if !entryPriceWithinTolerance(recordEntryFingerprint(record.PositionFingerprint), currentEntryFingerprint, 0.005) {
+				logger.Infof("🟣 Drawdown record ignored (entry price mismatch): %s %s record_fp=%s current_fp=%s type=%s", symbol, side, record.PositionFingerprint, currentFingerprint, record.ProtectionType)
+				continue
+			}
+		}
+		// Ignore and mark stale records from a closed position (qty=0) when current position is open
+		if quantity > 0 && record.PositionFingerprint != "" {
+			parts := strings.Split(record.PositionFingerprint, "|")
+			if len(parts) >= 2 {
+				if recordQty, err := strconv.ParseFloat(parts[1], 64); err == nil && recordQty == 0 {
+					logger.Infof("🟠 Drawdown record stale (closed position qty=0): %s %s record_fp=%s current_fp=%s — marking cleared", symbol, side, record.PositionFingerprint, currentFingerprint)
+					staleKeys = append(staleKeys, key)
+					continue
 				}
 			}
 		}
@@ -735,7 +750,7 @@ func entryPriceWithinTolerance(recordFP, currentFP string, tolerance float64) bo
 }
 
 func (at *AutoTrader) hasArmedNativeDrawdownForPosition(symbol, side string, entryPrice float64) bool {
-	return len(at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, 0)) > 0
+	return len(at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, 0, 0)) > 0
 }
 
 func (at *AutoTrader) getArmedDrawdownRuleFingerprints(symbol, side string) map[string]struct{} {
@@ -744,7 +759,7 @@ func (at *AutoTrader) getArmedDrawdownRuleFingerprints(symbol, side string) map[
 
 func (at *AutoTrader) getArmedDrawdownRuleFingerprintsForPosition(symbol, side string, entryPrice, quantity float64) map[string]struct{} {
 	armed := make(map[string]struct{})
-	for _, record := range at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, quantity) {
+	for _, record := range at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, quantity, 0) {
 		if record.RuleFingerprint != "" {
 			armed[record.RuleFingerprint] = struct{}{}
 		}
@@ -816,7 +831,7 @@ func (at *AutoTrader) getHighestArmedTierMinProfit(symbol, side string, entryPri
 	}
 	// Also check persisted DB records to survive container restarts.
 	// Fingerprint format: entryPrice|quantity|MinProfitPct|MaxDrawdownPct|...
-	for _, record := range at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, quantity) {
+	for _, record := range at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, quantity, 0) {
 		parts := strings.Split(record.RuleFingerprint, "|")
 		if len(parts) >= 3 {
 			if minProfit, err := strconv.ParseFloat(parts[2], 64); err == nil && minProfit > highest {

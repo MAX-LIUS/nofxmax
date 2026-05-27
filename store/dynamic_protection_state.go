@@ -15,6 +15,7 @@ type DynamicProtectionRecord struct {
 	Symbol              string  `json:"symbol"`
 	Side                string  `json:"side"`
 	PositionFingerprint string  `json:"position_fingerprint"`
+	PositionCreatedTime int64   `json:"position_created_time,omitempty"`
 	ProtectionType      string  `json:"protection_type"`
 	RuleFingerprint     string  `json:"rule_fingerprint"`
 	CloseRatioPct       float64 `json:"close_ratio_pct"`
