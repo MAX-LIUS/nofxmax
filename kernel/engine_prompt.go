@@ -750,7 +750,7 @@ func (e *StrategyEngine) BuildUserPrompt(ctx *Context) string {
 		// Evolution profile context (if available)
 		if ctx.EvolutionContexts != nil {
 			if evoCtx, hasEvo := ctx.EvolutionContexts[coin.Symbol]; hasEvo && evoCtx != "" {
-				sb.WriteString("**进化画像**: " + evoCtx + "\n")
+				sb.WriteString("Historical Performance Profile: " + evoCtx + "\n")
 			}
 		}
 		sb.WriteString("\n")
@@ -834,6 +834,12 @@ func (e *StrategyEngine) formatPositionInfo(index int, pos PositionInfo, ctx *Co
 		if ctx.QuantDataMap != nil {
 			if quantData, hasQuant := ctx.QuantDataMap[pos.Symbol]; hasQuant {
 				sb.WriteString(e.formatQuantData(quantData))
+			}
+		}
+		// Evolution context for position management decisions
+		if ctx.EvolutionContexts != nil {
+			if evoCtx, hasEvo := ctx.EvolutionContexts[pos.Symbol]; hasEvo && evoCtx != "" {
+				sb.WriteString("Historical Performance: " + evoCtx + "\n")
 			}
 		}
 		sb.WriteString("\n")

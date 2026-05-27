@@ -363,6 +363,7 @@ Returns: {"total_trades":<int>,"winning_trades":<int>,"win_rate":<float>,"total_
 			s.routeWithSchema(protected, "POST", "/traders/:id/backfill-scene-tags", "Backfill entry scene tags for historical positions",
 				`:id = trader_id. Retroactively fills entry_scene_tags from decision record prompts.`,
 				s.handleBackfillSceneTags)
+			s.route(protected, "GET", "/gate-blocks", "Recent gate-blocked trades (?trader_id=xxx&limit=50)", s.handleGateBlocks)
 
 		}
 	}

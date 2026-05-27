@@ -136,23 +136,24 @@ const (
 
 // SceneTagsData is the parsed version of EntrySceneTags JSON.
 type SceneTagsData struct {
-	TrendPhase string  `json:"trend_phase"`
-	Regime     string  `json:"regime"`
-	Chg4h      float64 `json:"chg4h"`
-	Chg1h      float64 `json:"chg1h"`
-	EMA20Dev   float64 `json:"ema20_dev"`
-	Direction  string  `json:"direction"`
+	TrendPhase  string  `json:"trend_phase"`
+	Regime      string  `json:"regime"`
+	Chg4h       float64 `json:"chg4h"`
+	Chg1h       float64 `json:"chg1h"`
+	EMA20Dev    float64 `json:"ema20_dev"`
+	Direction   string  `json:"direction"`
+	TriggerType string  `json:"trigger_type,omitempty"`
 }
 
 // TradeOutcome is a simplified trade record for factor computation.
 type TradeOutcome struct {
-	Symbol     string
-	Side       string
-	PnLPct     float64
-	IsWin      bool
-	CloseTime  time.Time
-	EntryTime  time.Time
-	SceneTags  SceneTagsData
+	Symbol      string
+	Side        string
+	PnLPct      float64
+	IsWin       bool
+	CloseTime   time.Time
+	EntryTime   time.Time
+	SceneTags   SceneTagsData
 	CloseReason string
 }
 
@@ -194,6 +195,9 @@ func ComputeFactors(trades []TradeOutcome) []EvolutionFactor {
 
 	// Factor 7: Volatility Regime
 	factors = append(factors, computeVolatilityRegime(trades, now))
+
+	// Factor 8: Trigger Quality
+	factors = append(factors, computeTriggerQuality(trades, now))
 
 	return factors
 }
@@ -541,6 +545,76 @@ func computeVolatilityRegime(trades []TradeOutcome, now time.Time) EvolutionFact
 	}
 }
 
+func computeTriggerQuality(trades []TradeOutcome, now time.Time) EvolutionFactor {
+	// Group by trigger type category: rejection (support/resistance), breakout (retest/confirmed), none
+	type bucket struct{ wins, total float64 }
+	buckets := map[string]*bucket{}
+	for _, t := range trades {
+		w := decayWeight(t.CloseTime, now)
+		triggerCat := categorizeTrigger(t.SceneTags.TriggerType)
+		if _, ok := buckets[triggerCat]; !ok {
+			buckets[triggerCat] = &bucket{}
+		}
+		buckets[triggerCat].total += w
+		if t.IsWin {
+			buckets[triggerCat].wins += w
+		}
+	}
+
+	// Find best and worst trigger categories
+	bestCat := ""
+	bestWR := 0.0
+	worstCat := ""
+	worstWR := 1.0
+	sampleSize := 0
+	for cat, b := range buckets {
+		if b.total < 1 {
+			continue
+		}
+		wr := b.wins / b.total
+		if wr > bestWR {
+			bestWR = wr
+			bestCat = cat
+		}
+		if wr < worstWR {
+			worstWR = wr
+			worstCat = cat
+		}
+		sampleSize += int(b.total)
+	}
+
+	score := bestWR * 100
+	insight := ""
+	if bestCat != "" {
+		insight = fmt.Sprintf("最佳trigger: %s (胜率%.0f%%)", bestCat, bestWR*100)
+	}
+	if worstCat != "" && worstWR < 0.35 && worstCat != bestCat {
+		insight += fmt.Sprintf(", %s胜率仅%.0f%%", worstCat, worstWR*100)
+	}
+
+	return EvolutionFactor{
+		Name:       FactorTriggerQuality,
+		Score:      clampScore(score),
+		SampleSize: sampleSize,
+		Confidence: sampleConfidence(sampleSize),
+		Insight:    insight,
+		UpdatedAt:  now.UnixMilli(),
+	}
+}
+
+func categorizeTrigger(triggerType string) string {
+	switch triggerType {
+	case "support_rejection_confirmed", "resistance_rejection_confirmed":
+		return "rejection"
+	case "resistance_breakout_retest_successful", "support_breakdown_retest_failed":
+		return "breakout_retest"
+	case "higher_low_breakout_confirmed", "lower_high_breakdown_confirmed":
+		return "structure_break"
+	default:
+		return "unknown"
+	}
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // Adaptation Generation
 // ══════════════════════════════════════════════════════════════════════
@@ -589,6 +663,17 @@ func GenerateAdaptations(factors []EvolutionFactor) []Adaptation {
 					Action:        "require_confidence_85,reduce_size_50%",
 					Reason:        f.Insight,
 					Effectiveness: 0.6,
+					CreatedAt:     now,
+					ExpiresAt:     now + ttl,
+				})
+			}
+		case FactorTriggerQuality:
+			if f.Score < 35 {
+				adaptations = append(adaptations, Adaptation{
+					Condition:     "trigger_low_quality",
+					Action:        "require_confidence_85,reduce_size_50%",
+					Reason:        f.Insight,
+					Effectiveness: 0.65,
 					CreatedAt:     now,
 					ExpiresAt:     now + ttl,
 				})
@@ -681,23 +766,32 @@ func BuildEvolutionContext(profile *CoinEvolutionProfile) string {
 	}
 	avgScore := totalScore / float64(count)
 
-	result := fmt.Sprintf("综合适配度: %.0f/100 | 样本: %d笔", avgScore, profile.SampleSize)
+	result := fmt.Sprintf("适配度: %.0f/100 (样本%d笔)", avgScore, profile.SampleSize)
 
-	// Add top insights
+	// Add top insights — only the most actionable ones
+	insightCount := 0
 	for _, f := range factors {
+		if insightCount >= 3 {
+			break
+		}
 		if f.Insight != "" && f.SampleSize >= minSampleForAdaptation && (f.Score < 35 || f.Score > 65) {
-			result += "\n  " + f.Insight
+			result += " | " + f.Insight
+			insightCount++
 		}
 	}
 
-	// Add active adaptations
-	if len(adaptations) > 0 {
-		result += "\n  调整: "
-		for i, a := range adaptations {
+	// Add active adaptations as explicit constraints
+	pruned := PruneExpiredAdaptations(adaptations)
+	if len(pruned) > 0 {
+		result += " | 约束: "
+		for i, a := range pruned {
 			if i > 0 {
 				result += "; "
 			}
 			result += a.Condition + "→" + a.Action
+			if a.Reason != "" && len(a.Reason) < 40 {
+				result += "(" + a.Reason + ")"
+			}
 		}
 	}
 

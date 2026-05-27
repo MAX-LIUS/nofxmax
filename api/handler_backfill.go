@@ -48,7 +48,7 @@ func (s *Server) handleBackfillSceneTags(c *gin.Context) {
 			continue
 		}
 
-		tags := reconstructSceneTagsFromInputPrompt(decision.InputPrompt, pos.Symbol, pos.Side)
+		tags := reconstructSceneTagsFromInputPrompt(decision.InputPrompt, decision.DecisionJSON, pos.Symbol, pos.Side)
 		if tags == "" {
 			skipped++
 			continue
@@ -73,7 +73,7 @@ func (s *Server) handleBackfillSceneTags(c *gin.Context) {
 // reconstructSceneTagsFromInputPrompt parses the AI input prompt to extract market state
 // at the time of the decision. The prompt contains formatted market data including
 // price, EMA20, price changes, regime, and trend phase.
-func reconstructSceneTagsFromInputPrompt(inputPrompt, symbol, side string) string {
+func reconstructSceneTagsFromInputPrompt(inputPrompt, decisionJSON, symbol, side string) string {
 	if inputPrompt == "" {
 		return ""
 	}
@@ -91,8 +91,19 @@ func reconstructSceneTagsFromInputPrompt(inputPrompt, symbol, side string) strin
 	chg4h = extractFloat(symbolSection, `(?:4h_change|chg_4h|price_change_4h)[=:\s]+([+-]?\d+\.?\d*)`)
 	chg1h = extractFloat(symbolSection, `(?:1h_change|chg_1h|price_change_1h)[=:\s]+([+-]?\d+\.?\d*)`)
 
+	// Also try composite snapshot format: "1h=1.23% 4h=-0.45%"
+	if chg4h == 0 {
+		chg4h = extractFloat(symbolSection, `4h=([+-]?\d+\.?\d*)%`)
+	}
+	if chg1h == 0 {
+		chg1h = extractFloat(symbolSection, `1h=([+-]?\d+\.?\d*)%`)
+	}
+
 	// Extract current price and EMA20 for deviation calculation
 	price := extractFloat(symbolSection, `current_price\s*=\s*(\d+\.?\d*)`)
+	if price == 0 {
+		price = extractFloat(symbolSection, `price=(\d+\.?\d*)`)
+	}
 	ema20 := extractFloat(symbolSection, `current_ema20\s*=\s*(\d+\.?\d*)`)
 	if price > 0 && ema20 > 0 {
 		ema20Dev = (price - ema20) / ema20 * 100
@@ -143,6 +154,12 @@ func reconstructSceneTagsFromInputPrompt(inputPrompt, symbol, side string) strin
 		"chg1h":       roundTo2(chg1h),
 		"ema20_dev":   roundTo2(ema20Dev),
 		"direction":   direction,
+	}
+
+	// Try to extract trigger_type from the decision JSON output
+	triggerType := extractString(decisionJSON, `"trigger_type"\s*:\s*"([^"]+)"`)
+	if triggerType != "" {
+		tags["trigger_type"] = triggerType
 	}
 
 	data, err := json.Marshal(tags)

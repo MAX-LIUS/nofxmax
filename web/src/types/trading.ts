@@ -835,4 +835,18 @@ export interface SceneTags {
   chg1h: number
   ema20_dev: number
   direction: string
+  trigger_type?: string
+}
+
+export interface GateBlockEntry {
+  timestamp: string
+  cycle_number: number
+  symbol: string
+  action: string
+  confidence?: number
+  blocked_by: string
+  block_reason: string
+  failed_checks?: string[]
+  regime?: string
+  gate_score?: number
 }

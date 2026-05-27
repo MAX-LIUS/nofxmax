@@ -497,8 +497,13 @@ func (at *AutoTrader) buildEntrySceneTags(symbol string) string {
 		ema20Dev = (data.CurrentPrice - data.CurrentEMA20) / data.CurrentEMA20 * 100
 	}
 
-	tags := fmt.Sprintf(`{"trend_phase":"%s","regime":"%s","chg4h":%.2f,"chg1h":%.2f,"ema20_dev":%.2f,"direction":"%s"}`,
-		phase.Phase, regime, data.PriceChange4h, data.PriceChange1h, ema20Dev, phase.Direction)
+	triggerType := ""
+	if at.lastTriggerTypes != nil {
+		triggerType = at.lastTriggerTypes[symbol]
+	}
+
+	tags := fmt.Sprintf(`{"trend_phase":"%s","regime":"%s","chg4h":%.2f,"chg1h":%.2f,"ema20_dev":%.2f,"direction":"%s","trigger_type":"%s"}`,
+		phase.Phase, regime, data.PriceChange4h, data.PriceChange1h, ema20Dev, phase.Direction, triggerType)
 	return tags
 }
 

@@ -8,6 +8,7 @@ import type {
   PositionHistoryResponse,
   OpenOrder,
   EvolutionProfile,
+  GateBlockEntry,
 } from '../../types'
 import { API_BASE, httpClient } from './helpers'
 
@@ -143,5 +144,13 @@ export const dataApi = {
     )
     if (!result.success) return []
     return result.data || []
+  },
+
+  async getGateBlocks(traderId: string, limit = 50): Promise<GateBlockEntry[]> {
+    const result = await httpClient.get<{ blocks: GateBlockEntry[] }>(
+      `${API_BASE}/gate-blocks?trader_id=${traderId}&limit=${limit}`
+    )
+    if (!result.success) return []
+    return result.data?.blocks || []
   },
 }

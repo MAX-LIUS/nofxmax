@@ -420,6 +420,14 @@ func (at *AutoTrader) runCycle() error {
 	// Store market data for scene tag recording during position creation
 	at.lastMarketDataMap = ctx.MarketDataMap
 
+	// Store trigger types from decisions for scene tag recording
+	at.lastTriggerTypes = make(map[string]string)
+	for _, d := range sortedDecisions {
+		if d.TriggerType != "" && isOpenAction(d.Action) {
+			at.lastTriggerTypes[d.Symbol] = d.TriggerType
+		}
+	}
+
 	// Execute decisions and record results
 	for _, d := range sortedDecisions {
 		// Check if trader is stopped before each decision (allow immediate stop during execution)

@@ -174,8 +174,12 @@ func (at *AutoTrader) applyEvolutionAdaptations(d *kernel.Decision, data *market
 			matched = ema20Contradicted
 		case "chg4h_gt_2.5":
 			matched = chg4hAbs > 2.5
+		case "trigger_low_quality":
+			// Matches when the trigger type is in the "worst" category for this coin
+			// For now, always apply when condition exists (the adaptation itself is only
+			// generated when trigger quality score is very low)
+			matched = true
 		case "trigger_tf=15m":
-			// Would need trigger TF info from decision — skip for now
 			continue
 		}
 

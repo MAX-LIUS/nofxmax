@@ -180,6 +180,7 @@ type AutoTrader struct {
 	safeMode              bool                                      // Safe mode: no new positions, protect existing ones
 	safeModeReason        string                                    // Why safe mode was activated
 	lastMarketDataMap     map[string]*market.Data                   // Market data from current cycle (for scene tag recording)
+	lastTriggerTypes      map[string]string                         // Trigger types from current cycle decisions (symbol → trigger_type)
 }
 
 // NewAutoTrader creates an automatic trader
