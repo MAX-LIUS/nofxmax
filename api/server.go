@@ -361,6 +361,7 @@ Returns: {"total_trades":<int>,"winning_trades":<int>,"win_rate":<float>,"total_
 				s.handleStatistics)
 			s.route(protected, "GET", "/evolution/profiles", "Evolution engine profiles for all coins", s.handleEvolutionProfiles)
 			s.route(protected, "POST", "/evolution/reset", "Reset a specific evolution profile", s.handleResetEvolutionProfile)
+			s.route(protected, "POST", "/evolution/rebuild/:id", "Rebuild all evolution profiles from historical trades", s.handleRebuildEvolutionProfiles)
 			s.routeWithSchema(protected, "POST", "/traders/:id/backfill-scene-tags", "Backfill entry scene tags for historical positions",
 				`:id = trader_id. Retroactively fills entry_scene_tags from decision record prompts.`,
 				s.handleBackfillSceneTags)
