@@ -1444,18 +1444,36 @@ function PositionRow({
                     exhaustion: '#FF4444',
                   }
                   const phaseColor = phaseColors[tags.trend_phase] || '#848E9C'
+                  // EMA20 alignment: aligned if deviation matches side direction
+                  const isLong = side === 'LONG'
+                  const ema20Aligned = isLong
+                    ? tags.ema20_dev >= -0.5
+                    : tags.ema20_dev <= 0.5
+                  const ema20Color = ema20Aligned ? '#0ECB81' : '#F6465D'
                   return (
-                    <span
-                      className="px-1.5 py-0.5 rounded text-[10px] font-medium"
-                      style={{
-                        background: `${phaseColor}22`,
-                        color: phaseColor,
-                        border: `1px solid ${phaseColor}33`,
-                      }}
-                      title={`Phase: ${tags.trend_phase} | 4h: ${tags.chg4h?.toFixed(1)}% | EMA20: ${tags.ema20_dev?.toFixed(1)}%`}
-                    >
-                      {tags.trend_phase?.slice(0, 3)}
-                    </span>
+                    <>
+                      <span
+                        className="px-1.5 py-0.5 rounded text-[10px] font-medium"
+                        style={{
+                          background: `${phaseColor}22`,
+                          color: phaseColor,
+                          border: `1px solid ${phaseColor}33`,
+                        }}
+                        title={`Phase: ${tags.trend_phase} | 4h: ${tags.chg4h?.toFixed(1)}% | EMA20: ${tags.ema20_dev?.toFixed(1)}%`}
+                      >
+                        {tags.trend_phase?.slice(0, 3)}
+                      </span>
+                      <span
+                        className="px-1 py-0.5 rounded text-[9px]"
+                        style={{
+                          background: `${ema20Color}15`,
+                          color: ema20Color,
+                        }}
+                        title={`EMA20 deviation: ${tags.ema20_dev?.toFixed(2)}% | ${ema20Aligned ? 'Aligned' : 'Contradicted'}`}
+                      >
+                        {ema20Aligned ? 'E✓' : 'E✗'}
+                      </span>
+                    </>
                   )
                 } catch {
                   return null
@@ -1729,6 +1747,91 @@ function PositionRow({
                   </div>
                 </div>
               </div>
+
+              {/* Entry Market Snapshot — from scene tags */}
+              {position.entry_scene_tags &&
+                (() => {
+                  try {
+                    const tags = JSON.parse(position.entry_scene_tags)
+                    if (!tags.trend_phase && !tags.chg4h) return null
+                    const isLong = side === 'LONG'
+                    const ema20Aligned = isLong
+                      ? tags.ema20_dev >= -0.5
+                      : tags.ema20_dev <= 0.5
+                    return (
+                      <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-[11px]">
+                        <div
+                          className="text-[10px] mb-1.5"
+                          style={{ color: '#848E9C' }}
+                        >
+                          入场市场快照 / Entry Snapshot
+                        </div>
+                        <div
+                          className="flex flex-wrap gap-3"
+                          style={{ color: '#EAECEF' }}
+                        >
+                          <span>
+                            Phase:{' '}
+                            <span
+                              style={{
+                                color:
+                                  tags.trend_phase === 'establishment'
+                                    ? '#0ECB81'
+                                    : tags.trend_phase === 'extension'
+                                      ? '#F6465D'
+                                      : '#F0B90B',
+                              }}
+                            >
+                              {tags.trend_phase || '—'}
+                            </span>
+                          </span>
+                          <span>
+                            4h:{' '}
+                            <span
+                              style={{
+                                color: tags.chg4h > 0 ? '#0ECB81' : '#F6465D',
+                              }}
+                            >
+                              {tags.chg4h > 0 ? '+' : ''}
+                              {tags.chg4h?.toFixed(2)}%
+                            </span>
+                          </span>
+                          <span>
+                            1h:{' '}
+                            <span
+                              style={{
+                                color: tags.chg1h > 0 ? '#0ECB81' : '#F6465D',
+                              }}
+                            >
+                              {tags.chg1h > 0 ? '+' : ''}
+                              {tags.chg1h?.toFixed(2)}%
+                            </span>
+                          </span>
+                          <span>
+                            EMA20:{' '}
+                            <span
+                              style={{
+                                color: ema20Aligned ? '#0ECB81' : '#F6465D',
+                              }}
+                            >
+                              {tags.ema20_dev > 0 ? '+' : ''}
+                              {tags.ema20_dev?.toFixed(2)}%{' '}
+                              {ema20Aligned ? '✓' : '✗'}
+                            </span>
+                          </span>
+                          <span>Regime: {tags.regime || '—'}</span>
+                          {tags.trigger_type && (
+                            <span>
+                              Trigger: {tags.trigger_type.replace(/_/g, ' ')}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  } catch {
+                    return null
+                  }
+                })()}
 
               {position.close_events && position.close_events.length > 0 && (
                 <div>

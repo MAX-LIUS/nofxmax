@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api } from '../../lib/api'
+import { FactorRadarChart } from './FactorRadarChart'
 import type { EvolutionProfile, EvolutionFactor } from '../../types'
 
 interface EvolutionProfilePanelProps {
@@ -192,6 +193,18 @@ export function EvolutionProfilePanel({
                     重置
                   </button>
                 </div>
+
+                {/* Radar chart */}
+                {profile.factors && profile.factors.length >= 3 && (
+                  <FactorRadarChart
+                    factors={profile.factors.map((f: EvolutionFactor) => ({
+                      name: f.name,
+                      score: f.score,
+                      label: (factorLabels[f.name] || f.name).slice(0, 4),
+                    }))}
+                    size={180}
+                  />
+                )}
 
                 {/* Factor scores */}
                 <div className="grid grid-cols-2 gap-2 mb-3">

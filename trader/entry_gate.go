@@ -341,7 +341,33 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 					Detail:   fmt.Sprintf("趋势延伸阶段禁止顺势开仓 (4h=%.2f%%, EMA20偏离=%.2f%%) — 等回调到EMA20附近", data.PriceChange4h, trendPhase.ExtensionPct),
 					Values:   fmt.Sprintf("phase=%s chg4h=%.4f extension=%.4f action=%s", trendPhase.Phase, data.PriceChange4h, trendPhase.ExtensionPct, d.Action),
 				})
+			} else {
+				// Counter-trend or neutral in extension: allow but require high confidence
+				minConf := 85
+				confPassed := d.Confidence >= minConf || d.Confidence == 0
+				checks = append(checks, EntryGateCheck{
+					Code:     "trend_phase_extension_high_conf",
+					Stage:    string(EntryGateStageMarketState),
+					Passed:   confPassed,
+					Enforced: false,
+					Penalty:  20,
+					Detail:   fmt.Sprintf("extension阶段逆势/中性交易需confidence≥%d (当前%d)", minConf, d.Confidence),
+					Values:   fmt.Sprintf("phase=%s confidence=%d min=%d", trendPhase.Phase, d.Confidence, minConf),
+				})
 			}
+		case market.TrendPhaseContinuation:
+			// Continuation: require confidence >= 75 (soft check, deducts score if not met)
+			minConf := 75
+			confPassed := d.Confidence >= minConf || d.Confidence == 0
+			checks = append(checks, EntryGateCheck{
+				Code:     "trend_phase_continuation_conf",
+				Stage:    string(EntryGateStageMarketState),
+				Passed:   confPassed,
+				Enforced: false,
+				Penalty:  15,
+				Detail:   fmt.Sprintf("continuation阶段需confidence≥%d (当前%d) — 趋势已展开，需更高确信度", minConf, d.Confidence),
+				Values:   fmt.Sprintf("phase=%s confidence=%d min=%d chg4h=%.4f", trendPhase.Phase, d.Confidence, minConf, data.PriceChange4h),
+			})
 		default:
 			checks = append(checks, EntryGateCheck{
 				Code:     "trend_phase_ok",
@@ -913,6 +939,8 @@ var gateCheckPenalties = map[string]int{
 	"protection_target_before_first_target": 12,
 	"data_diagnostics":                      8,
 	"coin_momentum_counter":                 15,
+	"trend_phase_continuation_conf":         15,
+	"trend_phase_extension_high_conf":       20,
 }
 
 // computeGateScore calculates a weighted score from all checks.
