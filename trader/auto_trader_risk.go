@@ -670,7 +670,7 @@ func (at *AutoTrader) getArmedDrawdownRecordsForPosition(symbol, side string, en
 			continue
 		}
 		if currentEntryFingerprint != "" && record.PositionFingerprint != "" {
-			if recordEntryFingerprint(record.PositionFingerprint) != currentEntryFingerprint {
+			if !entryPriceWithinTolerance(recordEntryFingerprint(record.PositionFingerprint), currentEntryFingerprint, 0.005) {
 				logger.Infof("🟣 Drawdown record ignored for current position: %s %s record_fp=%s current_fp=%s type=%s", symbol, side, record.PositionFingerprint, currentFingerprint, record.ProtectionType)
 				continue
 			}
@@ -725,6 +725,15 @@ func recordEntryFingerprint(positionFingerprint string) string {
 	return parts[0]
 }
 
+func entryPriceWithinTolerance(recordFP, currentFP string, tolerance float64) bool {
+	recordPrice, err1 := strconv.ParseFloat(recordFP, 64)
+	currentPrice, err2 := strconv.ParseFloat(currentFP, 64)
+	if err1 != nil || err2 != nil || recordPrice <= 0 || currentPrice <= 0 {
+		return recordFP == currentFP
+	}
+	return math.Abs(recordPrice-currentPrice)/recordPrice <= tolerance
+}
+
 func (at *AutoTrader) hasArmedNativeDrawdownForPosition(symbol, side string, entryPrice float64) bool {
 	return len(at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, 0)) > 0
 }
@@ -767,7 +776,7 @@ func (at *AutoTrader) hasMatchingNativeTrailingOrderForRule(symbol, side string,
 		activationOK := true
 		if order.StopPrice > 0 && plannedActivationPrice > 0 {
 			activationDrift := math.Abs(order.StopPrice-plannedActivationPrice) / math.Max(math.Abs(order.StopPrice), math.Abs(plannedActivationPrice))
-			activationOK = activationDrift <= 0.004
+			activationOK = activationDrift <= 0.01
 		}
 		if activationOK && math.Abs(callback-plannedCallbackRate) <= callbackTolerance {
 			return true
@@ -900,10 +909,10 @@ func (at *AutoTrader) getDrawdownArmRulesForSelectedRule(entryPrice, quantity fl
 			logger.Infof("🟣 Drawdown tier already executed: %s %s fingerprint=%s (trailing order filled, not re-arming)", symbol, side, fingerprint)
 			return nil
 		}
-		// Prevent re-arm loop: if we recently armed this fingerprint (within 90s) and
+		// Prevent re-arm loop: if we recently armed this fingerprint (within 300s) and
 		// the trailing order is not visible, OKX likely activated and filled it immediately
 		// (activation price already breached). Don't re-arm to avoid spamming orders.
-		if lastArm, ok := at.nativeTrailingArmTime[fingerprint]; ok && time.Since(lastArm) < 90*time.Second {
+		if lastArm, ok := at.nativeTrailingArmTime[fingerprint]; ok && time.Since(lastArm) < 300*time.Second {
 			logger.Infof("🟠 Drawdown native trailing arm cooldown: %s %s fingerprint=%s (armed %.0fs ago, not re-arming)", symbol, side, fingerprint, time.Since(lastArm).Seconds())
 			return nil
 		}
@@ -941,8 +950,12 @@ func (at *AutoTrader) getDrawdownArmRules(currentPnLPct, entryPrice, quantity fl
 			logger.Infof("🟣 Drawdown arm skipped: %s %s highest tier already armed fingerprint=%s (min=%.4f close=%.1f%%)", symbol, side, fingerprint, bestRule.MinProfitPct, bestRule.CloseRatioPct)
 			return nil
 		}
+		if at.isDrawdownTierExecuted(symbol, side, bestRule) {
+			logger.Infof("🟣 Drawdown tier already executed: %s %s fingerprint=%s (not re-arming)", symbol, side, fingerprint)
+			return nil
+		}
 		// Prevent re-arm loop when OKX immediately fills trailing orders (activation already breached)
-		if lastArm, ok := at.nativeTrailingArmTime[fingerprint]; ok && time.Since(lastArm) < 90*time.Second {
+		if lastArm, ok := at.nativeTrailingArmTime[fingerprint]; ok && time.Since(lastArm) < 300*time.Second {
 			logger.Infof("🟠 Drawdown arm cooldown: %s %s fingerprint=%s (armed %.0fs ago, not re-arming)", symbol, side, fingerprint, time.Since(lastArm).Seconds())
 			return nil
 		}

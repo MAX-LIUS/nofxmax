@@ -2,6 +2,7 @@ package trader
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -806,7 +807,6 @@ func stableDrawdownRuleFingerprint(entryPrice float64, rule store.DrawdownTakePr
 
 func (at *AutoTrader) refreshDrawdownExecutionFingerprint(symbol, side string, entryPrice float64) bool {
 	key := positionKey(symbol, side)
-	base := fmt.Sprintf("%.8f|", entryPrice)
 
 	at.protectionStateMutex.Lock()
 	defer at.protectionStateMutex.Unlock()
@@ -817,7 +817,19 @@ func (at *AutoTrader) refreshDrawdownExecutionFingerprint(symbol, side string, e
 	if !ok || prev == "" {
 		return false
 	}
-	if !strings.HasPrefix(prev, base) && prev != strings.TrimSuffix(base, "|") {
+	// Extract previous entry price and compare with tolerance.
+	// Partial closes cause OKX to recalculate avg entry price (tiny drift <0.1%).
+	// Only treat as "new position" if drift > 0.5%.
+	parts := strings.Split(prev, "|")
+	if len(parts) == 0 {
+		return false
+	}
+	prevEntry, err := strconv.ParseFloat(parts[0], 64)
+	if err != nil || prevEntry <= 0 {
+		return false
+	}
+	drift := math.Abs(entryPrice-prevEntry) / prevEntry
+	if drift > 0.005 {
 		delete(at.drawdownState, key)
 		return true
 	}
