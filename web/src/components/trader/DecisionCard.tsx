@@ -78,6 +78,13 @@ function formatControlDecisionLabel(
   if (normalized === 'downgraded_to_wait')
     return { label: 'downgraded to wait', tone: 'warn' }
   if (normalized === 'accepted') return { label: 'accepted', tone: 'neutral' }
+  // Gate score format: "accepted_score_75"
+  const scoreMatch = normalized.match(/accepted_score_(\d+)/)
+  if (scoreMatch) {
+    const score = parseInt(scoreMatch[1])
+    const tone = score < 75 ? 'warn' : 'neutral'
+    return { label: `score ${score}`, tone }
+  }
   return { label: normalized.replace(/_/g, ' '), tone: 'neutral' }
 }
 
