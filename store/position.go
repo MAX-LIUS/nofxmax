@@ -725,6 +725,11 @@ func (s *PositionStore) GetClosedPositionsWithOffset(traderID string, limit, off
 	return positions, nil
 }
 
+func (s *PositionStore) UpdateSceneTags(positionID int64, tags string) error {
+	return s.db.Model(&TraderPosition{}).Where("id = ?", positionID).
+		Update("entry_scene_tags", tags).Error
+}
+
 // GetRecentlyClosedSyncAbsentPosition returns the most recent position closed via
 // sync_absent_from_exchange for the same symbol/side within the specified delay window.
 // The fill's trade time may be earlier than the sync_absent exit_time (exchange executes

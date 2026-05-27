@@ -506,6 +506,13 @@ func (at *AutoTrader) runCycle() error {
 			actionRecord.Error = blockReason
 			record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("🚫 %s %s blocked: %s", d.Symbol, d.Action, blockReason))
 		} else {
+			// Apply gate score size adjustment for borderline trades
+			if gateResult.SizeMultiplier > 0 && gateResult.SizeMultiplier < 1.0 {
+				originalSize := d.PositionSizeUSD
+				d.PositionSizeUSD *= gateResult.SizeMultiplier
+				logger.Infof("📊 Gate score %d/100 → size %.0f→%.0f (×%.2f) for %s %s",
+					gateResult.Score, originalSize, d.PositionSizeUSD, gateResult.SizeMultiplier, d.Symbol, d.Action)
+			}
 			// Apply evolution adaptations before execution (adjust size/confidence, not block)
 			if at.config.StrategyConfig != nil && at.config.StrategyConfig.Evolution.Enabled {
 				at.applyEvolutionAdaptations(&d, ctx.MarketDataMap[d.Symbol])

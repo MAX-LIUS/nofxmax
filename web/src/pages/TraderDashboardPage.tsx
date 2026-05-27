@@ -9,6 +9,7 @@ const ChartTabs = lazy(() =>
 import { DecisionCard } from '../components/trader/DecisionCard'
 import { PositionProtectionPanel } from '../components/trader/PositionProtectionPanel'
 import { EvolutionProfilePanel } from '../components/trader/EvolutionProfilePanel'
+import { InsightPanel } from '../components/trader/InsightPanel'
 const PositionHistory = lazy(() =>
   import('../components/trader/PositionHistory').then((m) => ({
     default: m.PositionHistory,
@@ -1306,6 +1307,15 @@ export function TraderDashboardPage({
             })()}
           </div>
         </div>
+
+        {/* Smart Insights Panel */}
+        {selectedTraderId && decisions && (
+          <InsightPanel
+            traderId={selectedTraderId}
+            decisions={decisions}
+            language={language}
+          />
+        )}
 
         {/* Position History Section */}
         {selectedTraderId && (

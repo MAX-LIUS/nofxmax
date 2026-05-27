@@ -26,6 +26,7 @@ type EntryGateCheck struct {
 	Detail   string `json:"detail"`
 	Values   string `json:"values,omitempty"`
 	Enforced bool   `json:"enforced"`
+	Penalty  int    `json:"penalty,omitempty"` // score deduction when failed (0 = use default)
 }
 
 // EntryGateResult is the consolidated outcome of the 3-stage gate pipeline.
@@ -42,6 +43,8 @@ type EntryGateResult struct {
 	ATR14Pct      float64          `json:"atr14_pct,omitempty"`
 	FundingRate   float64          `json:"funding_rate,omitempty"`
 	EffectiveRR   float64          `json:"effective_rr,omitempty"`
+	Score         int              `json:"score"`
+	SizeMultiplier float64         `json:"size_multiplier"`
 }
 
 // entryGateInput collects all inputs needed for gate evaluation.
@@ -59,8 +62,10 @@ type entryGateInput struct {
 // evaluateEntryGate runs the 3-stage entry gate pipeline.
 // Stages are mutually exclusive: if Stage 1 blocks, Stages 2-3 are not evaluated.
 // All checks within a stage DO run so the rejection shows the full picture.
+// After all stages pass, a weighted score is computed from soft failures to
+// determine position size adjustment (score 60-75 → reduce size, >75 → normal).
 func evaluateEntryGate(input entryGateInput) EntryGateResult {
-	result := EntryGateResult{Allowed: true}
+	result := EntryGateResult{Allowed: true, Score: 100, SizeMultiplier: 1.0}
 	if input.Decision == nil || !isOpenAction(input.Decision.Action) {
 		return result
 	}
@@ -75,6 +80,8 @@ func evaluateEntryGate(input entryGateInput) EntryGateResult {
 		result.BlockReason = reason
 		result.FailedCodes = failedCodes(stage1Checks)
 		result.EnforcedCodes = enforcedFailedCodes(stage1Checks)
+		result.Score = 0
+		result.SizeMultiplier = 0
 		return result
 	}
 
@@ -88,6 +95,8 @@ func evaluateEntryGate(input entryGateInput) EntryGateResult {
 		result.BlockReason = reason
 		result.FailedCodes = failedCodes(result.Checks)
 		result.EnforcedCodes = enforcedFailedCodes(result.Checks)
+		result.Score = 0
+		result.SizeMultiplier = 0
 		return result
 	}
 
@@ -101,11 +110,20 @@ func evaluateEntryGate(input entryGateInput) EntryGateResult {
 		result.BlockReason = reason
 		result.FailedCodes = failedCodes(result.Checks)
 		result.EnforcedCodes = enforcedFailedCodes(result.Checks)
+		result.Score = 0
+		result.SizeMultiplier = 0
 		return result
 	}
 
 	result.FailedCodes = failedCodes(result.Checks)
 	result.EnforcedCodes = enforcedFailedCodes(result.Checks)
+
+	// ── Weighted Score Computation ──
+	// Soft failures (Enforced=false) deduct from the base score of 100.
+	// This determines position size adjustment for borderline trades.
+	result.Score = computeGateScore(result.Checks)
+	result.SizeMultiplier = scoreToSizeMultiplier(result.Score)
+
 	return result
 }
 
@@ -885,6 +903,57 @@ func enforcedFailedCodes(checks []EntryGateCheck) []string {
 	return codes
 }
 
+// gateCheckPenalties defines score deductions for soft (non-enforced) check failures.
+// Checks not listed here use a default penalty of 10.
+var gateCheckPenalties = map[string]int{
+	"range_middle_without_edge_setup":       15,
+	"net_rr_below_min":                      20,
+	"unsupported_setup_type":                10,
+	"sl_distance_below_vol_buffer":          10,
+	"protection_target_before_first_target": 12,
+	"data_diagnostics":                      8,
+	"coin_momentum_counter":                 15,
+}
+
+// computeGateScore calculates a weighted score from all checks.
+// Starts at 100, deducts points for each failed non-enforced check.
+func computeGateScore(checks []EntryGateCheck) int {
+	score := 100
+	for _, c := range checks {
+		if c.Passed || c.Enforced {
+			continue
+		}
+		penalty := c.Penalty
+		if penalty <= 0 {
+			if p, ok := gateCheckPenalties[c.Code]; ok {
+				penalty = p
+			} else {
+				penalty = 10
+			}
+		}
+		score -= penalty
+	}
+	if score < 0 {
+		score = 0
+	}
+	return score
+}
+
+// scoreToSizeMultiplier converts a gate score to a position size multiplier.
+// Score >75: full size (1.0)
+// Score 60-75: linear reduction from 1.0 to 0.5
+// Score <60: should have been blocked (returns 0.3 as safety)
+func scoreToSizeMultiplier(score int) float64 {
+	if score >= 75 {
+		return 1.0
+	}
+	if score >= 60 {
+		// Linear interpolation: 75→1.0, 60→0.5
+		return 0.5 + float64(score-60)/15.0*0.5
+	}
+	return 0.3
+}
+
 func getRegimeFilterConfig(cfg *store.StrategyConfig) store.RegimeFilterConfig {
 	if cfg == nil {
 		return store.RegimeFilterConfig{}
@@ -1273,6 +1342,9 @@ func entryGateResultToControlOutcome(result EntryGateResult, d *kernel.Decision)
 
 	if result.Allowed {
 		control.Decision = "accepted"
+		if result.Score < 100 {
+			control.Decision = fmt.Sprintf("accepted_score_%d", result.Score)
+		}
 	} else {
 		control.Decision = "rejected"
 		control.NoOrderPlaced = true
