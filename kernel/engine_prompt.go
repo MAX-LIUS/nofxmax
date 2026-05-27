@@ -1176,6 +1176,12 @@ func (e *StrategyEngine) formatMarketContextV2(symbol string, data *market.Data)
 	var sb strings.Builder
 	sb.WriteString("Execution Regime Guidance:\n")
 	sb.WriteString(fmt.Sprintf("  regime=%s structure_mode=%s fibonacci_mode=%s\n", ctx.RegimeRules.Regime, ctx.RegimeRules.StructureMode, ctx.RegimeRules.FibonacciMode))
+	if ctx.TrendPhase != nil {
+		sb.WriteString(fmt.Sprintf("  trend_phase=%s direction=%s extension=%.1f%% momentum_decay=%.2f\n", ctx.TrendPhase.Phase, ctx.TrendPhase.Direction, ctx.TrendPhase.ExtensionPct, ctx.TrendPhase.MomentumDecay))
+		if ctx.TrendPhase.Warning != "" {
+			sb.WriteString(fmt.Sprintf("  ⚠️ %s\n", ctx.TrendPhase.Warning))
+		}
+	}
 	if len(ctx.RegimeRules.AllowedSetups) > 0 {
 		sb.WriteString(fmt.Sprintf("  allowed_setups=%s\n", strings.Join(ctx.RegimeRules.AllowedSetups, ",")))
 	}
