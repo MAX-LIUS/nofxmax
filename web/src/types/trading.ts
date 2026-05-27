@@ -718,6 +718,7 @@ export interface HistoricalPosition {
   close_events?: PositionCloseEvent[]
   protection_snapshot?: ProtectionSnapshot
   protection_runtime?: ProtectionRuntime
+  entry_scene_tags?: string // JSON: {trend_phase, regime, chg4h, chg1h, ema20_dev, direction}
   created_at: string
   updated_at: string
 }
@@ -795,4 +796,43 @@ export interface GridRiskInfo {
   // Breakout state
   breakout_level: string
   breakout_direction: string
+}
+
+// Evolution Engine Types
+export interface EvolutionFactor {
+  name: string
+  score: number
+  sample_size: number
+  confidence: number
+  insight: string
+  updated_at: number
+}
+
+export interface EvolutionAdaptation {
+  condition: string
+  action: string
+  reason: string
+  effectiveness: number
+  created_at: number
+  expires_at: number
+  contradictions: number
+}
+
+export interface EvolutionProfile {
+  symbol: string
+  side: string
+  sample_size: number
+  version: number
+  updated_at: number
+  factors: EvolutionFactor[]
+  adaptations: EvolutionAdaptation[]
+}
+
+export interface SceneTags {
+  trend_phase: string
+  regime: string
+  chg4h: number
+  chg1h: number
+  ema20_dev: number
+  direction: string
 }

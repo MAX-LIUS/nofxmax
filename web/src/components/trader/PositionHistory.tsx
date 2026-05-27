@@ -4,7 +4,13 @@ import { useLanguage } from '../../contexts/LanguageContext'
 import { t, type Language } from '../../i18n/translations'
 import { MetricTooltip } from '../common/MetricTooltip'
 import { formatPrice, formatQuantity } from '../../utils/format'
-import { formatCompactLevelList, formatTimeframeTrail, formatFibSummary, formatRiskRewardLinkage, formatAlignmentNotes } from './reviewContextSummary'
+import {
+  formatCompactLevelList,
+  formatTimeframeTrail,
+  formatFibSummary,
+  formatRiskRewardLinkage,
+  formatAlignmentNotes,
+} from './reviewContextSummary'
 import { CompactEntryRationaleBlock } from './CompactEntryRationaleBlock'
 import type {
   HistoricalPosition,
@@ -62,49 +68,144 @@ type CloseSourcePresentation = {
   group: 'ai' | 'protection' | 'sync' | 'manual' | 'unknown'
 }
 
-function summarizeCloseSource(rawSource?: string, rawReason?: string, orderType?: string, hasDecisionCycle?: boolean, hasReview?: boolean): CloseSourcePresentation {
+function summarizeCloseSource(
+  rawSource?: string,
+  rawReason?: string,
+  orderType?: string,
+  hasDecisionCycle?: boolean,
+  hasReview?: boolean
+): CloseSourcePresentation {
   const source = String(rawSource || '').toLowerCase()
   const reason = String(rawReason || '').toLowerCase()
   const type = String(orderType || '').toUpperCase()
   const merged = `${source} ${reason}`.trim()
 
-  if (merged.includes('managed_drawdown')) return { label: 'Protection · Managed drawdown', confidence: 'high', group: 'protection' }
-  if (merged.includes('native_trailing') || merged.includes('trailing')) return { label: 'Protection · Native trailing', confidence: 'high', group: 'protection' }
-  if (merged.includes('break_even')) return { label: 'Protection · Break-even stop', confidence: 'high', group: 'protection' }
-  if (merged.includes('ladder_tp')) return { label: 'Protection · Ladder TP', confidence: 'high', group: 'protection' }
-  if (merged.includes('ladder_sl')) return { label: 'Protection · Ladder SL', confidence: 'high', group: 'protection' }
-  if (merged.includes('full_tp')) return { label: 'Protection · Full TP', confidence: 'high', group: 'protection' }
-  if (merged.includes('full_sl')) return { label: 'Protection · Full SL', confidence: 'high', group: 'protection' }
-  if (merged.includes('manual')) return { label: 'Manual close', confidence: 'high', group: 'manual' }
-  if (source === 'sync') return { label: 'Exchange sync attribution', confidence: 'low', group: 'sync' }
-
-  if (merged.includes('ai_close') || merged === 'close_long' || merged === 'close_short' || merged.includes('close_long') || merged.includes('close_short') || type === 'AI_CLOSE') {
-    if (hasDecisionCycle || hasReview) {
-      return { label: 'AI proactive close', detail: 'decision-linked', confidence: 'medium', group: 'ai' }
+  if (merged.includes('managed_drawdown'))
+    return {
+      label: 'Protection · Managed drawdown',
+      confidence: 'high',
+      group: 'protection',
     }
-    return { label: 'AI/sync close attribution', detail: 'not decision-linked', confidence: 'low', group: 'sync' }
+  if (merged.includes('native_trailing') || merged.includes('trailing'))
+    return {
+      label: 'Protection · Native trailing',
+      confidence: 'high',
+      group: 'protection',
+    }
+  if (merged.includes('break_even'))
+    return {
+      label: 'Protection · Break-even stop',
+      confidence: 'high',
+      group: 'protection',
+    }
+  if (merged.includes('ladder_tp'))
+    return {
+      label: 'Protection · Ladder TP',
+      confidence: 'high',
+      group: 'protection',
+    }
+  if (merged.includes('ladder_sl'))
+    return {
+      label: 'Protection · Ladder SL',
+      confidence: 'high',
+      group: 'protection',
+    }
+  if (merged.includes('full_tp'))
+    return {
+      label: 'Protection · Full TP',
+      confidence: 'high',
+      group: 'protection',
+    }
+  if (merged.includes('full_sl'))
+    return {
+      label: 'Protection · Full SL',
+      confidence: 'high',
+      group: 'protection',
+    }
+  if (merged.includes('manual'))
+    return { label: 'Manual close', confidence: 'high', group: 'manual' }
+  if (source === 'sync')
+    return {
+      label: 'Exchange sync attribution',
+      confidence: 'low',
+      group: 'sync',
+    }
+
+  if (
+    merged.includes('ai_close') ||
+    merged === 'close_long' ||
+    merged === 'close_short' ||
+    merged.includes('close_long') ||
+    merged.includes('close_short') ||
+    type === 'AI_CLOSE'
+  ) {
+    if (hasDecisionCycle || hasReview) {
+      return {
+        label: 'AI proactive close',
+        detail: 'decision-linked',
+        confidence: 'medium',
+        group: 'ai',
+      }
+    }
+    return {
+      label: 'AI/sync close attribution',
+      detail: 'not decision-linked',
+      confidence: 'low',
+      group: 'sync',
+    }
   }
 
-  if (!source && !reason) return { label: 'Unknown close source', confidence: 'low', group: 'unknown' }
-  return { label: rawSource || rawReason || 'Unknown close source', confidence: 'low', group: 'unknown' }
+  if (!source && !reason)
+    return {
+      label: 'Unknown close source',
+      confidence: 'low',
+      group: 'unknown',
+    }
+  return {
+    label: rawSource || rawReason || 'Unknown close source',
+    confidence: 'low',
+    group: 'unknown',
+  }
 }
 
 function getCloseSourceBadgeStyle(presentation: CloseSourcePresentation) {
   switch (presentation.group) {
     case 'ai':
-      return { background: 'rgba(96,165,250,0.14)', color: '#60A5FA', border: '1px solid rgba(96,165,250,0.3)' }
+      return {
+        background: 'rgba(96,165,250,0.14)',
+        color: '#60A5FA',
+        border: '1px solid rgba(96,165,250,0.3)',
+      }
     case 'protection':
-      return { background: 'rgba(168,85,247,0.14)', color: '#C084FC', border: '1px solid rgba(168,85,247,0.3)' }
+      return {
+        background: 'rgba(168,85,247,0.14)',
+        color: '#C084FC',
+        border: '1px solid rgba(168,85,247,0.3)',
+      }
     case 'manual':
-      return { background: 'rgba(14,203,129,0.14)', color: '#0ECB81', border: '1px solid rgba(14,203,129,0.3)' }
+      return {
+        background: 'rgba(14,203,129,0.14)',
+        color: '#0ECB81',
+        border: '1px solid rgba(14,203,129,0.3)',
+      }
     case 'sync':
-      return { background: 'rgba(251,191,36,0.14)', color: '#F0B90B', border: '1px solid rgba(251,191,36,0.3)' }
+      return {
+        background: 'rgba(251,191,36,0.14)',
+        color: '#F0B90B',
+        border: '1px solid rgba(251,191,36,0.3)',
+      }
     default:
-      return { background: 'rgba(132,142,156,0.14)', color: '#AAB2BD', border: '1px solid rgba(132,142,156,0.25)' }
+      return {
+        background: 'rgba(132,142,156,0.14)',
+        color: '#AAB2BD',
+        border: '1px solid rgba(132,142,156,0.25)',
+      }
   }
 }
 
-function summarizeCloseEventFlow(closeEvents: HistoricalPosition['close_events'] | undefined) {
+function summarizeCloseEventFlow(
+  closeEvents: HistoricalPosition['close_events'] | undefined
+) {
   const events = closeEvents || []
   if (events.length === 0) return null
   const sources = new Map<string, number>()
@@ -112,7 +213,13 @@ function summarizeCloseEventFlow(closeEvents: HistoricalPosition['close_events']
   let totalRatio = 0
   for (const event of events) {
     const hasReview = Boolean(event.decision_review?.review_context)
-    const presentation = summarizeCloseSource(event.execution_source, event.close_reason, event.execution_type, Boolean(event.decision_cycle), hasReview)
+    const presentation = summarizeCloseSource(
+      event.execution_source,
+      event.close_reason,
+      event.execution_type,
+      Boolean(event.decision_cycle),
+      hasReview
+    )
     sources.set(presentation.label, (sources.get(presentation.label) || 0) + 1)
     if (event.decision_cycle || hasReview) linkedDecisionCount += 1
     totalRatio += Number(event.close_ratio_pct || 0)
@@ -121,12 +228,16 @@ function summarizeCloseEventFlow(closeEvents: HistoricalPosition['close_events']
     eventCount: events.length,
     linkedDecisionCount,
     totalRatio,
-    sourceBreakdown: Array.from(sources.entries()).map(([label, count]) => `${label} × ${count}`),
+    sourceBreakdown: Array.from(sources.entries()).map(
+      ([label, count]) => `${label} × ${count}`
+    ),
     isFragmentedSyncLike: events.length >= 3 && linkedDecisionCount === 0,
   }
 }
 
-function findPrimaryOpenDecision(review?: DecisionReviewRef): DecisionAction | undefined {
+function findPrimaryOpenDecision(
+  review?: DecisionReviewRef
+): DecisionAction | undefined {
   if (review?.matched_decision) return review.matched_decision
   return (review?.decisions || []).find((decision) => {
     const action = String(decision.action || '').toLowerCase()
@@ -148,8 +259,24 @@ type EntryLinkageStatus = {
   targetSource?: 'resistance' | 'swing_high' | 'fibonacci'
 }
 
-function pickNearestLinkSource(target: number, tolerance: number, sources: Array<{ kind: 'support' | 'resistance' | 'swing_low' | 'swing_high' | 'fibonacci'; values: number[] }>): 'support' | 'resistance' | 'swing_low' | 'swing_high' | 'fibonacci' | undefined {
-  let best: { kind: 'support' | 'resistance' | 'swing_low' | 'swing_high' | 'fibonacci'; dist: number } | null = null
+function pickNearestLinkSource(
+  target: number,
+  tolerance: number,
+  sources: Array<{
+    kind: 'support' | 'resistance' | 'swing_low' | 'swing_high' | 'fibonacci'
+    values: number[]
+  }>
+):
+  | 'support'
+  | 'resistance'
+  | 'swing_low'
+  | 'swing_high'
+  | 'fibonacci'
+  | undefined {
+  let best: {
+    kind: 'support' | 'resistance' | 'swing_low' | 'swing_high' | 'fibonacci'
+    dist: number
+  } | null = null
   for (const source of sources) {
     for (const value of source.values) {
       const dist = Math.abs(value - target)
@@ -162,27 +289,70 @@ function pickNearestLinkSource(target: number, tolerance: number, sources: Array
   return best?.kind
 }
 
-function getEntryLinkageStatus(audit: EntryStructureAuditConfig | undefined, summary: EntryReviewSummary | undefined): EntryLinkageStatus | null {
+function getEntryLinkageStatus(
+  audit: EntryStructureAuditConfig | undefined,
+  summary: EntryReviewSummary | undefined
+): EntryLinkageStatus | null {
   if (!audit?.require_invalidation_target_linkage || !summary) return null
-  const rr = summary.risk_reward as { entry?: number; invalidation?: number; first_target?: number } | undefined
-  const levels = summary.key_levels as { support?: number[]; resistance?: number[]; swing_lows?: number[]; swing_highs?: number[]; fibonacci?: { swing_low?: number; swing_high?: number; levels?: number[] } } | undefined
-  if (!rr?.entry || !rr?.invalidation || !rr?.first_target) return { label: 'linkage missing', tone: 'danger', invalidLinked: false, targetLinked: false }
-  const supports = (levels?.support || []).filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
-  const resistances = (levels?.resistance || []).filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
-  const swingLows = (levels?.swing_lows || []).filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
-  const swingHighs = (levels?.swing_highs || []).filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
-  const fibLevels = (levels?.fibonacci?.levels || []).filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+  const rr = summary.risk_reward as
+    | { entry?: number; invalidation?: number; first_target?: number }
+    | undefined
+  const levels = summary.key_levels as
+    | {
+        support?: number[]
+        resistance?: number[]
+        swing_lows?: number[]
+        swing_highs?: number[]
+        fibonacci?: {
+          swing_low?: number
+          swing_high?: number
+          levels?: number[]
+        }
+      }
+    | undefined
+  if (!rr?.entry || !rr?.invalidation || !rr?.first_target)
+    return {
+      label: 'linkage missing',
+      tone: 'danger',
+      invalidLinked: false,
+      targetLinked: false,
+    }
+  const supports = (levels?.support || []).filter(
+    (v): v is number => typeof v === 'number' && Number.isFinite(v)
+  )
+  const resistances = (levels?.resistance || []).filter(
+    (v): v is number => typeof v === 'number' && Number.isFinite(v)
+  )
+  const swingLows = (levels?.swing_lows || []).filter(
+    (v): v is number => typeof v === 'number' && Number.isFinite(v)
+  )
+  const swingHighs = (levels?.swing_highs || []).filter(
+    (v): v is number => typeof v === 'number' && Number.isFinite(v)
+  )
+  const fibLevels = (levels?.fibonacci?.levels || []).filter(
+    (v): v is number => typeof v === 'number' && Number.isFinite(v)
+  )
   if (levels?.fibonacci?.swing_low) fibLevels.push(levels.fibonacci.swing_low)
   if (levels?.fibonacci?.swing_high) fibLevels.push(levels.fibonacci.swing_high)
   const riskDist = Math.abs(rr.entry - rr.invalidation)
   const targetDist = Math.abs(rr.first_target - rr.entry)
-  const tol = Math.max(0.0001, Math.min(Math.max(riskDist, targetDist) * 0.35, Math.max(rr.entry, rr.first_target, rr.invalidation) * 0.02))
+  const tol = Math.max(
+    0.0001,
+    Math.min(
+      Math.max(riskDist, targetDist) * 0.35,
+      Math.max(rr.entry, rr.first_target, rr.invalidation) * 0.02
+    )
+  )
   const invalidation = rr.invalidation
   const firstTarget = rr.first_target
   const invalidAnchors = [...supports, ...swingLows, ...fibLevels]
   const targetAnchors = [...resistances, ...swingHighs, ...fibLevels]
-  const invalidLinked = invalidAnchors.some((v) => Math.abs(v - invalidation) <= tol)
-  const targetLinked = targetAnchors.some((v) => Math.abs(v - firstTarget) <= tol)
+  const invalidLinked = invalidAnchors.some(
+    (v) => Math.abs(v - invalidation) <= tol
+  )
+  const targetLinked = targetAnchors.some(
+    (v) => Math.abs(v - firstTarget) <= tol
+  )
   const invalidSource = pickNearestLinkSource(invalidation, tol, [
     { kind: 'support', values: supports },
     { kind: 'swing_low', values: swingLows },
@@ -193,9 +363,32 @@ function getEntryLinkageStatus(audit: EntryStructureAuditConfig | undefined, sum
     { kind: 'swing_high', values: swingHighs },
     { kind: 'fibonacci', values: fibLevels },
   ]) as 'resistance' | 'swing_high' | 'fibonacci' | undefined
-  if (invalidLinked && targetLinked) return { label: 'linked', tone: 'neutral', invalidLinked, targetLinked, invalidSource, targetSource }
-  if (invalidLinked || targetLinked) return { label: 'partial linkage', tone: 'warn', invalidLinked, targetLinked, invalidSource, targetSource }
-  return { label: 'linkage missing', tone: 'danger', invalidLinked, targetLinked, invalidSource, targetSource }
+  if (invalidLinked && targetLinked)
+    return {
+      label: 'linked',
+      tone: 'neutral',
+      invalidLinked,
+      targetLinked,
+      invalidSource,
+      targetSource,
+    }
+  if (invalidLinked || targetLinked)
+    return {
+      label: 'partial linkage',
+      tone: 'warn',
+      invalidLinked,
+      targetLinked,
+      invalidSource,
+      targetSource,
+    }
+  return {
+    label: 'linkage missing',
+    tone: 'danger',
+    invalidLinked,
+    targetLinked,
+    invalidSource,
+    targetSource,
+  }
 }
 
 export function getDecisionAuditSnapshot(review?: DecisionReviewRef) {
@@ -203,32 +396,57 @@ export function getDecisionAuditSnapshot(review?: DecisionReviewRef) {
   const ctx = decision?.review_context
   const rr = ctx?.risk_reward
   const control = ctx?.control
-  const executionConstraintItems = formatExecutionConstraintItems(ctx?.execution_constraints)
-  const executionQualityItems = formatExecutionQualityItems(ctx?.extra?.execution_quality)
+  const executionConstraintItems = formatExecutionConstraintItems(
+    ctx?.execution_constraints
+  )
+  const executionQualityItems = formatExecutionQualityItems(
+    ctx?.extra?.execution_quality
+  )
   const actionAudit = formatActionAudit(control)
   const normalizedDecision = String(control?.decision || '').toLowerCase()
   const controlStatus = normalizedDecision
     ? {
         label: formatControlDecisionLabel(normalizedDecision),
-        tone: normalizedDecision === 'rejected' ? 'danger' : normalizedDecision === 'overridden' || isDowngradedDecision(normalizedDecision) ? 'warn' : 'neutral' as const,
+        tone:
+          normalizedDecision === 'rejected'
+            ? 'danger'
+            : normalizedDecision === 'overridden' ||
+                isDowngradedDecision(normalizedDecision)
+              ? 'warn'
+              : ('neutral' as const),
       }
     : null
   const controlBadges = [
     control?.effective_rr && Number.isFinite(control.effective_rr)
-      ? { label: `eff ${formatCompactRr(control.effective_rr)} · ${formatControlRrSource(control.effective_rr_source)}` }
+      ? {
+          label: `eff ${formatCompactRr(control.effective_rr)} · ${formatControlRrSource(control.effective_rr_source)}`,
+        }
       : null,
-    control?.constraints_merged ? { label: 'constraints merged', tone: 'warn' as const } : null,
-    control?.runtime_rr_recomputed ? { label: 'runtime RR', tone: 'warn' as const } : null,
-    control?.no_order_placed ? { label: 'no order placed', tone: 'danger' as const } : null,
+    control?.constraints_merged
+      ? { label: 'constraints merged', tone: 'warn' as const }
+      : null,
+    control?.runtime_rr_recomputed
+      ? { label: 'runtime RR', tone: 'warn' as const }
+      : null,
+    control?.no_order_placed
+      ? { label: 'no order placed', tone: 'danger' as const }
+      : null,
   ].filter(Boolean) as { label: string; tone?: 'warn' | 'danger' }[]
 
   const timeframeTrail = formatTimeframeTrail(ctx)
   const fibSummary = formatFibSummary(ctx?.key_levels)
   const rrLinkage = formatRiskRewardLinkage(rr)
-  const entryLinkageStatus = getEntryLinkageStatus({ require_invalidation_target_linkage: true }, ctx as unknown as EntryReviewSummary | undefined)
+  const entryLinkageStatus = getEntryLinkageStatus(
+    { require_invalidation_target_linkage: true },
+    ctx as unknown as EntryReviewSummary | undefined
+  )
   const entryLinkageSources = [
-    entryLinkageStatus?.invalidSource ? `invalid↔${entryLinkageStatus.invalidSource}` : '',
-    entryLinkageStatus?.targetSource ? `target↔${entryLinkageStatus.targetSource}` : '',
+    entryLinkageStatus?.invalidSource
+      ? `invalid↔${entryLinkageStatus.invalidSource}`
+      : '',
+    entryLinkageStatus?.targetSource
+      ? `target↔${entryLinkageStatus.targetSource}`
+      : '',
   ].filter(Boolean)
 
   return {
@@ -239,7 +457,9 @@ export function getDecisionAuditSnapshot(review?: DecisionReviewRef) {
     actionAudit,
     controlStatus,
     controlBadges,
-    failedChecks: (control?.failed_checks || []).map((check) => formatControlCheck(check)).slice(0, 4),
+    failedChecks: (control?.failed_checks || [])
+      .map((check) => formatControlCheck(check))
+      .slice(0, 4),
     support: formatCompactLevelList(ctx?.key_levels?.support),
     resistance: formatCompactLevelList(ctx?.key_levels?.resistance),
     swingHighs: formatCompactLevelList(ctx?.key_levels?.swing_highs),
@@ -256,8 +476,17 @@ export function getDecisionAuditSnapshot(review?: DecisionReviewRef) {
   }
 }
 
-function formatOptionalNumber(value?: number | null, maxDecimals = 8): string | undefined {
-  if (value === undefined || value === null || !Number.isFinite(value) || value <= 0) return undefined
+function formatOptionalNumber(
+  value?: number | null,
+  maxDecimals = 8
+): string | undefined {
+  if (
+    value === undefined ||
+    value === null ||
+    !Number.isFinite(value) ||
+    value <= 0
+  )
+    return undefined
   return new Intl.NumberFormat('en-US', {
     maximumFractionDigits: maxDecimals,
     minimumFractionDigits: 0,
@@ -265,7 +494,13 @@ function formatOptionalNumber(value?: number | null, maxDecimals = 8): string | 
 }
 
 function formatFeeRate(value?: number | null): string | undefined {
-  if (value === undefined || value === null || !Number.isFinite(value) || value <= 0) return undefined
+  if (
+    value === undefined ||
+    value === null ||
+    !Number.isFinite(value) ||
+    value <= 0
+  )
+    return undefined
   return `${(value * 100).toFixed(3)}%`
 }
 
@@ -284,7 +519,9 @@ function formatProtectionPolicyReason(reason?: string): string {
   }
 }
 
-function formatProtectionPolicyStatus(protection?: DecisionActionReviewContext['protection']): {
+function formatProtectionPolicyStatus(
+  protection?: DecisionActionReviewContext['protection']
+): {
   label: string
   tone: 'neutral' | 'warn' | 'danger'
 } | null {
@@ -299,15 +536,25 @@ function formatProtectionPolicyStatus(protection?: DecisionActionReviewContext['
     default:
       return {
         label: `policy ${protection.policy_status}`,
-        tone: protection.policy_rejected ? 'danger' : protection.policy_override ? 'warn' : 'neutral',
+        tone: protection.policy_rejected
+          ? 'danger'
+          : protection.policy_override
+            ? 'warn'
+            : 'neutral',
       }
   }
 }
 
-function formatExecutionConstraintItems(constraints?: DecisionActionReviewContext['execution_constraints']): { label: string; tone?: 'cost' }[] {
+function formatExecutionConstraintItems(
+  constraints?: DecisionActionReviewContext['execution_constraints']
+): { label: string; tone?: 'cost' }[] {
   if (!constraints) return []
   const items: { label: string; tone?: 'cost' }[] = []
-  const pushNumber = (prefix: string, value?: number | null, maxDecimals = 8) => {
+  const pushNumber = (
+    prefix: string,
+    value?: number | null,
+    maxDecimals = 8
+  ) => {
     const formatted = formatOptionalNumber(value, maxDecimals)
     if (formatted) items.push({ label: `${prefix} ${formatted}` })
   }
@@ -318,7 +565,9 @@ function formatExecutionConstraintItems(constraints?: DecisionActionReviewContex
   pushNumber('ctVal', constraints.contract_value)
   pushNumber('last', constraints.last_price, 4)
 
-  const fee = formatFeeRate(constraints.taker_fee_rate ?? constraints.maker_fee_rate)
+  const fee = formatFeeRate(
+    constraints.taker_fee_rate ?? constraints.maker_fee_rate
+  )
   if (fee) items.push({ label: `fee ${fee}`, tone: 'cost' })
   const slippage = formatOptionalNumber(constraints.estimated_slippage_bps, 2)
   if (slippage) items.push({ label: `slip ${slippage}bps`, tone: 'cost' })
@@ -326,13 +575,24 @@ function formatExecutionConstraintItems(constraints?: DecisionActionReviewContex
   return items
 }
 
-function formatExecutionQualityItems(quality?: DecisionActionReviewContext['extra'] extends infer E ? E extends { execution_quality?: infer Q } ? Q : never : never): { label: string; tone?: 'cost' | 'warn' | 'danger' }[] {
+function formatExecutionQualityItems(
+  quality?: DecisionActionReviewContext['extra'] extends infer E
+    ? E extends { execution_quality?: infer Q }
+      ? Q
+      : never
+    : never
+): { label: string; tone?: 'cost' | 'warn' | 'danger' }[] {
   if (!quality || typeof quality !== 'object') return []
-  const q = quality as NonNullable<DecisionActionReviewContext['extra']>['execution_quality']
+  const q = quality as NonNullable<
+    DecisionActionReviewContext['extra']
+  >['execution_quality']
   if (!q) return []
   const items: { label: string; tone?: 'cost' | 'warn' | 'danger' }[] = []
   if (q.grade) {
-    items.push({ label: `exec ${q.grade}`, tone: q.grade === 'D' ? 'danger' : q.grade === 'C' ? 'warn' : undefined })
+    items.push({
+      label: `exec ${q.grade}`,
+      tone: q.grade === 'D' ? 'danger' : q.grade === 'C' ? 'warn' : undefined,
+    })
   }
   const spread = formatOptionalNumber(q.spread_bps, 2)
   if (spread) items.push({ label: `spread ${spread}bps`, tone: 'cost' })
@@ -340,9 +600,15 @@ function formatExecutionQualityItems(quality?: DecisionActionReviewContext['extr
   if (slip) items.push({ label: `slip ${slip}bps`, tone: 'cost' })
   const minOrder = formatOptionalNumber(q.min_order_notional_usdt, 2)
   if (minOrder) items.push({ label: `min order ${minOrder} USDT` })
-  if (q.ladder_tiers_feasible) items.push({ label: `ladder feasible ${q.ladder_tiers_feasible}` })
-  if (q.partial_close_feasible === false) items.push({ label: 'partial weak', tone: 'warn' })
-  if (q.reason) items.push({ label: q.reason, tone: q.grade === 'D' ? 'danger' : q.grade === 'C' ? 'warn' : undefined })
+  if (q.ladder_tiers_feasible)
+    items.push({ label: `ladder feasible ${q.ladder_tiers_feasible}` })
+  if (q.partial_close_feasible === false)
+    items.push({ label: 'partial weak', tone: 'warn' })
+  if (q.reason)
+    items.push({
+      label: q.reason,
+      tone: q.grade === 'D' ? 'danger' : q.grade === 'C' ? 'warn' : undefined,
+    })
   return items
 }
 
@@ -418,7 +684,9 @@ function formatActionLabel(action?: string): string {
   }
 }
 
-function formatActionAudit(control?: DecisionActionReviewContext['control']): string | null {
+function formatActionAudit(
+  control?: DecisionActionReviewContext['control']
+): string | null {
   if (!control) return null
   const original = String(control.original_action || '').trim()
   const final = String(control.final_action || '').trim()
@@ -465,39 +733,50 @@ function DecisionAuditPanel({ review }: { review?: DecisionReviewRef }) {
     <div className="rounded-lg border border-white/10 bg-black/20 p-3 space-y-2">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[11px] text-nofx-text-muted">Entry audit</span>
-        <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${passCls}`}>
-          RR {formatCompactRr(audit.rr?.net_estimated_rr ?? audit.rr?.gross_estimated_rr)}
+        <span
+          className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${passCls}`}
+        >
+          RR{' '}
+          {formatCompactRr(
+            audit.rr?.net_estimated_rr ?? audit.rr?.gross_estimated_rr
+          )}
         </span>
         {audit.entryLinkageStatus ? (
-          <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] ${
-            audit.entryLinkageStatus.tone === 'danger'
-              ? 'border-rose-500/20 bg-rose-500/10 text-rose-200'
-              : audit.entryLinkageStatus.tone === 'warn'
-                ? 'border-amber-500/20 bg-amber-500/10 text-amber-200'
-                : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200'
-          }`}>
+          <span
+            className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] ${
+              audit.entryLinkageStatus.tone === 'danger'
+                ? 'border-rose-500/20 bg-rose-500/10 text-rose-200'
+                : audit.entryLinkageStatus.tone === 'warn'
+                  ? 'border-amber-500/20 bg-amber-500/10 text-amber-200'
+                  : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200'
+            }`}
+          >
             linkage {audit.entryLinkageStatus.label}
           </span>
         ) : null}
         {audit.controlStatus ? (
-          <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] ${
-            audit.controlStatus.tone === 'danger'
-              ? 'border-rose-500/20 bg-rose-500/10 text-rose-200'
-              : audit.controlStatus.tone === 'warn'
-                ? 'border-amber-500/20 bg-amber-500/10 text-amber-200'
-                : 'border-cyan-500/20 bg-cyan-500/10 text-cyan-200'
-          }`}>
+          <span
+            className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] ${
+              audit.controlStatus.tone === 'danger'
+                ? 'border-rose-500/20 bg-rose-500/10 text-rose-200'
+                : audit.controlStatus.tone === 'warn'
+                  ? 'border-amber-500/20 bg-amber-500/10 text-amber-200'
+                  : 'border-cyan-500/20 bg-cyan-500/10 text-cyan-200'
+            }`}
+          >
             {audit.controlStatus.label}
           </span>
         ) : null}
         {policyStatus ? (
-          <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] ${
-            policyStatus.tone === 'danger'
-              ? 'border-rose-500/20 bg-rose-500/10 text-rose-200'
-              : policyStatus.tone === 'warn'
-                ? 'border-amber-500/20 bg-amber-500/10 text-amber-200'
-                : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200'
-          }`}>
+          <span
+            className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] ${
+              policyStatus.tone === 'danger'
+                ? 'border-rose-500/20 bg-rose-500/10 text-rose-200'
+                : policyStatus.tone === 'warn'
+                  ? 'border-amber-500/20 bg-amber-500/10 text-amber-200'
+                  : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200'
+            }`}
+          >
             {policyStatus.label}
           </span>
         ) : null}
@@ -521,7 +800,10 @@ function DecisionAuditPanel({ review }: { review?: DecisionReviewRef }) {
       {audit.timeframeTrail.length > 0 && (
         <div className="flex flex-wrap gap-1.5 text-[10px]">
           {audit.timeframeTrail.map((item, idx) => (
-            <span key={`tf-${idx}`} className="inline-flex items-center rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2 py-0.5 text-cyan-200">
+            <span
+              key={`tf-${idx}`}
+              className="inline-flex items-center rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2 py-0.5 text-cyan-200"
+            >
               {item}
             </span>
           ))}
@@ -556,32 +838,50 @@ function DecisionAuditPanel({ review }: { review?: DecisionReviewRef }) {
       {audit.failedChecks.length > 0 && (
         <div className="flex flex-wrap gap-1.5 text-[10px]">
           {audit.failedChecks.map((check, idx) => (
-            <span key={`failed-${idx}`} className="inline-flex items-center rounded-full border border-rose-500/20 bg-rose-500/10 px-2 py-0.5 text-rose-200">
+            <span
+              key={`failed-${idx}`}
+              className="inline-flex items-center rounded-full border border-rose-500/20 bg-rose-500/10 px-2 py-0.5 text-rose-200"
+            >
               failed · {check}
             </span>
           ))}
         </div>
       )}
 
-      {(audit.support.length > 0 || audit.resistance.length > 0 || audit.swingHighs.length > 0 || audit.swingLows.length > 0) && (
+      {(audit.support.length > 0 ||
+        audit.resistance.length > 0 ||
+        audit.swingHighs.length > 0 ||
+        audit.swingLows.length > 0) && (
         <div className="flex flex-wrap gap-1.5 text-[10px]">
           {audit.support.map((value, idx) => (
-            <span key={`s-${idx}`} className="inline-flex items-center rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-emerald-200">
+            <span
+              key={`s-${idx}`}
+              className="inline-flex items-center rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-emerald-200"
+            >
               S {value}
             </span>
           ))}
           {audit.resistance.map((value, idx) => (
-            <span key={`r-${idx}`} className="inline-flex items-center rounded-full border border-rose-500/20 bg-rose-500/10 px-2 py-0.5 text-rose-200">
+            <span
+              key={`r-${idx}`}
+              className="inline-flex items-center rounded-full border border-rose-500/20 bg-rose-500/10 px-2 py-0.5 text-rose-200"
+            >
               R {value}
             </span>
           ))}
           {audit.swingLows.map((value, idx) => (
-            <span key={`sl-${idx}`} className="inline-flex items-center rounded-full border border-emerald-500/20 bg-emerald-500/5 px-2 py-0.5 text-emerald-100">
+            <span
+              key={`sl-${idx}`}
+              className="inline-flex items-center rounded-full border border-emerald-500/20 bg-emerald-500/5 px-2 py-0.5 text-emerald-100"
+            >
               swing low {value}
             </span>
           ))}
           {audit.swingHighs.map((value, idx) => (
-            <span key={`sh-${idx}`} className="inline-flex items-center rounded-full border border-rose-500/20 bg-rose-500/5 px-2 py-0.5 text-rose-100">
+            <span
+              key={`sh-${idx}`}
+              className="inline-flex items-center rounded-full border border-rose-500/20 bg-rose-500/5 px-2 py-0.5 text-rose-100"
+            >
               swing high {value}
             </span>
           ))}
@@ -594,13 +894,29 @@ function DecisionAuditPanel({ review }: { review?: DecisionReviewRef }) {
         rrSummary={audit.rrLinkage}
         supportSummary={audit.support}
         resistanceSummary={audit.resistance}
-        fibLevels={audit.fibSummary.length > 0 ? audit.fibSummary.map(() => 1) : []}
+        fibLevels={
+          audit.fibSummary.length > 0 ? audit.fibSummary.map(() => 1) : []
+        }
         anchors={audit.anchors}
         alignmentNotes={audit.alignmentNotes}
         toneColors={(tone) => {
-          if (tone === 'danger') return { border: '1px solid rgba(246, 70, 93, 0.25)', bg: 'rgba(246, 70, 93, 0.12)', color: '#FCA5A5' }
-          if (tone === 'warn') return { border: '1px solid rgba(240, 185, 11, 0.25)', bg: 'rgba(240, 185, 11, 0.12)', color: '#FCD34D' }
-          return { border: '1px solid rgba(56, 189, 248, 0.25)', bg: 'rgba(56, 189, 248, 0.12)', color: '#7DD3FC' }
+          if (tone === 'danger')
+            return {
+              border: '1px solid rgba(246, 70, 93, 0.25)',
+              bg: 'rgba(246, 70, 93, 0.12)',
+              color: '#FCA5A5',
+            }
+          if (tone === 'warn')
+            return {
+              border: '1px solid rgba(240, 185, 11, 0.25)',
+              bg: 'rgba(240, 185, 11, 0.12)',
+              color: '#FCD34D',
+            }
+          return {
+            border: '1px solid rgba(56, 189, 248, 0.25)',
+            bg: 'rgba(56, 189, 248, 0.12)',
+            color: '#7DD3FC',
+          }
         }}
       />
 
@@ -613,7 +929,10 @@ function DecisionAuditPanel({ review }: { review?: DecisionReviewRef }) {
       {policyReasons.length > 0 && (
         <div className="flex flex-wrap gap-1.5 text-[10px]">
           {policyReasons.map((reason, idx) => (
-            <span key={`policy-${idx}`} className="inline-flex items-center rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-amber-200">
+            <span
+              key={`policy-${idx}`}
+              className="inline-flex items-center rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-amber-200"
+            >
               {formatProtectionPolicyReason(reason)}
             </span>
           ))}
@@ -658,13 +977,24 @@ function DecisionAuditPanel({ review }: { review?: DecisionReviewRef }) {
 
       {audit.anchors.length > 0 && (
         <details className="text-[11px] text-nofx-text-muted">
-          <summary className="cursor-pointer select-none">anchors ({audit.anchors.length})</summary>
+          <summary className="cursor-pointer select-none">
+            anchors ({audit.anchors.length})
+          </summary>
           <div className="mt-2 space-y-1">
             {audit.anchors.slice(0, 5).map((anchor, idx) => (
-              <div key={idx} className="rounded border border-white/10 bg-white/5 px-2 py-1.5">
-                <span className="text-nofx-text-main">{anchor.type || 'anchor'}</span>
-                {anchor.timeframe ? <span>{` · ${anchor.timeframe}`}</span> : null}
-                {anchor.price ? <span>{` · ${formatPrice(anchor.price)}`}</span> : null}
+              <div
+                key={idx}
+                className="rounded border border-white/10 bg-white/5 px-2 py-1.5"
+              >
+                <span className="text-nofx-text-main">
+                  {anchor.type || 'anchor'}
+                </span>
+                {anchor.timeframe ? (
+                  <span>{` · ${anchor.timeframe}`}</span>
+                ) : null}
+                {anchor.price ? (
+                  <span>{` · ${formatPrice(anchor.price)}`}</span>
+                ) : null}
                 {anchor.reason ? <span>{` · ${anchor.reason}`}</span> : null}
               </div>
             ))}
@@ -675,7 +1005,9 @@ function DecisionAuditPanel({ review }: { review?: DecisionReviewRef }) {
   )
 }
 
-function formatReviewContextSummary(reviewContext?: Record<string, unknown>): string {
+function formatReviewContextSummary(
+  reviewContext?: Record<string, unknown>
+): string {
   if (!reviewContext) return '—'
 
   const safeMode = reviewContext.safe_mode
@@ -686,12 +1018,18 @@ function formatReviewContextSummary(reviewContext?: Record<string, unknown>): st
   const marginUsedPct = reviewContext.margin_used_pct
 
   const parts: string[] = []
-  if (typeof aiDecisionMode === 'string' && aiDecisionMode) parts.push(`mode=${aiDecisionMode}`)
-  if (typeof candidateCount === 'number') parts.push(`candidates=${candidateCount}`)
-  if (typeof positionCount === 'number') parts.push(`positions=${positionCount}`)
-  if (typeof marginUsedPct === 'number') parts.push(`margin=${marginUsedPct.toFixed(1)}%`)
-  if (typeof safeMode === 'boolean') parts.push(`safe=${safeMode ? 'on' : 'off'}`)
-  if (typeof safeModeReason === 'string' && safeModeReason) parts.push(`reason=${safeModeReason}`)
+  if (typeof aiDecisionMode === 'string' && aiDecisionMode)
+    parts.push(`mode=${aiDecisionMode}`)
+  if (typeof candidateCount === 'number')
+    parts.push(`candidates=${candidateCount}`)
+  if (typeof positionCount === 'number')
+    parts.push(`positions=${positionCount}`)
+  if (typeof marginUsedPct === 'number')
+    parts.push(`margin=${marginUsedPct.toFixed(1)}%`)
+  if (typeof safeMode === 'boolean')
+    parts.push(`safe=${safeMode ? 'on' : 'off'}`)
+  if (typeof safeModeReason === 'string' && safeModeReason)
+    parts.push(`reason=${safeModeReason}`)
 
   return parts.length > 0 ? parts.join(' | ') : '—'
 }
@@ -709,12 +1047,32 @@ function formatProtectionSourceLabel(source?: string): string {
   }
 }
 
-function formatProtectionBadge(sourceLabel: string, modeLabel?: string, kind?: 'full' | 'ladder' | 'drawdown' | 'break_even') {
+function formatProtectionBadge(
+  sourceLabel: string,
+  modeLabel?: string,
+  kind?: 'full' | 'ladder' | 'drawdown' | 'break_even'
+) {
   const colorMap = {
-    full: { bg: 'rgba(14, 203, 129, 0.10)', border: '1px solid rgba(14, 203, 129, 0.22)', color: '#8CF4C4' },
-    ladder: { bg: 'rgba(59, 130, 246, 0.10)', border: '1px solid rgba(59, 130, 246, 0.22)', color: '#93C5FD' },
-    drawdown: { bg: 'rgba(168, 85, 247, 0.10)', border: '1px solid rgba(168, 85, 247, 0.22)', color: '#D8B4FE' },
-    break_even: { bg: 'rgba(249, 115, 22, 0.10)', border: '1px solid rgba(249, 115, 22, 0.22)', color: '#FDBA74' },
+    full: {
+      bg: 'rgba(14, 203, 129, 0.10)',
+      border: '1px solid rgba(14, 203, 129, 0.22)',
+      color: '#8CF4C4',
+    },
+    ladder: {
+      bg: 'rgba(59, 130, 246, 0.10)',
+      border: '1px solid rgba(59, 130, 246, 0.22)',
+      color: '#93C5FD',
+    },
+    drawdown: {
+      bg: 'rgba(168, 85, 247, 0.10)',
+      border: '1px solid rgba(168, 85, 247, 0.22)',
+      color: '#D8B4FE',
+    },
+    break_even: {
+      bg: 'rgba(249, 115, 22, 0.10)',
+      border: '1px solid rgba(249, 115, 22, 0.22)',
+      color: '#FDBA74',
+    },
   } as const
   return {
     label: modeLabel ? `${sourceLabel} · ${modeLabel}` : sourceLabel,
@@ -722,27 +1080,53 @@ function formatProtectionBadge(sourceLabel: string, modeLabel?: string, kind?: '
   }
 }
 
-function formatProtectionSummary(snapshot?: HistoricalPosition['protection_snapshot']): { label: string; style: React.CSSProperties }[] {
+function formatProtectionSummary(
+  snapshot?: HistoricalPosition['protection_snapshot']
+): { label: string; style: React.CSSProperties }[] {
   if (!snapshot) return []
   const parts: { label: string; style: React.CSSProperties }[] = []
   if (snapshot.full_tp_sl?.enabled) {
-    parts.push(formatProtectionBadge('Full', snapshot.full_tp_sl.mode || 'manual', 'full'))
+    parts.push(
+      formatProtectionBadge(
+        'Full',
+        snapshot.full_tp_sl.mode || 'manual',
+        'full'
+      )
+    )
   }
   if (snapshot.ladder_tp_sl?.enabled) {
-    parts.push(formatProtectionBadge('Ladder', snapshot.ladder_tp_sl.mode || 'manual', 'ladder'))
+    parts.push(
+      formatProtectionBadge(
+        'Ladder',
+        snapshot.ladder_tp_sl.mode || 'manual',
+        'ladder'
+      )
+    )
   }
   if (snapshot.drawdown && snapshot.drawdown.length > 0) {
     const first = snapshot.drawdown[0]
     const extras = [
       first.stage ? first.stage.replace(/_/g, ' ') : '',
-      first.runner_mode_active ? `runner ${typeof first.runner_keep_pct === 'number' ? `${first.runner_keep_pct}%` : 'on'}` : '',
+      first.runner_mode_active
+        ? `runner ${typeof first.runner_keep_pct === 'number' ? `${first.runner_keep_pct}%` : 'on'}`
+        : '',
       first.break_even_suppressed_by_runner ? 'BE suppressed' : '',
     ].filter(Boolean)
-    const detail = [first.mode || 'manual', formatProtectionSourceLabel(first.source), ...extras].join(' · ')
+    const detail = [
+      first.mode || 'manual',
+      formatProtectionSourceLabel(first.source),
+      ...extras,
+    ].join(' · ')
     parts.push(formatProtectionBadge('Drawdown', detail, 'drawdown'))
   }
   if (snapshot.break_even?.enabled) {
-    parts.push(formatProtectionBadge('Break-even', formatProtectionSourceLabel(snapshot.break_even.source), 'break_even'))
+    parts.push(
+      formatProtectionBadge(
+        'Break-even',
+        formatProtectionSourceLabel(snapshot.break_even.source),
+        'break_even'
+      )
+    )
   }
   return parts
 }
@@ -808,7 +1192,13 @@ function StatCard({
 }
 
 // Symbol Stats Row
-function SymbolStatsRow({ stat, onSymbolClick }: { stat: SymbolStats; onSymbolClick?: (symbol: string) => void }) {
+function SymbolStatsRow({
+  stat,
+  onSymbolClick,
+}: {
+  stat: SymbolStats
+  onSymbolClick?: (symbol: string) => void
+}) {
   const totalPnl = stat.total_pnl || 0
   const winRate = stat.win_rate || 0
   const pnlColor = totalPnl >= 0 ? '#0ECB81' : '#F6465D'
@@ -838,7 +1228,10 @@ function SymbolStatsRow({ stat, onSymbolClick }: { stat: SymbolStats; onSymbolCl
           <div className="text-xs" style={{ color: '#848E9C' }}>
             Win Rate
           </div>
-          <div className="font-mono font-semibold" style={{ color: winRateColor }}>
+          <div
+            className="font-mono font-semibold"
+            style={{ color: winRateColor }}
+          >
             {winRate.toFixed(1)}%
           </div>
         </div>
@@ -857,7 +1250,13 @@ function SymbolStatsRow({ stat, onSymbolClick }: { stat: SymbolStats; onSymbolCl
 }
 
 // Direction Stats Card
-function DirectionStatsCard({ stat, language }: { stat: DirectionStats; language: Language }) {
+function DirectionStatsCard({
+  stat,
+  language,
+}: {
+  stat: DirectionStats
+  language: Language
+}) {
   const isLong = (stat.side || '').toLowerCase() === 'long'
   const iconColor = isLong ? '#0ECB81' : '#F6465D'
   const totalPnl = stat.total_pnl || 0
@@ -876,10 +1275,7 @@ function DirectionStatsCard({ stat, language }: { stat: DirectionStats; language
     >
       <div className="flex items-center gap-2 mb-3">
         <span className="text-xl">{isLong ? '📈' : '📉'}</span>
-        <span
-          className="font-bold uppercase"
-          style={{ color: iconColor }}
-        >
+        <span className="font-bold uppercase" style={{ color: iconColor }}>
           {stat.side || 'Unknown'}
         </span>
       </div>
@@ -923,7 +1319,10 @@ function DirectionStatsCard({ stat, language }: { stat: DirectionStats; language
           <div className="text-xs mb-1" style={{ color: '#848E9C' }}>
             {t('positionHistory.avgPnL', language)}
           </div>
-          <div className="font-mono font-semibold" style={{ color: avgPnl >= 0 ? '#0ECB81' : '#F6465D' }}>
+          <div
+            className="font-mono font-semibold"
+            style={{ color: avgPnl >= 0 ? '#0ECB81' : '#F6465D' }}
+          >
             {avgPnl >= 0 ? '+' : ''}
             {formatNumber(avgPnl)}
           </div>
@@ -934,7 +1333,13 @@ function DirectionStatsCard({ stat, language }: { stat: DirectionStats; language
 }
 
 // Position Row Component
-function PositionRow({ position, onSymbolClick }: { position: HistoricalPosition; onSymbolClick?: (symbol: string) => void }) {
+function PositionRow({
+  position,
+  onSymbolClick,
+}: {
+  position: HistoricalPosition
+  onSymbolClick?: (symbol: string) => void
+}) {
   const [expanded, setExpanded] = useState(false)
   const side = position.side || ''
   const isLong = side.toUpperCase() === 'LONG'
@@ -943,11 +1348,17 @@ function PositionRow({ position, onSymbolClick }: { position: HistoricalPosition
   const sideColor = isLong ? '#0ECB81' : '#F6465D'
   const pnlColor = isProfitable ? '#0ECB81' : '#F6465D'
 
-
   // Calculate holding time
-  const entryTime = position.entry_time ? new Date(position.entry_time).getTime() : 0
-  const exitTime = position.exit_time ? new Date(position.exit_time).getTime() : 0
-  const holdingMinutes = entryTime && exitTime && exitTime > entryTime ? (exitTime - entryTime) / 60000 : 0
+  const entryTime = position.entry_time
+    ? new Date(position.entry_time).getTime()
+    : 0
+  const exitTime = position.exit_time
+    ? new Date(position.exit_time).getTime()
+    : 0
+  const holdingMinutes =
+    entryTime && exitTime && exitTime > entryTime
+      ? (exitTime - entryTime) / 60000
+      : 0
 
   // Calculate PnL percentage based on entry price
   const entryPrice = position.entry_price || 0
@@ -965,7 +1376,7 @@ function PositionRow({ position, onSymbolClick }: { position: HistoricalPosition
   const displayQty = position.entry_quantity || position.quantity || 0
 
   const closeRatioPct = position.close_ratio_pct || 0
-  const closeValueUsdt = position.close_value_usdt || (exitPrice * displayQty)
+  const closeValueUsdt = position.close_value_usdt || exitPrice * displayQty
   const executionSourcePresentation = summarizeCloseSource(
     position.execution_source,
     position.close_reason,
@@ -976,273 +1387,511 @@ function PositionRow({ position, onSymbolClick }: { position: HistoricalPosition
   const executionSource = executionSourcePresentation.label
   const closeFlowSummary = summarizeCloseEventFlow(position.close_events)
   const entryReviewSummary = position.entry_review_summary
-  const entryTf = entryReviewSummary?.timeframe_context as { primary?: string; lower?: string[]; higher?: string[] } | undefined
-  const entryRR = entryReviewSummary?.risk_reward as { entry?: number; invalidation?: number; first_target?: number } | undefined
-  const entryLevels = entryReviewSummary?.key_levels as { support?: number[]; resistance?: number[] } | undefined
-  const linkageStatus = getEntryLinkageStatus(position.entry_structure_audit, position.entry_review_summary)
+  const entryTf = entryReviewSummary?.timeframe_context as
+    | { primary?: string; lower?: string[]; higher?: string[] }
+    | undefined
+  const entryRR = entryReviewSummary?.risk_reward as
+    | { entry?: number; invalidation?: number; first_target?: number }
+    | undefined
+  const entryLevels = entryReviewSummary?.key_levels as
+    | { support?: number[]; resistance?: number[] }
+    | undefined
+  const linkageStatus = getEntryLinkageStatus(
+    position.entry_structure_audit,
+    position.entry_review_summary
+  )
   const executionOrderType = position.execution_order_type || 'unknown'
 
   return (
     <>
-    <tr
-      className="transition-all duration-200 hover:bg-white/5 cursor-pointer"
-      style={{ borderBottom: expanded ? 'none' : '1px solid #2B3139' }}
-      onClick={() => setExpanded((v) => !v)}
-    >
-      {/* Symbol */}
-      <td className="py-3 px-4">
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); onSymbolClick?.(position.symbol) }}
-            className="font-mono font-semibold hover:text-cyan-300 transition-colors"
-            style={{ color: '#EAECEF' }}
-          >
-            {(position.symbol || '').replace('USDT', '')}
-          </button>
-          <span
-            className="px-2 py-0.5 rounded text-xs font-semibold uppercase"
-            style={{
-              background: `${sideColor}22`,
-              color: sideColor,
-              border: `1px solid ${sideColor}44`,
-            }}
-          >
-            {side}
-          </span>
-        </div>
-      </td>
-
-      {/* Entry Price */}
-      <td className="py-3 px-4 text-right font-mono" style={{ color: '#EAECEF' }}>
-        {formatPrice(entryPrice)}
-      </td>
-
-      {/* Exit Price */}
-      <td className="py-3 px-4 text-right font-mono" style={{ color: '#EAECEF' }}>
-        {formatPrice(exitPrice)}
-      </td>
-
-      {/* Quantity */}
-      <td className="py-3 px-4 text-right font-mono" style={{ color: '#848E9C' }}>
-        {formatQuantity(displayQty)}
-      </td>
-
-      {/* Position Value (Entry Price * Quantity) */}
-      <td className="py-3 px-4 text-right font-mono" style={{ color: '#EAECEF' }}>
-        {formatNumber(entryPrice * displayQty)}
-      </td>
-
-      {/* P&L */}
-      <td className="py-3 px-4 text-right">
-        <div className="font-mono font-semibold" style={{ color: pnlColor }}>
-          {isProfitable ? '+' : ''}
-          {formatNumber(realizedPnl)}
-        </div>
-        <div className="text-xs" style={{ color: pnlColor }}>
-          {pnlPct >= 0 ? '+' : ''}
-          {pnlPct.toFixed(2)}%
-        </div>
-      </td>
-
-      {/* Fee - show more precision for small fees */}
-      <td className="py-3 px-4 text-right font-mono text-xs" style={{ color: '#848E9C' }}>
-        -{((position.fee || 0) < 0.01 && (position.fee || 0) > 0)
-          ? (position.fee || 0).toFixed(4)
-          : (position.fee || 0).toFixed(2)}
-      </td>
-
-      {/* Duration */}
-      <td className="py-3 px-4 text-center text-sm" style={{ color: '#848E9C' }}>
-        {formatDuration(holdingMinutes)}
-      </td>
-
-      {/* Exit Time */}
-      <td className="py-3 px-4 text-right text-xs" style={{ color: '#848E9C' }}>
-        {formatDate(position.exit_time)}
-      </td>
-    </tr>
-    {expanded && (
-      <tr style={{ borderBottom: '1px solid #2B3139', background: 'rgba(255,255,255,0.02)' }}>
-        <td colSpan={9} className="px-4 pb-4 pt-0">
-          <div className="rounded-lg border border-white/10 bg-black/20 p-4 mt-2 space-y-3">
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-xs">
-              <div>
-                <div style={{ color: '#848E9C' }}>{'委托来源 / Source'}</div>
-                <div className="px-2 py-1 rounded text-[11px] font-semibold inline-flex" style={getCloseSourceBadgeStyle(executionSourcePresentation)}>
-                  {executionSource}
-                </div>
-                {executionSourcePresentation.detail ? (
-                  <div className="mt-1 text-[11px]" style={{ color: '#848E9C' }}>
-                    {executionSourcePresentation.detail} · confidence {executionSourcePresentation.confidence}
-                  </div>
-                ) : (
-                  <div className="mt-1 text-[11px]" style={{ color: '#848E9C' }}>
-                    confidence {executionSourcePresentation.confidence}
-                  </div>
-                )}
-                <div className="mt-1 text-[11px]" style={{ color: '#848E9C' }}>
-                  raw: {position.execution_source || position.close_reason || 'unknown'}
-                </div>
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {formatProtectionSummary(position.protection_snapshot).map((item, idx) => (
-                    <span key={idx} className="px-2 py-1 rounded text-[11px] font-medium" style={item.style}>
-                      {item.label}
+      <tr
+        className="transition-all duration-200 hover:bg-white/5 cursor-pointer"
+        style={{ borderBottom: expanded ? 'none' : '1px solid #2B3139' }}
+        onClick={() => setExpanded((v) => !v)}
+      >
+        {/* Symbol */}
+        <td className="py-3 px-4">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                onSymbolClick?.(position.symbol)
+              }}
+              className="font-mono font-semibold hover:text-cyan-300 transition-colors"
+              style={{ color: '#EAECEF' }}
+            >
+              {(position.symbol || '').replace('USDT', '')}
+            </button>
+            <span
+              className="px-2 py-0.5 rounded text-xs font-semibold uppercase"
+              style={{
+                background: `${sideColor}22`,
+                color: sideColor,
+                border: `1px solid ${sideColor}44`,
+              }}
+            >
+              {side}
+            </span>
+            {position.entry_scene_tags &&
+              (() => {
+                try {
+                  const tags = JSON.parse(position.entry_scene_tags)
+                  const phaseColors: Record<string, string> = {
+                    establishment: '#0ECB81',
+                    continuation: '#F0B90B',
+                    extension: '#F6465D',
+                    exhaustion: '#FF4444',
+                  }
+                  const phaseColor = phaseColors[tags.trend_phase] || '#848E9C'
+                  return (
+                    <span
+                      className="px-1.5 py-0.5 rounded text-[10px] font-medium"
+                      style={{
+                        background: `${phaseColor}22`,
+                        color: phaseColor,
+                        border: `1px solid ${phaseColor}33`,
+                      }}
+                      title={`Phase: ${tags.trend_phase} | 4h: ${tags.chg4h?.toFixed(1)}% | EMA20: ${tags.ema20_dev?.toFixed(1)}%`}
+                    >
+                      {tags.trend_phase?.slice(0, 3)}
                     </span>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <div style={{ color: '#848E9C' }}>{'委托类型 / Order Type'}</div>
-                <div className="font-mono" style={{ color: '#EAECEF' }}>{executionOrderType}</div>
-                {closeFlowSummary && (
-                  <div className="mt-2 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-[11px] space-y-1" style={{ color: '#EAECEF' }}>
-                    <div style={{ color: '#848E9C' }}>{'平仓流摘要 / Close Flow Summary'}</div>
-                    <div>{`events=${closeFlowSummary.eventCount} | linked=${closeFlowSummary.linkedDecisionCount} | ratio=${closeFlowSummary.totalRatio.toFixed(2)}%`}</div>
-                    <div>{closeFlowSummary.sourceBreakdown.join(' · ') || '—'}</div>
-                    {closeFlowSummary.isFragmentedSyncLike && (
-                      <div style={{ color: '#F0B90B' }}>{'This looks like fragmented exchange sync, not multiple independent AI decisions.'}</div>
-                    )}
-                  </div>
-                )}
-              </div>
-              <div>
-                <div style={{ color: '#848E9C' }}>{'入场 / 出场决策周期'}</div>
-                <div className="font-mono" style={{ color: '#EAECEF' }}>
-                  {`${position.entry_decision_cycle || '—'} / ${position.exit_decision_cycle || '—'}`}
-                </div>
-              </div>
-              <div>
-                <div style={{ color: '#848E9C' }}>{'复盘上下文 / Review Context'}</div>
-                <div className="text-[11px] leading-5" style={{ color: '#EAECEF' }}>
-                  {formatReviewContextSummary(position.exit_decision_review?.review_context || position.entry_decision_review?.review_context)}
-                </div>
-                {entryReviewSummary && (
-                  <div className="mt-2 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-[11px] space-y-1" style={{ color: '#EAECEF' }}>
-                    <div style={{ color: '#848E9C' }}>{'开仓结构摘要 / Entry Structure Summary'}</div>
-                    <div>
-                      TF: {entryTf?.primary || '—'}
-                      {entryTf?.lower?.length ? ` | lower ${entryTf.lower.join(', ')}` : ''}
-                      {entryTf?.higher?.length ? ` | higher ${entryTf.higher.join(', ')}` : ''}
-                    </div>
-                    <div>
-                      RR: entry {entryRR?.entry ?? '—'} / invalidation {entryRR?.invalidation ?? '—'} / target {entryRR?.first_target ?? '—'}
-                    </div>
-                    <div>
-                      Levels: S {entryLevels?.support?.join(', ') || '—'} | R {entryLevels?.resistance?.join(', ') || '—'}
-                    </div>
-                    {linkageStatus && (
-                      <div>
-                        Linkage: <span style={{ color: linkageStatus.tone === 'danger' ? '#F6465D' : linkageStatus.tone === 'warn' ? '#F0B90B' : '#0ECB81' }}>{linkageStatus.label}</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {formatProtectionSummary(position.exit_decision_review?.protection_snapshot || position.entry_decision_review?.protection_snapshot).map((item, idx) => (
-                    <span key={idx} className="px-2 py-1 rounded text-[11px] font-medium" style={item.style}>
-                      {item.label}
-                    </span>
-                  ))}
-                </div>
-                <div className="mt-2">
-                  <DecisionAuditPanel review={position.entry_decision_review || position.exit_decision_review} />
-                </div>
-              </div>
-              <div>
-                <div style={{ color: '#848E9C' }}>{'成交比例 / Close Ratio'}</div>
-                <div className="font-mono" style={{ color: '#EAECEF' }}>{closeRatioPct > 0 ? `${closeRatioPct.toFixed(2)}%` : '—'}</div>
-              </div>
-              <div>
-                <div style={{ color: '#848E9C' }}>{'成交价值 / Value USDT'}</div>
-                <div className="font-mono" style={{ color: '#EAECEF' }}>{formatNumber(closeValueUsdt)}</div>
-              </div>
-            </div>
-
-            {position.close_events && position.close_events.length > 0 && (
-              <div>
-                <div className="text-xs mb-2" style={{ color: '#848E9C' }}>{'分段平仓事件 / Close Event Flow'}</div>
-                <div className="space-y-2">
-                  {position.close_events.map((event) => {
-                    const eventPresentation = summarizeCloseSource(
-                      event.execution_source,
-                      event.close_reason,
-                      event.execution_type,
-                      Boolean(event.decision_cycle),
-                      Boolean(event.decision_review?.review_context)
-                    )
-                    return (
-                    <div key={event.id} className="rounded-lg border border-white/10 bg-white/5 p-3 grid grid-cols-1 md:grid-cols-6 gap-3 text-xs">
-                      <div>
-                        <div style={{ color: '#848E9C' }}>{'原因 / Reason'}</div>
-                        <div className="px-2 py-1 rounded text-[11px] font-semibold inline-flex" style={getCloseSourceBadgeStyle(eventPresentation)}>{eventPresentation.label}</div>
-                        <div className="mt-1 text-[11px]" style={{ color: '#848E9C' }}>
-                          {`raw=${event.execution_source || event.close_reason || 'unknown'} | confidence=${eventPresentation.confidence}`}
-                        </div>
-                        {event.protection_status ? (
-                          <div className="mt-2">
-                            <span className="px-2 py-1 rounded text-[11px] font-medium" style={{ background: 'rgba(255,255,255,0.06)', color: '#C9D1D9', border: '1px solid rgba(255,255,255,0.08)' }}>
-                              {`Protection: ${event.protection_status}`}
-                            </span>
-                          </div>
-                        ) : null}
-                      </div>
-                      <div>
-                        <div style={{ color: '#848E9C' }}>{'类型 / Type'}</div>
-                        <div className="font-mono" style={{ color: '#EAECEF' }}>{event.execution_type || 'unknown'}</div>
-                        <div className="mt-1 text-[11px] font-mono" style={{ color: '#848E9C' }}>
-                          {`trade=${event.exchange_order_id || '—'}`}
-                        </div>
-                        <div className="mt-1 text-[11px] font-mono" style={{ color: '#848E9C' }}>
-                          {`parent=${event.parent_order_id || '—'}`}
-                        </div>
-                      </div>
-                      <div>
-                        <div style={{ color: '#848E9C' }}>{'数量 / Ratio'}</div>
-                        <div className="font-mono" style={{ color: '#EAECEF' }}>{`${formatQuantity(event.close_quantity)} / ${event.close_ratio_pct.toFixed(2)}%`}</div>
-                      </div>
-                      <div>
-                        <div style={{ color: '#848E9C' }}>{'价格 / Value'}</div>
-                        <div className="font-mono" style={{ color: '#EAECEF' }}>{`${formatPrice(event.execution_price)} / ${formatNumber(event.close_value_usdt)}`}</div>
-                      </div>
-                      <div>
-                        <div style={{ color: '#848E9C' }}>{'决策周期 / Cycle'}</div>
-                        <div className="font-mono" style={{ color: '#EAECEF' }}>{event.decision_cycle || '—'}</div>
-                      </div>
-                      <div>
-                        <div style={{ color: '#848E9C' }}>{'复盘上下文 / Review'}</div>
-                        <div className="text-[11px] leading-5" style={{ color: '#EAECEF' }}>
-                          {formatReviewContextSummary(event.decision_review?.review_context)}
-                        </div>
-                        <div className="mt-2 flex flex-wrap gap-1.5">
-                          {formatProtectionSummary(event.decision_review?.protection_snapshot).map((item, idx) => (
-                            <span key={idx} className="px-2 py-1 rounded text-[11px] font-medium" style={item.style}>
-                              {item.label}
-                            </span>
-                          ))}
-                        </div>
-                        <div className="mt-2">
-                          <DecisionAuditPanel review={event.decision_review} />
-                        </div>
-                      </div>
-                      <div>
-                        <div style={{ color: '#848E9C' }}>{'PnL / Time'}</div>
-                        <div className="font-mono" style={{ color: '#EAECEF' }}>{`${event.realized_pnl_delta >= 0 ? '+' : ''}${formatNumber(event.realized_pnl_delta)} / ${formatDate(event.event_time)}`}</div>
-                      </div>
-                    </div>
-                  )})}
-                </div>
-              </div>
-            )}
+                  )
+                } catch {
+                  return null
+                }
+              })()}
           </div>
         </td>
+
+        {/* Entry Price */}
+        <td
+          className="py-3 px-4 text-right font-mono"
+          style={{ color: '#EAECEF' }}
+        >
+          {formatPrice(entryPrice)}
+        </td>
+
+        {/* Exit Price */}
+        <td
+          className="py-3 px-4 text-right font-mono"
+          style={{ color: '#EAECEF' }}
+        >
+          {formatPrice(exitPrice)}
+        </td>
+
+        {/* Quantity */}
+        <td
+          className="py-3 px-4 text-right font-mono"
+          style={{ color: '#848E9C' }}
+        >
+          {formatQuantity(displayQty)}
+        </td>
+
+        {/* Position Value (Entry Price * Quantity) */}
+        <td
+          className="py-3 px-4 text-right font-mono"
+          style={{ color: '#EAECEF' }}
+        >
+          {formatNumber(entryPrice * displayQty)}
+        </td>
+
+        {/* P&L */}
+        <td className="py-3 px-4 text-right">
+          <div className="font-mono font-semibold" style={{ color: pnlColor }}>
+            {isProfitable ? '+' : ''}
+            {formatNumber(realizedPnl)}
+          </div>
+          <div className="text-xs" style={{ color: pnlColor }}>
+            {pnlPct >= 0 ? '+' : ''}
+            {pnlPct.toFixed(2)}%
+          </div>
+        </td>
+
+        {/* Fee - show more precision for small fees */}
+        <td
+          className="py-3 px-4 text-right font-mono text-xs"
+          style={{ color: '#848E9C' }}
+        >
+          -
+          {(position.fee || 0) < 0.01 && (position.fee || 0) > 0
+            ? (position.fee || 0).toFixed(4)
+            : (position.fee || 0).toFixed(2)}
+        </td>
+
+        {/* Duration */}
+        <td
+          className="py-3 px-4 text-center text-sm"
+          style={{ color: '#848E9C' }}
+        >
+          {formatDuration(holdingMinutes)}
+        </td>
+
+        {/* Exit Time */}
+        <td
+          className="py-3 px-4 text-right text-xs"
+          style={{ color: '#848E9C' }}
+        >
+          {formatDate(position.exit_time)}
+        </td>
       </tr>
-    )}
+      {expanded && (
+        <tr
+          style={{
+            borderBottom: '1px solid #2B3139',
+            background: 'rgba(255,255,255,0.02)',
+          }}
+        >
+          <td colSpan={9} className="px-4 pb-4 pt-0">
+            <div className="rounded-lg border border-white/10 bg-black/20 p-4 mt-2 space-y-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-xs">
+                <div>
+                  <div style={{ color: '#848E9C' }}>{'委托来源 / Source'}</div>
+                  <div
+                    className="px-2 py-1 rounded text-[11px] font-semibold inline-flex"
+                    style={getCloseSourceBadgeStyle(
+                      executionSourcePresentation
+                    )}
+                  >
+                    {executionSource}
+                  </div>
+                  {executionSourcePresentation.detail ? (
+                    <div
+                      className="mt-1 text-[11px]"
+                      style={{ color: '#848E9C' }}
+                    >
+                      {executionSourcePresentation.detail} · confidence{' '}
+                      {executionSourcePresentation.confidence}
+                    </div>
+                  ) : (
+                    <div
+                      className="mt-1 text-[11px]"
+                      style={{ color: '#848E9C' }}
+                    >
+                      confidence {executionSourcePresentation.confidence}
+                    </div>
+                  )}
+                  <div
+                    className="mt-1 text-[11px]"
+                    style={{ color: '#848E9C' }}
+                  >
+                    raw:{' '}
+                    {position.execution_source ||
+                      position.close_reason ||
+                      'unknown'}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {formatProtectionSummary(position.protection_snapshot).map(
+                      (item, idx) => (
+                        <span
+                          key={idx}
+                          className="px-2 py-1 rounded text-[11px] font-medium"
+                          style={item.style}
+                        >
+                          {item.label}
+                        </span>
+                      )
+                    )}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ color: '#848E9C' }}>
+                    {'委托类型 / Order Type'}
+                  </div>
+                  <div className="font-mono" style={{ color: '#EAECEF' }}>
+                    {executionOrderType}
+                  </div>
+                  {closeFlowSummary && (
+                    <div
+                      className="mt-2 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-[11px] space-y-1"
+                      style={{ color: '#EAECEF' }}
+                    >
+                      <div style={{ color: '#848E9C' }}>
+                        {'平仓流摘要 / Close Flow Summary'}
+                      </div>
+                      <div>{`events=${closeFlowSummary.eventCount} | linked=${closeFlowSummary.linkedDecisionCount} | ratio=${closeFlowSummary.totalRatio.toFixed(2)}%`}</div>
+                      <div>
+                        {closeFlowSummary.sourceBreakdown.join(' · ') || '—'}
+                      </div>
+                      {closeFlowSummary.isFragmentedSyncLike && (
+                        <div style={{ color: '#F0B90B' }}>
+                          {
+                            'This looks like fragmented exchange sync, not multiple independent AI decisions.'
+                          }
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <div style={{ color: '#848E9C' }}>
+                    {'入场 / 出场决策周期'}
+                  </div>
+                  <div className="font-mono" style={{ color: '#EAECEF' }}>
+                    {`${position.entry_decision_cycle || '—'} / ${position.exit_decision_cycle || '—'}`}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ color: '#848E9C' }}>
+                    {'复盘上下文 / Review Context'}
+                  </div>
+                  <div
+                    className="text-[11px] leading-5"
+                    style={{ color: '#EAECEF' }}
+                  >
+                    {formatReviewContextSummary(
+                      position.exit_decision_review?.review_context ||
+                        position.entry_decision_review?.review_context
+                    )}
+                  </div>
+                  {entryReviewSummary && (
+                    <div
+                      className="mt-2 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-[11px] space-y-1"
+                      style={{ color: '#EAECEF' }}
+                    >
+                      <div style={{ color: '#848E9C' }}>
+                        {'开仓结构摘要 / Entry Structure Summary'}
+                      </div>
+                      <div>
+                        TF: {entryTf?.primary || '—'}
+                        {entryTf?.lower?.length
+                          ? ` | lower ${entryTf.lower.join(', ')}`
+                          : ''}
+                        {entryTf?.higher?.length
+                          ? ` | higher ${entryTf.higher.join(', ')}`
+                          : ''}
+                      </div>
+                      <div>
+                        RR: entry {entryRR?.entry ?? '—'} / invalidation{' '}
+                        {entryRR?.invalidation ?? '—'} / target{' '}
+                        {entryRR?.first_target ?? '—'}
+                      </div>
+                      <div>
+                        Levels: S {entryLevels?.support?.join(', ') || '—'} | R{' '}
+                        {entryLevels?.resistance?.join(', ') || '—'}
+                      </div>
+                      {linkageStatus && (
+                        <div>
+                          Linkage:{' '}
+                          <span
+                            style={{
+                              color:
+                                linkageStatus.tone === 'danger'
+                                  ? '#F6465D'
+                                  : linkageStatus.tone === 'warn'
+                                    ? '#F0B90B'
+                                    : '#0ECB81',
+                            }}
+                          >
+                            {linkageStatus.label}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {formatProtectionSummary(
+                      position.exit_decision_review?.protection_snapshot ||
+                        position.entry_decision_review?.protection_snapshot
+                    ).map((item, idx) => (
+                      <span
+                        key={idx}
+                        className="px-2 py-1 rounded text-[11px] font-medium"
+                        style={item.style}
+                      >
+                        {item.label}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="mt-2">
+                    <DecisionAuditPanel
+                      review={
+                        position.entry_decision_review ||
+                        position.exit_decision_review
+                      }
+                    />
+                  </div>
+                </div>
+                <div>
+                  <div style={{ color: '#848E9C' }}>
+                    {'成交比例 / Close Ratio'}
+                  </div>
+                  <div className="font-mono" style={{ color: '#EAECEF' }}>
+                    {closeRatioPct > 0 ? `${closeRatioPct.toFixed(2)}%` : '—'}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ color: '#848E9C' }}>
+                    {'成交价值 / Value USDT'}
+                  </div>
+                  <div className="font-mono" style={{ color: '#EAECEF' }}>
+                    {formatNumber(closeValueUsdt)}
+                  </div>
+                </div>
+              </div>
+
+              {position.close_events && position.close_events.length > 0 && (
+                <div>
+                  <div className="text-xs mb-2" style={{ color: '#848E9C' }}>
+                    {'分段平仓事件 / Close Event Flow'}
+                  </div>
+                  <div className="space-y-2">
+                    {position.close_events.map((event) => {
+                      const eventPresentation = summarizeCloseSource(
+                        event.execution_source,
+                        event.close_reason,
+                        event.execution_type,
+                        Boolean(event.decision_cycle),
+                        Boolean(event.decision_review?.review_context)
+                      )
+                      return (
+                        <div
+                          key={event.id}
+                          className="rounded-lg border border-white/10 bg-white/5 p-3 grid grid-cols-1 md:grid-cols-6 gap-3 text-xs"
+                        >
+                          <div>
+                            <div style={{ color: '#848E9C' }}>
+                              {'原因 / Reason'}
+                            </div>
+                            <div
+                              className="px-2 py-1 rounded text-[11px] font-semibold inline-flex"
+                              style={getCloseSourceBadgeStyle(
+                                eventPresentation
+                              )}
+                            >
+                              {eventPresentation.label}
+                            </div>
+                            <div
+                              className="mt-1 text-[11px]"
+                              style={{ color: '#848E9C' }}
+                            >
+                              {`raw=${event.execution_source || event.close_reason || 'unknown'} | confidence=${eventPresentation.confidence}`}
+                            </div>
+                            {event.protection_status ? (
+                              <div className="mt-2">
+                                <span
+                                  className="px-2 py-1 rounded text-[11px] font-medium"
+                                  style={{
+                                    background: 'rgba(255,255,255,0.06)',
+                                    color: '#C9D1D9',
+                                    border: '1px solid rgba(255,255,255,0.08)',
+                                  }}
+                                >
+                                  {`Protection: ${event.protection_status}`}
+                                </span>
+                              </div>
+                            ) : null}
+                          </div>
+                          <div>
+                            <div style={{ color: '#848E9C' }}>
+                              {'类型 / Type'}
+                            </div>
+                            <div
+                              className="font-mono"
+                              style={{ color: '#EAECEF' }}
+                            >
+                              {event.execution_type || 'unknown'}
+                            </div>
+                            <div
+                              className="mt-1 text-[11px] font-mono"
+                              style={{ color: '#848E9C' }}
+                            >
+                              {`trade=${event.exchange_order_id || '—'}`}
+                            </div>
+                            <div
+                              className="mt-1 text-[11px] font-mono"
+                              style={{ color: '#848E9C' }}
+                            >
+                              {`parent=${event.parent_order_id || '—'}`}
+                            </div>
+                          </div>
+                          <div>
+                            <div style={{ color: '#848E9C' }}>
+                              {'数量 / Ratio'}
+                            </div>
+                            <div
+                              className="font-mono"
+                              style={{ color: '#EAECEF' }}
+                            >{`${formatQuantity(event.close_quantity)} / ${event.close_ratio_pct.toFixed(2)}%`}</div>
+                          </div>
+                          <div>
+                            <div style={{ color: '#848E9C' }}>
+                              {'价格 / Value'}
+                            </div>
+                            <div
+                              className="font-mono"
+                              style={{ color: '#EAECEF' }}
+                            >{`${formatPrice(event.execution_price)} / ${formatNumber(event.close_value_usdt)}`}</div>
+                          </div>
+                          <div>
+                            <div style={{ color: '#848E9C' }}>
+                              {'决策周期 / Cycle'}
+                            </div>
+                            <div
+                              className="font-mono"
+                              style={{ color: '#EAECEF' }}
+                            >
+                              {event.decision_cycle || '—'}
+                            </div>
+                          </div>
+                          <div>
+                            <div style={{ color: '#848E9C' }}>
+                              {'复盘上下文 / Review'}
+                            </div>
+                            <div
+                              className="text-[11px] leading-5"
+                              style={{ color: '#EAECEF' }}
+                            >
+                              {formatReviewContextSummary(
+                                event.decision_review?.review_context
+                              )}
+                            </div>
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                              {formatProtectionSummary(
+                                event.decision_review?.protection_snapshot
+                              ).map((item, idx) => (
+                                <span
+                                  key={idx}
+                                  className="px-2 py-1 rounded text-[11px] font-medium"
+                                  style={item.style}
+                                >
+                                  {item.label}
+                                </span>
+                              ))}
+                            </div>
+                            <div className="mt-2">
+                              <DecisionAuditPanel
+                                review={event.decision_review}
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <div style={{ color: '#848E9C' }}>
+                              {'PnL / Time'}
+                            </div>
+                            <div
+                              className="font-mono"
+                              style={{ color: '#EAECEF' }}
+                            >{`${event.realized_pnl_delta >= 0 ? '+' : ''}${formatNumber(event.realized_pnl_delta)} / ${formatDate(event.event_time)}`}</div>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </td>
+        </tr>
+      )}
     </>
   )
 }
 
-export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProps) {
+export function PositionHistory({
+  traderId,
+  onSymbolClick,
+}: PositionHistoryProps) {
   const { language } = useLanguage()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -1326,7 +1975,8 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
       switch (sortBy) {
         case 'time':
           comparison =
-            new Date(a.exit_time || 0).getTime() - new Date(b.exit_time || 0).getTime()
+            new Date(a.exit_time || 0).getTime() -
+            new Date(b.exit_time || 0).getTime()
           break
         case 'pnl':
           comparison = (a.realized_pnl || 0) - (b.realized_pnl || 0)
@@ -1334,8 +1984,8 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
         case 'pnl_pct': {
           const aPrice = a.entry_price || 1
           const bPrice = b.entry_price || 1
-          const aPct = ((a.exit_price || 0) - aPrice) / aPrice * 100
-          const bPct = ((b.exit_price || 0) - bPrice) / bPrice * 100
+          const aPct = (((a.exit_price || 0) - aPrice) / aPrice) * 100
+          const bPct = (((b.exit_price || 0) - bPrice) / bPrice) * 100
           comparison = aPct - bPct
           break
         }
@@ -1426,7 +2076,10 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
         }}
       >
         <div className="text-4xl mb-4">📊</div>
-        <div className="text-lg font-semibold mb-2" style={{ color: '#EAECEF' }}>
+        <div
+          className="text-lg font-semibold mb-2"
+          style={{ color: '#EAECEF' }}
+        >
           {t('positionHistory.noHistory', language)}
         </div>
         <div style={{ color: '#848E9C' }}>
@@ -1445,7 +2098,10 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
             icon="📊"
             title={t('positionHistory.totalTrades', language)}
             value={stats.total_trades || 0}
-            subtitle={t('positionHistory.winLoss', language, { win: stats.win_trades || 0, loss: stats.loss_trades || 0 })}
+            subtitle={t('positionHistory.winLoss', language, {
+              win: stats.win_trades || 0,
+              loss: stats.loss_trades || 0,
+            })}
             language={language}
           />
           <StatCard
@@ -1466,7 +2122,10 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
           <StatCard
             icon="💰"
             title={t('positionHistory.totalPnL', language)}
-            value={((stats.total_pnl || 0) >= 0 ? '+' : '') + formatNumber(stats.total_pnl || 0)}
+            value={
+              ((stats.total_pnl || 0) >= 0 ? '+' : '') +
+              formatNumber(stats.total_pnl || 0)
+            }
             color={(stats.total_pnl || 0) >= 0 ? '#0ECB81' : '#F6465D'}
             subtitle={`${t('positionHistory.fee', language)}: -${formatNumber(stats.total_fee || 0)}`}
             metricKey="total_return"
@@ -1476,7 +2135,13 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
             icon="📈"
             title={t('positionHistory.profitFactor', language)}
             value={(stats.profit_factor || 0).toFixed(2)}
-            color={(stats.profit_factor || 0) >= 1.5 ? '#0ECB81' : (stats.profit_factor || 0) >= 1 ? '#F0B90B' : '#F6465D'}
+            color={
+              (stats.profit_factor || 0) >= 1.5
+                ? '#0ECB81'
+                : (stats.profit_factor || 0) >= 1
+                  ? '#F0B90B'
+                  : '#F6465D'
+            }
             subtitle={t('positionHistory.profitFactorDesc', language)}
             metricKey="profit_factor"
             language={language}
@@ -1484,8 +2149,16 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
           <StatCard
             icon="⚖️"
             title={t('positionHistory.plRatio', language)}
-            value={profitLossRatio === Infinity ? '∞' : profitLossRatio.toFixed(2)}
-            color={profitLossRatio >= 1.5 ? '#0ECB81' : profitLossRatio >= 1 ? '#F0B90B' : '#F6465D'}
+            value={
+              profitLossRatio === Infinity ? '∞' : profitLossRatio.toFixed(2)
+            }
+            color={
+              profitLossRatio >= 1.5
+                ? '#0ECB81'
+                : profitLossRatio >= 1
+                  ? '#F0B90B'
+                  : '#F6465D'
+            }
             subtitle={t('positionHistory.plRatioDesc', language)}
             metricKey="expectancy"
             language={language}
@@ -1500,7 +2173,13 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
             icon="📉"
             title={t('positionHistory.sharpeRatio', language)}
             value={(stats.sharpe_ratio || 0).toFixed(2)}
-            color={(stats.sharpe_ratio || 0) >= 1 ? '#0ECB81' : (stats.sharpe_ratio || 0) >= 0 ? '#F0B90B' : '#F6465D'}
+            color={
+              (stats.sharpe_ratio || 0) >= 1
+                ? '#0ECB81'
+                : (stats.sharpe_ratio || 0) >= 0
+                  ? '#F0B90B'
+                  : '#F6465D'
+            }
             subtitle={t('positionHistory.sharpeRatioDesc', language)}
             metricKey="sharpe_ratio"
             language={language}
@@ -1510,7 +2189,13 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
             title={t('positionHistory.maxDrawdown', language)}
             value={(stats.max_drawdown_pct || 0).toFixed(1)}
             suffix="%"
-            color={(stats.max_drawdown_pct || 0) <= 10 ? '#0ECB81' : (stats.max_drawdown_pct || 0) <= 20 ? '#F0B90B' : '#F6465D'}
+            color={
+              (stats.max_drawdown_pct || 0) <= 10
+                ? '#0ECB81'
+                : (stats.max_drawdown_pct || 0) <= 20
+                  ? '#F0B90B'
+                  : '#F6465D'
+            }
             metricKey="max_drawdown"
             language={language}
           />
@@ -1532,8 +2217,17 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
           <StatCard
             icon="💵"
             title={t('positionHistory.netPnL', language)}
-            value={((stats.total_pnl || 0) - (stats.total_fee || 0) >= 0 ? '+' : '') + formatNumber((stats.total_pnl || 0) - (stats.total_fee || 0))}
-            color={(stats.total_pnl || 0) - (stats.total_fee || 0) >= 0 ? '#0ECB81' : '#F6465D'}
+            value={
+              ((stats.total_pnl || 0) - (stats.total_fee || 0) >= 0
+                ? '+'
+                : '') +
+              formatNumber((stats.total_pnl || 0) - (stats.total_fee || 0))
+            }
+            color={
+              (stats.total_pnl || 0) - (stats.total_fee || 0) >= 0
+                ? '#0ECB81'
+                : '#F6465D'
+            }
             subtitle={t('positionHistory.netPnLDesc', language)}
             language={language}
           />
@@ -1544,7 +2238,11 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
       {directionStats.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {directionStats.map((stat) => (
-            <DirectionStatsCard key={stat.side} stat={stat} language={language} />
+            <DirectionStatsCard
+              key={stat.side}
+              stat={stat}
+              language={language}
+            />
           ))}
         </div>
       )}
@@ -1566,7 +2264,11 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
           </div>
           <div className="space-y-1">
             {symbolStats.slice(0, 10).map((stat) => (
-              <SymbolStatsRow key={stat.symbol} stat={stat} onSymbolClick={onSymbolClick} />
+              <SymbolStatsRow
+                key={stat.symbol}
+                stat={stat}
+                onSymbolClick={onSymbolClick}
+              />
             ))}
           </div>
         </div>
@@ -1599,7 +2301,9 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
                 color: '#EAECEF',
               }}
             >
-              <option value="all">{t('positionHistory.allSymbols', language)}</option>
+              <option value="all">
+                {t('positionHistory.allSymbols', language)}
+              </option>
               {uniqueSymbols.map((symbol) => (
                 <option key={symbol} value={symbol}>
                   {(symbol || '').replace('USDT', '')}
@@ -1612,7 +2316,10 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
             <span className="text-sm" style={{ color: '#848E9C' }}>
               {t('positionHistory.side', language)}:
             </span>
-            <div className="flex rounded overflow-hidden" style={{ border: '1px solid #2B3139' }}>
+            <div
+              className="flex rounded overflow-hidden"
+              style={{ border: '1px solid #2B3139' }}
+            >
               {['all', 'LONG', 'SHORT'].map((side) => (
                 <button
                   key={side}
@@ -1650,10 +2357,18 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
                 color: '#EAECEF',
               }}
             >
-              <option value="time-desc">{t('positionHistory.latestFirst', language)}</option>
-              <option value="time-asc">{t('positionHistory.oldestFirst', language)}</option>
-              <option value="pnl-desc">{t('positionHistory.highestPnL', language)}</option>
-              <option value="pnl-asc">{t('positionHistory.lowestPnL', language)}</option>
+              <option value="time-desc">
+                {t('positionHistory.latestFirst', language)}
+              </option>
+              <option value="time-asc">
+                {t('positionHistory.oldestFirst', language)}
+              </option>
+              <option value="pnl-desc">
+                {t('positionHistory.highestPnL', language)}
+              </option>
+              <option value="pnl-asc">
+                {t('positionHistory.lowestPnL', language)}
+              </option>
             </select>
           </div>
         </div>
@@ -1721,7 +2436,11 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
             </thead>
             <tbody>
               {filteredPositions.map((position) => (
-                <PositionRow key={position.id} position={position} onSymbolClick={onSymbolClick} />
+                <PositionRow
+                  key={position.id}
+                  position={position}
+                  onSymbolClick={onSymbolClick}
+                />
               ))}
             </tbody>
           </table>
@@ -1735,7 +2454,10 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
           {/* Left: Count info */}
           <div className="flex items-center gap-4">
             <span>
-              {t('positionHistory.showingPositions', language, { count: totalFilteredCount, total: positions.length })}
+              {t('positionHistory.showingPositions', language, {
+                count: totalFilteredCount,
+                total: positions.length,
+              })}
             </span>
             {totalFilteredCount > 0 && (
               <span>
@@ -1743,16 +2465,25 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
                 <span
                   style={{
                     color:
-                      filteredAndSortedPositions.reduce((sum, p) => sum + (p.realized_pnl || 0), 0) >= 0
+                      filteredAndSortedPositions.reduce(
+                        (sum, p) => sum + (p.realized_pnl || 0),
+                        0
+                      ) >= 0
                         ? '#0ECB81'
                         : '#F6465D',
                   }}
                 >
-                  {filteredAndSortedPositions.reduce((sum, p) => sum + (p.realized_pnl || 0), 0) >= 0
+                  {filteredAndSortedPositions.reduce(
+                    (sum, p) => sum + (p.realized_pnl || 0),
+                    0
+                  ) >= 0
                     ? '+'
                     : ''}
                   {formatNumber(
-                    filteredAndSortedPositions.reduce((sum, p) => sum + (p.realized_pnl || 0), 0)
+                    filteredAndSortedPositions.reduce(
+                      (sum, p) => sum + (p.realized_pnl || 0),
+                      0
+                    )
                   )}
                 </span>
               </span>
@@ -1811,11 +2542,14 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
                   {currentPage} / {totalPages}
                 </span>
                 <button
-                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  onClick={() =>
+                    setCurrentPage((p) => Math.min(totalPages, p + 1))
+                  }
                   disabled={currentPage === totalPages}
                   className="px-2 py-1 rounded text-xs transition-colors disabled:opacity-30"
                   style={{
-                    background: currentPage === totalPages ? 'transparent' : '#2B3139',
+                    background:
+                      currentPage === totalPages ? 'transparent' : '#2B3139',
                     color: '#EAECEF',
                   }}
                 >
@@ -1826,7 +2560,8 @@ export function PositionHistory({ traderId, onSymbolClick }: PositionHistoryProp
                   disabled={currentPage === totalPages}
                   className="px-2 py-1 rounded text-xs transition-colors disabled:opacity-30"
                   style={{
-                    background: currentPage === totalPages ? 'transparent' : '#2B3139',
+                    background:
+                      currentPage === totalPages ? 'transparent' : '#2B3139',
                     color: '#EAECEF',
                   }}
                 >
