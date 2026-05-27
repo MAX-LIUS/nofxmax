@@ -726,6 +726,9 @@ func (s *PositionStore) GetClosedPositionsWithOffset(traderID string, limit, off
 
 // GetRecentlyClosedSyncAbsentPosition returns the most recent position closed via
 // sync_absent_from_exchange for the same symbol/side within the specified delay window.
+// The fill's trade time may be earlier than the sync_absent exit_time (exchange executes
+// the stop, then our next position poll detects the absence), so we also match positions
+// closed slightly AFTER the trade time.
 func (s *PositionStore) GetRecentlyClosedSyncAbsentPosition(traderID, symbol, side string, tradeTimeMs int64, maxDelay time.Duration) (*TraderPosition, error) {
 	if s.db == nil || traderID == "" || symbol == "" || side == "" || tradeTimeMs <= 0 {
 		return nil, nil
@@ -734,9 +737,10 @@ func (s *PositionStore) GetRecentlyClosedSyncAbsentPosition(traderID, symbol, si
 		maxDelay = 2 * time.Minute
 	}
 	minExitTime := tradeTimeMs - maxDelay.Milliseconds()
+	maxExitTime := tradeTimeMs + maxDelay.Milliseconds()
 	var pos TraderPosition
-	err := s.db.Where("trader_id = ? AND symbol = ? AND side = ? AND status = ? AND close_reason = ? AND exit_time > 0 AND exit_time <= ? AND exit_time >= ?",
-		traderID, symbol, side, "CLOSED", "sync_absent_from_exchange", tradeTimeMs, minExitTime).
+	err := s.db.Where("trader_id = ? AND symbol = ? AND side = ? AND status = ? AND close_reason = ? AND exit_time > 0 AND exit_time >= ? AND exit_time <= ?",
+		traderID, symbol, side, "CLOSED", "sync_absent_from_exchange", minExitTime, maxExitTime).
 		Order("exit_time DESC, id DESC").
 		First(&pos).Error
 	if err != nil {
