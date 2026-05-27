@@ -8,6 +8,7 @@ const ChartTabs = lazy(() =>
 )
 import { DecisionCard } from '../components/trader/DecisionCard'
 import { PositionProtectionPanel } from '../components/trader/PositionProtectionPanel'
+import { EvolutionProfilePanel } from '../components/trader/EvolutionProfilePanel'
 const PositionHistory = lazy(() =>
   import('../components/trader/PositionHistory').then((m) => ({
     default: m.PositionHistory,
@@ -1182,7 +1183,6 @@ export function TraderDashboardPage({
                 </div>
               )}
             </div>
-
           </div>
 
           {/* Right Column: Position Protection */}
@@ -1213,8 +1213,7 @@ export function TraderDashboardPage({
             <div
               className="w-10 h-10 rounded-xl flex items-center justify-center text-xl shadow-[0_4px_14px_rgba(99,102,241,0.4)]"
               style={{
-                background:
-                  'linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%)',
+                background: 'linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%)',
               }}
             >
               🧠
@@ -1326,6 +1325,7 @@ export function TraderDashboardPage({
                 onSymbolClick={handleSymbolClick}
               />
             </Suspense>
+            <EvolutionProfilePanel traderId={selectedTraderId} />
           </div>
         )}
       </div>

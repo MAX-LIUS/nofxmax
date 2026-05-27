@@ -7,6 +7,7 @@ import type {
   CompetitionData,
   PositionHistoryResponse,
   OpenOrder,
+  EvolutionProfile,
 } from '../../types'
 import { API_BASE, httpClient } from './helpers'
 
@@ -82,7 +83,10 @@ export const dataApi = {
     return result.data!
   },
 
-  async getEquityHistoryBatch(traderIds: string[], hours?: number): Promise<any> {
+  async getEquityHistoryBatch(
+    traderIds: string[],
+    hours?: number
+  ): Promise<any> {
     const result = await httpClient.post<any>(
       `${API_BASE}/equity-history-batch`,
       { trader_ids: traderIds, hours: hours || 0 }
@@ -113,7 +117,10 @@ export const dataApi = {
     return result.data!
   },
 
-  async getPositionHistory(traderId: string, limit: number = 100): Promise<PositionHistoryResponse> {
+  async getPositionHistory(
+    traderId: string,
+    limit: number = 100
+  ): Promise<PositionHistoryResponse> {
     const result = await httpClient.get<PositionHistoryResponse>(
       `${API_BASE}/positions/history?trader_id=${traderId}&limit=${limit}`
     )
@@ -123,8 +130,18 @@ export const dataApi = {
 
   async getOpenOrders(traderId: string, symbol: string): Promise<OpenOrder[]> {
     const params = new URLSearchParams({ trader_id: traderId, symbol })
-    const result = await httpClient.get<OpenOrder[]>(`${API_BASE}/open-orders?${params}`)
+    const result = await httpClient.get<OpenOrder[]>(
+      `${API_BASE}/open-orders?${params}`
+    )
     if (!result.success) throw new Error('Failed to fetch open orders')
     return result.data!
+  },
+
+  async getEvolutionProfiles(traderId: string): Promise<EvolutionProfile[]> {
+    const result = await httpClient.get<EvolutionProfile[]>(
+      `${API_BASE}/evolution/profiles?trader_id=${traderId}`
+    )
+    if (!result.success) return []
+    return result.data || []
   },
 }
