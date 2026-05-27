@@ -92,6 +92,15 @@ func (at *AutoTrader) updateEvolutionProfile(symbol, side string) {
 	existingAdapts := profile.GetAdaptations()
 	existingAdapts = store.PruneExpiredAdaptations(existingAdapts)
 
+	// Check for contradictions: if the most recent trade was a WIN in a condition
+	// that an existing adaptation penalizes, increment the contradiction counter
+	if len(outcomes) > 0 {
+		latest := outcomes[0] // most recent trade
+		if latest.IsWin {
+			existingAdapts = checkContradictions(existingAdapts, latest)
+		}
+	}
+
 	// Replace adaptations with same condition, keep others
 	mergedAdapts := mergeAdaptations(existingAdapts, adaptations)
 
@@ -121,6 +130,38 @@ func mergeAdaptations(existing, new []store.Adaptation) []store.Adaptation {
 		result = append(result, a)
 	}
 	return result
+}
+
+// checkContradictions increments the contradiction counter for adaptations
+// that are contradicted by a winning trade. If a trade wins in a condition
+// that an adaptation penalizes, the adaptation may be outdated.
+func checkContradictions(adaptations []store.Adaptation, trade store.TradeOutcome) []store.Adaptation {
+	for i := range adaptations {
+		contradicted := false
+		switch adaptations[i].Condition {
+		case "phase=extension":
+			contradicted = trade.SceneTags.TrendPhase == "extension" || trade.SceneTags.TrendPhase == "exhaustion"
+		case "ema20_contradicted":
+			if trade.Side == "long" && trade.SceneTags.EMA20Dev < -0.5 {
+				contradicted = true
+			}
+			if trade.Side == "short" && trade.SceneTags.EMA20Dev > 0.5 {
+				contradicted = true
+			}
+		case "chg4h_gt_2.5":
+			abs4h := trade.SceneTags.Chg4h
+			if abs4h < 0 {
+				abs4h = -abs4h
+			}
+			contradicted = abs4h > 2.5
+		case "trigger_low_quality":
+			contradicted = true // any win contradicts "low quality trigger"
+		}
+		if contradicted {
+			adaptations[i].Contradictions++
+		}
+	}
+	return adaptations
 }
 
 // applyEvolutionAdaptations modifies a decision based on the coin's evolution profile.
