@@ -189,6 +189,12 @@ func ComputeFactors(trades []TradeOutcome) []EvolutionFactor {
 	// Factor 5: Protection Effectiveness
 	factors = append(factors, computeProtectionEffectiveness(trades, now))
 
+	// Factor 6: Time of Day
+	factors = append(factors, computeTimeOfDay(trades, now))
+
+	// Factor 7: Volatility Regime
+	factors = append(factors, computeVolatilityRegime(trades, now))
+
 	return factors
 }
 
@@ -427,6 +433,106 @@ func computeProtectionEffectiveness(trades []TradeOutcome, now time.Time) Evolut
 
 	return EvolutionFactor{
 		Name:       FactorProtectionEffectiveness,
+		Score:      clampScore(score),
+		SampleSize: len(trades),
+		Confidence: sampleConfidence(len(trades)),
+		Insight:    insight,
+		UpdatedAt:  now.UnixMilli(),
+	}
+}
+
+func computeTimeOfDay(trades []TradeOutcome, now time.Time) EvolutionFactor {
+	// Bucket by entry hour (UTC): 0-6, 6-12, 12-18, 18-24
+	type bucket struct{ wins, total float64 }
+	buckets := [4]bucket{}
+	for _, t := range trades {
+		w := decayWeight(t.CloseTime, now)
+		hour := t.EntryTime.UTC().Hour()
+		idx := hour / 6
+		if idx > 3 {
+			idx = 3
+		}
+		buckets[idx].total += w
+		if t.IsWin {
+			buckets[idx].wins += w
+		}
+	}
+
+	bestIdx := 0
+	bestWR := 0.0
+	for i, b := range buckets {
+		if b.total > 0 {
+			wr := b.wins / b.total
+			if wr > bestWR {
+				bestWR = wr
+				bestIdx = i
+			}
+		}
+	}
+
+	labels := []string{"00-06 UTC", "06-12 UTC", "12-18 UTC", "18-24 UTC"}
+	score := bestWR * 100
+	insight := fmt.Sprintf("最佳时段: %s (胜率%.0f%%)", labels[bestIdx], bestWR*100)
+
+	return EvolutionFactor{
+		Name:       FactorTimeOfDay,
+		Score:      clampScore(score),
+		SampleSize: len(trades),
+		Confidence: sampleConfidence(len(trades)),
+		Insight:    insight,
+		UpdatedAt:  now.UnixMilli(),
+	}
+}
+
+func computeVolatilityRegime(trades []TradeOutcome, now time.Time) EvolutionFactor {
+	// Use |chg4h| as volatility proxy. Bucket: low(<1%), medium(1-2.5%), high(>2.5%)
+	type bucket struct{ wins, total float64 }
+	buckets := [3]bucket{}
+	for _, t := range trades {
+		w := decayWeight(t.CloseTime, now)
+		absChg := t.SceneTags.Chg4h
+		if absChg < 0 {
+			absChg = -absChg
+		}
+		idx := 0
+		switch {
+		case absChg >= 2.5:
+			idx = 2
+		case absChg >= 1.0:
+			idx = 1
+		}
+		buckets[idx].total += w
+		if t.IsWin {
+			buckets[idx].wins += w
+		}
+	}
+
+	bestIdx := 0
+	bestWR := 0.0
+	for i, b := range buckets {
+		if b.total > 0 {
+			wr := b.wins / b.total
+			if wr > bestWR {
+				bestWR = wr
+				bestIdx = i
+			}
+		}
+	}
+
+	labels := []string{"低波动(<1%)", "中波动(1-2.5%)", "高波动(>2.5%)"}
+	score := bestWR * 100
+	insight := fmt.Sprintf("最佳波动率: %s (胜率%.0f%%)", labels[bestIdx], bestWR*100)
+
+	// Penalize high volatility if win rate is very low
+	if buckets[2].total > 1 {
+		wr := buckets[2].wins / buckets[2].total * 100
+		if wr < 30 {
+			insight += fmt.Sprintf(", 高波动胜率仅%.0f%%", wr)
+		}
+	}
+
+	return EvolutionFactor{
+		Name:       FactorVolatilityRegime,
 		Score:      clampScore(score),
 		SampleSize: len(trades),
 		Confidence: sampleConfidence(len(trades)),

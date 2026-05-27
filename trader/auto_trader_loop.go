@@ -505,14 +505,20 @@ func (at *AutoTrader) runCycle() error {
 			blockReason := entryGateResultToBlockReason(gateResult)
 			actionRecord.Error = blockReason
 			record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("🚫 %s %s blocked: %s", d.Symbol, d.Action, blockReason))
-		} else if err := at.executeDecisionWithRecord(&d, &actionRecord); err != nil {
-			logger.Infof("❌ Failed to execute decision (%s %s): %v", d.Symbol, d.Action, err)
-			actionRecord.Error = err.Error()
-			record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("❌ %s %s failed: %v", d.Symbol, d.Action, err))
 		} else {
-			actionRecord.Success = true
-			record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("✓ %s %s succeeded", d.Symbol, d.Action))
-			time.Sleep(1 * time.Second)
+			// Apply evolution adaptations before execution (adjust size/confidence, not block)
+			if at.config.StrategyConfig != nil && at.config.StrategyConfig.Evolution.Enabled {
+				at.applyEvolutionAdaptations(&d, ctx.MarketDataMap[d.Symbol])
+			}
+			if err := at.executeDecisionWithRecord(&d, &actionRecord); err != nil {
+				logger.Infof("❌ Failed to execute decision (%s %s): %v", d.Symbol, d.Action, err)
+				actionRecord.Error = err.Error()
+				record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("❌ %s %s failed: %v", d.Symbol, d.Action, err))
+			} else {
+				actionRecord.Success = true
+				record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("✓ %s %s succeeded", d.Symbol, d.Action))
+				time.Sleep(1 * time.Second)
+			}
 		}
 
 		record.Decisions = append(record.Decisions, actionRecord)

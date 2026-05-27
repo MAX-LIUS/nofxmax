@@ -2,7 +2,9 @@ package trader
 
 import (
 	"encoding/json"
+	"nofx/kernel"
 	"nofx/logger"
+	"nofx/market"
 	"nofx/store"
 	"strings"
 	"time"
@@ -119,4 +121,95 @@ func mergeAdaptations(existing, new []store.Adaptation) []store.Adaptation {
 		result = append(result, a)
 	}
 	return result
+}
+
+// applyEvolutionAdaptations modifies a decision based on the coin's evolution profile.
+// This is NOT a hard block — it adjusts position size and logs the adjustment.
+func (at *AutoTrader) applyEvolutionAdaptations(d *kernel.Decision, data *market.Data) {
+	if at.store == nil || d == nil {
+		return
+	}
+
+	side := "long"
+	if strings.Contains(strings.ToLower(d.Action), "short") {
+		side = "short"
+	}
+
+	profile, err := at.store.Evolution().GetProfile(at.id, d.Symbol, side)
+	if err != nil || profile == nil || profile.SampleSize < 3 {
+		return
+	}
+
+	adaptations := store.PruneExpiredAdaptations(profile.GetAdaptations())
+	if len(adaptations) == 0 {
+		return
+	}
+
+	// Determine current market conditions for matching
+	var phase string
+	var chg4hAbs float64
+	if data != nil {
+		tp := market.ClassifyTrendPhase(data)
+		phase = tp.Phase
+		chg4hAbs = tp.Chg4hAbs
+	}
+
+	var ema20Contradicted bool
+	if data != nil && data.CurrentEMA20 > 0 {
+		dev := (data.CurrentPrice - data.CurrentEMA20) / data.CurrentEMA20 * 100
+		if (side == "long" && dev < -0.5) || (side == "short" && dev > 0.5) {
+			ema20Contradicted = true
+		}
+	}
+
+	originalSize := d.PositionSizeUSD
+	applied := []string{}
+
+	for _, adapt := range adaptations {
+		matched := false
+		switch adapt.Condition {
+		case "phase=extension":
+			matched = phase == "extension" || phase == "exhaustion"
+		case "ema20_contradicted":
+			matched = ema20Contradicted
+		case "chg4h_gt_2.5":
+			matched = chg4hAbs > 2.5
+		case "trigger_tf=15m":
+			// Would need trigger TF info from decision — skip for now
+			continue
+		}
+
+		if !matched {
+			continue
+		}
+
+		// Parse and apply actions
+		actions := strings.Split(adapt.Action, ",")
+		for _, action := range actions {
+			action = strings.TrimSpace(action)
+			switch {
+			case action == "reduce_size_50%":
+				d.PositionSizeUSD *= 0.5
+				applied = append(applied, "size×0.5")
+			case action == "reduce_size_30%":
+				d.PositionSizeUSD *= 0.3
+				applied = append(applied, "size×0.3")
+			case action == "require_confidence_85":
+				if d.Confidence < 85 {
+					d.PositionSizeUSD *= 0.6 // Don't block, but reduce size significantly
+					applied = append(applied, "conf<85→size×0.6")
+				}
+			case action == "require_confidence_90":
+				if d.Confidence < 90 {
+					d.PositionSizeUSD *= 0.5
+					applied = append(applied, "conf<90→size×0.5")
+				}
+			}
+		}
+	}
+
+	if len(applied) > 0 && d.PositionSizeUSD != originalSize {
+		logger.Infof("🧬 [%s] Evolution adaptation applied for %s %s: %s (size %.0f→%.0f)",
+			at.name, d.Symbol, d.Action, strings.Join(applied, "; "), originalSize, d.PositionSizeUSD)
+	}
 }
