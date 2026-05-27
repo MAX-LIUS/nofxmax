@@ -301,6 +301,41 @@ export function EvolutionProfilePanel({
                     ))}
                   </div>
                 )}
+
+                {/* Timeline — adaptation history */}
+                {profile.adaptations && profile.adaptations.length > 0 && (
+                  <div className="mt-2 pt-2 border-t border-white/5">
+                    <div className="text-[10px] text-nofx-text-muted mb-1 font-medium">
+                      变更时间线:
+                    </div>
+                    <div className="space-y-0.5">
+                      {[...profile.adaptations]
+                        .sort(
+                          (a, b) => (b.created_at || 0) - (a.created_at || 0)
+                        )
+                        .slice(0, 5)
+                        .map((a, i) => (
+                          <div
+                            key={i}
+                            className="flex items-center gap-2 text-[10px]"
+                          >
+                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 flex-shrink-0" />
+                            <span className="text-nofx-text-muted">
+                              {a.created_at ? formatTimeAgo(a.created_at) : '—'}
+                            </span>
+                            <span className="text-nofx-text-main">
+                              {a.condition}→{a.action}
+                            </span>
+                            {a.contradictions > 0 && (
+                              <span className="text-amber-400 text-[9px]">
+                                ⚠{a.contradictions}次矛盾
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
 
