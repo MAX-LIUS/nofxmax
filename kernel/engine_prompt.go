@@ -115,6 +115,19 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString("- Only reference structural ZONES provided in the market data. Do not invent levels that are not listed.\n")
 	sb.WriteString("- When price has touched a structural level and the most recent closed 15m candle shows a wick rejection (long lower shadow at support, or long upper shadow at resistance) with body closing on the correct side, that counts as confirmation even if the move is small in ATR terms.\n\n")
 
+	// 2d. Trend Direction Discipline — the most important strategic principle
+	sb.WriteString("## Trend Direction Discipline (CRITICAL)\n\n")
+	sb.WriteString("**Your #1 priority is trading WITH the trend, not against it.**\n\n")
+	sb.WriteString("Before evaluating any setup, determine the dominant trend direction from 4h price change and EMA20 position:\n")
+	sb.WriteString("- If 4h change > +1% AND price > EMA20: the trend is UP. Only look for LONG setups (pullback to support, breakout retest).\n")
+	sb.WriteString("- If 4h change < -1% AND price < EMA20: the trend is DOWN. Only look for SHORT setups (rally to resistance, breakdown retest).\n")
+	sb.WriteString("- If 4h change is between -1% and +1%: range/balanced — both directions are valid at structural edges.\n\n")
+	sb.WriteString("**Counter-trend trades are FORBIDDEN** unless ALL of the following are true:\n")
+	sb.WriteString("1. Price has reached a HIGHER timeframe (4h+) structural level with high confidence (≥70)\n")
+	sb.WriteString("2. There is clear exhaustion evidence (divergence, extreme funding, volume climax)\n")
+	sb.WriteString("3. A completed candle confirms rejection at that level\n\n")
+	sb.WriteString("A 15m support bounce in a 4h downtrend is NOT a valid long — it's a dead cat bounce. A 15m resistance rejection in a 4h uptrend is NOT a valid short — it's a pullback before continuation.\n\n")
+
 	// 3. Hard constraints (risk control)
 	btcEthPosValueRatio := riskControl.BTCETHMaxPositionValueRatio
 	if btcEthPosValueRatio <= 0 {

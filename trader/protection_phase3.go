@@ -85,7 +85,7 @@ func classifyProtectionRegime(data *market.Data) string {
 }
 
 // classifyTrendDirection scores how many directional factors align.
-// Returns the count of aligned factors (0-4). The direction is determined
+// Returns the count of aligned factors (0-5). The direction is determined
 // by the majority of factors, but caller uses PriceChange4h for final direction.
 func classifyTrendDirection(data *market.Data) int {
 	if data == nil {
@@ -120,6 +120,14 @@ func classifyTrendDirection(data *market.Data) int {
 	if data.CurrentMACD > 0 {
 		upScore++
 	} else if data.CurrentMACD < 0 {
+		downScore++
+	}
+
+	// Factor 5 (bonus): Strong 4h move magnitude — a large 4h change is a
+	// strong directional signal even if short-term factors are mixed (pullback)
+	if data.PriceChange4h > 2.0 {
+		upScore++
+	} else if data.PriceChange4h < -2.0 {
 		downScore++
 	}
 
@@ -190,8 +198,9 @@ func isTrendAlignedWithMode(action string, setupType string, data *market.Data, 
 	}
 }
 
-// isStrongCounterTrend returns true if 3+ of 4 factors oppose the action direction.
-// Used in range regimes to block clearly counter-trend entries.
+// isStrongCounterTrend returns true if the action is clearly against the prevailing trend.
+// In range regimes, this blocks entries that fight a significant directional move.
+// Threshold: 3+ factors opposing, OR 2+ factors opposing when 4h move is significant (>1.5%).
 func isStrongCounterTrend(action string, data *market.Data) bool {
 	if data == nil {
 		return false
@@ -225,7 +234,14 @@ func isStrongCounterTrend(action string, data *market.Data) bool {
 			counterScore++
 		}
 	}
-	return counterScore >= 3
+	if counterScore >= 3 {
+		return true
+	}
+	// When 4h move is significant, 2 opposing factors is enough to block
+	if counterScore >= 2 && math.Abs(data.PriceChange4h) > 1.5 {
+		return true
+	}
+	return false
 }
 
 func isTrendAligned(action string, data *market.Data) bool {
