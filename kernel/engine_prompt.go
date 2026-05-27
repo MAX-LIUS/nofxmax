@@ -115,18 +115,29 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString("- Only reference structural ZONES provided in the market data. Do not invent levels that are not listed.\n")
 	sb.WriteString("- When price has touched a structural level and the most recent closed 15m candle shows a wick rejection (long lower shadow at support, or long upper shadow at resistance) with body closing on the correct side, that counts as confirmation even if the move is small in ATR terms.\n\n")
 
-	// 2d. Trend Direction Discipline — the most important strategic principle
-	sb.WriteString("## Trend Direction Discipline (CRITICAL)\n\n")
-	sb.WriteString("**Your #1 priority is trading WITH the trend, not against it.**\n\n")
-	sb.WriteString("Before evaluating any setup, determine the dominant trend direction from 4h price change and EMA20 position:\n")
-	sb.WriteString("- If 4h change > +1% AND price > EMA20: the trend is UP. Only look for LONG setups (pullback to support, breakout retest).\n")
-	sb.WriteString("- If 4h change < -1% AND price < EMA20: the trend is DOWN. Only look for SHORT setups (rally to resistance, breakdown retest).\n")
-	sb.WriteString("- If 4h change is between -1% and +1%: range/balanced — both directions are valid at structural edges.\n\n")
-	sb.WriteString("**Counter-trend trades are FORBIDDEN** unless ALL of the following are true:\n")
-	sb.WriteString("1. Price has reached a HIGHER timeframe (4h+) structural level with high confidence (≥70)\n")
-	sb.WriteString("2. There is clear exhaustion evidence (divergence, extreme funding, volume climax)\n")
-	sb.WriteString("3. A completed candle confirms rejection at that level\n\n")
-	sb.WriteString("A 15m support bounce in a 4h downtrend is NOT a valid long — it's a dead cat bounce. A 15m resistance rejection in a 4h uptrend is NOT a valid short — it's a pullback before continuation.\n\n")
+	// 2d. Trend Phase Discipline — the most important strategic principle
+	sb.WriteString("## Trend Phase Discipline (CRITICAL)\n\n")
+	sb.WriteString("**Your #1 priority: trade WITH the trend, at the RIGHT TIME.**\n\n")
+	sb.WriteString("Trend direction alone is not enough — you must also assess WHERE in the trend lifecycle you are.\n\n")
+
+	sb.WriteString("### Step 1: Determine Direction\n")
+	sb.WriteString("- If 4h change > +1% AND price > EMA20: trend is UP → only LONG setups\n")
+	sb.WriteString("- If 4h change < -1% AND price < EMA20: trend is DOWN → only SHORT setups\n")
+	sb.WriteString("- If 4h change between -1% and +1%: range/balanced → both directions valid at structural edges\n\n")
+
+	sb.WriteString("### Step 2: Check Trend Phase (from `trend_phase` field in market data)\n\n")
+	sb.WriteString("| Phase | Condition | What to do |\n")
+	sb.WriteString("|-------|-----------|------------|\n")
+	sb.WriteString("| **establishment** | 4h 0.5-1.5%, EMA20 deviation <0.8% | Best entry window. Normal trend-following with 15m trigger OK |\n")
+	sb.WriteString("| **continuation** | 4h 1.5-2.5%, EMA20 deviation 0.8-1.8% | Only enter on pullback to EMA20. Require 1h trigger (15m not enough) |\n")
+	sb.WriteString("| **extension** | 4h >2.5% or EMA20 deviation >1.8% | **DO NOT open trend-following positions.** Wait for pullback to EMA20 |\n")
+	sb.WriteString("| **exhaustion** | 4h >3.5% or momentum decay <0.15 | **DO NOT open ANY position.** Output wait |\n\n")
+
+	sb.WriteString("### Key Rules:\n")
+	sb.WriteString("- In **extension/exhaustion**: a 15m support bounce is NOT a valid entry — it's noise within an overextended move\n")
+	sb.WriteString("- In **continuation**: only enter if price has pulled back to within 0.5% of EMA20\n")
+	sb.WriteString("- The backend WILL BLOCK extension/exhaustion entries — don't waste analysis on them\n")
+	sb.WriteString("- Counter-trend trades are FORBIDDEN unless: 4h+ structural level + exhaustion evidence + completed candle confirmation\n\n")
 
 	// 3. Hard constraints (risk control)
 	btcEthPosValueRatio := riskControl.BTCETHMaxPositionValueRatio

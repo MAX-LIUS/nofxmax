@@ -38,6 +38,7 @@ type MarketContextV2 struct {
 	Structure    *MarketStructureBrief `json:"structure,omitempty"`
 	Quant        *QuantContext         `json:"quant,omitempty"`
 	ExchangeFlow *ExchangeFlowContext  `json:"exchange_flow,omitempty"`
+	TrendPhase   *TrendPhase           `json:"trend_phase,omitempty"`
 }
 
 type RegimeEntryGuidance struct {
@@ -84,6 +85,7 @@ func BuildMarketContextV2(symbol string, data *Data, expectedTFs []string, prima
 	ctx.Quant = data.QuantContext
 	ctx.ExchangeFlow = BuildExchangeFlowContext(data)
 	ctx.RegimeRules = BuildRegimeEntryGuidance(data, ctx.Structure, ctx.Derivatives, ctx.Quant, ctx.ExchangeFlow)
+	ctx.TrendPhase = ClassifyTrendPhase(data)
 
 	missing := make([]string, 0)
 	for _, tf := range expectedTFs {
@@ -343,6 +345,20 @@ func inferExecutionRegime(data *Data, structure *MarketStructureBrief, derivativ
 	if exchangeFlow != nil && exchangeFlow.CrowdingRisk == "high" {
 		return "crowded"
 	}
+
+	// EMA20 forced trending: when price deviates >2% from EMA20, the trend is
+	// undeniable regardless of short-term 1h pullbacks. This closes the gap where
+	// a 1h bounce would previously downgrade a clear trend to "range_edge".
+	if data != nil && data.CurrentEMA20 > 0 && data.CurrentPrice > 0 {
+		deviation := (data.CurrentPrice - data.CurrentEMA20) / data.CurrentEMA20 * 100
+		if deviation > 2.0 {
+			return "trend_up"
+		}
+		if deviation < -2.0 {
+			return "trend_down"
+		}
+	}
+
 	if structure != nil && (structure.RangePosition == "near_support" || structure.RangePosition == "near_resistance") && absMarketChange(data) < 1.5 {
 		return "range_edge"
 	}
@@ -376,6 +392,91 @@ func inferExecutionRegime(data *Data, structure *MarketStructureBrief, derivativ
 // to provide a baseline directional regime classification.
 func InferExecutionRegimePublic(data *Data) string {
 	return inferExecutionRegime(data, nil, nil, nil, nil)
+}
+
+// ClassifyTrendPhase determines where the current price action sits within a
+// trend lifecycle. This is the core concept that distinguishes "trend direction
+// is correct" from "this is a good time to enter".
+func ClassifyTrendPhase(data *Data) *TrendPhase {
+	if data == nil {
+		return &TrendPhase{Phase: TrendPhaseEstablishment, Direction: "neutral"}
+	}
+
+	chg4h := data.PriceChange4h
+	chg1h := data.PriceChange1h
+	absChg4h := chg4h
+	if absChg4h < 0 {
+		absChg4h = -absChg4h
+	}
+	absChg1h := chg1h
+	if absChg1h < 0 {
+		absChg1h = -absChg1h
+	}
+
+	// Compute EMA20 deviation
+	var extensionPct float64
+	if data.CurrentEMA20 > 0 && data.CurrentPrice > 0 {
+		extensionPct = (data.CurrentPrice - data.CurrentEMA20) / data.CurrentEMA20 * 100
+	}
+	absExtension := extensionPct
+	if absExtension < 0 {
+		absExtension = -absExtension
+	}
+
+	// Momentum decay: ratio of 1h to 4h magnitude
+	var momentumDecay float64
+	if absChg4h > 0.1 {
+		momentumDecay = absChg1h / absChg4h
+	} else {
+		momentumDecay = 1.0 // no 4h move = no decay
+	}
+
+	// Direction
+	direction := "neutral"
+	if chg4h > 0.5 || extensionPct > 0.5 {
+		direction = "bullish"
+	} else if chg4h < -0.5 || extensionPct < -0.5 {
+		direction = "bearish"
+	}
+
+	// Phase classification — uses the MAXIMUM of 4h magnitude and EMA20 deviation
+	// to catch both fast moves (high 4h) and slow grinds (high EMA20 deviation)
+	effectiveMagnitude := absChg4h
+	if absExtension > effectiveMagnitude {
+		effectiveMagnitude = absExtension
+	}
+
+	phase := TrendPhaseEstablishment
+	switch {
+	case momentumDecay < 0.15 && absChg4h > 2.0:
+		phase = TrendPhaseExhaustion
+	case effectiveMagnitude > 3.5:
+		phase = TrendPhaseExhaustion
+	case effectiveMagnitude > 2.5 || (absChg4h > 2.0 && absExtension > 1.8):
+		phase = TrendPhaseExtension
+	case effectiveMagnitude > 1.5 || (absChg4h > 1.0 && absExtension > 0.8):
+		phase = TrendPhaseContinuation
+	default:
+		phase = TrendPhaseEstablishment
+	}
+
+	tp := &TrendPhase{
+		Phase:         phase,
+		Direction:     direction,
+		ExtensionPct:  extensionPct,
+		MomentumDecay: momentumDecay,
+		Chg4hAbs:      absChg4h,
+	}
+
+	// Generate warning for extension/exhaustion
+	switch phase {
+	case TrendPhaseExtension:
+		tp.Warning = fmt.Sprintf("趋势延伸警告：4h=%.1f%%, EMA20偏离=%.1f%%. 追入风险高，等回调到EMA20附近", chg4h, extensionPct)
+	case TrendPhaseExhaustion:
+		tp.Warning = fmt.Sprintf("趋势耗竭：4h=%.1f%%, 动量衰减=%.2f. 禁止开仓，等待市场重置", chg4h, momentumDecay)
+	}
+
+	return tp
 }
 
 func regimeNotes(derivatives *DerivativesContext, quant *QuantContext) []string {

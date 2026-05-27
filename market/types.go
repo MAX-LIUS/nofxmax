@@ -307,6 +307,25 @@ func (d GridDirection) GetBuySellRatio(biasRatio float64) (buyRatio, sellRatio f
 	}
 }
 
+// TrendPhase classifies where the current price action sits within a trend lifecycle.
+// Used by both AI prompt (context) and backend gates (enforcement).
+type TrendPhase struct {
+	Phase         string  `json:"phase"`          // "establishment", "continuation", "extension", "exhaustion"
+	Direction     string  `json:"direction"`      // "bullish", "bearish", "neutral"
+	ExtensionPct  float64 `json:"extension_pct"`  // price deviation from EMA20 as percentage
+	MomentumDecay float64 `json:"momentum_decay"` // |1h/4h| ratio; <0.2 = decaying
+	Chg4hAbs      float64 `json:"chg4h_abs"`      // absolute 4h change for reference
+	Warning       string  `json:"warning,omitempty"`
+}
+
+// TrendPhase constants
+const (
+	TrendPhaseEstablishment = "establishment"
+	TrendPhaseContinuation  = "continuation"
+	TrendPhaseExtension     = "extension"
+	TrendPhaseExhaustion    = "exhaustion"
+)
+
 // DerivativesEnriched holds computed derivatives indicators derived from kline
 // and order-book snapshots. Fields are optional: zero value means not computed.
 type DerivativesEnriched struct {

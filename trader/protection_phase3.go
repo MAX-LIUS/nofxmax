@@ -16,6 +16,18 @@ func classifyProtectionRegime(data *market.Data) string {
 		return string(market.RegimeLevelStandard)
 	}
 
+	// EMA20 forced trending: when price deviates >2% from EMA20, the trend is
+	// undeniable regardless of other factors. This unifies with inferExecutionRegime.
+	if data.CurrentEMA20 > 0 && data.CurrentPrice > 0 {
+		deviation := (data.CurrentPrice - data.CurrentEMA20) / data.CurrentEMA20 * 100
+		if deviation > 2.0 {
+			return string(market.RegimeLevelTrendingUp)
+		}
+		if deviation < -2.0 {
+			return string(market.RegimeLevelTrendingDown)
+		}
+	}
+
 	atrPct := 0.0
 	if data.CurrentPrice > 0 {
 		if data.IntradaySeries != nil && data.IntradaySeries.ATR14 > 0 {

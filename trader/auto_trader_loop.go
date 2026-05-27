@@ -417,6 +417,9 @@ func (at *AutoTrader) runCycle() error {
 		sortedDecisions = filtered
 	}
 
+	// Store market data for scene tag recording during position creation
+	at.lastMarketDataMap = ctx.MarketDataMap
+
 	// Execute decisions and record results
 	for _, d := range sortedDecisions {
 		// Check if trader is stopped before each decision (allow immediate stop during execution)

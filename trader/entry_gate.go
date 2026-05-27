@@ -242,7 +242,101 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 		checks = append(checks, check)
 	}
 
-	// 1d2. Coin-specific momentum gate — reject entries where the coin itself
+	// 1d2. EMA20 direction consistency — price must be on the correct side of EMA20
+	// for the trade direction. This is the single most important mid-term trend filter.
+	if data != nil && data.CurrentEMA20 > 0 && data.CurrentPrice > 0 {
+		deviation := (data.CurrentPrice - data.CurrentEMA20) / data.CurrentEMA20 * 100
+		isLong := strings.Contains(strings.ToLower(d.Action), "long")
+		isShort := strings.Contains(strings.ToLower(d.Action), "short")
+
+		ema20Conflict := false
+		// Long requires price >= EMA20 * 0.995 (allow 0.5% tolerance)
+		if isLong && deviation < -0.5 {
+			ema20Conflict = true
+		}
+		// Short requires price <= EMA20 * 1.005
+		if isShort && deviation > 0.5 {
+			ema20Conflict = true
+		}
+
+		// Exception: range_edge with small deviation allows mean-reversion
+		if ema20Conflict && regime == string(market.RegimeLevelTrendingUp) || regime == string(market.RegimeLevelTrendingDown) {
+			// In trending regimes, EMA20 conflict is always enforced
+		} else if ema20Conflict {
+			absDeviation := deviation
+			if absDeviation < 0 {
+				absDeviation = -absDeviation
+			}
+			// Allow mean-reversion in range_edge when deviation is small (<1%)
+			regimeStr := market.InferExecutionRegimePublic(data)
+			if regimeStr == "range_edge" && absDeviation < 1.0 {
+				ema20Conflict = false
+			}
+		}
+
+		if ema20Conflict {
+			checks = append(checks, EntryGateCheck{
+				Code:     "ema20_direction_conflict",
+				Stage:    string(EntryGateStageMarketState),
+				Passed:   false,
+				Enforced: true,
+				Detail:   fmt.Sprintf("EMA20方向冲突: %s但price偏离EMA20 %.2f%% (price=%.2f, EMA20=%.2f)", d.Action, deviation, data.CurrentPrice, data.CurrentEMA20),
+				Values:   fmt.Sprintf("action=%s deviation=%.4f price=%.4f ema20=%.4f", d.Action, deviation, data.CurrentPrice, data.CurrentEMA20),
+			})
+		} else {
+			checks = append(checks, EntryGateCheck{
+				Code:     "ema20_direction_ok",
+				Stage:    string(EntryGateStageMarketState),
+				Passed:   true,
+				Enforced: true,
+				Detail:   fmt.Sprintf("EMA20方向一致: %s, price偏离EMA20 %.2f%%", d.Action, deviation),
+				Values:   fmt.Sprintf("deviation=%.4f", deviation),
+			})
+		}
+	}
+
+	// 1d3. Trend phase extension/exhaustion gate — block entries in overextended trends
+	if data != nil {
+		trendPhase := market.ClassifyTrendPhase(data)
+		isLong := strings.Contains(strings.ToLower(d.Action), "long")
+		isShort := strings.Contains(strings.ToLower(d.Action), "short")
+
+		switch trendPhase.Phase {
+		case market.TrendPhaseExhaustion:
+			checks = append(checks, EntryGateCheck{
+				Code:     "trend_phase_exhaustion",
+				Stage:    string(EntryGateStageMarketState),
+				Passed:   false,
+				Enforced: true,
+				Detail:   fmt.Sprintf("趋势耗竭阶段禁止开仓 (4h=%.2f%%, EMA20偏离=%.2f%%, 动量衰减=%.2f)", data.PriceChange4h, trendPhase.ExtensionPct, trendPhase.MomentumDecay),
+				Values:   fmt.Sprintf("phase=%s chg4h=%.4f extension=%.4f decay=%.4f", trendPhase.Phase, data.PriceChange4h, trendPhase.ExtensionPct, trendPhase.MomentumDecay),
+			})
+		case market.TrendPhaseExtension:
+			// Block trend-following entries in extension phase
+			isTrendFollowing := (isLong && data.PriceChange4h > 0) || (isShort && data.PriceChange4h < 0)
+			if isTrendFollowing {
+				checks = append(checks, EntryGateCheck{
+					Code:     "trend_phase_extension",
+					Stage:    string(EntryGateStageMarketState),
+					Passed:   false,
+					Enforced: true,
+					Detail:   fmt.Sprintf("趋势延伸阶段禁止顺势开仓 (4h=%.2f%%, EMA20偏离=%.2f%%) — 等回调到EMA20附近", data.PriceChange4h, trendPhase.ExtensionPct),
+					Values:   fmt.Sprintf("phase=%s chg4h=%.4f extension=%.4f action=%s", trendPhase.Phase, data.PriceChange4h, trendPhase.ExtensionPct, d.Action),
+				})
+			}
+		default:
+			checks = append(checks, EntryGateCheck{
+				Code:     "trend_phase_ok",
+				Stage:    string(EntryGateStageMarketState),
+				Passed:   true,
+				Enforced: true,
+				Detail:   fmt.Sprintf("趋势阶段=%s, 可正常交易", trendPhase.Phase),
+				Values:   fmt.Sprintf("phase=%s chg4h=%.4f extension=%.4f", trendPhase.Phase, data.PriceChange4h, trendPhase.ExtensionPct),
+			})
+		}
+	}
+
+	// 1d4. Coin-specific momentum gate — reject entries where the coin itself
 	// shows no directional momentum (stale) or excessive momentum (late trend).
 	if data != nil && regimeCfg.MomentumGateEnabled {
 		primaryTF := ""
@@ -817,7 +911,7 @@ func evaluateCoinMomentumGate(action string, data *market.Data, cfg store.Regime
 	}
 	exhaustedChg4h := cfg.MomentumExhaustedChg4h
 	if exhaustedChg4h == 0 {
-		exhaustedChg4h = 4.5
+		exhaustedChg4h = 3.5
 	}
 	// Altcoins use a tighter exhausted threshold — they reverse faster after big moves
 	sym := ""
@@ -825,8 +919,8 @@ func evaluateCoinMomentumGate(action string, data *market.Data, cfg store.Regime
 		sym = strings.ToUpper(data.Symbol)
 	}
 	isMajor := strings.HasPrefix(sym, "BTC") || strings.HasPrefix(sym, "ETH")
-	if !isMajor && exhaustedChg4h > 3.5 {
-		exhaustedChg4h = 3.5
+	if !isMajor && exhaustedChg4h > 2.8 {
+		exhaustedChg4h = 2.8
 	}
 	counterChg1h := cfg.MomentumCounterChg1h
 	if counterChg1h == 0 {
@@ -910,18 +1004,18 @@ func evaluateCoinMomentumGate(action string, data *market.Data, cfg store.Regime
 	// Check 2b: Momentum fading — 4h move is large but 1h momentum is weak or reversing
 	fadingThreshold := cfg.MomentumFadingChg4h
 	if fadingThreshold == 0 {
-		fadingThreshold = 2.5
+		fadingThreshold = 2.0
 	}
 	if absChg4h > fadingThreshold {
 		momentumRatio := absChg1h / absChg4h
 		fading := false
-		if momentumRatio < 0.1 {
-			fading = true // 1h is <10% of 4h move — momentum has stalled
+		if momentumRatio < 0.2 {
+			fading = true // 1h is <20% of 4h move — momentum has stalled
 		}
-		if isLong && chg4h > 2.5 && chg1h < 0 {
+		if isLong && chg4h > 2.0 && chg1h < 0 {
 			fading = true // 4h up big but 1h turning negative — reversal starting
 		}
-		if isShort && chg4h < -2.5 && chg1h > 0 {
+		if isShort && chg4h < -2.0 && chg1h > 0 {
 			fading = true // 4h down big but 1h turning positive — bounce starting
 		}
 		if fading {

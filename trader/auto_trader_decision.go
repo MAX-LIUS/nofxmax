@@ -441,6 +441,7 @@ func (at *AutoTrader) recordPositionChange(orderID, symbol, side, action string,
 			EntryTime:          nowMs,
 			Leverage:           leverage,
 			Status:             "OPEN",
+			EntrySceneTags:     at.buildEntrySceneTags(symbol),
 			CreatedAt:          nowMs,
 			UpdatedAt:          nowMs,
 		}
@@ -475,6 +476,30 @@ func (at *AutoTrader) recordPositionChange(orderID, symbol, side, action string,
 			logger.Infof("  ✅ Position closed [%s] %s %s @ %.4f", at.id[:8], symbol, side, price)
 		}
 	}
+}
+
+// buildEntrySceneTags creates a JSON string capturing the market state at entry time.
+// This data feeds the evolution engine for post-trade analysis.
+func (at *AutoTrader) buildEntrySceneTags(symbol string) string {
+	if at.lastMarketDataMap == nil {
+		return ""
+	}
+	data := at.lastMarketDataMap[symbol]
+	if data == nil {
+		return ""
+	}
+
+	phase := market.ClassifyTrendPhase(data)
+	regime := market.InferExecutionRegimePublic(data)
+
+	var ema20Dev float64
+	if data.CurrentEMA20 > 0 && data.CurrentPrice > 0 {
+		ema20Dev = (data.CurrentPrice - data.CurrentEMA20) / data.CurrentEMA20 * 100
+	}
+
+	tags := fmt.Sprintf(`{"trend_phase":"%s","regime":"%s","chg4h":%.2f,"chg1h":%.2f,"ema20_dev":%.2f,"direction":"%s"}`,
+		phase.Phase, regime, data.PriceChange4h, data.PriceChange1h, ema20Dev, phase.Direction)
+	return tags
 }
 
 // createOrderRecord creates an order record struct from order details

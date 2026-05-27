@@ -119,8 +119,9 @@ type TraderPosition struct {
 	Status            string  `gorm:"column:status;default:OPEN;index:idx_positions_status" json:"status"`
 	CloseReason       string  `gorm:"column:close_reason;default:''" json:"close_reason"`
 	Source            string  `gorm:"column:source;default:system" json:"source"`
-	CreatedAt         int64   `gorm:"column:created_at" json:"created_at"` // Unix milliseconds UTC
-	UpdatedAt         int64   `gorm:"column:updated_at" json:"updated_at"` // Unix milliseconds UTC
+	EntrySceneTags    string  `gorm:"column:entry_scene_tags;default:''" json:"entry_scene_tags"` // JSON: trend_phase, ema20_deviation, regime, chg4h at entry
+	CreatedAt         int64   `gorm:"column:created_at" json:"created_at"`                       // Unix milliseconds UTC
+	UpdatedAt         int64   `gorm:"column:updated_at" json:"updated_at"`                       // Unix milliseconds UTC
 }
 
 // TableName returns the table name

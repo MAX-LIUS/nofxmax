@@ -131,7 +131,7 @@ func TestDeleteDynamicProtectionRecordsForInactive(t *testing.T) {
 			t.Fatalf("save dynamic protection record: %v", err)
 		}
 	}
-	if err := s.DeleteDynamicProtectionRecordsForInactive(map[string]struct{}{"ETHUSDT_long": {}}); err != nil {
+	if err := s.DeleteDynamicProtectionRecordsForInactive("trader-1", map[string]struct{}{"ETHUSDT_long": {}}); err != nil {
 		t.Fatalf("delete inactive dynamic protection records: %v", err)
 	}
 	state, err := s.LoadDynamicProtectionState()

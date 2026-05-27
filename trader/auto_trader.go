@@ -5,6 +5,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"nofx/kernel"
 	"nofx/logger"
+	"nofx/market"
 	"nofx/mcp"
 	_ "nofx/mcp/payment"
 	_ "nofx/mcp/provider"
@@ -178,6 +179,7 @@ type AutoTrader struct {
 	consecutiveAIFailures int                                       // Consecutive AI call failures
 	safeMode              bool                                      // Safe mode: no new positions, protect existing ones
 	safeModeReason        string                                    // Why safe mode was activated
+	lastMarketDataMap     map[string]*market.Data                   // Market data from current cycle (for scene tag recording)
 }
 
 // NewAutoTrader creates an automatic trader
