@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import { api } from '../../lib/api'
 import { formatPrice } from '../../utils/format'
 import type { Language } from '../../i18n/translations'
@@ -233,6 +233,233 @@ function buildProtectionRows(
   return rows
 }
 
+const PositionCard = memo(function PositionCard({
+  position,
+  orders,
+  language,
+  onSymbolClick,
+}: {
+  position: Position
+  orders: OpenOrder[]
+  language: Language
+  onSymbolClick?: (symbol: string) => void
+}) {
+  const symbol = String(position.symbol || '').toUpperCase()
+  const side = normalizeSide(position.side)
+  const entryPrice = position.entry_price || 0
+  const markPrice = position.mark_price || 0
+  const entryQty = position.entry_quantity || position.quantity || 0
+  const nowQty = position.quantity || 0
+  const rt = position.protection_runtime
+  const currentPnlPct = Number(
+    rt?.current_pnl_pct ?? position.unrealized_pnl_pct ?? 0
+  )
+  const peakPnlPct = Number(rt?.drawdown_peak_pnl_pct ?? currentPnlPct)
+  const currentDrawdownPct = Number(rt?.current_drawdown_pct ?? 0)
+
+  const filteredOrders = useMemo(
+    () =>
+      orders.filter((o) => {
+        const s = normalizeSide(o.position_side)
+        return !s || s === side
+      }),
+    [orders, side]
+  )
+
+  const rows = useMemo(
+    () => buildProtectionRows(position, filteredOrders, language),
+    [position, filteredOrders, language]
+  )
+
+  const pnlColor = currentPnlPct >= 0 ? 'text-nofx-green' : 'text-nofx-red'
+  const sideCls =
+    side === 'LONG'
+      ? 'bg-nofx-green/15 text-nofx-green border-nofx-green/30'
+      : 'bg-nofx-red/15 text-nofx-red border-nofx-red/30'
+
+  return (
+    <div className="rounded-lg border border-white/10 bg-black/20 p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onSymbolClick?.(symbol)}
+            className="text-base font-bold text-nofx-text-main hover:text-cyan-300 transition-colors"
+          >
+            {symbol}
+          </button>
+          <span
+            className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-semibold ${sideCls}`}
+          >
+            {side}
+          </span>
+          {position.leverage && (
+            <span className="text-xs font-mono text-nofx-text-muted">
+              {position.leverage}x
+            </span>
+          )}
+        </div>
+        <span className={`text-base font-bold font-mono ${pnlColor}`}>
+          {formatPct(currentPnlPct)}
+        </span>
+      </div>
+
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-nofx-text-muted">
+        {markPrice > 0 && (
+          <span>
+            {language === 'zh' ? '现价' : 'Mark'}{' '}
+            <span className="font-mono text-nofx-text-main">
+              {formatPrice(markPrice)}
+            </span>
+          </span>
+        )}
+        <span>
+          {language === 'zh' ? '入场' : 'Entry'}{' '}
+          <span className="font-mono text-nofx-text-main">
+            {formatPrice(entryPrice)}
+          </span>
+        </span>
+        <span>
+          Full{' '}
+          <span className="font-mono text-nofx-text-main">
+            {formatUsdx(entryQty, entryPrice)}
+          </span>
+          <span className="text-nofx-text-muted mx-0.5">/</span>
+          Now{' '}
+          <span className="font-mono text-nofx-text-main">
+            {formatUsdx(nowQty, markPrice)}
+          </span>
+        </span>
+        <span>
+          Peak{' '}
+          <span className="font-mono text-nofx-text-main">
+            {formatPct(peakPnlPct)}
+          </span>
+          {currentDrawdownPct > 0 && (
+            <>
+              <span className="text-nofx-text-muted mx-0.5">↓</span>
+              <span className="font-mono text-nofx-red">
+                {currentDrawdownPct.toFixed(1)}%
+              </span>
+            </>
+          )}
+        </span>
+      </div>
+
+      {rows.length > 0 ? (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-nofx-text-muted border-b border-white/10">
+                <th className="text-left py-1 pr-2 font-medium">
+                  {language === 'zh' ? '层级' : 'Zone'}
+                </th>
+                <th className="text-right py-1 px-2 font-medium">
+                  {language === 'zh' ? '触发价' : 'Trigger'}
+                </th>
+                <th className="text-right py-1 px-2 font-medium">Δ%</th>
+                <th className="text-right py-1 px-2 font-medium">
+                  {language === 'zh' ? '仓位' : 'Ratio'}
+                </th>
+                <th className="text-center py-1 px-2 font-medium">
+                  {language === 'zh' ? '状态' : 'Status'}
+                </th>
+                <th className="text-left py-1 pl-2 font-medium">
+                  {language === 'zh' ? '参数' : 'Detail'}
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, ri) => {
+                if (row.isCurrentPrice) {
+                  return (
+                    <tr
+                      key={`price-line-${ri}`}
+                      className="border-y border-cyan-500/40"
+                    >
+                      <td colSpan={6} className="py-0.5">
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 h-px bg-cyan-500/40" />
+                          <span className="text-[10px] font-mono text-cyan-300 whitespace-nowrap">
+                            ▸ {formatPrice(row.price)} (
+                            {formatPct(row.deltaPct)})
+                          </span>
+                          <div className="flex-1 h-px bg-cyan-500/40" />
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                }
+
+                const deltaColor =
+                  row.deltaPct > 0
+                    ? 'text-nofx-green'
+                    : row.deltaPct < 0
+                      ? 'text-nofx-red'
+                      : 'text-nofx-text-muted'
+                const zoneCls = row.zone.startsWith('DD')
+                  ? 'text-purple-300'
+                  : row.zone.startsWith('BE')
+                    ? 'text-amber-300'
+                    : 'text-blue-300'
+
+                return (
+                  <tr
+                    key={`row-${ri}`}
+                    className="border-b border-white/5 hover:bg-white/5"
+                  >
+                    <td className="py-1 pr-2">
+                      <span className={`font-medium ${zoneCls}`}>
+                        {row.zone}
+                      </span>
+                    </td>
+                    <td className="py-1 px-2 text-right font-mono text-nofx-text-main">
+                      {row.price > 0 ? formatPrice(row.price) : '—'}
+                    </td>
+                    <td
+                      className={`py-1 px-2 text-right font-mono ${deltaColor}`}
+                    >
+                      {row.price > 0 ? formatPct(row.deltaPct) : '—'}
+                    </td>
+                    <td className="py-1 px-2 text-right font-mono text-nofx-text-main">
+                      {row.ratioPct > 0 ? `${row.ratioPct.toFixed(0)}%` : '—'}
+                    </td>
+                    <td className="py-1 px-2 text-center">
+                      <span
+                        className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium border ${row.statusCls} ${
+                          row.statusCls.includes('emerald')
+                            ? 'bg-emerald-500/10 border-emerald-500/20'
+                            : row.statusCls.includes('amber')
+                              ? 'bg-amber-500/10 border-amber-500/20'
+                              : row.statusCls.includes('red')
+                                ? 'bg-red-500/10 border-red-500/20'
+                                : 'bg-white/5 border-white/10'
+                        }`}
+                      >
+                        {row.status}
+                      </span>
+                    </td>
+                    <td
+                      className="py-1 pl-2 text-nofx-text-muted truncate max-w-[180px]"
+                      title={row.detail || ''}
+                    >
+                      {row.detail || '—'}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="text-xs text-nofx-text-muted border border-white/10 rounded px-3 py-2">
+          {language === 'zh' ? '无保护委托' : 'No protection orders'}
+        </div>
+      )}
+    </div>
+  )
+})
+
 export function PositionProtectionPanel({
   traderId,
   positions,
@@ -244,24 +471,26 @@ export function PositionProtectionPanel({
   >({})
   const [loading, setLoading] = useState(false)
 
-  const symbolKeys = useMemo(() => {
+  // Stable symbol key string to avoid re-fetching on every positions reference change
+  const symbolKeyStr = useMemo(() => {
     const keys = new Set<string>()
     for (const pos of positions || [])
       keys.add(String(pos.symbol || '').toUpperCase())
-    return [...keys]
+    return [...keys].sort().join(',')
   }, [positions])
 
   useEffect(() => {
     let cancelled = false
     async function load() {
-      if (!traderId || !positions || positions.length === 0) {
+      if (!traderId || !symbolKeyStr) {
         setOrdersBySymbol({})
         return
       }
       setLoading(true)
+      const symbols = symbolKeyStr.split(',')
       try {
         const entries = await Promise.all(
-          symbolKeys.map(async (symbol) => {
+          symbols.map(async (symbol) => {
             const data = await api.getOpenOrders(traderId, symbol)
             return [symbol, Array.isArray(data) ? data : []] as const
           })
@@ -279,7 +508,7 @@ export function PositionProtectionPanel({
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [traderId, positions, symbolKeys])
+  }, [traderId, symbolKeyStr])
 
   if (!positions || positions.length === 0) {
     return (
@@ -306,224 +535,17 @@ export function PositionProtectionPanel({
       </h2>
 
       <div className="space-y-4">
-        {positions.map((position, index) => {
-          const symbol = String(position.symbol || '').toUpperCase()
-          const side = normalizeSide(position.side)
-          const entryPrice = position.entry_price || 0
-          const markPrice = position.mark_price || 0
-          const entryQty = position.entry_quantity || position.quantity || 0
-          const nowQty = position.quantity || 0
-          const rt = position.protection_runtime
-          const currentPnlPct = Number(
-            rt?.current_pnl_pct ?? position.unrealized_pnl_pct ?? 0
-          )
-          const peakPnlPct = Number(rt?.drawdown_peak_pnl_pct ?? currentPnlPct)
-          const currentDrawdownPct = Number(rt?.current_drawdown_pct ?? 0)
-
-          const symbolOrders = ordersBySymbol[symbol] || []
-          const filteredOrders = symbolOrders.filter((o) => {
-            const s = normalizeSide(o.position_side)
-            return !s || s === side
-          })
-
-          const rows = buildProtectionRows(position, filteredOrders, language)
-          const pnlColor =
-            currentPnlPct >= 0 ? 'text-nofx-green' : 'text-nofx-red'
-          const sideCls =
-            side === 'LONG'
-              ? 'bg-nofx-green/15 text-nofx-green border-nofx-green/30'
-              : 'bg-nofx-red/15 text-nofx-red border-nofx-red/30'
-
-          return (
-            <div
-              key={`${symbol}-${side}-${index}`}
-              className="rounded-lg border border-white/10 bg-black/20 p-4 space-y-3"
-            >
-              {/* Header */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => onSymbolClick?.(symbol)}
-                    className="text-base font-bold text-nofx-text-main hover:text-cyan-300 transition-colors"
-                  >
-                    {symbol}
-                  </button>
-                  <span
-                    className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-semibold ${sideCls}`}
-                  >
-                    {side}
-                  </span>
-                  {position.leverage && (
-                    <span className="text-xs font-mono text-nofx-text-muted">
-                      {position.leverage}x
-                    </span>
-                  )}
-                </div>
-                <span className={`text-base font-bold font-mono ${pnlColor}`}>
-                  {formatPct(currentPnlPct)}
-                </span>
-              </div>
-
-              {/* Info line */}
-              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-nofx-text-muted">
-                {markPrice > 0 && (
-                  <span>
-                    {language === 'zh' ? '现价' : 'Mark'}{' '}
-                    <span className="font-mono text-nofx-text-main">
-                      {formatPrice(markPrice)}
-                    </span>
-                  </span>
-                )}
-                <span>
-                  {language === 'zh' ? '入场' : 'Entry'}{' '}
-                  <span className="font-mono text-nofx-text-main">
-                    {formatPrice(entryPrice)}
-                  </span>
-                </span>
-                <span>
-                  Full{' '}
-                  <span className="font-mono text-nofx-text-main">
-                    {formatUsdx(entryQty, entryPrice)}
-                  </span>
-                  <span className="text-nofx-text-muted mx-0.5">/</span>
-                  Now{' '}
-                  <span className="font-mono text-nofx-text-main">
-                    {formatUsdx(nowQty, markPrice)}
-                  </span>
-                </span>
-                <span>
-                  Peak{' '}
-                  <span className="font-mono text-nofx-text-main">
-                    {formatPct(peakPnlPct)}
-                  </span>
-                  {currentDrawdownPct > 0 && (
-                    <>
-                      <span className="text-nofx-text-muted mx-0.5">↓</span>
-                      <span className="font-mono text-nofx-red">
-                        {currentDrawdownPct.toFixed(1)}%
-                      </span>
-                    </>
-                  )}
-                </span>
-              </div>
-
-              {/* Protection price ladder */}
-              {rows.length > 0 ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="text-nofx-text-muted border-b border-white/10">
-                        <th className="text-left py-1 pr-2 font-medium">
-                          {language === 'zh' ? '层级' : 'Zone'}
-                        </th>
-                        <th className="text-right py-1 px-2 font-medium">
-                          {language === 'zh' ? '触发价' : 'Trigger'}
-                        </th>
-                        <th className="text-right py-1 px-2 font-medium">Δ%</th>
-                        <th className="text-right py-1 px-2 font-medium">
-                          {language === 'zh' ? '仓位' : 'Ratio'}
-                        </th>
-                        <th className="text-center py-1 px-2 font-medium">
-                          {language === 'zh' ? '状态' : 'Status'}
-                        </th>
-                        <th className="text-left py-1 pl-2 font-medium">
-                          {language === 'zh' ? '参数' : 'Detail'}
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {rows.map((row, ri) => {
-                        if (row.isCurrentPrice) {
-                          return (
-                            <tr
-                              key={`price-line-${ri}`}
-                              className="border-y border-cyan-500/40"
-                            >
-                              <td colSpan={6} className="py-0.5">
-                                <div className="flex items-center gap-2">
-                                  <div className="flex-1 h-px bg-cyan-500/40" />
-                                  <span className="text-[10px] font-mono text-cyan-300 whitespace-nowrap">
-                                    ▸ {formatPrice(row.price)} (
-                                    {formatPct(row.deltaPct)})
-                                  </span>
-                                  <div className="flex-1 h-px bg-cyan-500/40" />
-                                </div>
-                              </td>
-                            </tr>
-                          )
-                        }
-
-                        const deltaColor =
-                          row.deltaPct > 0
-                            ? 'text-nofx-green'
-                            : row.deltaPct < 0
-                              ? 'text-nofx-red'
-                              : 'text-nofx-text-muted'
-                        const zoneCls = row.zone.startsWith('DD')
-                          ? 'text-purple-300'
-                          : row.zone.startsWith('BE')
-                            ? 'text-amber-300'
-                            : 'text-blue-300'
-
-                        return (
-                          <tr
-                            key={`row-${ri}`}
-                            className="border-b border-white/5 hover:bg-white/5"
-                          >
-                            <td className="py-1 pr-2">
-                              <span className={`font-medium ${zoneCls}`}>
-                                {row.zone}
-                              </span>
-                            </td>
-                            <td className="py-1 px-2 text-right font-mono text-nofx-text-main">
-                              {row.price > 0 ? formatPrice(row.price) : '—'}
-                            </td>
-                            <td
-                              className={`py-1 px-2 text-right font-mono ${deltaColor}`}
-                            >
-                              {row.price > 0 ? formatPct(row.deltaPct) : '—'}
-                            </td>
-                            <td className="py-1 px-2 text-right font-mono text-nofx-text-main">
-                              {row.ratioPct > 0
-                                ? `${row.ratioPct.toFixed(0)}%`
-                                : '—'}
-                            </td>
-                            <td className="py-1 px-2 text-center">
-                              <span
-                                className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium border ${row.statusCls} ${
-                                  row.statusCls.includes('emerald')
-                                    ? 'bg-emerald-500/10 border-emerald-500/20'
-                                    : row.statusCls.includes('amber')
-                                      ? 'bg-amber-500/10 border-amber-500/20'
-                                      : row.statusCls.includes('red')
-                                        ? 'bg-red-500/10 border-red-500/20'
-                                        : 'bg-white/5 border-white/10'
-                                }`}
-                              >
-                                {row.status}
-                              </span>
-                            </td>
-                            <td
-                              className="py-1 pl-2 text-nofx-text-muted truncate max-w-[180px]"
-                              title={row.detail || ''}
-                            >
-                              {row.detail || '—'}
-                            </td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <div className="text-xs text-nofx-text-muted border border-white/10 rounded px-3 py-2">
-                  {language === 'zh' ? '无保护委托' : 'No protection orders'}
-                </div>
-              )}
-            </div>
-          )
-        })}
+        {positions.map((position, index) => (
+          <PositionCard
+            key={`${String(position.symbol || '').toUpperCase()}-${normalizeSide(position.side)}-${index}`}
+            position={position}
+            orders={
+              ordersBySymbol[String(position.symbol || '').toUpperCase()] || []
+            }
+            language={language}
+            onSymbolClick={onSymbolClick}
+          />
+        ))}
       </div>
     </div>
   )
