@@ -15,6 +15,7 @@ interface PositionProtectionPanelProps {
 type ProtectionRow = {
   zone: string
   price: number
+  sortPrice: number
   deltaPct: number
   ratioPct: number
   callbackPct?: number
@@ -22,6 +23,7 @@ type ProtectionRow = {
   statusCls: string
   anchor?: string
   isCurrentPrice?: boolean
+  isTrailing?: boolean
 }
 
 function normalizeSide(side?: string): string {
@@ -139,8 +141,10 @@ function buildProtectionRows(
   let beIndex = 0
 
   for (const order of orders) {
+    const type = String(order.type || '').toUpperCase()
+    const isTrailing = type.includes('TRAILING')
     const triggerPrice = order.stop_price || order.price || 0
-    if (triggerPrice <= 0) continue
+    if (triggerPrice <= 0 && !isTrailing) continue
 
     const rawDelta =
       entryPrice > 0 ? ((triggerPrice - entryPrice) / entryPrice) * 100 : 0
@@ -149,8 +153,6 @@ function buildProtectionRows(
       entryQty > 0 && order.quantity > 0 ? (order.quantity / entryQty) * 100 : 0
 
     let zone = classifyZone(order, entryPrice, side)
-    const type = String(order.type || '').toUpperCase()
-    const isTrailing = type.includes('TRAILING')
 
     // Number BE zones
     if (zone === 'BE') {
@@ -180,15 +182,20 @@ function buildProtectionRows(
 
     const anchor = getAnchorFromPlanned(triggerPrice, plannedLadder)
 
+    // For trailing orders with no trigger price yet, use markPrice for sorting
+    const sortPrice = triggerPrice > 0 ? triggerPrice : markPrice
+
     rows.push({
       zone,
       price: triggerPrice,
+      sortPrice,
       deltaPct,
       ratioPct,
       callbackPct,
       status,
       statusCls,
       anchor,
+      isTrailing,
     })
   }
 
@@ -201,6 +208,7 @@ function buildProtectionRows(
     rows.push({
       zone: '',
       price: markPrice,
+      sortPrice: markPrice,
       deltaPct: markDelta,
       ratioPct: 0,
       status: '',
@@ -212,9 +220,9 @@ function buildProtectionRows(
   // Sort by price: for LONG, highest price first (profit protection on top, SL on bottom)
   // For SHORT, lowest price first
   if (side === 'LONG') {
-    rows.sort((a, b) => b.price - a.price)
+    rows.sort((a, b) => b.sortPrice - a.sortPrice)
   } else {
-    rows.sort((a, b) => a.price - b.price)
+    rows.sort((a, b) => a.sortPrice - b.sortPrice)
   }
 
   return rows
@@ -447,7 +455,15 @@ export function PositionProtectionPanel({
                               </span>
                             </td>
                             <td className="py-1 px-2 text-right font-mono text-nofx-text-main">
-                              {formatPrice(row.price)}
+                              {row.price > 0 ? (
+                                formatPrice(row.price)
+                              ) : row.isTrailing ? (
+                                <span className="text-nofx-text-muted text-[10px]">
+                                  {language === 'zh' ? '跟踪中' : 'Tracking'}
+                                </span>
+                              ) : (
+                                '—'
+                              )}
                               {row.callbackPct ? (
                                 <span className="text-nofx-text-muted ml-1">
                                   cb{row.callbackPct.toFixed(1)}%
@@ -457,7 +473,7 @@ export function PositionProtectionPanel({
                             <td
                               className={`py-1 px-2 text-right font-mono ${deltaColor}`}
                             >
-                              {formatPct(row.deltaPct)}
+                              {row.price > 0 ? formatPct(row.deltaPct) : '—'}
                             </td>
                             <td className="py-1 px-2 text-right font-mono text-nofx-text-main">
                               {row.ratioPct > 0
