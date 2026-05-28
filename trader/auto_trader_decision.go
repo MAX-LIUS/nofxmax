@@ -233,11 +233,15 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 		openOrders = at.enrichProtectionOrders(openOrders)
 		protectionRuntime := at.buildPositionProtectionRuntime(symbol, side, quantity, entryPrice, openOrders)
 		entryDecisionCycle := 0
+		entryQuantity := quantity
 		var entryReviewSummary map[string]interface{}
 		var entryStructureAudit map[string]interface{}
 		if at.store != nil {
 			if openPos, err := at.store.Position().GetOpenPositionBySymbol(at.id, symbol, positionSideUpper); err == nil && openPos != nil {
 				entryDecisionCycle = openPos.EntryDecisionCycle
+				if openPos.EntryQuantity > 0 {
+					entryQuantity = openPos.EntryQuantity
+				}
 				if decisionStore := at.store.Decision(); decisionStore != nil {
 					if record, err := decisionStore.GetRecordByCycle(at.id, openPos.EntryDecisionCycle); err == nil && record != nil {
 						candidate := findMatchedDecisionAction(record, symbol, sideToOpenAction(positionSideUpper))
@@ -274,6 +278,7 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 			"entry_price":               entryPrice,
 			"mark_price":                markPrice,
 			"quantity":                  quantity,
+			"entry_quantity":            entryQuantity,
 			"leverage":                  leverage,
 			"unrealized_pnl":            unrealizedPnl,
 			"unrealized_pnl_pct":        pnlPct,

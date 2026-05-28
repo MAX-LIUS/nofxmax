@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../../lib/api'
-import { formatPrice, formatQuantity } from '../../utils/format'
+import { formatPrice } from '../../utils/format'
 import type { Language } from '../../i18n/translations'
 import type { OpenOrder, Position } from '../../types'
 
@@ -18,12 +18,25 @@ type ProtectionRow = {
   sortPrice: number
   deltaPct: number
   ratioPct: number
-  callbackPct?: number
   status: string
   statusCls: string
-  anchor?: string
+  detail?: string
   isCurrentPrice?: boolean
-  isTrailing?: boolean
+}
+
+interface ScheduledTier {
+  index: number
+  min_profit_pct: number
+  max_drawdown_pct: number
+  close_ratio_pct: number
+  callback_rate: number
+  activation_price: number
+  planned_quantity: number
+  is_satisfied: boolean
+  is_triggered: boolean
+  stage_name: string
+  reason_anchor: string
+  execution_mode: string
 }
 
 function normalizeSide(side?: string): string {
@@ -36,6 +49,12 @@ function formatPct(value: number | undefined | null, digits = 2): string {
   return `${sign}${value.toFixed(digits)}%`
 }
 
+function formatUsdx(qty: number, price: number): string {
+  const val = qty * price
+  if (val >= 1000) return `$${(val / 1000).toFixed(1)}k`
+  return `$${val.toFixed(1)}`
+}
+
 function classifyZone(
   order: OpenOrder,
   entryPrice: number,
@@ -45,7 +64,6 @@ function classifyZone(
   const type = String(order.type || '').toUpperCase()
   const triggerPrice = order.stop_price || order.price || 0
 
-  // Trailing = DD
   if (
     type.includes('TRAILING') ||
     id.includes('drawdown') ||
@@ -53,11 +71,9 @@ function classifyZone(
   ) {
     return 'DD'
   }
-  // Break-even tagged
   if (id.includes('break_even') || id.includes('breakeven')) {
     return 'BE'
   }
-  // Positive offset from entry = BE (profit protection stop)
   if (triggerPrice > 0 && entryPrice > 0) {
     const isLong = side === 'LONG'
     const isProfitSide = isLong
@@ -68,43 +84,6 @@ function classifyZone(
     }
   }
   return 'Ladder'
-}
-
-function getAnchorFromPlanned(
-  triggerPrice: number,
-  plannedLadder:
-    | {
-        stop_loss?: Array<{
-          price: number
-          anchor_source?: string
-          anchor_timeframe?: string
-          anchor_price?: number
-        }>
-        take_profit?: Array<{
-          price: number
-          anchor_source?: string
-          anchor_timeframe?: string
-          anchor_price?: number
-        }>
-      }
-    | undefined
-): string | undefined {
-  if (!plannedLadder || triggerPrice <= 0) return undefined
-  const allOrders = [
-    ...(plannedLadder.stop_loss || []),
-    ...(plannedLadder.take_profit || []),
-  ]
-  const tolerance = triggerPrice * 0.001
-  const match = allOrders.find(
-    (p) => Math.abs(p.price - triggerPrice) < tolerance
-  )
-  if (!match?.anchor_source) return undefined
-  const parts = [
-    match.anchor_timeframe,
-    match.anchor_source,
-    match.anchor_price ? formatPrice(match.anchor_price) : '',
-  ].filter(Boolean)
-  return parts.join(' ')
 }
 
 function buildProtectionRows(
@@ -120,31 +99,72 @@ function buildProtectionRows(
   const rows: ProtectionRow[] = []
 
   const rt = position.protection_runtime
-  const plannedLadder = rt?.planned_ladder_orders as
-    | {
-        stop_loss?: Array<{
-          price: number
-          anchor_source?: string
-          anchor_timeframe?: string
-          anchor_price?: number
-        }>
-        take_profit?: Array<{
-          price: number
-          anchor_source?: string
-          anchor_timeframe?: string
-          anchor_price?: number
-        }>
-      }
-    | undefined
+  const peakPnlPct = Number(rt?.drawdown_peak_pnl_pct ?? 0)
+  const scheduledTiers = (rt?.scheduled_tiers || []) as ScheduledTier[]
 
-  // Track BE indices for numbering
+  // Build DD rows from scheduled_tiers (authoritative source)
+  for (const tier of scheduledTiers) {
+    const tierIdx = tier.index || 0
+    const zone = `DD-${tierIdx}`
+    const callbackRate = tier.callback_rate || 0
+
+    // Calculate trigger price: peak price minus callback
+    // For LONG: triggerPrice = peakPrice * (1 - callbackRate)
+    // For SHORT: triggerPrice = peakPrice * (1 + callbackRate)
+    let triggerPrice = 0
+    if (peakPnlPct > 0 && entryPrice > 0 && callbackRate > 0) {
+      const peakPrice =
+        side === 'LONG'
+          ? entryPrice * (1 + peakPnlPct / 100)
+          : entryPrice * (1 - peakPnlPct / 100)
+      triggerPrice =
+        side === 'LONG'
+          ? peakPrice * (1 - callbackRate)
+          : peakPrice * (1 + callbackRate)
+    }
+
+    const rawDelta =
+      triggerPrice > 0 && entryPrice > 0
+        ? ((triggerPrice - entryPrice) / entryPrice) * 100
+        : 0
+    const deltaPct = rawDelta * dirMul
+    const ratioPct = tier.close_ratio_pct || 0
+
+    let status: string
+    let statusCls: string
+    if (tier.is_triggered) {
+      status = language === 'zh' ? '已触发' : 'Triggered'
+      statusCls = 'text-nofx-red'
+    } else if (tier.is_satisfied) {
+      status = language === 'zh' ? '已激活' : 'Active'
+      statusCls = 'text-emerald-300'
+    } else {
+      status = language === 'zh' ? '待满足' : 'Waiting'
+      statusCls = 'text-nofx-text-muted'
+    }
+
+    const detail = `peak${formatPct(peakPnlPct, 1)} cb${(callbackRate * 100).toFixed(1)}%`
+
+    rows.push({
+      zone,
+      price: triggerPrice,
+      sortPrice: triggerPrice > 0 ? triggerPrice : markPrice,
+      deltaPct,
+      ratioPct,
+      status,
+      statusCls,
+      detail,
+    })
+  }
+
+  // Build rows from exchange orders (BE + Ladder only, skip trailing since DD comes from tiers)
   let beIndex = 0
-
   for (const order of orders) {
     const type = String(order.type || '').toUpperCase()
-    const isTrailing = type.includes('TRAILING')
+    if (type.includes('TRAILING')) continue
+
     const triggerPrice = order.stop_price || order.price || 0
-    if (triggerPrice <= 0 && !isTrailing) continue
+    if (triggerPrice <= 0) continue
 
     const rawDelta =
       entryPrice > 0 ? ((triggerPrice - entryPrice) / entryPrice) * 100 : 0
@@ -153,49 +173,24 @@ function buildProtectionRows(
       entryQty > 0 && order.quantity > 0 ? (order.quantity / entryQty) * 100 : 0
 
     let zone = classifyZone(order, entryPrice, side)
+    if (zone === 'DD') continue
 
-    // Number BE zones
     if (zone === 'BE') {
       beIndex++
       zone = `BE-${beIndex}`
     }
 
-    // DD trailing: show activation status
-    let status: string
-    let statusCls: string
-    let callbackPct: number | undefined
-
-    if (isTrailing) {
-      zone = 'DD'
-      callbackPct = order.callback_rate ? order.callback_rate * 100 : undefined
-      if (order.activation_status === 'activated') {
-        status = language === 'zh' ? '已激活' : 'Active'
-        statusCls = 'text-emerald-300'
-      } else {
-        status = language === 'zh' ? '未激活' : 'Pending'
-        statusCls = 'text-amber-300'
-      }
-    } else {
-      status = language === 'zh' ? '委托中' : 'Live'
-      statusCls = 'text-emerald-300'
-    }
-
-    const anchor = getAnchorFromPlanned(triggerPrice, plannedLadder)
-
-    // For trailing orders with no trigger price yet, use markPrice for sorting
-    const sortPrice = triggerPrice > 0 ? triggerPrice : markPrice
+    const status = language === 'zh' ? '委托中' : 'Live'
+    const statusCls = 'text-emerald-300'
 
     rows.push({
       zone,
       price: triggerPrice,
-      sortPrice,
+      sortPrice: triggerPrice,
       deltaPct,
       ratioPct,
-      callbackPct,
       status,
       statusCls,
-      anchor,
-      isTrailing,
     })
   }
 
@@ -217,8 +212,7 @@ function buildProtectionRows(
     })
   }
 
-  // Sort by price: for LONG, highest price first (profit protection on top, SL on bottom)
-  // For SHORT, lowest price first
+  // Sort: for LONG highest first, for SHORT lowest first
   if (side === 'LONG') {
     rows.sort((a, b) => b.sortPrice - a.sortPrice)
   } else {
@@ -307,11 +301,13 @@ export function PositionProtectionPanel({
           const entryPrice = position.entry_price || 0
           const markPrice = position.mark_price || 0
           const entryQty = position.entry_quantity || position.quantity || 0
+          const nowQty = position.quantity || 0
           const rt = position.protection_runtime
           const currentPnlPct = Number(
             rt?.current_pnl_pct ?? position.unrealized_pnl_pct ?? 0
           )
           const peakPnlPct = Number(rt?.drawdown_peak_pnl_pct ?? currentPnlPct)
+          const currentDrawdownPct = Number(rt?.current_drawdown_pct ?? 0)
 
           const symbolOrders = ordersBySymbol[symbol] || []
           const filteredOrders = symbolOrders.filter((o) => {
@@ -358,7 +354,7 @@ export function PositionProtectionPanel({
                 </span>
               </div>
 
-              {/* Info line: Mark / Entry / Qty / Peak */}
+              {/* Info line */}
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-nofx-text-muted">
                 {markPrice > 0 && (
                   <span>
@@ -375,9 +371,14 @@ export function PositionProtectionPanel({
                   </span>
                 </span>
                 <span>
-                  Qty{' '}
+                  Full{' '}
                   <span className="font-mono text-nofx-text-main">
-                    {formatQuantity(entryQty)}
+                    {formatUsdx(entryQty, entryPrice)}
+                  </span>
+                  <span className="text-nofx-text-muted mx-0.5">/</span>
+                  Now{' '}
+                  <span className="font-mono text-nofx-text-main">
+                    {formatUsdx(nowQty, markPrice)}
                   </span>
                 </span>
                 <span>
@@ -385,6 +386,14 @@ export function PositionProtectionPanel({
                   <span className="font-mono text-nofx-text-main">
                     {formatPct(peakPnlPct)}
                   </span>
+                  {currentDrawdownPct > 0 && (
+                    <>
+                      <span className="text-nofx-text-muted mx-0.5">↓</span>
+                      <span className="font-mono text-nofx-red">
+                        {currentDrawdownPct.toFixed(1)}%
+                      </span>
+                    </>
+                  )}
                 </span>
               </div>
 
@@ -395,18 +404,20 @@ export function PositionProtectionPanel({
                     <thead>
                       <tr className="text-nofx-text-muted border-b border-white/10">
                         <th className="text-left py-1 pr-2 font-medium">
-                          {language === 'zh' ? '区域' : 'Zone'}
+                          {language === 'zh' ? '层级' : 'Zone'}
                         </th>
                         <th className="text-right py-1 px-2 font-medium">
-                          {language === 'zh' ? '价格' : 'Price'}
+                          {language === 'zh' ? '触发价' : 'Trigger'}
                         </th>
                         <th className="text-right py-1 px-2 font-medium">Δ%</th>
-                        <th className="text-right py-1 px-2 font-medium">%</th>
+                        <th className="text-right py-1 px-2 font-medium">
+                          {language === 'zh' ? '仓位' : 'Ratio'}
+                        </th>
                         <th className="text-center py-1 px-2 font-medium">
                           {language === 'zh' ? '状态' : 'Status'}
                         </th>
                         <th className="text-left py-1 pl-2 font-medium">
-                          {language === 'zh' ? '锚点' : 'Anchor'}
+                          {language === 'zh' ? '参数' : 'Detail'}
                         </th>
                       </tr>
                     </thead>
@@ -455,20 +466,7 @@ export function PositionProtectionPanel({
                               </span>
                             </td>
                             <td className="py-1 px-2 text-right font-mono text-nofx-text-main">
-                              {row.price > 0 ? (
-                                formatPrice(row.price)
-                              ) : row.isTrailing ? (
-                                <span className="text-nofx-text-muted text-[10px]">
-                                  {language === 'zh' ? '跟踪中' : 'Tracking'}
-                                </span>
-                              ) : (
-                                '—'
-                              )}
-                              {row.callbackPct ? (
-                                <span className="text-nofx-text-muted ml-1">
-                                  cb{row.callbackPct.toFixed(1)}%
-                                </span>
-                              ) : null}
+                              {row.price > 0 ? formatPrice(row.price) : '—'}
                             </td>
                             <td
                               className={`py-1 px-2 text-right font-mono ${deltaColor}`}
@@ -487,17 +485,19 @@ export function PositionProtectionPanel({
                                     ? 'bg-emerald-500/10 border-emerald-500/20'
                                     : row.statusCls.includes('amber')
                                       ? 'bg-amber-500/10 border-amber-500/20'
-                                      : 'bg-white/5 border-white/10'
+                                      : row.statusCls.includes('red')
+                                        ? 'bg-red-500/10 border-red-500/20'
+                                        : 'bg-white/5 border-white/10'
                                 }`}
                               >
                                 {row.status}
                               </span>
                             </td>
                             <td
-                              className="py-1 pl-2 text-nofx-text-muted truncate max-w-[150px]"
-                              title={row.anchor || ''}
+                              className="py-1 pl-2 text-nofx-text-muted truncate max-w-[180px]"
+                              title={row.detail || ''}
                             >
-                              {row.anchor || '—'}
+                              {row.detail || '—'}
                             </td>
                           </tr>
                         )
