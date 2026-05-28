@@ -248,7 +248,8 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 
 		// Detect duplicate/stale orders by explicit order-role mismatch, not only coarse order counts.
 		// This keeps valid break-even / trailing orders while removing old ladder/fallback debris.
-		if unexpectedStops > 0 && unexpectedTPs == 0 && !missingSL && ownership.StopOwner != "" {
+		// Exception: if stale bot duplicates exceed a threshold, clean them up to prevent accumulation.
+		if unexpectedStops > 0 && unexpectedTPs == 0 && !missingSL && ownership.StopOwner != "" && unexpectedSummary.StaleBotDuplicate <= 5 {
 			logger.Infof("🛡 Protection reconciler: %s %s preserving extra protective stop orders (unexpectedSL=%d) because stop coverage is already satisfied", symbol, positionSide, unexpectedStops)
 			unexpectedStops = 0
 			ownership.UnexpectedStops = 0
