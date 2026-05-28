@@ -464,34 +464,34 @@ export function TraderDashboardPage({
   }
 
   return (
-    <DeepVoidBackground className="min-h-screen pb-12" disableAnimation>
-      <div className="w-full px-4 md:px-8 relative z-10 pt-6">
+    <DeepVoidBackground className="min-h-screen pb-6" disableAnimation>
+      <div className="w-full px-3 md:px-5 lg:px-6 relative z-10 pt-3">
         {/* Trader Header */}
         <div
-          className="mb-6 rounded-lg p-6 animate-scale-in nofx-glass group"
+          className="mb-3 rounded-lg p-4 animate-scale-in nofx-glass group"
           style={{
             background:
               'linear-gradient(135deg, rgba(15, 23, 42, 0.6) 0%, rgba(15, 23, 42, 0.4) 100%)',
           }}
         >
-          <div className="flex items-start justify-between mb-4">
-            <h2 className="text-2xl font-bold flex items-center gap-4 text-nofx-text-main">
+          <div className="flex items-start justify-between mb-2">
+            <h2 className="text-2xl font-bold flex items-center gap-3 text-nofx-text-main">
               <div className="relative">
                 <PunkAvatar
                   seed={getTraderAvatar(
                     selectedTrader.trader_id,
                     selectedTrader.trader_name
                   )}
-                  size={56}
+                  size={40}
                   className="rounded-xl border-2 border-nofx-gold/30 shadow-[0_0_15px_rgba(240,185,11,0.2)]"
                 />
                 <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-nofx-green rounded-full border-2 border-[#0B0E11] shadow-[0_0_8px_rgba(14,203,129,0.8)] animate-pulse" />
               </div>
               <div className="flex flex-col">
-                <span className="text-3xl tracking-tight text-nofx-text font-semibold">
+                <span className="text-xl tracking-tight text-nofx-text font-semibold">
                   {selectedTrader.trader_name}
                 </span>
-                <span className="text-xs font-mono text-nofx-text-muted opacity-60 flex items-center gap-2">
+                <span className="text-[10px] font-mono text-nofx-text-muted opacity-60 flex items-center gap-2">
                   <div className="w-1.5 h-1.5 bg-nofx-gold rounded-full" />
                   ID: {selectedTrader.trader_id.slice(0, 8)}...
                 </span>
@@ -568,7 +568,7 @@ export function TraderDashboardPage({
               )}
             </div>
           </div>
-          <div className="flex items-center gap-6 text-sm flex-wrap text-nofx-text-muted font-mono pl-2">
+          <div className="flex items-center gap-4 text-xs flex-wrap text-nofx-text-muted font-mono pl-1">
             <span className="flex items-center gap-2">
               <span className="opacity-60">AI Model:</span>
               <span
@@ -837,7 +837,7 @@ export function TraderDashboardPage({
 
         {/* Debug Info */}
         {account && (
-          <div className="mb-4 px-3 py-1.5 rounded bg-black/40 border border-white/5 text-[10px] font-mono text-nofx-text-muted flex justify-between items-center opacity-60 hover:opacity-100 transition-opacity">
+          <div className="mb-2 px-3 py-1 rounded bg-black/40 border border-white/5 text-[10px] font-mono text-nofx-text-muted flex justify-between items-center opacity-60 hover:opacity-100 transition-opacity">
             <span>SYSTEM_STATUS::ONLINE</span>
             <div className="flex gap-4">
               <span>LAST_UPDATE::{lastUpdate}</span>
@@ -848,7 +848,7 @@ export function TraderDashboardPage({
         )}
 
         {/* Account Overview */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
           <StatCard
             title={t('totalEquity', language)}
             value={`${account?.total_equity?.toFixed(2) || '0.00'}`}
@@ -885,7 +885,7 @@ export function TraderDashboardPage({
         {/* Grid Risk Panel - Only show for grid trading strategy */}
         {status?.strategy_type === 'grid_trading' && selectedTraderId && (
           <div
-            className="mb-8 animate-slide-in"
+            className="mb-4 animate-slide-in"
             style={{ animationDelay: '0.05s' }}
           >
             <GridRiskPanel
@@ -897,9 +897,9 @@ export function TraderDashboardPage({
         )}
 
         {/* Main Content Area */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
           {/* Left Column: Charts + Positions */}
-          <div className="space-y-6">
+          <div className="space-y-4">
             {/* Chart Tabs (Equity / K-line) */}
             <div
               ref={chartSectionRef}
@@ -933,7 +933,7 @@ export function TraderDashboardPage({
 
             {/* Current Positions */}
             <div
-              className="nofx-glass p-6 animate-slide-in relative overflow-hidden group"
+              className="nofx-glass p-4 animate-slide-in relative overflow-hidden group"
               style={{ animationDelay: '0.15s' }}
             >
               <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
@@ -1196,7 +1196,7 @@ export function TraderDashboardPage({
 
           {/* Right Column: Position Protection */}
           <div
-            className="animate-slide-in h-fit lg:sticky lg:top-24 lg:max-h-[calc(100vh-120px)] overflow-y-auto"
+            className="animate-slide-in h-fit lg:sticky lg:top-16 lg:max-h-[calc(100vh-80px)] overflow-y-auto"
             style={{ animationDelay: '0.2s' }}
           >
             <PositionProtectionPanel
@@ -1214,7 +1214,7 @@ export function TraderDashboardPage({
 
         {/* Recent Decisions — Full Width */}
         <div
-          className="nofx-glass p-6 mb-6 animate-slide-in"
+          className="nofx-glass p-4 mb-4 animate-slide-in"
           style={{ animationDelay: '0.2s' }}
         >
           {/* Header */}
@@ -1328,7 +1328,7 @@ export function TraderDashboardPage({
         {/* Position History Section */}
         {selectedTraderId && (
           <div
-            className="nofx-glass p-6 animate-slide-in"
+            className="nofx-glass p-4 animate-slide-in"
             style={{ animationDelay: '0.25s' }}
           >
             <div className="flex items-center justify-between mb-5">
@@ -1370,19 +1370,19 @@ function StatCard({
   icon?: string
 }) {
   return (
-    <div className="group nofx-glass p-5 rounded-lg transition-all duration-300 hover:bg-white/5 hover:translate-y-[-2px] border border-white/5 hover:border-nofx-gold/20 relative overflow-hidden">
-      <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity text-4xl grayscale group-hover:grayscale-0">
+    <div className="group nofx-glass p-3 rounded-lg transition-all duration-300 hover:bg-white/5 hover:translate-y-[-2px] border border-white/5 hover:border-nofx-gold/20 relative overflow-hidden">
+      <div className="absolute top-0 right-0 p-3 opacity-5 group-hover:opacity-10 transition-opacity text-3xl grayscale group-hover:grayscale-0">
         {icon}
       </div>
-      <div className="text-xs mb-2 font-mono uppercase tracking-wider text-nofx-text-muted flex items-center gap-2">
+      <div className="text-[10px] mb-1 font-mono uppercase tracking-wider text-nofx-text-muted flex items-center gap-2">
         {title}
       </div>
-      <div className="flex items-baseline gap-1 mb-1">
-        <div className="text-2xl font-bold font-mono text-nofx-text-main tracking-tight group-hover:text-white transition-colors">
+      <div className="flex items-baseline gap-1">
+        <div className="text-xl font-bold font-mono text-nofx-text-main tracking-tight group-hover:text-white transition-colors">
           {value}
         </div>
         {unit && (
-          <span className="text-xs font-mono text-nofx-text-muted opacity-60">
+          <span className="text-[10px] font-mono text-nofx-text-muted opacity-60">
             {unit}
           </span>
         )}
@@ -1391,7 +1391,7 @@ function StatCard({
       {change !== undefined && (
         <div className="flex items-center gap-1">
           <div
-            className={`text-sm mono font-bold flex items-center gap-1 ${positive ? 'text-nofx-green' : 'text-nofx-red'}`}
+            className={`text-xs mono font-bold flex items-center gap-1 ${positive ? 'text-nofx-green' : 'text-nofx-red'}`}
           >
             <span>{positive ? '▲' : '▼'}</span>
             <span>
@@ -1402,7 +1402,7 @@ function StatCard({
         </div>
       )}
       {subtitle && (
-        <div className="text-xs mt-2 mono text-nofx-text-muted opacity-80">
+        <div className="text-[10px] mt-1 mono text-nofx-text-muted opacity-80">
           {subtitle}
         </div>
       )}
@@ -1481,16 +1481,16 @@ function SystemHealthCard({
   }, [decisions, language])
 
   return (
-    <div className="group nofx-glass p-5 rounded-lg transition-all duration-300 hover:bg-white/5 hover:translate-y-[-2px] border border-white/5 hover:border-nofx-gold/20 relative overflow-hidden">
-      <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity text-4xl grayscale group-hover:grayscale-0">
+    <div className="group nofx-glass p-3 rounded-lg transition-all duration-300 hover:bg-white/5 hover:translate-y-[-2px] border border-white/5 hover:border-nofx-gold/20 relative overflow-hidden">
+      <div className="absolute top-0 right-0 p-3 opacity-5 group-hover:opacity-10 transition-opacity text-3xl grayscale group-hover:grayscale-0">
         🧬
       </div>
-      <div className="text-xs mb-2 font-mono uppercase tracking-wider text-nofx-text-muted flex items-center gap-2">
+      <div className="text-[10px] mb-1 font-mono uppercase tracking-wider text-nofx-text-muted flex items-center gap-2">
         {language === 'zh' ? '系统健康' : 'HEALTH'}
       </div>
-      <div className="flex items-baseline gap-1 mb-1">
+      <div className="flex items-baseline gap-1">
         <div
-          className="text-2xl font-bold font-mono tracking-tight transition-colors"
+          className="text-xl font-bold font-mono tracking-tight transition-colors"
           style={{ color }}
         >
           {score}

@@ -512,8 +512,8 @@ export function PositionProtectionPanel({
 
   if (!positions || positions.length === 0) {
     return (
-      <div className="nofx-glass p-6 relative overflow-hidden">
-        <h2 className="text-lg font-bold text-nofx-text-main uppercase tracking-wide flex items-center gap-2 mb-4">
+      <div className="nofx-glass p-4 relative overflow-hidden">
+        <h2 className="text-sm font-bold text-nofx-text-main uppercase tracking-wide flex items-center gap-2 mb-4">
           <span className="text-purple-400">◈</span>
           {language === 'zh' ? '持仓保护' : 'Position Protection'}
         </h2>
@@ -525,8 +525,8 @@ export function PositionProtectionPanel({
   }
 
   return (
-    <div className="nofx-glass p-6 relative overflow-hidden">
-      <h2 className="text-lg font-bold text-nofx-text-main uppercase tracking-wide flex items-center gap-2 mb-5">
+    <div className="nofx-glass p-4 relative overflow-hidden">
+      <h2 className="text-sm font-bold text-nofx-text-main uppercase tracking-wide flex items-center gap-2 mb-3">
         <span className="text-purple-400">◈</span>
         {language === 'zh' ? '持仓保护' : 'Position Protection'}
         {loading && (
