@@ -152,13 +152,13 @@ type Decision struct {
 }
 
 type AIQualityScore struct {
-	Total              int `json:"total,omitempty"`
-	TrendAlignment     int `json:"trend_alignment,omitempty"`
-	StructureLocation  int `json:"structure_location,omitempty"`
-	SRFibQuality       int `json:"sr_fib_quality,omitempty"`
-	DerivativesContext int `json:"derivatives_context,omitempty"`
-	TriggerQuality     int `json:"trigger_quality,omitempty"`
-	NetRR              int `json:"net_rr,omitempty"`
+	Total              int     `json:"total,omitempty"`
+	TrendAlignment     int     `json:"trend_alignment,omitempty"`
+	StructureLocation  int     `json:"structure_location,omitempty"`
+	SRFibQuality       int     `json:"sr_fib_quality,omitempty"`
+	DerivativesContext int     `json:"derivatives_context,omitempty"`
+	TriggerQuality     int     `json:"trigger_quality,omitempty"`
+	NetRR              float64 `json:"net_rr,omitempty"`
 }
 
 type AIEntryProtectionRationale struct {
