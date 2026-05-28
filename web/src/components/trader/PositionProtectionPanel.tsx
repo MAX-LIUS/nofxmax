@@ -108,11 +108,15 @@ function buildProtectionRows(
     const zone = `DD-${tierIdx}`
     const callbackRate = tier.callback_rate || 0
 
-    // Calculate trigger price: peak price minus callback
-    // For LONG: triggerPrice = peakPrice * (1 - callbackRate)
-    // For SHORT: triggerPrice = peakPrice * (1 + callbackRate)
+    // Calculate trigger price from peak and callback when tier is active
+    // If peak is 0 (new position), show the activation price instead
     let triggerPrice = 0
-    if (peakPnlPct > 0 && entryPrice > 0 && callbackRate > 0) {
+    if (
+      peakPnlPct > 0 &&
+      entryPrice > 0 &&
+      callbackRate > 0 &&
+      tier.is_satisfied
+    ) {
       const peakPrice =
         side === 'LONG'
           ? entryPrice * (1 + peakPnlPct / 100)
@@ -121,6 +125,8 @@ function buildProtectionRows(
         side === 'LONG'
           ? peakPrice * (1 - callbackRate)
           : peakPrice * (1 + callbackRate)
+    } else if (tier.activation_price > 0) {
+      triggerPrice = tier.activation_price
     }
 
     const rawDelta =
@@ -143,7 +149,12 @@ function buildProtectionRows(
       statusCls = 'text-nofx-text-muted'
     }
 
-    const detail = `peak${formatPct(peakPnlPct, 1)} cb${(callbackRate * 100).toFixed(1)}%`
+    let detail: string
+    if (tier.is_satisfied && peakPnlPct > 0) {
+      detail = `peak${formatPct(peakPnlPct, 1)} cb${(callbackRate * 100).toFixed(1)}%`
+    } else {
+      detail = `min${tier.min_profit_pct.toFixed(1)}% dd${tier.max_drawdown_pct.toFixed(0)}%`
+    }
 
     rows.push({
       zone,

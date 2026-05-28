@@ -915,7 +915,26 @@ func (at *AutoTrader) getDrawdownArmRulesForNativeExposure(currentPnLPct, entryP
 	// drop the floor so we can arm the highest currently-satisfied tier instead.
 	// This prevents "phantom protection" where an unreachable trailing order exists
 	// but provides no actual protection.
+	// HOWEVER: if the exchange already has a trailing order with activePx set,
+	// it will auto-activate when price reaches it — don't clear in that case.
 	if highestArmedMinProfit > 0 && currentPnLPct < highestArmedMinProfit {
+		if openOrders, err := at.trader.GetOpenOrders(symbol); err == nil {
+			positionSide := strings.ToUpper(side)
+			hasLiveTrailing := false
+			for _, o := range openOrders {
+				if !strings.EqualFold(o.PositionSide, positionSide) && o.PositionSide != "" && o.PositionSide != "BOTH" {
+					continue
+				}
+				if strings.Contains(strings.ToUpper(o.Type), "TRAILING") {
+					hasLiveTrailing = true
+					break
+				}
+			}
+			if hasLiveTrailing {
+				// Exchange has a trailing order waiting for activation — don't clear
+				return nil
+			}
+		}
 		logger.Infof("🔄 Drawdown floor downgrade: %s %s profit %.2f%% < floor %.2f%% — allowing lower tier", symbol, side, currentPnLPct, highestArmedMinProfit)
 		at.clearArmedDrawdownRecordsAboveMinProfit(symbol, side, currentPnLPct)
 		highestArmedMinProfit = 0
