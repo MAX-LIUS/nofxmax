@@ -112,7 +112,15 @@ func (pb *PositionBuilder) handleClose(
 			return fallbackErr
 		}
 		if fallback != nil {
-			logger.Infof("  🩹 Late close fill matched recently sync-closed position: %s %s qty=%.6f @ %.8f (orderID: %s, positionID: %d)", symbol, side, quantity, price, orderID, fallback.ID)
+			if realizedPnL == 0 && fallback.EntryPrice > 0 {
+				if strings.EqualFold(side, "LONG") {
+					realizedPnL = (price - fallback.EntryPrice) * quantity
+				} else {
+					realizedPnL = (fallback.EntryPrice - price) * quantity
+				}
+				realizedPnL = math.Round(realizedPnL*100) / 100
+			}
+			logger.Infof("  🩹 Late close fill matched recently sync-closed position: %s %s qty=%.6f @ %.8f pnl=%.2f (orderID: %s, positionID: %d)", symbol, side, quantity, price, realizedPnL, orderID, fallback.ID)
 			return pb.positionStore.ApplyLateCloseFillToClosedPosition(fallback.ID, quantity, price, fee, realizedPnL, action, action, "MARKET", orderID, tradeTimeMs)
 		}
 		// No open position found - just skip

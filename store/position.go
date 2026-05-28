@@ -988,13 +988,13 @@ func (s *PositionStore) MarkOpenPositionsAbsentFromExchangeClosed(traderID strin
 		}
 
 		exitPrice := pos.EntryPrice
-		realizedPnl := 0.0
+		realizedPnl := pos.RealizedPnL
 		totalFee := pos.Fee
 
-		// Try to compute real PnL from close fills/orders
+		// Try to compute real PnL from close fills/orders for the remaining quantity
 		if computed, compFee, compExit, ok := s.computePnlFromFills(pos); ok {
 			exitPrice = compExit
-			realizedPnl = computed
+			realizedPnl = pos.RealizedPnL + computed
 			totalFee = pos.Fee + compFee
 		}
 
