@@ -853,15 +853,29 @@ func hasMatchingBreakEvenOrder(orders []tradertypes.OpenOrder, positionSide stri
 		if !looksLikeStopLoss(order) {
 			continue
 		}
-		if !strings.Contains(strings.ToLower(order.ClientOrderID), "break_even") && !strings.Contains(strings.ToLower(order.ClientOrderID), "be-stop") {
-			continue
-		}
 		price := order.StopPrice
 		if price <= 0 {
 			price = order.Price
 		}
-		if approximatelyEqualPrice(price, targetPrice) {
-			return true
+		if price <= 0 {
+			continue
+		}
+		// Match by tag if available
+		tag := strings.ToLower(order.ClientOrderID)
+		if strings.Contains(tag, "break_even") || strings.Contains(tag, "be-stop") {
+			if approximatelyEqualPrice(price, targetPrice) {
+				return true
+			}
+			continue
+		}
+		// For OKX where tag is truncated: match any conditional stop at the target price
+		// that is not a trailing stop and not identified as ladder/fallback
+		if !strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
+			if !strings.Contains(tag, "ladder") && !strings.Contains(tag, "fallback") && !strings.Contains(tag, "full_sl") {
+				if approximatelyEqualPrice(price, targetPrice) {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -875,8 +889,19 @@ func hasAnyBreakEvenOrderOnExchange(orders []tradertypes.OpenOrder, positionSide
 		if !looksLikeStopLoss(order) {
 			continue
 		}
+		// Check by tag first (works for exchanges with longer tag support)
 		if strings.Contains(strings.ToLower(order.ClientOrderID), "break_even") || strings.Contains(strings.ToLower(order.ClientOrderID), "be-stop") {
 			return true
+		}
+		// For OKX where tag is truncated: any conditional stop-loss that is NOT a
+		// trailing stop and NOT identified as ladder/fallback is likely a BE order.
+		// This is a heuristic — the reconciler uses it as a safety check, not for
+		// precise matching (applyBreakEvenStops does exact price matching).
+		if order.StopPrice > 0 && !strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
+			tag := strings.ToLower(order.ClientOrderID)
+			if !strings.Contains(tag, "ladder") && !strings.Contains(tag, "fallback") && !strings.Contains(tag, "full_sl") && !strings.Contains(tag, "full_tp") {
+				return true
+			}
 		}
 	}
 	return false
