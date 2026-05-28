@@ -51,8 +51,16 @@ func (at *AutoTrader) applyPostOpenProtection(req *protectionExecutionRequest) e
 		if decisionPlan != nil {
 			plan = preferDecisionProtectionPlan(configuredPlan, decisionPlan)
 			if len(decisionPlan.DrawdownRules) > 0 {
-				at.setAIDrawdownRules(req.Symbol, req.PositionSide, decisionPlan.DrawdownRules)
-				at.initDrawdownTiersFromResolvedRules(req.Symbol, req.PositionSide, req.Quantity, decisionPlan.DrawdownRules)
+				ddRules := decisionPlan.DrawdownRules
+				// Clamp DD tiers to RR target distance if AI gave unreasonable values
+				if req.Decision.EntryProtection != nil && req.Decision.EntryProtection.RiskReward.FirstTarget > 0 {
+					side := strings.ToLower(req.PositionSide)
+					structTargets := extractStructuralTargets(req.Decision, req.EntryPrice, side)
+					ddRules = clampDrawdownRulesToTarget(ddRules, req.EntryPrice, req.Decision.EntryProtection.RiskReward.FirstTarget, side, structTargets)
+					decisionPlan.DrawdownRules = ddRules
+				}
+				at.setAIDrawdownRules(req.Symbol, req.PositionSide, ddRules)
+				at.initDrawdownTiersFromResolvedRules(req.Symbol, req.PositionSide, req.Quantity, ddRules)
 			}
 		}
 	}
@@ -1014,4 +1022,67 @@ func (at *AutoTrader) cancelOrphanedDrawdownOrders(symbol string, plan *Protecti
 			logger.Infof("  🧹 Cancelled orphaned drawdown TP orders for %s", symbol)
 		}
 	}
+}
+
+// extractStructuralTargets extracts resistance (for long) or support (for short) price levels
+// from the AI decision's entry_protection_rationale. These are used as structural anchors
+// for DD tier targets when the AI's min_profit_pct values are unreasonable.
+func extractStructuralTargets(decision *kernel.Decision, entryPrice float64, side string) []float64 {
+	if decision == nil || decision.EntryProtection == nil || entryPrice <= 0 {
+		return nil
+	}
+	ep := decision.EntryProtection
+
+	isLong := strings.EqualFold(side, "long")
+	seen := make(map[float64]bool)
+	var targets []float64
+
+	addTarget := func(price float64) {
+		if price <= 0 || seen[price] {
+			return
+		}
+		if isLong && price > entryPrice {
+			seen[price] = true
+			targets = append(targets, price)
+		} else if !isLong && price < entryPrice {
+			seen[price] = true
+			targets = append(targets, price)
+		}
+	}
+
+	if isLong {
+		for _, r := range ep.KeyLevels.Resistance {
+			addTarget(r)
+		}
+	} else {
+		for _, s := range ep.KeyLevels.Support {
+			addTarget(s)
+		}
+	}
+
+	for _, skl := range ep.StructuralKeyLevels {
+		if isLong && strings.EqualFold(skl.Type, "resistance") {
+			addTarget(skl.Price)
+		} else if !isLong && strings.EqualFold(skl.Type, "support") {
+			addTarget(skl.Price)
+		}
+	}
+
+	for _, a := range ep.Anchors {
+		if isLong && (strings.EqualFold(a.Type, "resistance") || strings.EqualFold(a.Type, "first_target") || strings.EqualFold(a.Type, "target")) {
+			addTarget(a.Price)
+		} else if !isLong && (strings.EqualFold(a.Type, "support") || strings.EqualFold(a.Type, "first_target") || strings.EqualFold(a.Type, "target")) {
+			addTarget(a.Price)
+		}
+	}
+
+	for _, a := range ep.HigherAnchors {
+		if isLong && (strings.EqualFold(a.Type, "resistance") || strings.EqualFold(a.Type, "target")) {
+			addTarget(a.Price)
+		} else if !isLong && (strings.EqualFold(a.Type, "support") || strings.EqualFold(a.Type, "target")) {
+			addTarget(a.Price)
+		}
+	}
+
+	return targets
 }

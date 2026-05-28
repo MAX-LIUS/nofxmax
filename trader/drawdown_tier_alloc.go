@@ -498,6 +498,145 @@ func findRuleForTier(rules []store.DrawdownTakeProfitRule, tier *store.DrawdownT
 	return nil
 }
 
+// clampDrawdownRulesToTarget ensures DD tier min_profit_pct values are anchored to
+// actual structural targets, not arbitrary AI values that exceed the RR target.
+// Strategy:
+//  1. Extract resistance/support levels beyond entry from the decision's structural data
+//  2. Use those as T1/T2/T3 targets (with 0.2% buffer before each)
+//  3. If not enough structural levels, fill with fib extensions (1.618, 2.618) of target distance
+//
+// Only activates when T1 exceeds the first target distance (AI gave unreasonable values).
+func clampDrawdownRulesToTarget(rules []store.DrawdownTakeProfitRule, entryPrice, firstTarget float64, side string, structuralTargets []float64) []store.DrawdownTakeProfitRule {
+	if len(rules) == 0 || entryPrice <= 0 || firstTarget <= 0 {
+		return rules
+	}
+
+	var targetDistPct float64
+	if strings.EqualFold(side, "long") {
+		targetDistPct = (firstTarget - entryPrice) / entryPrice * 100
+	} else {
+		targetDistPct = (entryPrice - firstTarget) / entryPrice * 100
+	}
+
+	if targetDistPct <= 0 {
+		return rules
+	}
+
+	sort.Slice(rules, func(i, j int) bool {
+		return rules[i].MinProfitPct < rules[j].MinProfitPct
+	})
+
+	t1Profit := rules[0].MinProfitPct
+	if t1Profit <= 0 {
+		return rules
+	}
+
+	// Only clamp if T1 exceeds the target distance (T1 should arm before or at target)
+	if t1Profit <= targetDistPct {
+		return rules
+	}
+
+	// Build tier targets from structural levels + fib extensions
+	tierTargets, tierSources := buildTierTargets(entryPrice, firstTarget, targetDistPct, side, structuralTargets, len(rules))
+
+	clamped := make([]store.DrawdownTakeProfitRule, len(rules))
+	for i, rule := range rules {
+		clamped[i] = rule
+		if i < len(tierTargets) {
+			clamped[i].MinProfitPct = tierTargets[i]
+		}
+	}
+
+	logger.Infof("📐 DD tiers clamped to structural targets: entry=%.4f target=%.4f dist=%.2f%%",
+		entryPrice, firstTarget, targetDistPct)
+	for i, r := range clamped {
+		source := "fib"
+		if i < len(tierSources) {
+			source = tierSources[i]
+		}
+		logger.Infof("  → T%d: min_profit=%.2f%% (was %.2f%%) [%s]", i+1, r.MinProfitPct, rules[i].MinProfitPct, source)
+	}
+
+	return clamped
+}
+
+// buildTierTargets produces min_profit_pct values for each DD tier.
+// Uses structural resistance/support levels beyond entry when available,
+// falls back to fibonacci extensions of the target distance.
+// Returns (targets, sources) where sources[i] is "target"/"struct"/"fib".
+func buildTierTargets(entryPrice, firstTarget, targetDistPct float64, side string, structuralTargets []float64, numTiers int) ([]float64, []string) {
+	const buffer = 0.2 // arm slightly before reaching the level
+
+	// Convert structural prices to distance percentages, filter to those beyond entry
+	var structDistances []float64
+	for _, price := range structuralTargets {
+		var dist float64
+		if strings.EqualFold(side, "long") {
+			dist = (price - entryPrice) / entryPrice * 100
+		} else {
+			dist = (entryPrice - price) / entryPrice * 100
+		}
+		// Only use levels meaningfully beyond the first target (at least 0.5% further)
+		if dist > targetDistPct+0.5 {
+			structDistances = append(structDistances, dist)
+		}
+	}
+	sort.Float64s(structDistances)
+
+	// Deduplicate (levels within 0.3% of each other)
+	var deduped []float64
+	for _, d := range structDistances {
+		if len(deduped) == 0 || d-deduped[len(deduped)-1] > 0.3 {
+			deduped = append(deduped, d)
+		}
+	}
+
+	// T1 is always anchored to the first target
+	targets := make([]float64, 0, numTiers)
+	sources := make([]string, 0, numTiers)
+	t1 := targetDistPct - buffer
+	if t1 < 0.3 {
+		t1 = 0.3
+	}
+	targets = append(targets, math.Round(t1*100)/100)
+	sources = append(sources, "target")
+
+	// Fill T2+ from structural levels first, then fib extensions
+	structIdx := 0
+	fibMultipliers := []float64{1.618, 2.618, 3.618, 4.618}
+	fibIdx := 0
+
+	for len(targets) < numTiers {
+		var nextDist float64
+		var src string
+		if structIdx < len(deduped) {
+			nextDist = deduped[structIdx] - buffer
+			src = "struct"
+			structIdx++
+		} else if fibIdx < len(fibMultipliers) {
+			nextDist = targetDistPct*fibMultipliers[fibIdx] - buffer
+			src = "fib"
+			fibIdx++
+		} else {
+			last := targets[len(targets)-1]
+			nextDist = last * 1.5
+			src = "fib"
+		}
+
+		if nextDist < 0.3 {
+			nextDist = 0.3
+		}
+		// Ensure monotonically increasing
+		if len(targets) > 0 && nextDist <= targets[len(targets)-1] {
+			nextDist = targets[len(targets)-1] + 0.5
+		}
+		targets = append(targets, math.Round(nextDist*100)/100)
+		sources = append(sources, src)
+	}
+
+	return targets, sources
+}
+
 // computeRemainingQuantityForBE calculates the total quantity of tiers that haven't been
 // executed by drawdown — this is the quantity that BE should protect.
 func (at *AutoTrader) computeRemainingQuantityForBE(symbol, side string) float64 {

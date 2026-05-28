@@ -450,6 +450,11 @@ func (at *AutoTrader) restoreAIDrawdownRulesForPositionWithEntry(symbol, side st
 			if err != nil || plan == nil || len(plan.DrawdownRules) == 0 {
 				continue
 			}
+			// Clamp DD tiers to RR target on restore (same logic as open-time)
+			if decision.EntryProtection != nil && decision.EntryProtection.RiskReward.FirstTarget > 0 {
+				structTargets := extractStructuralTargets(&decision, entryPrice, side)
+				plan.DrawdownRules = clampDrawdownRulesToTarget(plan.DrawdownRules, entryPrice, decision.EntryProtection.RiskReward.FirstTarget, side, structTargets)
+			}
 			at.setAIDrawdownRules(symbol, side, plan.DrawdownRules)
 			return plan.DrawdownRules
 		}
@@ -526,6 +531,11 @@ func (at *AutoTrader) restoreAIProtectionPlanForPositionWithEntry(symbol, side s
 				continue
 			}
 			if len(plan.DrawdownRules) > 0 {
+				// Clamp DD tiers to RR target on restore
+				if decision.EntryProtection != nil && decision.EntryProtection.RiskReward.FirstTarget > 0 {
+					structTargets := extractStructuralTargets(&decision, entryPrice, side)
+					plan.DrawdownRules = clampDrawdownRulesToTarget(plan.DrawdownRules, entryPrice, decision.EntryProtection.RiskReward.FirstTarget, side, structTargets)
+				}
 				at.setAIDrawdownRules(symbol, side, plan.DrawdownRules)
 			}
 			return plan
