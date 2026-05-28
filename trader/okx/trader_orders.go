@@ -500,6 +500,9 @@ func (t *OKXTrader) setTrailingStopLossWithTagReturningID(symbol string, positio
 	}
 
 	sz := quantity / inst.CtVal
+	if inst.MinSz > 0 && sz < inst.MinSz {
+		sz = inst.MinSz
+	}
 	szStr := t.formatSize(sz, inst)
 
 	side := "sell"
@@ -516,9 +519,11 @@ func (t *OKXTrader) setTrailingStopLossWithTagReturningID(symbol string, positio
 		"posSide":       posSide,
 		"ordType":       "move_order_stop",
 		"sz":            szStr,
-		"activePx":      t.formatPrice(activationPrice, inst),
 		"callbackRatio": strconv.FormatFloat(callbackRate, 'f', -1, 64),
 		"tag":           okxReasonTag(reasonTag),
+	}
+	if activationPrice > 0 {
+		body["activePx"] = t.formatPrice(activationPrice, inst)
 	}
 
 	resp, err := t.doRequest("POST", okxAdvanceAlgoPath, body)
@@ -709,6 +714,9 @@ func (t *OKXTrader) setStopLossWithTag(symbol string, positionSide string, quant
 
 	// Calculate contract size: quantity (in base asset) / ctVal (asset per contract)
 	sz := quantity / inst.CtVal
+	if inst.MinSz > 0 && sz < inst.MinSz {
+		sz = inst.MinSz
+	}
 	szStr := t.formatSize(sz, inst)
 
 	// Determine direction
@@ -764,6 +772,9 @@ func (t *OKXTrader) setTakeProfitWithTag(symbol string, positionSide string, qua
 
 	// Calculate contract size: quantity (in base asset) / ctVal (asset per contract)
 	sz := quantity / inst.CtVal
+	if inst.MinSz > 0 && sz < inst.MinSz {
+		sz = inst.MinSz
+	}
 	szStr := t.formatSize(sz, inst)
 
 	// Determine direction
@@ -1214,6 +1225,7 @@ func (t *OKXTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
 			PosSide       string `json:"posSide"`
 			ActivePx      string `json:"activePx"`
 			CallbackRatio string `json:"callbackRatio"`
+			MoveTriggerPx string `json:"moveTriggerPx"`
 			Sz            string `json:"sz"`
 			Tag           string `json:"tag"`
 		}
@@ -1227,6 +1239,7 @@ func (t *OKXTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
 				quantity := quantityContracts * ctVal
 				activePx, _ := strconv.ParseFloat(order.ActivePx, 64)
 				callbackRatio, _ := strconv.ParseFloat(order.CallbackRatio, 64)
+				moveTriggerPx, _ := strconv.ParseFloat(order.MoveTriggerPx, 64)
 				// OKX returns callbackRatio in percentage units (for example "0.55" means
 				// 0.55%). Internally OpenOrder.CallbackRate is a decimal ratio, matching
 				// the value we pass when placing trailing orders (0.0055). Normalizing here
@@ -1238,22 +1251,34 @@ func (t *OKXTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
 				if positionSide == "NET" {
 					positionSide = "BOTH"
 				}
+				activationStatus := "pending_activation"
+				stopPrice := activePx
+				if trailingState == "effective" {
+					activationStatus = "activated"
+					if moveTriggerPx > 0 {
+						stopPrice = moveTriggerPx
+					}
+				} else if activePx == 0 {
+					// No activePx means immediate activation — treat as activated
+					activationStatus = "activated"
+				}
 				result = append(result, types.OpenOrder{
-					OrderID:         order.AlgoId,
-					Symbol:          symbol,
-					Side:            side,
-					PositionSide:    positionSide,
-					Type:            "TRAILING_STOP_MARKET",
-					Price:           0,
-					StopPrice:       activePx,
-					ActivationPrice: activePx,
-					CallbackRate:    callbackRate,
-					CallbackRatePct: callbackRatio,
-					Quantity:        quantity,
-					Status:          "NEW",
-					ClientOrderID:   order.Tag,
-					ProtectionRole:  protectionReasonFromTag(order.Tag),
-					ParentOrderID:   order.AlgoId,
+					OrderID:          order.AlgoId,
+					Symbol:           symbol,
+					Side:             side,
+					PositionSide:     positionSide,
+					Type:             "TRAILING_STOP_MARKET",
+					Price:            0,
+					StopPrice:        stopPrice,
+					ActivationPrice:  activePx,
+					ActivationStatus: activationStatus,
+					CallbackRate:     callbackRate,
+					CallbackRatePct:  callbackRatio,
+					Quantity:         quantity,
+					Status:           "NEW",
+					ClientOrderID:    order.Tag,
+					ProtectionRole:   protectionReasonFromTag(order.Tag),
+					ParentOrderID:    order.AlgoId,
 				})
 			}
 		}

@@ -215,11 +215,19 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			executionMode := at.getDrawdownExecutionMode(symbol, side)
 			armRules := at.getDrawdownArmRulesForNativeExposure(currentPnLPct, entryPrice, quantity, symbol, side, rules)
 			if len(armRules) == 0 && isNativeTrailingProtectionState(at.getProtectionState(symbol, side)) {
-				logger.Infof("🟣 Drawdown monitor: %s %s already has all satisfied native trailing tiers armed (%s), skipping duplicate arm pass", symbol, side, executionMode)
-				nativeTrailingHandled = true
-			} else {
+				// Check if existing trailing orders need reactivation (placed with activePx
+				// that is now past current price but OKX didn't auto-activate)
+				if at.checkAndFixStaleTrailingActivation(symbol, side, entryPrice, markPrice, rules) {
+					// Stale trailing order was cancelled, re-fetch arm rules
+					armRules = at.getDrawdownArmRulesForNativeExposure(currentPnLPct, entryPrice, quantity, symbol, side, rules)
+				} else {
+					logger.Infof("🟣 Drawdown monitor: %s %s already has all satisfied native trailing tiers armed (%s), skipping duplicate arm pass", symbol, side, executionMode)
+					nativeTrailingHandled = true
+				}
+			}
+			if !nativeTrailingHandled {
 				for _, armRule := range armRules {
-					if at.applyNativeTrailingDrawdown(symbol, side, entryPrice, armRule) {
+					if at.applyNativeTrailingDrawdown(symbol, side, entryPrice, markPrice, armRule) {
 						// Only mark as native-handled if the state is actually native trailing.
 						// If applyNativeTrailingDrawdown fell back to managed mode (callback too small),
 						// we must NOT skip the managed execution path below.
@@ -318,7 +326,7 @@ func (at *AutoTrader) checkPositionDrawdown() {
 
 		if at.supportsNativeTrailingStop() {
 			for _, triggeredRule := range triggeredRules {
-				at.applyNativeTrailingDrawdown(symbol, side, entryPrice, triggeredRule)
+				at.applyNativeTrailingDrawdown(symbol, side, entryPrice, markPrice, triggeredRule)
 			}
 			if at.hasArmedNativeDrawdownForPosition(symbol, side, entryPrice) {
 				logger.Infof("🟣 Drawdown monitor: %s %s native trailing drawdown is armed; skipping managed market close fallback", symbol, side)
@@ -649,6 +657,65 @@ func (at *AutoTrader) clearArmedDrawdownRecords(symbol, side string) {
 		data, _ := json.Marshal(state)
 		_ = at.store.SetSystemConfig(store.DynamicProtectionStateConfigKey, string(data))
 	}
+}
+
+// checkAndFixStaleTrailingActivation checks if existing trailing orders have an activePx
+// that the current price has already passed, but OKX hasn't activated them. If found,
+// cancels the stale order so the system can re-arm with immediate activation (no activePx).
+// Returns true if a stale order was cancelled and re-arm is needed.
+func (at *AutoTrader) checkAndFixStaleTrailingActivation(symbol, side string, entryPrice, markPrice float64, rules []store.DrawdownTakeProfitRule) bool {
+	if markPrice <= 0 {
+		return false
+	}
+	openOrders, err := at.trader.GetOpenOrders(symbol)
+	if err != nil {
+		return false
+	}
+	positionSide := strings.ToUpper(side)
+	for _, order := range openOrders {
+		if !strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
+			continue
+		}
+		if order.PositionSide != "" && !strings.EqualFold(order.PositionSide, positionSide) {
+			continue
+		}
+		if order.ActivationStatus == "activated" {
+			continue
+		}
+		// Check if activation price has been passed
+		activePx := order.ActivationPrice
+		if activePx <= 0 {
+			activePx = order.StopPrice
+		}
+		if activePx <= 0 {
+			continue
+		}
+		pricePast := false
+		if strings.EqualFold(side, "long") && markPrice >= activePx {
+			pricePast = true
+		} else if strings.EqualFold(side, "short") && markPrice <= activePx {
+			pricePast = true
+		}
+		if !pricePast {
+			continue
+		}
+		// Found a trailing order that should be activated but isn't — cancel it
+		logger.Infof("🔄 DD trailing stale activation detected: %s %s | mark=%.4f past activePx=%.4f — cancelling for re-arm with immediate activation", symbol, side, markPrice, activePx)
+		if cancelTrader, ok := at.trader.(interface {
+			CancelAlgoOrderByID(symbol string, algoID string) error
+		}); ok {
+			if err := cancelTrader.CancelAlgoOrderByID(symbol, order.OrderID); err != nil {
+				logger.Warnf("⚠️ Failed to cancel stale trailing order %s: %v", order.OrderID, err)
+				continue
+			}
+		}
+		// Clear armed state and tier allocs to allow clean re-arm
+		// (prevents detectNativeTrailingFills from marking the cancelled order as "executed")
+		at.clearProtectionState(symbol, side)
+		at.clearDrawdownTierAllocs(symbol, side)
+		return true
+	}
+	return false
 }
 
 func (at *AutoTrader) clearArmedDrawdownRecordsAboveMinProfit(symbol, side string, maxMinProfit float64) {
@@ -1270,11 +1337,12 @@ func (at *AutoTrader) supportsNativeTrailingStop() bool {
 }
 
 type nativeTrailingOrder struct {
-	PositionSide string
-	StopPrice    float64
-	CallbackRate float64
-	Quantity     float64
-	OrderID      string
+	PositionSide     string
+	StopPrice        float64
+	CallbackRate     float64
+	Quantity         float64
+	OrderID          string
+	ActivationStatus string
 }
 
 func (at *AutoTrader) findExistingFullTrailingOrder(side string, openOrders []OpenOrder) *nativeTrailingOrder {
@@ -1345,11 +1413,12 @@ func (at *AutoTrader) findEquivalentPartialTrailingOrder(symbol, side string, ru
 			}
 			if math.Abs(order.Quantity-qtyTarget) <= qtyTolerance && math.Abs(order.CallbackRate-plannedCallbackRate) <= callbackTolerance && activationMatches(order.StopPrice, plannedActivationPrice) {
 				return &nativeTrailingOrder{
-					PositionSide: order.PositionSide,
-					StopPrice:    order.StopPrice,
-					CallbackRate: order.CallbackRate,
-					Quantity:     order.Quantity,
-					OrderID:      order.OrderID,
+					PositionSide:     order.PositionSide,
+					StopPrice:        order.StopPrice,
+					CallbackRate:     order.CallbackRate,
+					Quantity:         order.Quantity,
+					OrderID:          order.OrderID,
+					ActivationStatus: order.ActivationStatus,
 				}, qtyTarget, plannedActivationPrice, plannedCallbackRate
 			}
 		}
@@ -1479,7 +1548,7 @@ func (at *AutoTrader) applyManagedDrawdownFallback(symbol, side string, entryPri
 	return true
 }
 
-func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPrice float64, rule store.DrawdownTakeProfitRule) bool {
+func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPrice, markPrice float64, rule store.DrawdownTakeProfitRule) bool {
 	if !at.supportsNativeTrailingStop() {
 		return false
 	}
@@ -1511,10 +1580,25 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 			} else {
 				existingTier, _, plannedActivationPrice, plannedCallbackRate := at.findEquivalentPartialTrailingOrder(symbol, side, rule, entryPrice, openOrders)
 				if existingTier != nil && !at.shouldReplacePartialTrailingTier(existingTier, plannedActivationPrice, plannedCallbackRate) {
-					if existingTier.StopPrice > 0 && plannedActivationPrice > 0 {
-						logger.Infof("ℹ️ Native partial trailing tier already exists on exchange (%s %s close=%.1f%% activation=%.6f callback=%.6f)", symbol, side, rule.CloseRatioPct, existingTier.StopPrice, existingTier.CallbackRate)
+					// Force replace if trailing order has activePx set but price already past threshold.
+					// This handles the case where the order was placed with a fixed activePx that
+					// OKX may not have auto-activated. Replace with no activePx for immediate activation.
+					needsReactivation := markPrice > 0 && existingTier.StopPrice > 0 && existingTier.ActivationStatus != "activated"
+					if needsReactivation {
+						if strings.EqualFold(side, "long") && markPrice >= existingTier.StopPrice {
+							logger.Infof("🔄 DD trailing not activated but price past: %s %s mark=%.4f >= activePx=%.4f — replacing for immediate activation", symbol, side, markPrice, existingTier.StopPrice)
+						} else if strings.EqualFold(side, "short") && markPrice <= existingTier.StopPrice {
+							logger.Infof("🔄 DD trailing not activated but price past: %s %s mark=%.4f <= activePx=%.4f — replacing for immediate activation", symbol, side, markPrice, existingTier.StopPrice)
+						} else {
+							needsReactivation = false
+						}
 					}
-					return true
+					if !needsReactivation {
+						if existingTier.StopPrice > 0 && plannedActivationPrice > 0 {
+							logger.Infof("ℹ️ Native partial trailing tier already exists on exchange (%s %s close=%.1f%% activation=%.6f callback=%.6f status=%s)", symbol, side, rule.CloseRatioPct, existingTier.StopPrice, existingTier.CallbackRate, existingTier.ActivationStatus)
+						}
+						return true
+					}
 				}
 			}
 		}
@@ -1532,12 +1616,19 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 
 	plannedActivationPrice := calculateProfitBasedTrailingTriggerPrice(entryPrice, side, rule.MinProfitPct)
 	activationPrice := plannedActivationPrice
-	// Use the fixed planned activation price. The exchange's native trailing stop
-	// tracks the high-water mark internally — we do NOT update activation price
-	// based on current market price. This prevents the "ratchet down" bug where
-	// the trigger price keeps dropping as price retreats from peak.
+	// If current price already past activation threshold, don't pass activePx
+	// so OKX activates the trailing stop immediately from placement.
+	if markPrice > 0 && plannedActivationPrice > 0 {
+		if strings.EqualFold(side, "long") && markPrice >= plannedActivationPrice {
+			activationPrice = 0
+			logger.Infof("🎯 DD trailing immediate activation: %s %s | mark=%.4f >= planned=%.4f", symbol, side, markPrice, plannedActivationPrice)
+		} else if strings.EqualFold(side, "short") && markPrice <= plannedActivationPrice {
+			activationPrice = 0
+			logger.Infof("🎯 DD trailing immediate activation: %s %s | mark=%.4f <= planned=%.4f", symbol, side, markPrice, plannedActivationPrice)
+		}
+	}
 	priceBasedCallbackRatio := calculateDrawdownRuleCallbackRatio(entryPrice, side, rule)
-	if activationPrice <= 0 || priceBasedCallbackRatio <= 0 {
+	if plannedActivationPrice <= 0 || priceBasedCallbackRatio <= 0 {
 		return false
 	}
 
@@ -2128,79 +2219,72 @@ func (at *AutoTrader) applyBreakEvenStops(symbol, side string, quantity, entryPr
 	if len(rules) == 0 {
 		return nil
 	}
-	bestIdx := -1
-	for idx, rule := range rules {
-		if currentPnLPct >= rule.TriggerValue {
-			bestIdx = idx
-		}
-	}
-	if bestIdx < 0 {
-		return nil
-	}
-	rule := rules[bestIdx]
-	if rule.CloseRatioPct <= 0 {
-		rule.CloseRatioPct = 100
-	}
-	ruleQty := quantity * rule.CloseRatioPct / 100.0
-	if ruleQty <= 0 {
-		return nil
-	}
 
-	stage := rule.StageName
-	if stage == "" {
-		stage = fmt.Sprintf("BE%d", bestIdx+1)
-	}
-
-	newBEPrice := calculateBreakEvenStopPrice(side, entryPrice, rule.OffsetPct)
-	if newBEPrice <= 0 {
-		return nil
-	}
-
-	// If BE is already armed, verify exchange order actually exists before skipping.
 	positionSide := strings.ToUpper(side)
-	if at.getBreakEvenState(symbol, side) == "armed" {
-		if openOrders, err := at.trader.GetOpenOrders(symbol); err == nil {
-			if hasMatchingBreakEvenOrder(openOrders, positionSide, newBEPrice) {
-				return nil
-			}
-			logger.Infof("⚠️ Break-even armed but exchange order missing: %s %s — re-placing at %.6f", symbol, side, newBEPrice)
-			at.clearBreakEvenState(symbol, side)
-		} else {
-			return nil
-		}
-	}
+	var openOrders []OpenOrder
+	var openOrdersErr error
+	openOrdersFetched := false
 
-	// Check if a higher-tier BE upgrade is needed by comparing the new price
-	// against the currently armed stop. Skip if already at this tier or better.
-	// Only skip if there's a dedicated BE order (identified by tag), not a ladder SL
-	// that happens to be at the same price.
-	if openOrders, err := at.trader.GetOpenOrders(symbol); err == nil {
+	for idx, rule := range rules {
+		if currentPnLPct < rule.TriggerValue {
+			continue
+		}
+		if rule.CloseRatioPct <= 0 {
+			rule.CloseRatioPct = 100
+		}
+
+		// Cumulative quantity: sum of this tier and all lower tiers, capped at 100%
+		cumulativeRatio := 0.0
+		for i := 0; i <= idx; i++ {
+			r := rules[i]
+			if r.CloseRatioPct <= 0 {
+				r.CloseRatioPct = 100
+			}
+			cumulativeRatio += r.CloseRatioPct
+		}
+		if cumulativeRatio > 100 {
+			cumulativeRatio = 100
+		}
+		ruleQty := quantity * cumulativeRatio / 100.0
+		if ruleQty <= 0 {
+			continue
+		}
+
+		stage := rule.StageName
+		if stage == "" {
+			stage = fmt.Sprintf("BE%d", idx+1)
+		}
+
+		newBEPrice := calculateBreakEvenStopPrice(side, entryPrice, rule.OffsetPct)
+		if newBEPrice <= 0 {
+			continue
+		}
+
+		// Lazy-fetch open orders (once per call)
+		if !openOrdersFetched {
+			openOrders, openOrdersErr = at.trader.GetOpenOrders(symbol)
+			openOrdersFetched = true
+		}
+		if openOrdersErr != nil {
+			continue
+		}
+
+		// Check if this tier already has a matching exchange order
 		if hasMatchingBreakEvenOrder(openOrders, positionSide, newBEPrice) {
-			logger.Infof("🟠 Break-even stop already live: %s %s | stop=%.6f", symbol, side, newBEPrice)
+			// Ensure armed state is persisted
 			at.persistDynamicProtectionRecordWithDetails(symbol, side, "break_even_stop", fmt.Sprintf("%.8f|%.8f|%.4f|%.4f|%s", entryPrice, quantity, rule.TriggerValue, rule.OffsetPct, stage), 0, "armed", "", newBEPrice, 0, ruleQty)
-			return nil
+			continue
 		}
-		// A BE order exists at a different (lower) price — cancel it before upgrading.
-		for _, o := range openOrders {
-			if strings.Contains(o.ClientOrderID, "break_even_stop") && strings.EqualFold(o.PositionSide, positionSide) {
-				if o.OrderID != "" {
-					logger.Infof("🔄 Upgrading break-even: cancelling old BE order %s for %s %s before placing %s at %.6f", o.OrderID, symbol, side, stage, newBEPrice)
-					if cancelTrader, ok := at.trader.(interface {
-						CancelAlgoOrderByID(symbol string, algoID string) error
-					}); ok {
-						if err := cancelTrader.CancelAlgoOrderByID(symbol, o.OrderID); err != nil {
-							logger.Warnf("⚠️ Failed to cancel old BE order %s: %v", o.OrderID, err)
-						}
-					}
-				}
-			}
+
+		// Place this tier's stop order
+		cfg := store.BreakEvenStopConfig{Enabled: true, Mode: store.ProtectionModeManual, TriggerMode: rule.TriggerMode, TriggerValue: rule.TriggerValue, OffsetPct: rule.OffsetPct}
+		if err := at.applyBreakEvenStop(symbol, side, ruleQty, entryPrice, currentPnLPct, cfg, stage); err != nil {
+			logger.Warnf("❌ BE tier %s apply failed (%s %s): %v", stage, symbol, side, err)
+			continue
 		}
 	}
 
-	cfg := store.BreakEvenStopConfig{Enabled: true, Mode: store.ProtectionModeManual, TriggerMode: rule.TriggerMode, TriggerValue: rule.TriggerValue, OffsetPct: rule.OffsetPct}
-	if err := at.applyBreakEvenStop(symbol, side, ruleQty, entryPrice, currentPnLPct, cfg, stage); err != nil {
-		return err
-	}
+	// Set overall armed state if any tier was placed
 	at.setBreakEvenState(symbol, side, "armed")
 	return nil
 }

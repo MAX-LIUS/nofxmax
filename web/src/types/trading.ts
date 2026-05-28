@@ -254,6 +254,7 @@ export interface Position {
   entry_price: number
   mark_price: number
   quantity: number
+  entry_quantity?: number
   leverage: number
   unrealized_pnl: number
   unrealized_pnl_pct: number
@@ -356,6 +357,8 @@ export interface OpenOrder {
   client_order_id?: string
   protection_role?: string
   protection_status?: string
+  activation_price?: number
+  activation_status?: 'activated' | 'pending_activation'
 }
 
 export interface DecisionActionReasonAnchor {

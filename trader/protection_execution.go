@@ -275,7 +275,7 @@ func (at *AutoTrader) applyNativeProtectionTargetsAfterOpen(req *protectionExecu
 		if rule.MinProfitPct <= 0 || rule.MaxDrawdownPct <= 0 || rule.CloseRatioPct <= 0 {
 			continue
 		}
-		_ = at.applyNativeTrailingDrawdown(req.Symbol, side, req.EntryPrice, rule)
+		_ = at.applyNativeTrailingDrawdown(req.Symbol, side, req.EntryPrice, 0, rule)
 	}
 
 	// 2. Break-even: runtime polling will detect when profit reaches trigger level

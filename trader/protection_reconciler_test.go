@@ -497,7 +497,7 @@ func TestProtectionReconcilerStagesMissingStopBeforeCleanup(t *testing.T) {
 		drawdownState:         make(map[string]string),
 	}
 
-	result, err := at.reconcileProtectionForPosition("BTCUSDT", "long", 1, 100)
+	result, err := at.reconcileProtectionForPosition("BTCUSDT", "long", 1, 100, 0)
 	if err != nil {
 		t.Fatalf("reconcile protection: %v", err)
 	}
@@ -534,7 +534,7 @@ func TestProtectionReconcilerPreservesGenericTPUntilDynamicOwnerArmed(t *testing
 		drawdownState:         make(map[string]string),
 	}
 
-	_, _ = at.reconcileProtectionForPosition("BTCUSDT", "long", 1, 100)
+	_, _ = at.reconcileProtectionForPosition("BTCUSDT", "long", 1, 100, 0)
 	if len(ft.cancelTakeProfitCalls) != 0 {
 		t.Fatalf("expected generic TP preserved until dynamic owner armed, got calls=%v", ft.cancelTakeProfitCalls)
 	}

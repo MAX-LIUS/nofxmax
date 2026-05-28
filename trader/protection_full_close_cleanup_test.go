@@ -66,7 +66,7 @@ func TestHandleSyncedFullCloseCleansStateAndBlocksLaterProtectionWrites(t *testi
 	if len(fake.stopLossOrders) != 0 {
 		t.Fatalf("expected no break-even write after full-close cleanup, got %d", len(fake.stopLossOrders))
 	}
-	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 78867.8, store.DrawdownTakeProfitRule{
+	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 78867.8, 0, store.DrawdownTakeProfitRule{
 		MinProfitPct:   0.8,
 		MaxDrawdownPct: 70,
 		CloseRatioPct:  50,

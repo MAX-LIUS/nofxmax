@@ -69,6 +69,7 @@ func (at *AutoTrader) reconcilePositionProtections() {
 		side, _ := pos["side"].(string)
 		entryPrice, _ := pos["entryPrice"].(float64)
 		quantity, _ := pos["positionAmt"].(float64)
+		markPrice, _ := pos["markPrice"].(float64)
 		if quantity < 0 {
 			quantity = -quantity
 		}
@@ -84,7 +85,7 @@ func (at *AutoTrader) reconcilePositionProtections() {
 			continue
 		}
 
-		result, err := at.reconcileProtectionForPosition(symbol, side, quantity, entryPrice)
+		result, err := at.reconcileProtectionForPosition(symbol, side, quantity, entryPrice, markPrice)
 		if err != nil {
 			logger.Infof("❌ Protection reconciler: %s %s reconcile failed: %v", symbol, side, err)
 			at.setProtectionState(symbol, side, "reconcile_failed: "+err.Error())
@@ -147,7 +148,7 @@ func (at *AutoTrader) describeProtectionSnapshot(symbol, side string, openOrders
 	return strings.Join(parts, " | ")
 }
 
-func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quantity, entryPrice float64) (protectionReconcileResult, error) {
+func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quantity, entryPrice, markPrice float64) (protectionReconcileResult, error) {
 	result := protectionReconcileResult{}
 	positionSide := strings.ToUpper(side)
 	currentProtectionState := at.getProtectionState(symbol, side)
@@ -345,7 +346,9 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 		}
 	}
 
-	markPrice, _ := at.getPositionMarkPrice(symbol, side)
+	if markPrice <= 0 {
+		markPrice, _ = at.getPositionMarkPrice(symbol, side)
+	}
 	currentPnLPct := calculatePositionPnLPct(side, entryPrice, markPrice)
 
 	beRules := at.getActiveBreakEvenRules()
@@ -392,13 +395,13 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 		}
 		armedAny := false
 		for _, armRule := range at.getDrawdownArmRulesForNativeExposure(currentPnLPct, entryPrice, quantity, symbol, side, rules) {
-			if at.applyNativeTrailingDrawdown(symbol, side, entryPrice, armRule) {
+			if at.applyNativeTrailingDrawdown(symbol, side, entryPrice, markPrice, armRule) {
 				armedAny = true
 				logger.Infof("🛠 Protection reconciler: %s %s ensured native drawdown protection (arm close=%.1f%%)", symbol, positionSide, armRule.CloseRatioPct)
 			}
 		}
 		for _, triggeredRule := range at.getTriggeredDrawdownRules(currentPnLPct, drawdownPct, rules) {
-			if at.applyNativeTrailingDrawdown(symbol, side, entryPrice, triggeredRule) {
+			if at.applyNativeTrailingDrawdown(symbol, side, entryPrice, markPrice, triggeredRule) {
 				armedAny = true
 				logger.Infof("🛠 Protection reconciler: %s %s ensured native drawdown protection (trigger close=%.1f%%)", symbol, positionSide, triggeredRule.CloseRatioPct)
 			}

@@ -293,7 +293,7 @@ func TestApplyNativeTrailingDrawdownClampsNoiseCallbackAndPlacesNativeOrder(t *t
 		CloseRatioPct:  100,
 	}
 
-	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "long", 100, rule)
+	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "long", 100, 0, rule)
 	if !ok {
 		t.Fatal("expected native trailing to succeed with clamped callback")
 	}
@@ -330,7 +330,7 @@ func TestApplyNativeTrailingDrawdownForBinance(t *testing.T) {
 		CloseRatioPct:  100,
 	}
 
-	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "long", 100, rule)
+	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "long", 100, 0, rule)
 	if !ok {
 		t.Fatal("expected native trailing drawdown to be applied")
 	}
@@ -376,7 +376,7 @@ func TestApplyNativeTrailingDrawdownSkipsDuplicateWhenEquivalentFullTrailingAlre
 	}
 
 	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 40, CloseRatioPct: 100}
-	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "long", 100, rule)
+	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "long", 100, 0, rule)
 	if !ok {
 		t.Fatal("expected equivalent full trailing order to satisfy duplicate-arm guard")
 	}
@@ -416,7 +416,7 @@ func TestApplyNativeTrailingDrawdownReplacesStaleFullTrailingOrder(t *testing.T)
 	}
 
 	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 40, CloseRatioPct: 100}
-	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "long", 100, rule)
+	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "long", 100, 0, rule)
 	if !ok {
 		t.Fatal("expected stale full trailing order to be replaced")
 	}
@@ -458,7 +458,7 @@ func TestApplyNativeTrailingDrawdownPersistsFullTrailingOrderID(t *testing.T) {
 	}
 
 	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 40, CloseRatioPct: 100}
-	if ok := at.applyNativeTrailingDrawdown("BTCUSDT", "long", 100, rule); !ok {
+	if ok := at.applyNativeTrailingDrawdown("BTCUSDT", "long", 100, 0, rule); !ok {
 		t.Fatal("expected native trailing drawdown to be applied")
 	}
 
@@ -510,7 +510,7 @@ func TestApplyNativeTrailingDrawdownSkipsDuplicateWhenEquivalentPartialTierAlrea
 	}
 
 	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 40, CloseRatioPct: 50}
-	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 100, rule)
+	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 100, 0, rule)
 	if !ok {
 		t.Fatal("expected equivalent partial trailing tier to satisfy duplicate-arm guard")
 	}
@@ -550,7 +550,7 @@ func TestApplyNativeTrailingDrawdownReplacesPartialTierWhenQuantityDrifts(t *tes
 	}
 
 	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 40, CloseRatioPct: 50}
-	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 100, rule)
+	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 100, 0, rule)
 	if !ok {
 		t.Fatal("expected stale partial tier with qty drift to be replaced")
 	}
@@ -594,7 +594,7 @@ func TestApplyNativeTrailingDrawdownConcurrentPartialArmingPlacesOnlyOneOrder(t 
 		go func() {
 			defer wg.Done()
 			<-start
-			results <- at.applyNativeTrailingDrawdown("BTCUSDT", "short", 100, rule)
+			results <- at.applyNativeTrailingDrawdown("BTCUSDT", "short", 100, 0, rule)
 		}()
 	}
 	close(start)
@@ -653,7 +653,7 @@ func TestApplyNativeTrailingDrawdownReplacementPrefersBestMatchingPartialTierAmo
 	}
 
 	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 40, CloseRatioPct: 50}
-	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 100, rule)
+	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 100, 0, rule)
 	if !ok {
 		t.Fatal("expected multi-tier stale partial replacement to succeed")
 	}
@@ -703,7 +703,7 @@ func TestApplyNativeTrailingDrawdownPersistsPartialTrailingOrderID(t *testing.T)
 	}
 
 	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 40, CloseRatioPct: 50}
-	if ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 100, rule); !ok {
+	if ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 100, 0, rule); !ok {
 		t.Fatal("expected native partial trailing drawdown to be applied")
 	}
 
@@ -822,7 +822,7 @@ func TestApplyNativeTrailingDrawdownSkipsWhenPositionClosedBeforeWrite(t *testin
 		peakPnLCache:    map[string]float64{},
 	}
 
-	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 78867.8, store.DrawdownTakeProfitRule{
+	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 78867.8, 0, store.DrawdownTakeProfitRule{
 		MinProfitPct:   0.8,
 		MaxDrawdownPct: 70,
 		CloseRatioPct:  50,
@@ -1063,7 +1063,7 @@ func TestApplyNativeTrailingDrawdownBelowSafetyFloorClampsAndPlacesNativeOrder(t
 		protectionState: make(map[string]string),
 	}
 	rule := store.DrawdownTakeProfitRule{MinProfitPct: 0.1, MaxDrawdownPct: 10, CloseRatioPct: 100, StageName: "outer_exit"}
-	if !at.applyNativeTrailingDrawdown("BTCUSDT", "long", 100, rule) {
+	if !at.applyNativeTrailingDrawdown("BTCUSDT", "long", 100, 0, rule) {
 		t.Fatalf("expected native trailing to succeed with clamped callback")
 	}
 	if got := at.getProtectionState("BTCUSDT", "long"); got != "native_trailing_armed" {
