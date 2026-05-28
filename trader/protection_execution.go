@@ -867,6 +867,21 @@ func hasMatchingBreakEvenOrder(orders []tradertypes.OpenOrder, positionSide stri
 	return false
 }
 
+func hasAnyBreakEvenOrderOnExchange(orders []tradertypes.OpenOrder, positionSide string) bool {
+	for _, order := range orders {
+		if positionSide != "" && !strings.EqualFold(order.PositionSide, positionSide) && order.PositionSide != "" {
+			continue
+		}
+		if !looksLikeStopLoss(order) {
+			continue
+		}
+		if strings.Contains(strings.ToLower(order.ClientOrderID), "break_even") || strings.Contains(strings.ToLower(order.ClientOrderID), "be-stop") {
+			return true
+		}
+	}
+	return false
+}
+
 func countMatchingProtectionOrders(orders []tradertypes.OpenOrder, positionSide string, wantTakeProfit bool, targetPrice float64) int {
 	count := 0
 	for _, order := range orders {

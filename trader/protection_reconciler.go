@@ -364,6 +364,15 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 				at.setBreakEvenState(symbol, side, "pending")
 				return result, fmt.Errorf("apply break-even native stop: %w", err)
 			}
+		} else if prevBreakEvenArmed {
+			// BE is armed — verify exchange order actually exists
+			if !hasAnyBreakEvenOrderOnExchange(openOrders, positionSide) {
+				logger.Infof("⚠️ Reconciler: BE armed but no exchange order: %s %s — clearing state for re-arm", symbol, positionSide)
+				at.clearBreakEvenState(symbol, side)
+				if err := at.applyBreakEvenStops(symbol, side, quantity, entryPrice, currentPnLPct, beRules); err != nil {
+					return result, fmt.Errorf("re-arm break-even after missing detection: %w", err)
+				}
+			}
 		}
 	}
 

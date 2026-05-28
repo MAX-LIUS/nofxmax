@@ -651,6 +651,42 @@ func (at *AutoTrader) clearArmedDrawdownRecords(symbol, side string) {
 	}
 }
 
+func (at *AutoTrader) clearArmedDrawdownRecordsAboveMinProfit(symbol, side string, maxMinProfit float64) {
+	if at.store == nil {
+		return
+	}
+	state, err := at.store.LoadDynamicProtectionState()
+	if err != nil || state == nil {
+		return
+	}
+	changed := false
+	for key, record := range state.Records {
+		if record.TraderID != "" && record.TraderID != at.id {
+			continue
+		}
+		if !strings.EqualFold(record.Symbol, symbol) || !strings.EqualFold(record.Side, side) {
+			continue
+		}
+		if record.Status != "armed" || !isDynamicNativeProtectionType(record.ProtectionType) {
+			continue
+		}
+		parts := strings.Split(record.RuleFingerprint, "|")
+		if len(parts) >= 3 {
+			if minProfit, err := strconv.ParseFloat(parts[2], 64); err == nil && minProfit > maxMinProfit {
+				record.Status = "cleared_floor_downgrade"
+				record.UpdatedAt = time.Now().UTC().UnixMilli()
+				state.Records[key] = record
+				changed = true
+				logger.Infof("🔄 Cleared unreachable armed record: %s %s minProfit=%.2f%% (floor downgraded to %.2f%%)", symbol, side, minProfit, maxMinProfit)
+			}
+		}
+	}
+	if changed {
+		data, _ := json.Marshal(state)
+		_ = at.store.SetSystemConfig(store.DynamicProtectionStateConfigKey, string(data))
+	}
+}
+
 func (at *AutoTrader) getArmedDrawdownRecords(symbol, side string) []store.DynamicProtectionRecord {
 	return at.getArmedDrawdownRecordsForPosition(symbol, side, 0, 0, 0)
 }
@@ -805,11 +841,19 @@ func (at *AutoTrader) getDrawdownArmRulesForNativeExposure(currentPnLPct, entryP
 	// venues. Live OKX behaviour showed multiple simultaneous trailing tiers on the
 	// same symbol/side can churn (place/cancel/place). Keep one exchange tier stable
 	// and let local managed drawdown + reconciler migrate it as profit advances.
-	//
-	// High-water-mark protection: use tier alloc state to prevent downgrade.
-	// If a higher tier was previously armed (lower tiers are superseded), never
-	// fall back to a lower tier even if currentPnL drops below the higher tier's threshold.
 	highestArmedMinProfit := at.getHighestArmedTierMinProfit(symbol, side, entryPrice, quantity)
+
+	// If current profit is below the floor tier's activation threshold, the floor
+	// tier's trailing order is unreachable (activation price not met). In this case,
+	// drop the floor so we can arm the highest currently-satisfied tier instead.
+	// This prevents "phantom protection" where an unreachable trailing order exists
+	// but provides no actual protection.
+	if highestArmedMinProfit > 0 && currentPnLPct < highestArmedMinProfit {
+		logger.Infof("🔄 Drawdown floor downgrade: %s %s profit %.2f%% < floor %.2f%% — allowing lower tier", symbol, side, currentPnLPct, highestArmedMinProfit)
+		at.clearArmedDrawdownRecordsAboveMinProfit(symbol, side, currentPnLPct)
+		highestArmedMinProfit = 0
+	}
+
 	rule, ok := selectNativeDrawdownExposureRuleWithFloor(currentPnLPct, rules, highestArmedMinProfit)
 	if !ok {
 		return nil
@@ -2112,16 +2156,24 @@ func (at *AutoTrader) applyBreakEvenStops(symbol, side string, quantity, entryPr
 		return nil
 	}
 
-	// If BE is already armed at this price in this session, skip.
+	// If BE is already armed, verify exchange order actually exists before skipping.
+	positionSide := strings.ToUpper(side)
 	if at.getBreakEvenState(symbol, side) == "armed" {
-		return nil
+		if openOrders, err := at.trader.GetOpenOrders(symbol); err == nil {
+			if hasMatchingBreakEvenOrder(openOrders, positionSide, newBEPrice) {
+				return nil
+			}
+			logger.Infof("⚠️ Break-even armed but exchange order missing: %s %s — re-placing at %.6f", symbol, side, newBEPrice)
+			at.clearBreakEvenState(symbol, side)
+		} else {
+			return nil
+		}
 	}
 
 	// Check if a higher-tier BE upgrade is needed by comparing the new price
 	// against the currently armed stop. Skip if already at this tier or better.
 	// Only skip if there's a dedicated BE order (identified by tag), not a ladder SL
 	// that happens to be at the same price.
-	positionSide := strings.ToUpper(side)
 	if openOrders, err := at.trader.GetOpenOrders(symbol); err == nil {
 		if hasMatchingBreakEvenOrder(openOrders, positionSide, newBEPrice) {
 			logger.Infof("🟠 Break-even stop already live: %s %s | stop=%.6f", symbol, side, newBEPrice)

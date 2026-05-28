@@ -319,6 +319,11 @@ func TestProtectionReconciler_DoesNotReapplyBreakEvenWhenAlreadyArmedAndFingerpr
 		t.Fatalf("expected initial break-even stop placement, got %d", len(ft.stopLossOrders))
 	}
 
+	// Simulate exchange now has the BE order (placed by first reconcile)
+	ft.openOrders = []tradertypes.OpenOrder{
+		{Symbol: "BTCUSDT", PositionSide: "LONG", Type: "STOP_MARKET", StopPrice: 100.0, Quantity: 1, ClientOrderID: "break_even_stop"},
+	}
+
 	before := len(ft.stopLossOrders)
 	at.reconcilePositionProtections()
 	if len(ft.stopLossOrders) != before {
