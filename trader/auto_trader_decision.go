@@ -744,18 +744,23 @@ func (at *AutoTrader) GetOpenOrders(symbol string) ([]OpenOrder, error) {
 }
 
 // isTierSatisfied checks if a DD tier has been satisfied (reached min_profit at some point).
-// Uses persistent tier alloc state to avoid flickering when current PnL oscillates around threshold.
-func isTierSatisfied(ruleIdx int, currentPnLPct, minProfitPct float64, allocs []store.DrawdownTierAllocation) bool {
+// Uses persistent tier alloc state + peak PnL + live trailing presence to determine status.
+func isTierSatisfied(ruleIdx int, currentPnLPct, minProfitPct float64, allocs []store.DrawdownTierAllocation, hasLiveTrailing bool) bool {
 	// Check persistent tier alloc state first (doesn't flip back once tracking)
 	for _, a := range allocs {
 		if a.TierIndex == ruleIdx || a.MinProfitPct == minProfitPct {
 			if a.Status == "tracking" || a.Status == "executed" || a.Status == "superseded" {
 				return true
 			}
-			return false
+			break
 		}
 	}
-	// Fallback to real-time check if no alloc state available
+	// If there's a live trailing order on exchange, the lowest tier (idx 0) is definitely satisfied.
+	// Trailing orders are only placed after profit reaches the tier's activation threshold.
+	if hasLiveTrailing && ruleIdx == 0 {
+		return true
+	}
+	// Fallback to real-time check
 	return currentPnLPct >= minProfitPct
 }
 
@@ -881,8 +886,10 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 				}
 			}
 		}
-		if strings.Contains(strings.ToUpper(order.Type), "TRAILING") && triggerPrice > 0 {
-			liveTrailingTriggerPrice = triggerPrice
+		if strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
+			if triggerPrice > 0 {
+				liveTrailingTriggerPrice = triggerPrice
+			}
 			if order.CallbackRate > 0 {
 				liveTrailingCallbackRate = order.CallbackRate
 			}
@@ -1085,7 +1092,7 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 				"planned_quantity":                  quantity * rule.CloseRatioPct / 100.0,
 				"source":                            source,
 				"execution_mode":                    executionMode,
-				"is_satisfied":                      matchedLive || isTierSatisfied(idx, currentPnLPct, rule.MinProfitPct, tierAllocs),
+				"is_satisfied":                      matchedLive || peakPnLPct >= rule.MinProfitPct || isTierSatisfied(idx, currentPnLPct, rule.MinProfitPct, tierAllocs, len(trailingOrders) > 0),
 				"is_triggered":                      currentPnLPct >= rule.MinProfitPct && isDrawdownThresholdMet(currentPnLPct, drawdownPct, rule),
 				"legacy_drawdown_semantics_warning": legacyWarning,
 				"native_trailing_rejected_reason":   nativeRejectedReason,
