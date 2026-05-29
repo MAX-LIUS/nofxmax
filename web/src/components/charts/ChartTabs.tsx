@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useEffect, useRef } from 'react'
+import { lazy, Suspense, useState, useEffect, useRef, useCallback } from 'react'
 const EquityChart = lazy(() =>
   import('./EquityChart').then((m) => ({ default: m.EquityChart }))
 )
@@ -7,7 +7,14 @@ import { httpClient } from '../../lib/httpClient'
 import { useLanguage } from '../../contexts/LanguageContext'
 import { t } from '../../i18n/translations'
 import { chartTabs, ts } from '../../i18n/strategy-translations'
-import { BarChart3, CandlestickChart, ChevronDown, Search } from 'lucide-react'
+import {
+  BarChart3,
+  CandlestickChart,
+  ChevronDown,
+  Search,
+  Plus,
+  X,
+} from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useChartPrefs, type RefreshRate } from '../../hooks/useChartPrefs'
 
@@ -31,11 +38,46 @@ interface SymbolInfo {
 
 // Market type configuration
 const MARKET_CONFIG = {
-  hyperliquid: { exchange: 'hyperliquid', defaultSymbol: 'BTC', icon: '🔷', labelKey: 'hyperliquid' as const, color: 'cyan', hasDropdown: true },
-  crypto: { exchange: 'binance', defaultSymbol: 'BTCUSDT', icon: '₿', labelKey: 'crypto' as const, color: 'yellow', hasDropdown: false },
-  stocks: { exchange: 'alpaca', defaultSymbol: 'AAPL', icon: '📈', labelKey: 'stocks' as const, color: 'green', hasDropdown: false },
-  forex: { exchange: 'forex', defaultSymbol: 'EUR/USD', icon: '💱', labelKey: 'forex' as const, color: 'blue', hasDropdown: false },
-  metals: { exchange: 'metals', defaultSymbol: 'XAU/USD', icon: '🥇', labelKey: 'metals' as const, color: 'amber', hasDropdown: false },
+  hyperliquid: {
+    exchange: 'hyperliquid',
+    defaultSymbol: 'BTC',
+    icon: '🔷',
+    labelKey: 'hyperliquid' as const,
+    color: 'cyan',
+    hasDropdown: true,
+  },
+  crypto: {
+    exchange: 'binance',
+    defaultSymbol: 'BTCUSDT',
+    icon: '₿',
+    labelKey: 'crypto' as const,
+    color: 'yellow',
+    hasDropdown: false,
+  },
+  stocks: {
+    exchange: 'alpaca',
+    defaultSymbol: 'AAPL',
+    icon: '📈',
+    labelKey: 'stocks' as const,
+    color: 'green',
+    hasDropdown: false,
+  },
+  forex: {
+    exchange: 'forex',
+    defaultSymbol: 'EUR/USD',
+    icon: '💱',
+    labelKey: 'forex' as const,
+    color: 'blue',
+    hasDropdown: false,
+  },
+  metals: {
+    exchange: 'metals',
+    defaultSymbol: 'XAU/USD',
+    icon: '🥇',
+    labelKey: 'metals' as const,
+    color: 'amber',
+    hasDropdown: false,
+  },
 }
 
 const INTERVALS: { value: Interval; label: string }[] = [
@@ -57,16 +99,63 @@ function getMarketTypeFromExchange(exchangeId: string | undefined): MarketType {
   return 'crypto'
 }
 
-export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, disableAutoRefresh = false }: ChartTabsProps) {
+export function ChartTabs({
+  traderId,
+  selectedSymbol,
+  updateKey,
+  exchangeId,
+  disableAutoRefresh = false,
+}: ChartTabsProps) {
   const { language } = useLanguage()
   const { prefs, updatePrefs } = useChartPrefs()
   const [activeTab, setActiveTab] = useState<ChartTab>('kline')
   const [chartSymbol, setChartSymbol] = useState<string>('BTC')
-  const [interval, setInterval] = useState<Interval>(() => (prefs.interval as Interval) || '5m')
+  const [interval, setInterval] = useState<Interval>(
+    () => (prefs.interval as Interval) || '5m'
+  )
   const [symbolInput, setSymbolInput] = useState('')
-  const [marketType, setMarketType] = useState<MarketType>(() => getMarketTypeFromExchange(exchangeId))
+  const [marketType, setMarketType] = useState<MarketType>(() =>
+    getMarketTypeFromExchange(exchangeId)
+  )
   const [availableSymbols, setAvailableSymbols] = useState<SymbolInfo[]>([])
   const [showDropdown, setShowDropdown] = useState(false)
+
+  // Quick watchlist
+  const WATCHLIST_KEY = 'nofx_chart_watchlist'
+  const DEFAULT_WATCHLIST = ['BTC', 'ETH', 'SOL', 'HYPE', 'ZEC']
+  const [watchlist, setWatchlist] = useState<string[]>(() => {
+    try {
+      const stored = localStorage.getItem(WATCHLIST_KEY)
+      return stored ? JSON.parse(stored) : DEFAULT_WATCHLIST
+    } catch {
+      return DEFAULT_WATCHLIST
+    }
+  })
+  const [editingWatchlist, setEditingWatchlist] = useState(false)
+  const [watchlistInput, setWatchlistInput] = useState('')
+
+  const saveWatchlist = useCallback((list: string[]) => {
+    setWatchlist(list)
+    localStorage.setItem(WATCHLIST_KEY, JSON.stringify(list))
+  }, [])
+
+  const addToWatchlist = useCallback(
+    (sym: string) => {
+      const s = sym.trim().toUpperCase().replace(/USDT$/, '')
+      if (!s || watchlist.includes(s)) return
+      saveWatchlist([...watchlist, s])
+      setWatchlistInput('')
+      setEditingWatchlist(false)
+    },
+    [watchlist, saveWatchlist]
+  )
+
+  const removeFromWatchlist = useCallback(
+    (sym: string) => {
+      saveWatchlist(watchlist.filter((s) => s !== sym))
+    },
+    [watchlist, saveWatchlist]
+  )
   const [searchFilter, setSearchFilter] = useState('')
   const dropdownRef = useRef<HTMLDivElement>(null)
 
@@ -86,7 +175,10 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
   // Determine exchange from market type
   const marketConfig = MARKET_CONFIG[marketType]
   // Prefer passed-in exchangeId (when not hyperliquid)
-  const currentExchange = marketType === 'hyperliquid' ? 'hyperliquid' : (exchangeId || marketConfig.exchange)
+  const currentExchange =
+    marketType === 'hyperliquid'
+      ? 'hyperliquid'
+      : exchangeId || marketConfig.exchange
 
   // Fetch available symbol list
   useEffect(() => {
@@ -96,24 +188,38 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
     }
 
     const loadSymbols = async () => {
-      const result = await httpClient.get<{ symbols?: SymbolInfo[] }>('/api/symbols', {
-        exchange: marketConfig.exchange,
-      })
+      const result = await httpClient.get<{ symbols?: SymbolInfo[] }>(
+        '/api/symbols',
+        {
+          exchange: marketConfig.exchange,
+        }
+      )
 
       if (!result.success || !result.data?.symbols) {
-        console.error('Failed to fetch symbols:', result.message || 'Unknown error')
+        console.error(
+          'Failed to fetch symbols:',
+          result.message || 'Unknown error'
+        )
         setAvailableSymbols([])
         return
       }
 
       // Sort by category: crypto > stock > forex > commodity > index
-      const categoryOrder: Record<string, number> = { crypto: 0, stock: 1, forex: 2, commodity: 3, index: 4 }
-      const sorted = [...result.data.symbols].sort((a: SymbolInfo, b: SymbolInfo) => {
-        const orderA = categoryOrder[a.category] ?? 5
-        const orderB = categoryOrder[b.category] ?? 5
-        if (orderA !== orderB) return orderA - orderB
-        return a.symbol.localeCompare(b.symbol)
-      })
+      const categoryOrder: Record<string, number> = {
+        crypto: 0,
+        stock: 1,
+        forex: 2,
+        commodity: 3,
+        index: 4,
+      }
+      const sorted = [...result.data.symbols].sort(
+        (a: SymbolInfo, b: SymbolInfo) => {
+          const orderA = categoryOrder[a.category] ?? 5
+          const orderB = categoryOrder[b.category] ?? 5
+          if (orderA !== orderB) return orderA - orderB
+          return a.symbol.localeCompare(b.symbol)
+        }
+      )
       setAvailableSymbols(sorted)
     }
 
@@ -123,7 +229,10 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
   // Close dropdown on outside click
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+      if (
+        dropdownRef.current &&
+        !dropdownRef.current.contains(event.target as Node)
+      ) {
         setShowDropdown(false)
       }
     }
@@ -139,14 +248,19 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
   }
 
   // Filtered symbol list
-  const filteredSymbols = availableSymbols.filter(s =>
+  const filteredSymbols = availableSymbols.filter((s) =>
     s.symbol.toLowerCase().includes(searchFilter.toLowerCase())
   )
 
   // Auto-switch to kline chart when symbol selected externally
   useEffect(() => {
     if (selectedSymbol) {
-      console.log('[ChartTabs] Symbol selected:', selectedSymbol, 'updateKey:', updateKey)
+      console.log(
+        '[ChartTabs] Symbol selected:',
+        selectedSymbol,
+        'updateKey:',
+        updateKey
+      )
       setChartSymbol(selectedSymbol)
       setActiveTab('kline')
     }
@@ -169,8 +283,13 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
   console.log('[ChartTabs] rendering, activeTab:', activeTab)
 
   return (
-    <div className={`nofx-glass rounded-lg border border-white/5 relative z-10 w-full flex flex-col transition-all duration-300 ${typeof window !== 'undefined' && window.innerWidth < 768 ? 'h-[500px]' : 'h-[600px]'
-      }`}>
+    <div
+      className={`nofx-glass rounded-lg border border-white/5 relative z-10 w-full flex flex-col transition-all duration-300 ${
+        typeof window !== 'undefined' && window.innerWidth < 768
+          ? 'h-[500px]'
+          : 'h-[600px]'
+      }`}
+    >
       {/* 
         Premium Professional Toolbar 
         Mobile: Single row, horizontal scroll with gradient mask
@@ -184,25 +303,31 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
         <div className="flex flex-wrap items-center gap-1">
           <button
             onClick={() => setActiveTab('equity')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-medium transition-all ${activeTab === 'equity'
-              ? 'bg-nofx-gold/10 text-nofx-gold border border-nofx-gold/20 shadow-[0_0_10px_rgba(240,185,11,0.1)]'
-              : 'text-nofx-text-muted hover:text-nofx-text-main hover:bg-white/5'
-              }`}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-medium transition-all ${
+              activeTab === 'equity'
+                ? 'bg-nofx-gold/10 text-nofx-gold border border-nofx-gold/20 shadow-[0_0_10px_rgba(240,185,11,0.1)]'
+                : 'text-nofx-text-muted hover:text-nofx-text-main hover:bg-white/5'
+            }`}
           >
             <BarChart3 className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">{t('accountEquityCurve', language)}</span>
+            <span className="hidden md:inline">
+              {t('accountEquityCurve', language)}
+            </span>
             <span className="md:hidden">Eq</span>
           </button>
 
           <button
             onClick={() => setActiveTab('kline')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-medium transition-all ${activeTab === 'kline'
-              ? 'bg-nofx-gold/10 text-nofx-gold border border-nofx-gold/20 shadow-[0_0_10px_rgba(240,185,11,0.1)]'
-              : 'text-nofx-text-muted hover:text-nofx-text-main hover:bg-white/5'
-              }`}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-medium transition-all ${
+              activeTab === 'kline'
+                ? 'bg-nofx-gold/10 text-nofx-gold border border-nofx-gold/20 shadow-[0_0_10px_rgba(240,185,11,0.1)]'
+                : 'text-nofx-text-muted hover:text-nofx-text-main hover:bg-white/5'
+            }`}
           >
             <CandlestickChart className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">{t('marketChart', language)}</span>
+            <span className="hidden md:inline">
+              {t('marketChart', language)}
+            </span>
             <span className="md:hidden">Kline</span>
           </button>
 
@@ -216,10 +341,11 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
                   <button
                     key={type}
                     onClick={() => handleMarketTypeChange(type)}
-                    className={`px-2.5 py-1 text-[10px] font-medium rounded transition-all border ${isActive
-                      ? 'bg-white/10 text-white border-white/20'
-                      : 'text-nofx-text-muted border-transparent hover:text-nofx-text-main hover:bg-white/5'
-                      }`}
+                    className={`px-2.5 py-1 text-[10px] font-medium rounded transition-all border ${
+                      isActive
+                        ? 'bg-white/10 text-white border-white/20'
+                        : 'text-nofx-text-muted border-transparent hover:text-nofx-text-main hover:bg-white/5'
+                    }`}
                   >
                     <span className="mr-1 opacity-70">{config.icon}</span>
                     {ts(chartTabs[config.labelKey], language)}
@@ -242,7 +368,9 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
                     className="flex items-center gap-1.5 px-2.5 py-1 bg-black/40 border border-white/10 rounded text-[11px] font-bold text-nofx-text-main hover:border-nofx-gold/30 hover:text-nofx-gold transition-all"
                   >
                     <span>{chartSymbol}</span>
-                    <ChevronDown className={`w-3 h-3 text-nofx-text-muted transition-transform ${showDropdown ? 'rotate-180' : ''}`} />
+                    <ChevronDown
+                      className={`w-3 h-3 text-nofx-text-muted transition-transform ${showDropdown ? 'rotate-180' : ''}`}
+                    />
                   </button>
                   {showDropdown && (
                     <div className="absolute top-full right-0 mt-2 w-64 bg-[#0B0E11] border border-white/10 rounded-lg shadow-[0_10px_40px_-10px_rgba(0,0,0,0.5)] z-50 overflow-hidden nofx-glass ring-1 ring-white/5">
@@ -260,32 +388,52 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
                         </div>
                       </div>
                       <div className="overflow-y-auto max-h-60 custom-scrollbar">
-                        {['crypto', 'stock', 'forex', 'commodity', 'index'].map(category => {
-                          const categorySymbols = filteredSymbols.filter(s => s.category === category)
-                          if (categorySymbols.length === 0) return null
-                          const labels: Record<string, string> = { crypto: 'Crypto', stock: 'Stocks', forex: 'Forex', commodity: 'Commodities', index: 'Index' }
-                          return (
-                            <div key={category}>
-                              <div className="px-3 py-1.5 text-[9px] font-bold text-nofx-text-muted/60 bg-white/5 uppercase tracking-wider">{labels[category]}</div>
-                              {categorySymbols.map(s => (
-                                <button
-                                  key={s.symbol}
-                                  onClick={() => { setChartSymbol(s.symbol); setShowDropdown(false); setSearchFilter('') }}
-                                  className={`w-full px-3 py-2 text-left text-[11px] font-mono hover:bg-white/5 transition-all flex items-center justify-between ${chartSymbol === s.symbol ? 'bg-nofx-gold/10 text-nofx-gold' : 'text-nofx-text-muted'}`}
-                                >
-                                  <span>{s.symbol}</span>
-                                  <span className="text-[9px] opacity-40">{s.name}</span>
-                                </button>
-                              ))}
-                            </div>
-                          )
-                        })}
+                        {['crypto', 'stock', 'forex', 'commodity', 'index'].map(
+                          (category) => {
+                            const categorySymbols = filteredSymbols.filter(
+                              (s) => s.category === category
+                            )
+                            if (categorySymbols.length === 0) return null
+                            const labels: Record<string, string> = {
+                              crypto: 'Crypto',
+                              stock: 'Stocks',
+                              forex: 'Forex',
+                              commodity: 'Commodities',
+                              index: 'Index',
+                            }
+                            return (
+                              <div key={category}>
+                                <div className="px-3 py-1.5 text-[9px] font-bold text-nofx-text-muted/60 bg-white/5 uppercase tracking-wider">
+                                  {labels[category]}
+                                </div>
+                                {categorySymbols.map((s) => (
+                                  <button
+                                    key={s.symbol}
+                                    onClick={() => {
+                                      setChartSymbol(s.symbol)
+                                      setShowDropdown(false)
+                                      setSearchFilter('')
+                                    }}
+                                    className={`w-full px-3 py-2 text-left text-[11px] font-mono hover:bg-white/5 transition-all flex items-center justify-between ${chartSymbol === s.symbol ? 'bg-nofx-gold/10 text-nofx-gold' : 'text-nofx-text-muted'}`}
+                                  >
+                                    <span>{s.symbol}</span>
+                                    <span className="text-[9px] opacity-40">
+                                      {s.name}
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            )
+                          }
+                        )}
                       </div>
                     </div>
                   )}
                 </>
               ) : (
-                <span className="px-2.5 py-1 bg-black/40 border border-white/10 rounded text-[11px] font-bold text-nofx-text-main font-mono">{chartSymbol}</span>
+                <span className="px-2.5 py-1 bg-black/40 border border-white/10 rounded text-[11px] font-bold text-nofx-text-main font-mono">
+                  {chartSymbol}
+                </span>
               )}
             </div>
 
@@ -294,11 +442,15 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
               {INTERVALS.map((int) => (
                 <button
                   key={int.value}
-                  onClick={() => { setInterval(int.value); updatePrefs({ interval: int.value }) }}
-                  className={`px-2 py-1 text-[10px] font-medium transition-all whitespace-nowrap ${interval === int.value
-                    ? 'bg-nofx-gold/20 text-nofx-gold'
-                    : 'text-nofx-text-muted hover:text-white hover:bg-white/5'
-                    }`}
+                  onClick={() => {
+                    setInterval(int.value)
+                    updatePrefs({ interval: int.value })
+                  }}
+                  className={`px-2 py-1 text-[10px] font-medium transition-all whitespace-nowrap ${
+                    interval === int.value
+                      ? 'bg-nofx-gold/20 text-nofx-gold'
+                      : 'text-nofx-text-muted hover:text-white hover:bg-white/5'
+                  }`}
                 >
                   {int.label}
                 </button>
@@ -311,11 +463,18 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
                 <button
                   key={rate.value}
                   onClick={() => updatePrefs({ refreshRate: rate.value })}
-                  className={`px-2 py-1 text-[10px] font-medium transition-all whitespace-nowrap ${prefs.refreshRate === rate.value
-                    ? 'bg-cyan-500/20 text-cyan-400'
-                    : 'text-nofx-text-muted hover:text-white hover:bg-white/5'
-                    }`}
-                  title={rate.value === 'realtime' ? 'Real-time (1s polling)' : rate.value === 'off' ? 'No auto-refresh' : `Refresh every ${rate.label}`}
+                  className={`px-2 py-1 text-[10px] font-medium transition-all whitespace-nowrap ${
+                    prefs.refreshRate === rate.value
+                      ? 'bg-cyan-500/20 text-cyan-400'
+                      : 'text-nofx-text-muted hover:text-white hover:bg-white/5'
+                  }`}
+                  title={
+                    rate.value === 'realtime'
+                      ? 'Real-time (1s polling)'
+                      : rate.value === 'off'
+                        ? 'No auto-refresh'
+                        : `Refresh every ${rate.label}`
+                  }
                 >
                   {rate.label}
                 </button>
@@ -323,7 +482,10 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
             </div>
 
             {/* Quick Input - Hidden on mobile, dropdown search is enough */}
-            <form onSubmit={handleSymbolSubmit} className="hidden md:flex items-center shrink-0">
+            <form
+              onSubmit={handleSymbolSubmit}
+              className="hidden md:flex items-center shrink-0"
+            >
               <input
                 type="text"
                 value={symbolInput}
@@ -331,13 +493,94 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
                 placeholder="Sym"
                 className="w-16 px-2 py-1 bg-black/40 border border-white/10 rounded-l text-[10px] text-white placeholder-gray-600 focus:outline-none focus:border-nofx-gold/50 font-mono transition-colors"
               />
-              <button type="submit" className="px-2 py-1 bg-white/5 border border-white/10 border-l-0 rounded-r text-[10px] text-nofx-text-muted hover:text-white hover:bg-white/10 transition-all">
+              <button
+                type="submit"
+                className="px-2 py-1 bg-white/5 border border-white/10 border-l-0 rounded-r text-[10px] text-nofx-text-muted hover:text-white hover:bg-white/10 transition-all"
+              >
                 Go
               </button>
             </form>
           </div>
         )}
       </div>
+
+      {/* Quick Watchlist */}
+      {activeTab === 'kline' && (
+        <div className="flex items-center gap-1 px-3 py-1 bg-[#0B0E11]/60 border-b border-white/5 shrink-0 overflow-x-auto no-scrollbar">
+          {watchlist.map((sym) => {
+            const isActive = chartSymbol.replace(/USDT$/, '') === sym
+            return (
+              <button
+                key={sym}
+                onClick={() =>
+                  setChartSymbol(
+                    marketType === 'crypto'
+                      ? sym === 'BTC' || sym === 'ETH'
+                        ? sym
+                        : sym + 'USDT'
+                      : sym
+                  )
+                }
+                className={`relative group px-2 py-0.5 text-[10px] font-mono rounded transition-all whitespace-nowrap ${
+                  isActive
+                    ? 'bg-nofx-gold/15 text-nofx-gold border border-nofx-gold/30'
+                    : 'text-nofx-text-muted hover:text-white hover:bg-white/5 border border-transparent'
+                }`}
+              >
+                {sym}
+                {editingWatchlist && (
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      removeFromWatchlist(sym)
+                    }}
+                    className="absolute -top-1 -right-1 w-3 h-3 bg-red-500/80 rounded-full flex items-center justify-center cursor-pointer"
+                  >
+                    <X className="w-2 h-2 text-white" />
+                  </span>
+                )}
+              </button>
+            )
+          })}
+          {editingWatchlist ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault()
+                addToWatchlist(watchlistInput)
+              }}
+              className="flex items-center"
+            >
+              <input
+                type="text"
+                value={watchlistInput}
+                onChange={(e) => setWatchlistInput(e.target.value)}
+                placeholder="+"
+                className="w-12 px-1.5 py-0.5 bg-black/40 border border-white/20 rounded text-[10px] text-white placeholder-gray-500 focus:outline-none focus:border-nofx-gold/50 font-mono"
+                autoFocus
+                onBlur={() => {
+                  if (!watchlistInput) setEditingWatchlist(false)
+                }}
+              />
+            </form>
+          ) : (
+            <button
+              onClick={() => setEditingWatchlist(true)}
+              className="px-1.5 py-0.5 text-nofx-text-muted hover:text-white hover:bg-white/5 rounded transition-all"
+              title={language === 'zh' ? '编辑列表' : 'Edit watchlist'}
+            >
+              <Plus className="w-3 h-3" />
+            </button>
+          )}
+          {editingWatchlist && (
+            <button
+              onClick={() => setEditingWatchlist(false)}
+              className="px-1.5 py-0.5 text-[9px] text-nofx-text-muted hover:text-white"
+            >
+              ✓
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Tab Content - Chart autosizes to this container */}
       <div className="relative flex-1 bg-[#0B0E11]/50 rounded-b-lg overflow-hidden h-full min-h-0">
@@ -351,7 +594,11 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
               transition={{ duration: 0.2 }}
               className="h-full w-full absolute inset-0"
             >
-              <Suspense fallback={<div className="h-full w-full animate-pulse rounded-lg bg-black/20" />}>
+              <Suspense
+                fallback={
+                  <div className="h-full w-full animate-pulse rounded-lg bg-black/20" />
+                }
+              >
                 <EquityChart traderId={traderId} embedded />
               </Suspense>
             </motion.div>
@@ -376,12 +623,20 @@ export function ChartTabs({ traderId, selectedSymbol, updateKey, exchangeId, dis
                 showFibonacci={prefs.showFibonacci}
                 showVWAP={prefs.showVWAP}
                 levelTimeframes={prefs.levelTimeframes}
-                onStructuralToggle={(key, value) => updatePrefs({ [key]: value })}
-                onLevelTimeframeToggle={(key, value) => updatePrefs({ levelTimeframes: { ...prefs.levelTimeframes, [key]: value } })}
+                onStructuralToggle={(key, value) =>
+                  updatePrefs({ [key]: value })
+                }
+                onLevelTimeframeToggle={(key, value) =>
+                  updatePrefs({
+                    levelTimeframes: { ...prefs.levelTimeframes, [key]: value },
+                  })
+                }
                 initialIndicators={prefs.indicators}
                 initialShowOrderMarkers={prefs.showOrderMarkers}
                 onIndicatorsChange={(indicators) => updatePrefs({ indicators })}
-                onOrderMarkersChange={(show) => updatePrefs({ showOrderMarkers: show })}
+                onOrderMarkersChange={(show) =>
+                  updatePrefs({ showOrderMarkers: show })
+                }
               />
             </motion.div>
           )}

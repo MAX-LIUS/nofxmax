@@ -743,6 +743,22 @@ func (at *AutoTrader) GetOpenOrders(symbol string) ([]OpenOrder, error) {
 	return at.enrichProtectionOrdersWithPlan(symbol, orders), nil
 }
 
+// isTierSatisfied checks if a DD tier has been satisfied (reached min_profit at some point).
+// Uses persistent tier alloc state to avoid flickering when current PnL oscillates around threshold.
+func isTierSatisfied(ruleIdx int, currentPnLPct, minProfitPct float64, allocs []store.DrawdownTierAllocation) bool {
+	// Check persistent tier alloc state first (doesn't flip back once tracking)
+	for _, a := range allocs {
+		if a.TierIndex == ruleIdx || a.MinProfitPct == minProfitPct {
+			if a.Status == "tracking" || a.Status == "executed" || a.Status == "superseded" {
+				return true
+			}
+			return false
+		}
+	}
+	// Fallback to real-time check if no alloc state available
+	return currentPnLPct >= minProfitPct
+}
+
 func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quantity, entryPrice float64, openOrders []OpenOrder) map[string]interface{} {
 	positionSide := strings.ToUpper(side)
 	currentPnLPct := 0.0
@@ -938,6 +954,7 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 	}
 
 	tiers := make([]map[string]interface{}, 0)
+	tierAllocs := at.getDrawdownTierAllocs(symbol, side)
 	structureCtx := at.buildDrawdownStructureContext(symbol, side)
 	currentStructureStage := ""
 	currentStructureStopSource := ""
@@ -995,6 +1012,7 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 			activationSource := "planned"
 			callbackSource := "planned"
 			plannedQty := quantity * rule.CloseRatioPct / 100.0
+			matchedLive := false
 			if executionMode == "native_partial_trailing" || executionMode == "native_trailing_full" {
 				activationSource = "request"
 				callbackSource = "request"
@@ -1002,7 +1020,6 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 				case "binance", "bitget":
 					callbackRate = callbackRate * 100.0
 				}
-				matchedLive := false
 				for _, order := range trailingOrders {
 					qtyVal, _ := order["quantity"].(float64)
 					cbVal, _ := order["callback_rate"].(float64)
@@ -1068,7 +1085,7 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 				"planned_quantity":                  quantity * rule.CloseRatioPct / 100.0,
 				"source":                            source,
 				"execution_mode":                    executionMode,
-				"is_satisfied":                      currentPnLPct >= rule.MinProfitPct,
+				"is_satisfied":                      matchedLive || isTierSatisfied(idx, currentPnLPct, rule.MinProfitPct, tierAllocs),
 				"is_triggered":                      currentPnLPct >= rule.MinProfitPct && isDrawdownThresholdMet(currentPnLPct, drawdownPct, rule),
 				"legacy_drawdown_semantics_warning": legacyWarning,
 				"native_trailing_rejected_reason":   nativeRejectedReason,

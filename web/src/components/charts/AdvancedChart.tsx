@@ -1486,8 +1486,8 @@ export function AdvancedChart({
 
         // Upper boundary line (with label for A-grade only)
         const title = isA
-          ? `[A] ${Math.round(zone.confidence)} ${tfs}${flippedMark}`
-          : `${tfs}`
+          ? `[A]${Math.round(zone.confidence)} ${tfs}${flippedMark}`
+          : `[B]${Math.round(zone.confidence)} ${tfs}${flippedMark}`
         const highLine = candlestickSeriesRef.current?.createPriceLine({
           price: hi,
           color,
