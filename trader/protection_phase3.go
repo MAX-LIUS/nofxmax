@@ -168,7 +168,26 @@ func isTrendAlignedWithMode(action string, setupType string, data *market.Data, 
 	act := strings.ToLower(action)
 	setup := strings.ToLower(strings.TrimSpace(setupType))
 
+	// Downgrade weak trends: if regime is trending but evidence is thin
+	// (4h change < 0.5% AND ATR < 1.2%), treat as standard range instead.
+	if regime == string(market.RegimeLevelTrendingUp) || regime == string(market.RegimeLevelTrendingDown) {
+		atrPct := 0.0
+		if data.IntradaySeries != nil && data.IntradaySeries.ATR14 > 0 {
+			atrPct = data.IntradaySeries.ATR14 / data.CurrentPrice * 100
+		}
+		if math.Abs(data.PriceChange4h) < 0.5 && atrPct < 1.2 && atrPct > 0 {
+			regime = string(market.RegimeLevelStandard)
+		}
+	}
+
 	if mode == store.RegimeTrendAlignmentAllowRangeEdgeReversal && setup == "range_edge" {
+		// Additional guard: range_edge reversal must not fight a significant 4h move
+		if act == "open_long" && data.PriceChange4h < -1.0 {
+			return false
+		}
+		if act == "open_short" && data.PriceChange4h > 1.0 {
+			return false
+		}
 		if isRangeEdgeReversalStructurallyPlausible(act, data) {
 			return true
 		}
@@ -249,8 +268,8 @@ func isStrongCounterTrend(action string, data *market.Data) bool {
 	if counterScore >= 3 {
 		return true
 	}
-	// When 4h move is significant, 2 opposing factors is enough to block
-	if counterScore >= 2 && math.Abs(data.PriceChange4h) > 1.5 {
+	// When 4h move is significant (>1%), 2 opposing factors is enough to block
+	if counterScore >= 2 && math.Abs(data.PriceChange4h) > 1.0 {
 		return true
 	}
 	return false
