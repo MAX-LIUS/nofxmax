@@ -1430,39 +1430,53 @@ function SystemHealthCard({
     let total = 0
     let consecutiveLosses = 0
     let maxConsecutiveLosses = 0
-    let blocks = 0
-    let totalActions = 0
+    let apiErrors = 0
 
     for (const d of decisions) {
       for (const a of d.decisions || []) {
         if (a.action.includes('open')) {
-          totalActions++
           if (a.success) {
             wins++
             total++
             consecutiveLosses = 0
           } else if (a.review_context?.control?.decision === 'rejected') {
-            blocks++
+            // Gate rejections are normal system behavior, not failures
           } else if (a.error) {
-            total++
-            consecutiveLosses++
-            maxConsecutiveLosses = Math.max(
-              maxConsecutiveLosses,
-              consecutiveLosses
-            )
+            // Only count actual execution failures (API errors, order rejected by exchange)
+            if (
+              a.error.includes('API') ||
+              a.error.includes('429') ||
+              a.error.includes('timeout')
+            ) {
+              apiErrors++
+            } else {
+              total++
+              consecutiveLosses++
+              maxConsecutiveLosses = Math.max(
+                maxConsecutiveLosses,
+                consecutiveLosses
+              )
+            }
           }
         }
       }
     }
 
-    const winRate = total > 0 ? wins / total : 0.5
-    const blockRate = totalActions > 0 ? blocks / totalActions : 0
-
-    // Score: base from win rate (0-60), penalty for consecutive losses (-20), block rate adjustment
-    let s = Math.round(winRate * 80)
-    s -= maxConsecutiveLosses * 5
-    if (blockRate > 0.7) s -= 10 // too conservative
-    s = Math.max(0, Math.min(100, s + 20)) // base offset
+    // Score: base from execution success rate, penalty for consecutive failures
+    let s: number
+    if (total === 0 && apiErrors === 0) {
+      // No executed trades — system is observing, not unhealthy
+      s = 80
+    } else if (total === 0 && apiErrors > 0) {
+      // Only API errors — connectivity issue
+      s = 60 - apiErrors * 5
+    } else {
+      const winRate = wins / total
+      s = Math.round(winRate * 80)
+      s -= maxConsecutiveLosses * 5
+      s += 20
+    }
+    s = Math.max(0, Math.min(100, s))
 
     let lbl: string
     let clr: string
