@@ -141,11 +141,10 @@ export function ChartTabs({
 
   const addToWatchlist = useCallback(
     (sym: string) => {
-      const s = sym.trim().toUpperCase().replace(/USDT$/, '')
+      const s = sym.trim().toUpperCase()
       if (!s || watchlist.includes(s)) return
       saveWatchlist([...watchlist, s])
       setWatchlistInput('')
-      setEditingWatchlist(false)
     },
     [watchlist, saveWatchlist]
   )
@@ -508,19 +507,14 @@ export function ChartTabs({
       {activeTab === 'kline' && (
         <div className="flex items-center gap-1 px-3 py-1 bg-[#0B0E11]/60 border-b border-white/5 shrink-0 overflow-x-auto no-scrollbar">
           {watchlist.map((sym) => {
-            const isActive = chartSymbol.replace(/USDT$/, '') === sym
+            const normalizedChart = chartSymbol.replace(/USDT$/, '')
+            const normalizedSym = sym.replace(/USDT$/, '')
+            const isActive =
+              chartSymbol === sym || normalizedChart === normalizedSym
             return (
               <button
                 key={sym}
-                onClick={() =>
-                  setChartSymbol(
-                    marketType === 'crypto'
-                      ? sym === 'BTC' || sym === 'ETH'
-                        ? sym
-                        : sym + 'USDT'
-                      : sym
-                  )
-                }
+                onClick={() => setChartSymbol(sym)}
                 className={`relative group px-2 py-0.5 text-[10px] font-mono rounded transition-all whitespace-nowrap ${
                   isActive
                     ? 'bg-nofx-gold/15 text-nofx-gold border border-nofx-gold/30'
@@ -548,19 +542,32 @@ export function ChartTabs({
                 e.preventDefault()
                 addToWatchlist(watchlistInput)
               }}
-              className="flex items-center"
+              className="flex items-center gap-0.5"
             >
               <input
                 type="text"
                 value={watchlistInput}
                 onChange={(e) => setWatchlistInput(e.target.value)}
-                placeholder="+"
-                className="w-12 px-1.5 py-0.5 bg-black/40 border border-white/20 rounded text-[10px] text-white placeholder-gray-500 focus:outline-none focus:border-nofx-gold/50 font-mono"
+                placeholder="ETH / SOLUSDT"
+                className="w-20 px-1.5 py-0.5 bg-black/40 border border-white/20 rounded-l text-[10px] text-white placeholder-gray-500 focus:outline-none focus:border-nofx-gold/50 font-mono"
                 autoFocus
-                onBlur={() => {
-                  if (!watchlistInput) setEditingWatchlist(false)
-                }}
               />
+              <button
+                type="submit"
+                className="px-1.5 py-0.5 bg-white/5 border border-white/20 border-l-0 text-[10px] text-nofx-text-muted hover:text-white hover:bg-white/10 transition-all"
+              >
+                +
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingWatchlist(false)
+                  setWatchlistInput('')
+                }}
+                className="px-1.5 py-0.5 text-[10px] text-nofx-text-muted hover:text-white"
+              >
+                ✓
+              </button>
             </form>
           ) : (
             <button
@@ -569,14 +576,6 @@ export function ChartTabs({
               title={language === 'zh' ? '编辑列表' : 'Edit watchlist'}
             >
               <Plus className="w-3 h-3" />
-            </button>
-          )}
-          {editingWatchlist && (
-            <button
-              onClick={() => setEditingWatchlist(false)}
-              className="px-1.5 py-0.5 text-[9px] text-nofx-text-muted hover:text-white"
-            >
-              ✓
             </button>
           )}
         </div>
