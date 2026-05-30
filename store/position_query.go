@@ -198,6 +198,37 @@ func (s *PositionStore) GetLastClosedTrade(traderID, symbol string) (*RecentTrad
 	return t, nil
 }
 
+// GetLastClosedTradeByDirection returns the most recent closed trade for symbol+side.
+func (s *PositionStore) GetLastClosedTradeByDirection(traderID, symbol, side string) (*RecentTrade, error) {
+	var pos TraderPosition
+	err := s.db.Where("trader_id = ? AND symbol = ? AND side = ? AND status = ?",
+		traderID, symbol, strings.ToUpper(strings.TrimSpace(side)), "CLOSED").
+		Order("exit_time DESC").
+		First(&pos).Error
+	if err != nil {
+		return nil, err
+	}
+	t := &RecentTrade{
+		Symbol: pos.Symbol, Side: strings.ToLower(pos.Side),
+		EntryPrice: pos.EntryPrice, ExitPrice: pos.ExitPrice,
+		RealizedPnL: pos.RealizedPnL,
+	}
+	if pos.ExitTime > 0 {
+		t.ExitTime = pos.ExitTime / 1000
+	}
+	if pos.EntryTime > 0 {
+		t.EntryTime = pos.EntryTime / 1000
+	}
+	if pos.EntryPrice > 0 {
+		if t.Side == "long" {
+			t.PnLPct = (pos.ExitPrice - pos.EntryPrice) / pos.EntryPrice * 100 * float64(pos.Leverage)
+		} else {
+			t.PnLPct = (pos.EntryPrice - pos.ExitPrice) / pos.EntryPrice * 100 * float64(pos.Leverage)
+		}
+	}
+	return t, nil
+}
+
 // calculateSharpeRatioFromPnls calculates Sharpe ratio
 func calculateSharpeRatioFromPnls(pnls []float64) float64 {
 	if len(pnls) < 2 {

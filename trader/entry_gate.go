@@ -7,6 +7,7 @@ import (
 	"nofx/market"
 	"nofx/store"
 	"strings"
+	"time"
 )
 
 // EntryGateStage identifies which stage rejected the entry.
@@ -50,14 +51,16 @@ type EntryGateResult struct {
 
 // entryGateInput collects all inputs needed for gate evaluation.
 type entryGateInput struct {
-	Decision        *kernel.Decision
-	MarketData      *market.Data
-	StrategyConfig  *store.StrategyConfig
-	PolicyMode      store.StrategyControlPolicyMode
-	MinRR           float64
-	MinConfidence   int
-	ConstraintSnap  *ExecutionConstraintsSnapshot
-	ProtectionAlign *store.DecisionActionProtectionAlignment
+	Decision             *kernel.Decision
+	MarketData           *market.Data
+	StrategyConfig       *store.StrategyConfig
+	PolicyMode           store.StrategyControlPolicyMode
+	MinRR                float64
+	MinConfidence        int
+	ConstraintSnap       *ExecutionConstraintsSnapshot
+	ProtectionAlign      *store.DecisionActionProtectionAlignment
+	LastSameDirectionTrade *store.RecentTrade
+	ChainOfThought       string
 }
 
 // evaluateEntryGate runs the 3-stage entry gate pipeline.
@@ -402,6 +405,47 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 			Values:   fmt.Sprintf("ai_regime=%s", d.Regime),
 		}
 		checks = append(checks, check)
+	}
+
+	// 1f. Same-direction consecutive loss cooldown
+	if lastTrade := input.LastSameDirectionTrade; lastTrade != nil && lastTrade.RealizedPnL < 0 {
+		sinceClose := time.Since(time.Unix(lastTrade.ExitTime, 0))
+		cooldownNeeded := 20 * time.Minute
+		if sinceClose < cooldownNeeded {
+			checks = append(checks, EntryGateCheck{
+				Code:     "same_direction_loss_cooldown",
+				Stage:    string(EntryGateStageMarketState),
+				Passed:   false,
+				Enforced: true,
+				Detail:   fmt.Sprintf("last %s %s closed at loss %.2f%% only %v ago — cooldown %v required", d.Symbol, d.Action, lastTrade.PnLPct, sinceClose.Round(time.Minute), cooldownNeeded),
+				Values:   fmt.Sprintf("since_close=%v, pnl=%.2f%%", sinceClose.Round(time.Second), lastTrade.PnLPct),
+			})
+		}
+	}
+
+	// 1g. Chasing worse price — same direction re-entry at worse price shortly after close
+	if lastTrade := input.LastSameDirectionTrade; lastTrade != nil && lastTrade.ExitTime > 0 {
+		sinceClose := time.Since(time.Unix(lastTrade.ExitTime, 0))
+		entryPrice := 0.0
+		if d.EntryProtection != nil {
+			entryPrice = d.EntryProtection.RiskReward.Entry
+		}
+		if sinceClose < 60*time.Minute && entryPrice > 0 && lastTrade.EntryPrice > 0 {
+			isLong := strings.Contains(strings.ToLower(d.Action), "long")
+			worsePrice := (isLong && entryPrice > lastTrade.EntryPrice*1.005) ||
+				(!isLong && entryPrice < lastTrade.EntryPrice*0.995)
+			if worsePrice {
+				checks = append(checks, EntryGateCheck{
+					Code:     "chasing_worse_price",
+					Stage:    string(EntryGateStageMarketState),
+					Passed:   false,
+					Enforced: false,
+					Penalty:  25,
+					Detail:   fmt.Sprintf("re-entry at worse price: new=%.4f vs last=%.4f (%v ago)", entryPrice, lastTrade.EntryPrice, sinceClose.Round(time.Minute)),
+					Values:   fmt.Sprintf("new_entry=%.4f, last_entry=%.4f", entryPrice, lastTrade.EntryPrice),
+				})
+			}
+		}
 	}
 
 	return checks
@@ -894,12 +938,31 @@ func evaluateConfidenceRiskGate(input entryGateInput) []EntryGateCheck {
 		checks = append(checks, check)
 	}
 
+	// 3x. AI hesitation/self-contradiction in chain of thought
+	if cot := input.ChainOfThought; cot != "" {
+		hesitationSignals := 0
+		cotLower := strings.ToLower(cot)
+		hesitationPatterns := []string{"不对", "等等", "让我重新", "不，", "不对，", "？不", "重新看"}
+		for _, p := range hesitationPatterns {
+			if strings.Contains(cotLower, p) {
+				hesitationSignals++
+			}
+		}
+		if hesitationSignals >= 2 {
+			checks = append(checks, EntryGateCheck{
+				Code:     "ai_cot_hesitation",
+				Stage:    string(EntryGateStageConfidenceRisk),
+				Passed:   false,
+				Enforced: false,
+				Penalty:  20,
+				Detail:   fmt.Sprintf("AI chain-of-thought shows %d hesitation/self-correction signals — reduced conviction", hesitationSignals),
+				Values:   fmt.Sprintf("signals=%d", hesitationSignals),
+			})
+		}
+	}
+
 	return checks
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// Helpers
-// ════════════════════════════════════════════════════════════════════════
 
 func firstEnforcedFailure(checks []EntryGateCheck) (blocked bool, code string, reason string) {
 	for _, c := range checks {

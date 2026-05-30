@@ -178,8 +178,8 @@ func TestTrendAlignmentAllowsConfiguredRangeEdgeReversalException(t *testing.T) 
 	data := &market.Data{
 		CurrentPrice:  82.94,
 		CurrentEMA20:  83.14,
-		PriceChange4h: -2.1,
-		PriceChange1h: -0.8,
+		PriceChange4h: -0.8, // mild 4h move — range_edge reversal allowed
+		PriceChange1h: -0.5,
 		CurrentMACD:   -0.03,
 		IntradaySeries: &market.IntradayData{
 			ATR14: 0.09,
@@ -194,6 +194,12 @@ func TestTrendAlignmentAllowsConfiguredRangeEdgeReversalException(t *testing.T) 
 	decision := &kernel.Decision{Symbol: "SOLUSDT", Action: "open_long", SetupType: "range_edge"}
 	if !at.allowDecisionByRegime(decision, data) {
 		t.Fatal("expected configured range_edge reversal exception to allow structurally plausible support-bounce long")
+	}
+
+	// But block when 4h strongly opposes (> 1%)
+	data.PriceChange4h = -2.1
+	if at.allowDecisionByRegime(decision, data) {
+		t.Fatal("expected range_edge reversal to be blocked when 4h opposes by > 1%")
 	}
 }
 

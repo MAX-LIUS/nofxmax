@@ -452,15 +452,21 @@ func (at *AutoTrader) runCycle() error {
 		executionQuality := buildExecutionQualityContext(constraintSnapshot, d.PositionSizeUSD, plannedLadderTiers)
 
 		// ── Consolidated Entry Gate: 3-stage pipeline ──
+		var lastSameDirTrade *store.RecentTrade
+		if side := directionFromAction(d.Action); side != "" {
+			lastSameDirTrade, _ = at.store.Position().GetLastClosedTradeByDirection(at.id, d.Symbol, side)
+		}
 		gateResult := evaluateEntryGate(entryGateInput{
-			Decision:        &d,
-			MarketData:      ctx.MarketDataMap[d.Symbol],
-			StrategyConfig:  at.config.StrategyConfig,
-			PolicyMode:      policyMode,
-			MinRR:           at.getMinRiskRewardRatio(),
-			MinConfidence:   at.getMinConfidence(),
-			ConstraintSnap:  constraintSnapshot,
-			ProtectionAlign: protectionAlignment,
+			Decision:               &d,
+			MarketData:             ctx.MarketDataMap[d.Symbol],
+			StrategyConfig:        at.config.StrategyConfig,
+			PolicyMode:            policyMode,
+			MinRR:                 at.getMinRiskRewardRatio(),
+			MinConfidence:         at.getMinConfidence(),
+			ConstraintSnap:        constraintSnapshot,
+			ProtectionAlign:       protectionAlignment,
+			LastSameDirectionTrade: lastSameDirTrade,
+			ChainOfThought:        record.CoTTrace,
 		})
 		gateResult.Regime = classifyProtectionRegime(ctx.MarketDataMap[d.Symbol])
 		if ctx.MarketDataMap[d.Symbol] != nil {
@@ -1690,6 +1696,17 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// directionFromAction extracts "long" or "short" from an open action.
+func directionFromAction(action string) string {
+	if strings.Contains(action, "long") {
+		return "long"
+	}
+	if strings.Contains(action, "short") {
+		return "short"
+	}
+	return ""
 }
 
 // getCurrentPositionPnLPct returns the unrealized PnL % for a position.
