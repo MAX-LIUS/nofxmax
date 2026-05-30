@@ -304,6 +304,7 @@ func extractDecisions(response string) ([]Decision, string, error) {
 		jsonContent := strings.TrimSpace(m[1])
 		jsonContent = compactArrayOpen(jsonContent)
 		jsonContent = fixMissingQuotes(jsonContent)
+		jsonContent = fixThousandSeparators(jsonContent)
 		if err := validateJSONFormat(jsonContent); err != nil {
 			return nil, "", fmt.Errorf("JSON format validation failed: %w\nJSON content: %s\nFull response:\n%s", err, jsonContent, response)
 		}
@@ -334,6 +335,7 @@ func extractDecisions(response string) ([]Decision, string, error) {
 
 	jsonContent = compactArrayOpen(jsonContent)
 	jsonContent = fixMissingQuotes(jsonContent)
+	jsonContent = fixThousandSeparators(jsonContent)
 
 	if err := validateJSONFormat(jsonContent); err != nil {
 		return nil, "", fmt.Errorf("JSON format validation failed: %w\nJSON content: %s\nFull response:\n%s", err, jsonContent, response)
@@ -345,6 +347,43 @@ func extractDecisions(response string) ([]Decision, string, error) {
 	}
 
 	return decisions, "", nil
+}
+
+// fixThousandSeparators removes thousand-separator commas from numeric values in JSON.
+// Matches patterns like 1,672.7 or 5,529.21 outside of string literals.
+func fixThousandSeparators(jsonStr string) string {
+	var buf strings.Builder
+	buf.Grow(len(jsonStr))
+	inString := false
+	escaped := false
+	for i := 0; i < len(jsonStr); i++ {
+		ch := jsonStr[i]
+		if inString {
+			if escaped {
+				escaped = false
+			} else if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				inString = false
+			}
+			buf.WriteByte(ch)
+			continue
+		}
+		if ch == '"' {
+			inString = true
+			buf.WriteByte(ch)
+			continue
+		}
+		if ch == ',' && i > 0 && i+3 < len(jsonStr) &&
+			jsonStr[i-1] >= '0' && jsonStr[i-1] <= '9' &&
+			jsonStr[i+1] >= '0' && jsonStr[i+1] <= '9' &&
+			jsonStr[i+2] >= '0' && jsonStr[i+2] <= '9' &&
+			jsonStr[i+3] >= '0' && jsonStr[i+3] <= '9' {
+			continue // skip thousand separator comma
+		}
+		buf.WriteByte(ch)
+	}
+	return buf.String()
 }
 
 func fixMissingQuotes(jsonStr string) string {
