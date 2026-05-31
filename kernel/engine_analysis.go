@@ -350,7 +350,8 @@ func extractDecisions(response string) ([]Decision, string, error) {
 }
 
 // fixThousandSeparators removes thousand-separator commas from numeric values in JSON.
-// Matches patterns like 1,672.7 or 5,529.21 outside of string literals.
+// Pattern: digit,3-digits followed by non-digit. Only strips when the preceding number
+// has no decimal point (array separators like 721.74,718.69 are preserved).
 func fixThousandSeparators(jsonStr string) string {
 	var buf strings.Builder
 	buf.Grow(len(jsonStr))
@@ -374,12 +375,26 @@ func fixThousandSeparators(jsonStr string) string {
 			buf.WriteByte(ch)
 			continue
 		}
-		if ch == ',' && i > 0 && i+3 < len(jsonStr) &&
+		if ch == ',' && i > 0 && i+4 <= len(jsonStr) &&
 			jsonStr[i-1] >= '0' && jsonStr[i-1] <= '9' &&
 			jsonStr[i+1] >= '0' && jsonStr[i+1] <= '9' &&
 			jsonStr[i+2] >= '0' && jsonStr[i+2] <= '9' &&
-			jsonStr[i+3] >= '0' && jsonStr[i+3] <= '9' {
-			continue // skip thousand separator comma
+			jsonStr[i+3] >= '0' && jsonStr[i+3] <= '9' &&
+			(i+4 >= len(jsonStr) || !(jsonStr[i+4] >= '0' && jsonStr[i+4] <= '9')) {
+			// Check preceding number has no decimal point (would mean array separator)
+			hasDot := false
+			for j := i - 1; j >= 0; j-- {
+				if jsonStr[j] == '.' {
+					hasDot = true
+					break
+				}
+				if jsonStr[j] < '0' || jsonStr[j] > '9' {
+					break
+				}
+			}
+			if !hasDot {
+				continue // thousand separator — skip
+			}
 		}
 		buf.WriteByte(ch)
 	}
