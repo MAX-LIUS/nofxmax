@@ -100,10 +100,16 @@ func TestValidateJSONFormatRejectsRangeSymbolOutsideStrings(t *testing.T) {
 	}
 }
 
-func TestValidateJSONFormatRejectsThousandsSeparatorsInNumericFields(t *testing.T) {
+func TestFixThousandSeparatorsRemovesThemCorrectly(t *testing.T) {
 	bad := `[{"symbol":"BTCUSDT","action":"hold","confidence":61,"entry":97,687.05}]`
-	if err := validateJSONFormat(bad); err == nil {
-		t.Fatal("expected thousand separator in numeric field to be rejected")
+	fixed := fixThousandSeparators(bad)
+	if strings.Contains(fixed, "97,687") {
+		t.Fatal("expected thousand separator to be removed by fixThousandSeparators")
+	}
+	// Array separators after decimals must be preserved
+	good := `[672.8,666.66]`
+	if fixThousandSeparators(good) != good {
+		t.Fatal("array separator after decimal should not be removed")
 	}
 }
 

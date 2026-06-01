@@ -529,15 +529,6 @@ func validateJSONFormat(jsonStr string) error {
 			inString = true
 			continue
 		}
-		if ch >= '0' && ch <= '9' &&
-			i+5 < len(jsonStr) &&
-			jsonStr[i+1] == ',' &&
-			jsonStr[i+2] >= '0' && jsonStr[i+2] <= '9' &&
-			jsonStr[i+3] >= '0' && jsonStr[i+3] <= '9' &&
-			jsonStr[i+4] >= '0' && jsonStr[i+4] <= '9' &&
-			!(jsonStr[i+5] >= '0' && jsonStr[i+5] <= '9') {
-			return fmt.Errorf("JSON numbers cannot contain thousand separator comma, found: %s", jsonStr[i:min(i+10, len(jsonStr))])
-		}
 	}
 
 	return nil
