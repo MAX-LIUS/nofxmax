@@ -1524,6 +1524,7 @@ export function AdvancedChart({
     }
 
     drawZones()
+    const rafId = requestAnimationFrame(drawZones)
 
     // Redraw on scale changes
     chart.timeScale().subscribeVisibleLogicalRangeChange(drawZones)
@@ -1560,6 +1561,7 @@ export function AdvancedChart({
     })
 
     return () => {
+      cancelAnimationFrame(rafId)
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(drawZones)
       chart.unsubscribeCrosshairMove(drawZones)
     }
@@ -1713,123 +1715,172 @@ export function AdvancedChart({
         </div>
       </div>
 
-      {/* Indicator panel - floats on right side, can overlap other panels */}
+      {/* Indicator panel - modern floating panel */}
       {showIndicatorPanel && (
         <div
-          className="fixed top-24 right-4 z-50 rounded-lg shadow-2xl backdrop-blur-sm"
+          className="fixed top-24 right-4 z-50 rounded-xl shadow-2xl backdrop-blur-md"
           style={{
-            background: 'linear-gradient(135deg, #1A1E23 0%, #0F1215 100%)',
-            border: '1px solid rgba(240, 185, 11, 0.2)',
+            background: 'rgba(15, 18, 21, 0.95)',
+            border: '1px solid rgba(255, 255, 255, 0.08)',
             maxHeight: 'calc(100vh - 120px)',
-            minWidth: '280px',
+            width: '300px',
             overflowY: 'auto',
           }}
         >
           {/* Title bar */}
           <div
-            className="flex items-center justify-between px-4 py-3 border-b"
-            style={{ borderColor: 'rgba(43, 49, 57, 0.5)' }}
+            className="flex items-center justify-between px-4 py-3"
+            style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.06)' }}
           >
             <div className="flex items-center gap-2">
-              <BarChart2 className="w-4 h-4 text-yellow-400" />
-              <h4 className="text-sm font-bold text-white">
+              <BarChart2 className="w-4 h-4 text-blue-400" />
+              <h4 className="text-[13px] font-semibold text-white tracking-tight">
                 {t('advancedChart.technicalIndicators', language)}
               </h4>
             </div>
             <button
               onClick={() => setShowIndicatorPanel(false)}
-              className="text-gray-400 hover:text-white transition-colors"
+              className="w-6 h-6 flex items-center justify-center rounded-md text-gray-500 hover:text-white hover:bg-white/10 transition-all"
             >
-              <span className="text-lg">×</span>
+              <span className="text-sm">×</span>
             </button>
           </div>
 
-          {/* Indicator list */}
-          <div className="p-3 space-y-1">
-            {indicators.map((indicator) => (
-              <label
-                key={indicator.id}
-                className="flex items-center gap-3 p-2.5 rounded-md hover:bg-white/5 cursor-pointer transition-all group"
-              >
-                <div className="relative">
-                  <input
-                    type="checkbox"
-                    checked={indicator.enabled}
-                    onChange={() => toggleIndicator(indicator.id)}
-                    className="w-4 h-4 rounded border-gray-600 text-yellow-500 focus:ring-2 focus:ring-yellow-500/50"
-                  />
-                </div>
+          {/* Technical Indicators section */}
+          <div className="px-3 py-2">
+            <div className="text-[10px] text-gray-500 uppercase tracking-widest font-medium px-1 mb-1.5">
+              Overlays
+            </div>
+            <div className="space-y-0.5">
+              {indicators.map((indicator) => (
                 <div
-                  className="w-8 h-3 rounded-sm border border-white/10"
-                  style={{ backgroundColor: indicator.color }}
-                ></div>
-                <span className="text-sm text-gray-300 group-hover:text-white transition-colors flex-1">
-                  {indicator.name}
-                </span>
-                {indicator.enabled && (
-                  <span className="text-xs text-yellow-400">●</span>
-                )}
-              </label>
-            ))}
-          </div>
-
-          {/* Bottom hint */}
-          <div
-            className="px-4 py-2 text-xs text-gray-500 border-t"
-            style={{ borderColor: 'rgba(43, 49, 57, 0.5)' }}
-          >
-            {t('advancedChart.clickToToggle', language)}
+                  key={indicator.id}
+                  onClick={() => toggleIndicator(indicator.id)}
+                  className="flex items-center gap-2.5 px-2.5 py-2 rounded-lg cursor-pointer transition-all hover:bg-white/[0.04]"
+                  style={{
+                    background: indicator.enabled
+                      ? 'rgba(255, 255, 255, 0.03)'
+                      : 'transparent',
+                  }}
+                >
+                  <div
+                    className="w-2.5 h-2.5 rounded-full shrink-0"
+                    style={{
+                      backgroundColor: indicator.color,
+                      opacity: indicator.enabled ? 1 : 0.3,
+                    }}
+                  />
+                  <span
+                    className="text-[12px] flex-1"
+                    style={{
+                      color: indicator.enabled ? '#E5E7EB' : '#6B7280',
+                    }}
+                  >
+                    {indicator.name}
+                  </span>
+                  <div
+                    className="w-8 h-[18px] rounded-full relative transition-all shrink-0"
+                    style={{
+                      background: indicator.enabled
+                        ? 'rgba(96, 165, 250, 0.4)'
+                        : 'rgba(75, 85, 99, 0.3)',
+                    }}
+                  >
+                    <div
+                      className="absolute top-[2px] w-[14px] h-[14px] rounded-full transition-all"
+                      style={{
+                        left: indicator.enabled ? '18px' : '2px',
+                        background: indicator.enabled ? '#60A5FA' : '#4B5563',
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
 
           {/* Structural Levels section */}
-          <div className="border-t border-white/10 mx-3 pt-2 pb-3">
-            <div className="text-[10px] text-gray-500 px-2 mb-1 uppercase tracking-wider font-bold">
-              Structural Levels
+          <div
+            className="px-3 py-2"
+            style={{ borderTop: '1px solid rgba(255, 255, 255, 0.06)' }}
+          >
+            <div className="text-[10px] text-gray-500 uppercase tracking-widest font-medium px-1 mb-1.5">
+              Structure
             </div>
-            {[
-              {
-                key: 'showStructuralLevels' as const,
-                label: 'Support / Resistance',
-                color: '#10B981',
-                enabled: showStructuralLevels,
-              },
-              {
-                key: 'showFibonacci' as const,
-                label: 'Fibonacci',
-                color: '#A855F7',
-                enabled: showFibonacci,
-              },
-              {
-                key: 'showVWAP' as const,
-                label: 'VWAP',
-                color: '#3B82F6',
-                enabled: showVWAP,
-              },
-            ].map((item) => (
-              <label
-                key={item.key}
-                className="flex items-center gap-3 p-2 rounded-md hover:bg-white/5 cursor-pointer transition-all group"
-              >
-                <input
-                  type="checkbox"
-                  checked={item.enabled}
-                  onChange={() => onStructuralToggle?.(item.key, !item.enabled)}
-                  className="w-4 h-4 rounded border-gray-600 text-yellow-500 focus:ring-2 focus:ring-yellow-500/50"
-                />
+            <div className="space-y-0.5">
+              {[
+                {
+                  key: 'showStructuralLevels' as const,
+                  label: 'Support / Resistance',
+                  color: '#10B981',
+                  enabled: showStructuralLevels,
+                },
+                {
+                  key: 'showFibonacci' as const,
+                  label: 'Fibonacci',
+                  color: '#A855F7',
+                  enabled: showFibonacci,
+                },
+                {
+                  key: 'showVWAP' as const,
+                  label: 'VWAP',
+                  color: '#3B82F6',
+                  enabled: showVWAP,
+                },
+              ].map((item) => (
                 <div
-                  className="w-8 h-3 rounded-sm border border-white/10"
-                  style={{ backgroundColor: item.color }}
-                ></div>
-                <span className="text-sm text-gray-300 group-hover:text-white transition-colors flex-1">
-                  {item.label}
-                </span>
-              </label>
-            ))}
+                  key={item.key}
+                  onClick={() => onStructuralToggle?.(item.key, !item.enabled)}
+                  className="flex items-center gap-2.5 px-2.5 py-2 rounded-lg cursor-pointer transition-all hover:bg-white/[0.04]"
+                  style={{
+                    background: item.enabled
+                      ? 'rgba(255, 255, 255, 0.03)'
+                      : 'transparent',
+                  }}
+                >
+                  <div
+                    className="w-2.5 h-2.5 rounded-full shrink-0"
+                    style={{
+                      backgroundColor: item.color,
+                      opacity: item.enabled ? 1 : 0.3,
+                    }}
+                  />
+                  <span
+                    className="text-[12px] flex-1"
+                    style={{
+                      color: item.enabled ? '#E5E7EB' : '#6B7280',
+                    }}
+                  >
+                    {item.label}
+                  </span>
+                  <div
+                    className="w-8 h-[18px] rounded-full relative transition-all shrink-0"
+                    style={{
+                      background: item.enabled
+                        ? `rgba(${item.color === '#10B981' ? '16,185,129' : item.color === '#A855F7' ? '168,85,247' : '59,130,246'}, 0.4)`
+                        : 'rgba(75, 85, 99, 0.3)',
+                    }}
+                  >
+                    <div
+                      className="absolute top-[2px] w-[14px] h-[14px] rounded-full transition-all"
+                      style={{
+                        left: item.enabled ? '18px' : '2px',
+                        background: item.enabled ? item.color : '#4B5563',
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+
             {/* Per-timeframe toggles */}
             {(structuralLines.length > 0 || structuralZones.length > 0) && (
-              <div className="mt-2 space-y-0.5">
-                <div className="text-[9px] text-gray-600 px-2 mb-1 uppercase">
-                  By Timeframe
+              <div
+                className="mt-2 pt-2"
+                style={{ borderTop: '1px solid rgba(255, 255, 255, 0.04)' }}
+              >
+                <div className="text-[9px] text-gray-600 uppercase tracking-widest px-2.5 mb-1">
+                  Timeframes
                 </div>
                 {(() => {
                   const groups: Record<
@@ -1855,26 +1906,34 @@ export function AdvancedChart({
                           ? '#A855F7'
                           : '#3B82F6'
                     return (
-                      <label
+                      <div
                         key={key}
-                        className="flex items-center gap-2 px-2 py-1 rounded hover:bg-white/5 cursor-pointer text-[11px]"
+                        onClick={() => onLevelTimeframeToggle?.(key, !enabled)}
+                        className="flex items-center gap-2 px-2.5 py-1.5 rounded-md cursor-pointer hover:bg-white/[0.04] transition-all"
                       >
-                        <input
-                          type="checkbox"
-                          checked={enabled}
-                          onChange={() =>
-                            onLevelTimeframeToggle?.(key, !enabled)
-                          }
-                          className="w-3 h-3 rounded border-gray-700 text-yellow-500"
+                        <div
+                          className="w-1.5 h-1.5 rounded-full"
+                          style={{
+                            backgroundColor: color,
+                            opacity: enabled ? 1 : 0.3,
+                          }}
                         />
                         <span
-                          style={{ color }}
-                          className="w-2 h-2 rounded-full inline-block"
-                        />
-                        <span className="text-gray-400">{g.kind}</span>
-                        <span className="text-gray-500 font-mono">{g.tf}</span>
-                        <span className="text-gray-600 ml-auto">{g.count}</span>
-                      </label>
+                          className="text-[11px] flex-1"
+                          style={{ color: enabled ? '#9CA3AF' : '#4B5563' }}
+                        >
+                          {g.kind}
+                        </span>
+                        <span
+                          className="text-[10px] font-mono"
+                          style={{ color: enabled ? '#6B7280' : '#374151' }}
+                        >
+                          {g.tf}
+                        </span>
+                        <span className="text-[10px] text-gray-600 tabular-nums w-4 text-right">
+                          {g.count}
+                        </span>
+                      </div>
                     )
                   })
                 })()}
@@ -1906,6 +1965,7 @@ export function AdvancedChart({
               top: 0,
               left: 0,
               pointerEvents: 'none',
+              zIndex: 10,
               width: '100%',
               height: '100%',
             }}

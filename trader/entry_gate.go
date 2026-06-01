@@ -621,6 +621,41 @@ func evaluateStructuralFitGate(input entryGateInput) []EntryGateCheck {
 		}
 	}
 
+	// 2f. Fake retest trap detection: entry price too close to anchor level
+	// If entry is within 0.15% of the anchor (structural level), price just arrived
+	// and hasn't had time to confirm rejection — high probability of fake bounce/rejection
+	if d.EntryProtection != nil && len(d.EntryProtection.Anchors) > 0 {
+		entry := d.EntryProtection.RiskReward.Entry
+		if entry > 0 {
+			for _, anchor := range d.EntryProtection.Anchors {
+				if anchor.Price <= 0 {
+					continue
+				}
+				distPct := math.Abs(entry-anchor.Price) / entry * 100
+				// If entry is within 0.15% of the anchor, it's likely a "just arrived" situation
+				if distPct < 0.15 {
+					isLong := strings.Contains(strings.ToLower(d.Action), "long")
+					anchorIsSupport := strings.Contains(strings.ToLower(anchor.Type), "support")
+					anchorIsResistance := strings.Contains(strings.ToLower(anchor.Type), "resistance")
+					// Long at support or short at resistance = potential fake retest
+					isFakeRetestRisk := (isLong && anchorIsSupport) || (!isLong && anchorIsResistance)
+					if isFakeRetestRisk {
+						check := EntryGateCheck{
+							Code:     "fake_retest_trap",
+							Stage:    string(EntryGateStageStructuralFit),
+							Passed:   false,
+							Enforced: true,
+							Detail:   fmt.Sprintf("entry %.4f is only %.2f%% from anchor %s@%.4f — price just arrived at level, no multi-candle confirmation possible", entry, distPct, anchor.Type, anchor.Price),
+							Values:   fmt.Sprintf("entry=%.6f anchor=%.6f dist_pct=%.3f type=%s", entry, anchor.Price, distPct, anchor.Type),
+						}
+						checks = append(checks, check)
+						break
+					}
+				}
+			}
+		}
+	}
+
 	return checks
 }
 
