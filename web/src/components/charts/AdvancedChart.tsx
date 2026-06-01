@@ -160,6 +160,7 @@ export function AdvancedChart({
   const klineDataCacheRef = useRef<Kline[]>([])
   const priceLinesRef = useRef<any[]>([])
   const structuralLinesRef = useRef<Map<string, any>>(new Map())
+  const zoneCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const isInitialLoadRef = useRef(true)
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const lastTickerPriceRef = useRef<number>(0)
@@ -1395,11 +1396,11 @@ export function AdvancedChart({
     }
   }, [indicators])
 
-  // Render structural levels as price lines on main candlestick series (shared price axis)
+  // Render structural zones as canvas overlay (semi-transparent bands + labels)
   useEffect(() => {
-    if (!candlestickSeriesRef.current) return
+    if (!candlestickSeriesRef.current || !chartRef.current) return
 
-    // Clear old structural lines
+    // Clear old price lines (for individual fibonacci/vwap lines)
     structuralLinesRef.current.forEach((line) => {
       try {
         candlestickSeriesRef.current?.removePriceLine(line)
@@ -1409,28 +1410,37 @@ export function AdvancedChart({
     })
     structuralLinesRef.current.clear()
 
-    const LEVEL_COLORS: Record<string, string> = {
-      support: '#10B981',
-      resistance: '#EF4444',
-      fibonacci: '#A855F7',
-      vwap: '#3B82F6',
-    }
-    const LEVEL_STYLES: Record<string, number> = {
-      support: 3,
-      resistance: 3,
-      fibonacci: 3,
-      vwap: 0,
-    }
+    const chart = chartRef.current
+    const series = candlestickSeriesRef.current
 
-    // Render zones (only A/B grade, max 5 per direction, within ±8% of price)
-    if (structuralZones.length > 0 && showStructuralLevels) {
+    // Draw zones on canvas overlay
+    const drawZones = () => {
+      const canvas = zoneCanvasRef.current
+      if (!canvas || !chart || !series) return
+
+      const container = chartContainerRef.current
+      if (!container) return
+
+      const rect = container.getBoundingClientRect()
+      const dpr = window.devicePixelRatio || 1
+      canvas.width = rect.width * dpr
+      canvas.height = rect.height * dpr
+      canvas.style.width = `${rect.width}px`
+      canvas.style.height = `${rect.height}px`
+
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      ctx.scale(dpr, dpr)
+      ctx.clearRect(0, 0, rect.width, rect.height)
+
+      if (!showStructuralLevels || structuralZones.length === 0) return
+
       const currentPrice =
         klineDataCacheRef.current.length > 0
           ? klineDataCacheRef.current[klineDataCacheRef.current.length - 1]
               .close
           : 0
 
-      // Filter: A/B only, within 8% of current price
       const relevantZones = structuralZones.filter((z: StructuralZone) => {
         if (z.quality_grade === 'C') return false
         if (currentPrice <= 0) return true
@@ -1438,7 +1448,6 @@ export function AdvancedChart({
         return distPct <= 0.08
       })
 
-      // Split by type, sort by distance, limit to 5 each
       const supportZones = relevantZones
         .filter((z: StructuralZone) => z.type === 'support')
         .sort(
@@ -1457,14 +1466,10 @@ export function AdvancedChart({
         .slice(0, 5)
 
       const visibleZones = [...supportZones, ...resistanceZones]
+      // Price scale width (right axis) — leave space for labels
+      const priceScaleWidth = 65
 
-      visibleZones.forEach((zone: StructuralZone, idx: number) => {
-        const color = zone.type === 'support' ? '#10B981' : '#EF4444'
-        const isA = zone.quality_grade === 'A'
-        const tfs = zone.timeframes?.join('+') || ''
-        const flippedMark = zone.flipped ? ' ⟳' : ''
-
-        // Expand zero-width zones to ±0.15% for visual band
+      visibleZones.forEach((zone: StructuralZone) => {
         let lo = zone.low
         let hi = zone.high
         if (hi - lo < zone.mid_price * 0.001) {
@@ -1473,74 +1478,91 @@ export function AdvancedChart({
           hi = zone.mid_price + expand
         }
 
-        // Lower boundary line (no label)
-        const lowLine = candlestickSeriesRef.current?.createPriceLine({
-          price: lo,
-          color,
-          lineWidth: isA ? 2 : 1,
-          lineStyle: 3,
-          axisLabelVisible: false,
-          title: '',
-        })
-        if (lowLine) structuralLinesRef.current.set(`zone-lo-${idx}`, lowLine)
+        const yHi = series.priceToCoordinate(hi)
+        const yLo = series.priceToCoordinate(lo)
+        if (yHi === null || yLo === null) return
 
-        // Upper boundary line (with label for A-grade only)
-        const title = isA
-          ? `[A]${Math.round(zone.confidence)} ${tfs}${flippedMark}`
-          : `[B]${Math.round(zone.confidence)} ${tfs}${flippedMark}`
-        const highLine = candlestickSeriesRef.current?.createPriceLine({
-          price: hi,
-          color,
-          lineWidth: isA ? 2 : 1,
-          lineStyle: 3,
-          axisLabelVisible: isA,
-          axisLabelColor: color,
-          title,
-        })
-        if (highLine) structuralLinesRef.current.set(`zone-hi-${idx}`, highLine)
+        const top = Math.min(yHi, yLo)
+        const bottom = Math.max(yHi, yLo)
+        const bandHeight = Math.max(bottom - top, 2)
+
+        const isSupport = zone.type === 'support'
+        const isA = zone.quality_grade === 'A'
+        const baseColor = isSupport ? '16, 185, 129' : '239, 68, 68'
+        const alpha = isA ? 0.18 : 0.1
+
+        // Draw band
+        ctx.fillStyle = `rgba(${baseColor}, ${alpha})`
+        ctx.fillRect(0, top, rect.width - priceScaleWidth, bandHeight)
+
+        // Draw border lines
+        ctx.strokeStyle = `rgba(${baseColor}, ${isA ? 0.7 : 0.4})`
+        ctx.lineWidth = isA ? 1.5 : 0.8
+        ctx.setLineDash(isA ? [] : [4, 3])
+        ctx.beginPath()
+        ctx.moveTo(0, top)
+        ctx.lineTo(rect.width - priceScaleWidth, top)
+        ctx.moveTo(0, top + bandHeight)
+        ctx.lineTo(rect.width - priceScaleWidth, top + bandHeight)
+        ctx.stroke()
+        ctx.setLineDash([])
+
+        // Draw label on the right side of chart area
+        const tfs = zone.timeframes?.join('+') || ''
+        const flipped = zone.flipped ? '⟳' : ''
+        const label = `[${zone.quality_grade}]${Math.round(zone.confidence)} ${tfs}${flipped}`
+
+        ctx.font = `${isA ? 'bold ' : ''}11px monospace`
+        ctx.fillStyle = `rgba(${baseColor}, 0.9)`
+        const labelY = top + bandHeight / 2 + 4
+        ctx.fillText(
+          label,
+          rect.width - priceScaleWidth - ctx.measureText(label).width - 6,
+          labelY
+        )
       })
     }
 
-    // Also render individual lines (fibonacci, vwap, etc.) that aren't covered by zones
+    drawZones()
+
+    // Redraw on scale changes
+    chart.timeScale().subscribeVisibleLogicalRangeChange(drawZones)
+    chart.subscribeCrosshairMove(drawZones)
+
+    // Render individual lines (fibonacci, vwap)
+    const LEVEL_COLORS: Record<string, string> = {
+      fibonacci: '#A855F7',
+      vwap: '#3B82F6',
+    }
+
     const filtered = structuralLines.filter((line: CompositeMarketLine) => {
-      // Skip support/resistance lines if zones are being rendered
-      if (
-        (line.kind === 'support' || line.kind === 'resistance') &&
-        structuralZones.length > 0
-      ) {
-        return false
-      }
-      if (line.kind === 'support' || line.kind === 'resistance') {
-        if (!showStructuralLevels) return false
-      }
-      if (line.kind === 'fibonacci') {
-        if (!showFibonacci) return false
-      }
-      if (line.kind === 'vwap') {
-        if (!showVWAP) return false
-      }
+      if (line.kind === 'support' || line.kind === 'resistance') return false
+      if (line.kind === 'fibonacci' && !showFibonacci) return false
+      if (line.kind === 'vwap' && !showVWAP) return false
       const tfKey = `${line.kind}-${line.timeframe || 'all'}`
       if (levelTimeframes[tfKey] === false) return false
       return true
     })
 
     filtered.forEach((line: CompositeMarketLine) => {
-      const strengthLabel = line.strength
-        ? '●'.repeat(Math.min(line.strength, 5))
-        : ''
       const tfLabel = line.timeframe || ''
-      const label = `${line.label} ${tfLabel} ${strengthLabel}`.trim()
+      const label = `${line.label} ${tfLabel}`.trim()
       const priceLine = candlestickSeriesRef.current?.createPriceLine({
         price: line.price,
         color: LEVEL_COLORS[line.kind] ?? '#6B7280',
-        lineWidth: line.strength && line.strength >= 3 ? 2 : 1,
-        lineStyle: LEVEL_STYLES[line.kind] ?? 3,
+        lineWidth: 1,
+        lineStyle: 3,
         axisLabelVisible: true,
         axisLabelColor: LEVEL_COLORS[line.kind] ?? '#6B7280',
         title: label,
       })
       if (priceLine) structuralLinesRef.current.set(line.id, priceLine)
     })
+
+    return () => {
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(drawZones)
+      chart.unsubscribeCrosshairMove(drawZones)
+    }
   }, [
     structuralLines,
     structuralZones,
@@ -1872,7 +1894,23 @@ export function AdvancedChart({
           flexDirection: 'column',
         }}
       >
-        <div ref={chartContainerRef} style={{ flex: 1, minHeight: 0 }} />
+        <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+          <div
+            ref={chartContainerRef}
+            style={{ width: '100%', height: '100%' }}
+          />
+          <canvas
+            ref={zoneCanvasRef}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              pointerEvents: 'none',
+              width: '100%',
+              height: '100%',
+            }}
+          />
+        </div>
 
         {/* Volume sub-chart */}
         <div
