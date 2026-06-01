@@ -803,8 +803,7 @@ func evaluateConfidenceRiskGate(input entryGateInput) []EntryGateCheck {
 			}
 
 			// SL distance percentage cap — reject entries where SL is too far from entry
-			// A wide SL means the structure is too loose for the position size, or
-			// the coin has already moved too far and "support" is unreliable.
+			// Dynamic cap: altcoins get wider allowance, and high-RR trades get a bonus.
 			if rr.Entry > 0 {
 				slPctDist := slDist / rr.Entry * 100
 				maxSLPct := 2.0
@@ -814,18 +813,35 @@ func evaluateConfidenceRiskGate(input entryGateInput) []EntryGateCheck {
 						maxSLPct = rfCfg.MaxSLDistancePct
 					}
 				}
+
+				// Dynamic adjustment: altcoins (non-BTC/ETH) get 2x the cap
+				sym := strings.ToUpper(d.Symbol)
+				isMajor := strings.HasPrefix(sym, "BTC") || strings.HasPrefix(sym, "ETH")
+				if !isMajor {
+					maxSLPct *= 2.0
+				}
+
+				// RR bonus: if net RR >= 2.0, allow 50% wider SL (risk is justified by reward)
+				netRR := rr.NetEstimatedRR
+				if netRR <= 0 {
+					netRR = rr.GrossEstimatedRR * 0.9
+				}
+				if netRR >= 2.0 {
+					maxSLPct *= 1.5
+				}
+
 				slPctPassed := slPctDist <= maxSLPct
 				slPctCheck := EntryGateCheck{
 					Code:     "sl_distance_pct_too_wide",
 					Stage:    string(EntryGateStageConfidenceRisk),
 					Passed:   slPctPassed,
 					Enforced: true,
-					Values:   fmt.Sprintf("sl_pct=%.2f%% max=%.1f%% entry=%.4f invalidation=%.4f", slPctDist, maxSLPct, rr.Entry, rr.Invalidation),
+					Values:   fmt.Sprintf("sl_pct=%.2f%% max=%.2f%% entry=%.4f invalidation=%.4f rr=%.2f major=%v", slPctDist, maxSLPct, rr.Entry, rr.Invalidation, netRR, isMajor),
 				}
 				if slPctPassed {
-					slPctCheck.Detail = fmt.Sprintf("SL distance %.2f%% within %.1f%% cap — risk per trade acceptable", slPctDist, maxSLPct)
+					slPctCheck.Detail = fmt.Sprintf("SL distance %.2f%% within %.2f%% cap — risk per trade acceptable", slPctDist, maxSLPct)
 				} else {
-					slPctCheck.Detail = fmt.Sprintf("SL distance %.2f%% exceeds %.1f%% cap — structure too loose, invalidation too far from entry", slPctDist, maxSLPct)
+					slPctCheck.Detail = fmt.Sprintf("SL distance %.2f%% exceeds %.2f%% cap — structure too loose, invalidation too far from entry", slPctDist, maxSLPct)
 				}
 				checks = append(checks, slPctCheck)
 			}
