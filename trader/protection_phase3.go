@@ -196,14 +196,23 @@ func isTrendAlignedWithMode(action string, setupType string, data *market.Data, 
 	switch regime {
 	case string(market.RegimeLevelTrendingUp):
 		// Uptrend: longs OK, shorts blocked
+		// Exception: short allowed if price is below EMA20 and 4h move is weak
 		if act == "open_short" {
+			if data.CurrentEMA20 > 0 && data.CurrentPrice < data.CurrentEMA20 && math.Abs(data.PriceChange4h) < 1.0 {
+				return true
+			}
 			return false
 		}
 		return true
 
 	case string(market.RegimeLevelTrendingDown):
 		// Downtrend: shorts OK, longs blocked
+		// Exception: long allowed if price is above EMA20 and 4h move is weak (<1%)
+		// This handles early reversals where regime lags behind price action
 		if act == "open_long" {
+			if data.CurrentEMA20 > 0 && data.CurrentPrice > data.CurrentEMA20 && math.Abs(data.PriceChange4h) < 1.0 {
+				return true
+			}
 			return false
 		}
 		return true
