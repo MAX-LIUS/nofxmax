@@ -384,7 +384,35 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 		}
 	}
 
-	// 1d4. Coin-specific momentum gate — reject entries where the coin itself
+	// 1d4. RSI extreme — block trend-following entries when RSI is at extreme levels
+	// RSI < 20 = extremely oversold, don't short (mean-reversion likely)
+	// RSI > 80 = extremely overbought, don't long (mean-reversion likely)
+	if data != nil && data.CurrentRSI7 > 0 {
+		rsi := data.CurrentRSI7
+		isLongAction := strings.Contains(strings.ToLower(d.Action), "long")
+		isShortAction := strings.Contains(strings.ToLower(d.Action), "short")
+
+		rsiExtreme := false
+		if isShortAction && rsi < 20 {
+			rsiExtreme = true
+		}
+		if isLongAction && rsi > 80 {
+			rsiExtreme = true
+		}
+
+		if rsiExtreme {
+			checks = append(checks, EntryGateCheck{
+				Code:     "rsi_extreme_counter_entry",
+				Stage:    string(EntryGateStageMarketState),
+				Passed:   false,
+				Enforced: true,
+				Detail:   fmt.Sprintf("RSI7=%.1f 极端水平，%s方向面临均值回归风险 — 等RSI回到30-70区间", rsi, d.Action),
+				Values:   fmt.Sprintf("rsi7=%.2f action=%s", rsi, d.Action),
+			})
+		}
+	}
+
+	// 1d5. Coin-specific momentum gate — reject entries where the coin itself
 	// shows no directional momentum (stale) or excessive momentum (late trend).
 	if data != nil && regimeCfg.MomentumGateEnabled {
 		primaryTF := ""
