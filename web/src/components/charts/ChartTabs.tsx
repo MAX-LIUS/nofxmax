@@ -521,7 +521,7 @@ export function ChartTabs({
                     : 'text-nofx-text-muted hover:text-white hover:bg-white/5 border border-transparent'
                 }`}
               >
-                {sym}
+                {sym.replace(/USDT$|USD$|BUSD$/, '')}
                 {editingWatchlist && (
                   <span
                     onClick={(e) => {
