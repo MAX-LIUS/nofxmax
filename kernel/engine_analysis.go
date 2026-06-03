@@ -305,6 +305,7 @@ func extractDecisions(response string) ([]Decision, string, error) {
 		jsonContent = compactArrayOpen(jsonContent)
 		jsonContent = fixMissingQuotes(jsonContent)
 		jsonContent = fixThousandSeparators(jsonContent)
+		jsonContent = fixUnbalancedBraces(jsonContent)
 		if err := validateJSONFormat(jsonContent); err != nil {
 			return nil, "", fmt.Errorf("JSON format validation failed: %w\nJSON content: %s\nFull response:\n%s", err, jsonContent, response)
 		}
@@ -336,6 +337,7 @@ func extractDecisions(response string) ([]Decision, string, error) {
 	jsonContent = compactArrayOpen(jsonContent)
 	jsonContent = fixMissingQuotes(jsonContent)
 	jsonContent = fixThousandSeparators(jsonContent)
+	jsonContent = fixUnbalancedBraces(jsonContent)
 
 	if err := validateJSONFormat(jsonContent); err != nil {
 		return nil, "", fmt.Errorf("JSON format validation failed: %w\nJSON content: %s\nFull response:\n%s", err, jsonContent, response)
@@ -547,6 +549,100 @@ func removeInvisibleRunes(s string) string {
 
 func compactArrayOpen(s string) string {
 	return reArrayOpenSpace.ReplaceAllString(strings.TrimSpace(s), "[{")
+}
+
+// fixUnbalancedBraces repairs a top-level JSON array whose object braces are
+// unbalanced — most commonly a model emitting one extra closing "}" before the
+// final "]" (observed with claude-opus-4-8: ...}]}}}] ). It scans outside of
+// strings, tracks { } and [ ] depth, and when it reaches the array-closing "]"
+// with surplus unmatched "}" immediately before it, drops the surplus braces.
+// Conservative: only trims trailing surplus "}" right before the closing "]";
+// it never adds braces or touches string contents. Returns input unchanged if
+// it cannot confidently repair.
+func fixUnbalancedBraces(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if !strings.HasPrefix(trimmed, "[") || !strings.HasSuffix(trimmed, "]") {
+		return s
+	}
+
+	objDepth := 0
+	arrDepth := 0
+	inString := false
+	escaped := false
+	// Walk to find the position of the final top-level "]" and the brace depth
+	// just before it.
+	for i := 0; i < len(trimmed); i++ {
+		ch := trimmed[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			switch ch {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case '{':
+			objDepth++
+		case '}':
+			objDepth--
+		case '[':
+			arrDepth++
+		case ']':
+			arrDepth--
+			if arrDepth == 0 {
+				// Closing the top-level array. At a well-formed boundary objDepth
+				// should be 0. If it's negative, the model emitted surplus "}".
+				if objDepth < 0 {
+					surplus := -objDepth
+					// Strip exactly `surplus` "}" characters appearing immediately
+					// before this "]" (allowing interleaved whitespace).
+					return stripSurplusBracesBefore(trimmed, i, surplus)
+				}
+				return s
+			}
+		}
+	}
+	return s
+}
+
+// stripSurplusBracesBefore removes up to `count` "}" characters that appear
+// immediately before index closeIdx (the top-level "]"), skipping whitespace.
+// Returns the original string if it cannot remove exactly `count` braces.
+func stripSurplusBracesBefore(s string, closeIdx, count int) string {
+	j := closeIdx - 1
+	removed := 0
+	cut := make([]bool, len(s))
+	for j >= 0 && removed < count {
+		switch s[j] {
+		case ' ', '\t', '\n', '\r':
+			j--
+		case '}':
+			cut[j] = true
+			removed++
+			j--
+		default:
+			return s // unexpected char — bail out, do not corrupt
+		}
+	}
+	if removed != count {
+		return s
+	}
+	var buf strings.Builder
+	buf.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if !cut[i] {
+			buf.WriteByte(s[i])
+		}
+	}
+	return buf.String()
 }
 
 // ParseAIDecisions parses structured AI decision JSON from raw model output.
