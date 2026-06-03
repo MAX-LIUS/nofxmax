@@ -379,6 +379,40 @@ func (client *Client) ParseMCPResponseFull(body []byte) (*LLMResponse, error) {
 		})
 	}
 
+	// Monitor for excessive output tokens (indicates verbose AI response)
+	if raw.Usage.CompletionTokens > 6000 {
+		client.Log.Warnf("⚠️  [%s] Excessive output tokens: %d (expected < 4000, target 2500)",
+			client.String(), raw.Usage.CompletionTokens)
+		client.Log.Warnf("    This may indicate: verbose reasoning, duplicate analysis, or prompt issues")
+	}
+
+	// Monitor for large cache usage (may indicate stale data being cached)
+	// Check multiple possible cache field names from different API providers
+	var cacheReadTokens int
+	if raw.Usage.PromptTokens < 10000 { // Only check if prompt tokens are suspiciously low
+		// Try to extract cache-related fields from raw JSON
+		var usageRaw map[string]interface{}
+		usageBytes, _ := json.Marshal(raw.Usage)
+		if json.Unmarshal(usageBytes, &usageRaw) == nil {
+			// Check common cache field names
+			if val, ok := usageRaw["cache_read_input_tokens"].(float64); ok {
+				cacheReadTokens = int(val)
+			} else if val, ok := usageRaw["cached_tokens"].(float64); ok {
+				cacheReadTokens = int(val)
+			} else if val, ok := usageRaw["cache_read_tokens"].(float64); ok {
+				cacheReadTokens = int(val)
+			}
+
+			if cacheReadTokens > 50000 {
+				client.Log.Warnf("⚠️  [%s] Large cache detected: %d tokens (may contain stale market data)",
+					client.String(), cacheReadTokens)
+				client.Log.Warnf("    Prompt tokens: %d, Cache: %d, Total input: %d",
+					raw.Usage.PromptTokens, cacheReadTokens, raw.Usage.PromptTokens+cacheReadTokens)
+				client.Log.Warnf("    If trading decisions are based on cached data, contact API provider to disable caching")
+			}
+		}
+	}
+
 	// Parse message as a flexible map to capture all fields
 	var msgMap map[string]json.RawMessage
 	if err := json.Unmarshal(raw.Choices[0].Message, &msgMap); err != nil {

@@ -490,6 +490,37 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 		sb.WriteString("Note: The above personalized strategy is a supplement to the basic rules and cannot violate the basic risk control principles.\n")
 	}
 
+	// 9. Output Discipline (Critical - prevents token waste)
+	lang := e.GetLanguage()
+	sb.WriteString("\n---\n\n")
+	if lang == LangChinese {
+		sb.WriteString("## ⚠️ 输出纪律（关键）\n\n")
+		sb.WriteString("**硬性限制**：\n")
+		sb.WriteString("- reasoning 部分：最多 300 词\n")
+		sb.WriteString("- 每个决策的 reasoning 字段：最多 30 词\n")
+		sb.WriteString("- 总响应：目标 2500 tokens，绝对上限 4000 tokens\n")
+		sb.WriteString("- 如果超过 4000 tokens，响应将被截断并拒绝\n\n")
+		sb.WriteString("**禁止内容**：\n")
+		sb.WriteString("- 市场数据摘要（我已有数据）\n")
+		sb.WriteString("- 重复解释\n")
+		sb.WriteString("- 决策 JSON 之外的冗长分析\n")
+		sb.WriteString("- 哲学性评论或泛泛而谈\n\n")
+		sb.WriteString("精准、简洁、惜字如金。\n")
+	} else {
+		sb.WriteString("## ⚠️ OUTPUT DISCIPLINE (CRITICAL)\n\n")
+		sb.WriteString("**HARD LIMITS**:\n")
+		sb.WriteString("- reasoning section: MAX 300 words\n")
+		sb.WriteString("- Each decision's reasoning field: MAX 30 words\n")
+		sb.WriteString("- Total response: TARGET 2500 tokens, ABSOLUTE MAX 4000 tokens\n")
+		sb.WriteString("- If you exceed 4000 tokens, the response will be truncated and rejected\n\n")
+		sb.WriteString("**FORBIDDEN**:\n")
+		sb.WriteString("- Market data summaries (I already have the data)\n")
+		sb.WriteString("- Duplicate explanations\n")
+		sb.WriteString("- Verbose analysis outside the decision JSON\n")
+		sb.WriteString("- Philosophical commentary\n\n")
+		sb.WriteString("Be precise. Be concise. Value every token.\n")
+	}
+
 	return sb.String()
 }
 
