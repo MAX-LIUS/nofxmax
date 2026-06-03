@@ -380,37 +380,40 @@ func (client *Client) ParseMCPResponseFull(body []byte) (*LLMResponse, error) {
 	}
 
 	// Monitor for excessive output tokens (indicates verbose AI response)
-	if raw.Usage.CompletionTokens > 6000 {
-		client.Log.Warnf("⚠️  [%s] Excessive output tokens: %d (expected < 4000, target 2500)",
+	if raw.Usage.CompletionTokens > 4500 {
+		client.Log.Warnf("⚠️  [%s] Excessive output tokens: %d (target 2500, max 4000)",
 			client.String(), raw.Usage.CompletionTokens)
-		client.Log.Warnf("    This may indicate: verbose reasoning, duplicate analysis, or prompt issues")
+		client.Log.Warnf("    This may indicate: verbose reasoning, duplicate analysis, or provider-side caching instability")
 	}
 
-	// Monitor for large cache usage (may indicate stale data being cached)
-	// Check multiple possible cache field names from different API providers
+	// Monitor for prompt caching (may indicate stale market data being reused).
+	// Parse the original response body for cache fields used by different providers.
+	// Observed: novai (once.novai.su) reports nested usage.prompt_tokens_details.cached_tokens;
+	// Anthropic-native reports cache_read_input_tokens. ltcraft reports no caching.
 	var cacheReadTokens int
-	if raw.Usage.PromptTokens < 10000 { // Only check if prompt tokens are suspiciously low
-		// Try to extract cache-related fields from raw JSON
-		var usageRaw map[string]interface{}
-		usageBytes, _ := json.Marshal(raw.Usage)
-		if json.Unmarshal(usageBytes, &usageRaw) == nil {
-			// Check common cache field names
-			if val, ok := usageRaw["cache_read_input_tokens"].(float64); ok {
-				cacheReadTokens = int(val)
-			} else if val, ok := usageRaw["cached_tokens"].(float64); ok {
-				cacheReadTokens = int(val)
-			} else if val, ok := usageRaw["cache_read_tokens"].(float64); ok {
-				cacheReadTokens = int(val)
-			}
-
-			if cacheReadTokens > 50000 {
-				client.Log.Warnf("⚠️  [%s] Large cache detected: %d tokens (may contain stale market data)",
-					client.String(), cacheReadTokens)
-				client.Log.Warnf("    Prompt tokens: %d, Cache: %d, Total input: %d",
-					raw.Usage.PromptTokens, cacheReadTokens, raw.Usage.PromptTokens+cacheReadTokens)
-				client.Log.Warnf("    If trading decisions are based on cached data, contact API provider to disable caching")
-			}
+	var usageProbe struct {
+		Usage struct {
+			CacheReadInputTokens int `json:"cache_read_input_tokens"`
+			CachedTokens         int `json:"cached_tokens"`
+			PromptTokensDetails  struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(body, &usageProbe) == nil {
+		switch {
+		case usageProbe.Usage.PromptTokensDetails.CachedTokens > 0:
+			cacheReadTokens = usageProbe.Usage.PromptTokensDetails.CachedTokens
+		case usageProbe.Usage.CacheReadInputTokens > 0:
+			cacheReadTokens = usageProbe.Usage.CacheReadInputTokens
+		case usageProbe.Usage.CachedTokens > 0:
+			cacheReadTokens = usageProbe.Usage.CachedTokens
 		}
+	}
+	if cacheReadTokens > 5000 {
+		client.Log.Warnf("⚠️  [%s] Prompt cache hit: %d tokens reused (prompt=%d). Market data is dynamic — "+
+			"cached input risks stale decisions. If this provider caches the user message, disable caching or switch provider.",
+			client.String(), cacheReadTokens, raw.Usage.PromptTokens)
 	}
 
 	// Parse message as a flexible map to capture all fields

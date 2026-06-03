@@ -491,7 +491,6 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	}
 
 	// 9. Output Discipline (Critical - prevents token waste)
-	lang := e.GetLanguage()
 	sb.WriteString("\n---\n\n")
 	if lang == LangChinese {
 		sb.WriteString("## ⚠️ 输出纪律（关键）\n\n")
