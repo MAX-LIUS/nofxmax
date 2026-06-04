@@ -450,7 +450,11 @@ func ClassifyTrendPhase(data *Data) *TrendPhase {
 	switch {
 	case momentumDecay < 0.15 && absChg4h > 2.0:
 		phase = TrendPhaseExhaustion
-	case effectiveMagnitude > 3.5:
+	case absChg4h > 3.5:
+		// Exhaustion only on a genuine large 4h move, NOT on EMA20 deviation alone.
+		// Validation 2026-06-04: EMA-deviation-driven "exhaustion" mislabeled ranging
+		// markets (e.g. 4h=-0.81% but EMA dev -3.6% with decay=1.66 = accelerating, not
+		// exhausting). Pure-EMA-deviation cases fall through to extension (soft-gated).
 		phase = TrendPhaseExhaustion
 	case effectiveMagnitude > 2.5 || (absChg4h > 2.0 && absExtension > 1.8):
 		phase = TrendPhaseExtension

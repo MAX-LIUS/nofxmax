@@ -463,6 +463,16 @@ type RegimeFilterConfig struct {
 	MomentumCounterChg1h   float64 `json:"momentum_counter_chg1h,omitempty"`   // chg1h opposing direction above this = counter (default 0.3)
 	MomentumFadingChg4h    float64 `json:"momentum_fading_chg4h,omitempty"`    // chg4h above this triggers fading check (default 2.5)
 	MaxSLDistancePct       float64 `json:"max_sl_distance_pct,omitempty"`      // max SL distance as % of entry price (default 2.0)
+
+	// Asymmetric trend alignment — based on regime-classifier accuracy validation
+	// (2026-06-04): trending_up direction accuracy ~45% (counter-indicator),
+	// trending_down ~60% (reliable). EMA20-deviation-driven extension over-triggers
+	// in ranging markets. When enabled, counter-trend shorts in uptrends and
+	// EMA-driven extensions become soft (penalty + size reduction) instead of hard blocks,
+	// while reliable downtrend protection (block counter-trend longs) stays hard.
+	AsymmetricTrendAlignment  bool `json:"asymmetric_trend_alignment,omitempty"`   // master switch; false = legacy hard-block behavior
+	CounterTrendShortPenalty  int  `json:"counter_trend_short_penalty,omitempty"`  // soft penalty for short in trending_up (default 25)
+	ExtensionEMADrivenPenalty int  `json:"extension_ema_driven_penalty,omitempty"` // soft penalty for EMA-deviation-driven extension (default 20)
 }
 
 // GridStrategyConfig grid trading specific configuration

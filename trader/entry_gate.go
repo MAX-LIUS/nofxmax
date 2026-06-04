@@ -259,8 +259,34 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 			if regimeCfg.TrendAlignmentMode == store.RegimeTrendAlignmentAllowRangeEdgeReversal {
 				check.Detail += " — range_edge reversal exception not satisfied"
 			}
+			// Sweet-spot soft-gate (validation 2026-06-04, 336 samples + out-of-sample):
+			// A counter-trend (opposes-regime) entry is only profitable in a narrow window —
+			// when the 4h move is mildly IN the trade's direction (0 to -0.5%), i.e. the
+			// opposing trend has just started loosening but has not reversed hard.
+			// dir_mom = 4h change projected onto the trade direction (short→ -chg4h, long→ +chg4h).
+			//   dir_mom ∈ (-0.5, 0]: profit:stop ≈ 3.6, +EV → soft-gate (penalty + size cut), allow.
+			//   dir_mom ≤ -1 (hard counter-trend = catching a falling knife): negative EV → keep hard block.
+			//   dir_mom > 0 (already reversed = chasing): negative EV → keep hard block.
+			// trending_down counter-trend LONGs outside the sweet-spot stay hard-blocked
+			// (downtrend protection is the reliable ~60% signal).
+			if regimeCfg.AsymmetricTrendAlignment && data != nil {
+				dirMom := data.PriceChange4h
+				if strings.Contains(strings.ToLower(d.Action), "short") {
+					dirMom = -data.PriceChange4h
+				}
+				if dirMom > -0.5 && dirMom <= 0.0 {
+					penalty := regimeCfg.CounterTrendShortPenalty
+					if penalty <= 0 {
+						penalty = 25
+					}
+					check.Enforced = false
+					check.Passed = false
+					check.Penalty = penalty
+					check.Detail += fmt.Sprintf(" — 甜区逆势(dir_mom=%.2f%%∈(-0.5,0])降级软门禁缩仓: 回测盈亏比3.6", dirMom)
+				}
+			}
 		}
-		check.Values = fmt.Sprintf("action=%s regime=%s setup=%s mode=%s", d.Action, regime, d.SetupType, regimeCfg.TrendAlignmentMode)
+		check.Values = fmt.Sprintf("action=%s regime=%s setup=%s mode=%s enforced=%v", d.Action, regime, d.SetupType, regimeCfg.TrendAlignmentMode, check.Enforced)
 		checks = append(checks, check)
 	}
 
@@ -337,14 +363,35 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 			// Block trend-following entries in extension phase
 			isTrendFollowing := (isLong && data.PriceChange4h > 0) || (isShort && data.PriceChange4h < 0)
 			if isTrendFollowing {
-				checks = append(checks, EntryGateCheck{
-					Code:     "trend_phase_extension",
-					Stage:    string(EntryGateStageMarketState),
-					Passed:   false,
-					Enforced: true,
-					Detail:   fmt.Sprintf("趋势延伸阶段禁止顺势开仓 (4h=%.2f%%, EMA20偏离=%.2f%%) — 等回调到EMA20附近", data.PriceChange4h, trendPhase.ExtensionPct),
-					Values:   fmt.Sprintf("phase=%s chg4h=%.4f extension=%.4f action=%s", trendPhase.Phase, data.PriceChange4h, trendPhase.ExtensionPct, d.Action),
-				})
+				// Asymmetric soft-gate: an EMA20-deviation-driven extension (small real 4h
+				// move but price far from EMA20) over-triggers in ranging markets
+				// (validation 2026-06-04). Downgrade those to a soft penalty; keep a hard
+				// block only for a genuine large 4h move.
+				emaDriven := trendPhase.Chg4hAbs < 1.5 && math.Abs(trendPhase.ExtensionPct) > 2.5
+				if regimeCfg.AsymmetricTrendAlignment && emaDriven {
+					penalty := regimeCfg.ExtensionEMADrivenPenalty
+					if penalty <= 0 {
+						penalty = 20
+					}
+					checks = append(checks, EntryGateCheck{
+						Code:     "trend_phase_extension_ema_driven",
+						Stage:    string(EntryGateStageMarketState),
+						Passed:   false,
+						Enforced: false,
+						Penalty:  penalty,
+						Detail:   fmt.Sprintf("EMA偏离驱动的延伸(4h仅%.2f%%,偏离%.2f%%)—降级软门禁缩仓而非硬拦", data.PriceChange4h, trendPhase.ExtensionPct),
+						Values:   fmt.Sprintf("phase=%s chg4h=%.4f extension=%.4f action=%s soft=ema_driven", trendPhase.Phase, data.PriceChange4h, trendPhase.ExtensionPct, d.Action),
+					})
+				} else {
+					checks = append(checks, EntryGateCheck{
+						Code:     "trend_phase_extension",
+						Stage:    string(EntryGateStageMarketState),
+						Passed:   false,
+						Enforced: true,
+						Detail:   fmt.Sprintf("趋势延伸阶段禁止顺势开仓 (4h=%.2f%%, EMA20偏离=%.2f%%) — 等回调到EMA20附近", data.PriceChange4h, trendPhase.ExtensionPct),
+						Values:   fmt.Sprintf("phase=%s chg4h=%.4f extension=%.4f action=%s", trendPhase.Phase, data.PriceChange4h, trendPhase.ExtensionPct, d.Action),
+					})
+				}
 			} else {
 				// Counter-trend or neutral in extension: allow but require high confidence
 				minConf := 85
@@ -1084,6 +1131,7 @@ var gateCheckPenalties = map[string]int{
 	"coin_momentum_counter":                 15,
 	"trend_phase_continuation_conf":         15,
 	"trend_phase_extension_high_conf":       20,
+	"trend_phase_extension_ema_driven":      20,
 }
 
 // computeGateScore calculates a weighted score from all checks.
