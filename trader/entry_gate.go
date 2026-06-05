@@ -259,32 +259,12 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 			if regimeCfg.TrendAlignmentMode == store.RegimeTrendAlignmentAllowRangeEdgeReversal {
 				check.Detail += " — range_edge reversal exception not satisfied"
 			}
-			// Sweet-spot soft-gate (validation 2026-06-04, 336 samples + out-of-sample):
-			// A counter-trend (opposes-regime) entry is only profitable in a narrow window —
-			// when the 4h move is mildly IN the trade's direction (0 to -0.5%), i.e. the
-			// opposing trend has just started loosening but has not reversed hard.
-			// dir_mom = 4h change projected onto the trade direction (short→ -chg4h, long→ +chg4h).
-			//   dir_mom ∈ (-0.5, 0]: profit:stop ≈ 3.6, +EV → soft-gate (penalty + size cut), allow.
-			//   dir_mom ≤ -1 (hard counter-trend = catching a falling knife): negative EV → keep hard block.
-			//   dir_mom > 0 (already reversed = chasing): negative EV → keep hard block.
-			// trending_down counter-trend LONGs outside the sweet-spot stay hard-blocked
-			// (downtrend protection is the reliable ~60% signal).
-			if regimeCfg.AsymmetricTrendAlignment && data != nil {
-				dirMom := data.PriceChange4h
-				if strings.Contains(strings.ToLower(d.Action), "short") {
-					dirMom = -data.PriceChange4h
-				}
-				if dirMom > -0.5 && dirMom <= 0.0 {
-					penalty := regimeCfg.CounterTrendShortPenalty
-					if penalty <= 0 {
-						penalty = 25
-					}
-					check.Enforced = false
-					check.Passed = false
-					check.Penalty = penalty
-					check.Detail += fmt.Sprintf(" — 甜区逆势(dir_mom=%.2f%%∈(-0.5,0])降级软门禁缩仓: 回测盈亏比3.6", dirMom)
-				}
-			}
+			// Counter-trend (opposes-regime) entries are hard-blocked.
+			// The previous "sweet-spot soft-gate" (commit 2110e77) that allowed misaligned
+			// entries with dir_mom∈(-0.5,0] was reverted on 2026-06-04: rigorous backtests
+			// (real SL/TP + fees, 5.5 months) proved counter-trend trades lose in both
+			// directions (-0.38%/-0.82% per trade) while trend-following wins. There is no
+			// reliable counter-trend window. Enforced=true → hard block.
 		}
 		check.Values = fmt.Sprintf("action=%s regime=%s setup=%s mode=%s enforced=%v", d.Action, regime, d.SetupType, regimeCfg.TrendAlignmentMode, check.Enforced)
 		checks = append(checks, check)
