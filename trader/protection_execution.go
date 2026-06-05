@@ -43,7 +43,23 @@ func (at *AutoTrader) applyPostOpenProtection(req *protectionExecutionRequest) e
 	}
 	plan := configuredPlan
 
-	if req.Decision.ProtectionPlan != nil {
+	// When the strategy's protection is configured in MANUAL mode, the operator has
+	// explicitly fixed the protection scheme (e.g. ladder TP-ladder + fixed SL). The AI
+	// may still emit a protection_plan out of habit, but it must NOT override the manual
+	// config. Only defer to the AI plan when the relevant legs are in AI mode.
+	// (Fixes: 2026-06-05 A1 deploy — AI protection_plan was silently overriding the
+	// manual ladder 8% SL + laddered take-profit config.)
+	manualProtection := false
+	if at.config.StrategyConfig != nil {
+		prot := at.config.StrategyConfig.Protection
+		ladderManual := prot.LadderTPSL.Enabled && prot.LadderTPSL.Mode == store.ProtectionModeManual
+		fullManual := prot.FullTPSL.Enabled && prot.FullTPSL.Mode == store.ProtectionModeManual
+		ddAI := prot.DrawdownTakeProfit.Enabled && prot.DrawdownTakeProfit.Mode == store.ProtectionModeAI
+		// Manual protection regime: ladder/full manual own the legs and DD is not in AI mode.
+		manualProtection = (ladderManual || fullManual) && !ddAI
+	}
+
+	if !manualProtection && req.Decision.ProtectionPlan != nil {
 		decisionPlan, err := buildAIProtectionPlan(req.EntryPrice, req.Action, req.Decision.ProtectionPlan, at.config.StrategyConfig)
 		if err != nil {
 			return err
