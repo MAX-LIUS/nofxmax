@@ -49,15 +49,7 @@ func (at *AutoTrader) applyPostOpenProtection(req *protectionExecutionRequest) e
 	// config. Only defer to the AI plan when the relevant legs are in AI mode.
 	// (Fixes: 2026-06-05 A1 deploy — AI protection_plan was silently overriding the
 	// manual ladder 8% SL + laddered take-profit config.)
-	manualProtection := false
-	if at.config.StrategyConfig != nil {
-		prot := at.config.StrategyConfig.Protection
-		ladderManual := prot.LadderTPSL.Enabled && prot.LadderTPSL.Mode == store.ProtectionModeManual
-		fullManual := prot.FullTPSL.Enabled && prot.FullTPSL.Mode == store.ProtectionModeManual
-		ddAI := prot.DrawdownTakeProfit.Enabled && prot.DrawdownTakeProfit.Mode == store.ProtectionModeAI
-		// Manual protection regime: ladder/full manual own the legs and DD is not in AI mode.
-		manualProtection = (ladderManual || fullManual) && !ddAI
-	}
+	manualProtection := at.usesManualProtection()
 
 	if !manualProtection && req.Decision.ProtectionPlan != nil {
 		decisionPlan, err := buildAIProtectionPlan(req.EntryPrice, req.Action, req.Decision.ProtectionPlan, at.config.StrategyConfig)
@@ -209,6 +201,23 @@ func protectionRouteRequiresDecisionPlan(protection store.ProtectionConfig, deci
 		return mode != "full" || (!materialized.NeedsStopLoss && !materialized.NeedsTakeProfit)
 	}
 	return false
+}
+
+// usesManualProtection reports whether the strategy's protection is configured in
+// MANUAL mode (ladder/full manual own the legs, DD not in AI mode). In this regime
+// the operator has fixed the protection scheme, and any AI protection_plan must be
+// ignored — both at open time (applyPostOpenProtection) and on every reconcile
+// (protection_reconciler). Fixes 2026-06-06: AI plan was overriding manual A1 config
+// via the reconciler's preferDecisionProtectionPlan call every 20s.
+func (at *AutoTrader) usesManualProtection() bool {
+	if at.config.StrategyConfig == nil {
+		return false
+	}
+	prot := at.config.StrategyConfig.Protection
+	ladderManual := prot.LadderTPSL.Enabled && prot.LadderTPSL.Mode == store.ProtectionModeManual
+	fullManual := prot.FullTPSL.Enabled && prot.FullTPSL.Mode == store.ProtectionModeManual
+	ddAI := prot.DrawdownTakeProfit.Enabled && prot.DrawdownTakeProfit.Mode == store.ProtectionModeAI
+	return (ladderManual || fullManual) && !ddAI
 }
 
 func preferDecisionProtectionPlan(configuredPlan, decisionPlan *ProtectionPlan) *ProtectionPlan {
