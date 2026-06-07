@@ -806,7 +806,12 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 
 	drawdownRules := at.getActiveDrawdownRulesForPosition(symbol, side)
 	if len(drawdownRules) == 0 {
-		drawdownRules = at.restoreAIDrawdownRulesForPositionWithEntry(symbol, side, entryPrice)
+		// Only restore AI-baked drawdown rules from the entry decision when drawdown
+		// take-profit is actually enabled. Otherwise the disabled feature leaks into
+		// telemetry ("Drawdown arm pending …") and is misleading (fix 2026-06-07).
+		if at.config.StrategyConfig != nil && at.config.StrategyConfig.Protection.DrawdownTakeProfit.Enabled {
+			drawdownRules = at.restoreAIDrawdownRulesForPositionWithEntry(symbol, side, entryPrice)
+		}
 	}
 	drawdownSource := at.getDrawdownConfigSource(symbol, side)
 	runnerState := at.getDrawdownRunnerState(symbol, side)

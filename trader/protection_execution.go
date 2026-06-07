@@ -522,11 +522,32 @@ func (at *AutoTrader) validateProtectionPlanExecution(symbol, positionSide strin
 		adjusted.StopLossOrders = filterExecutable(adjusted.StopLossOrders)
 		adjusted.TakeProfitOrders = filterExecutable(adjusted.TakeProfitOrders)
 
-		if len(plan.StopLossOrders) > 0 && len(adjusted.StopLossOrders) == 0 && plan.NeedsStopLoss && plan.StopLossPrice > 0 {
-			logger.Warnf("  ⚠️ Ladder stop-loss tiers all below exchange minimum; degrading to full stop for %s %s", symbol, positionSide)
+		if len(plan.StopLossOrders) > 0 && len(adjusted.StopLossOrders) == 0 && plan.NeedsStopLoss {
+			// All ladder stop tiers fell below the exchange minimum (dust remainder).
+			// Honor a pre-set full stop price if present; otherwise collapse to the
+			// tightest tier so the remaining position keeps stop coverage instead of
+			// losing it entirely (fix 2026-06-07).
+			if adjusted.StopLossPrice > 0 {
+				logger.Warnf("  ⚠️ Ladder stop-loss tiers all below exchange minimum; using full stop @%.6f for %s %s", adjusted.StopLossPrice, symbol, positionSide)
+			} else if collapsePrice := tightestLadderStopPrice(plan.StopLossOrders, strings.ToLower(positionSide)); collapsePrice > 0 {
+				logger.Warnf("  ⚠️ Ladder stop-loss tiers all below exchange minimum; collapsing to full stop @%.6f for %s %s", collapsePrice, symbol, positionSide)
+				adjusted.StopLossPrice = collapsePrice
+				adjusted.StopLossOrders = nil
+			}
 		}
-		if len(plan.TakeProfitOrders) > 0 && len(adjusted.TakeProfitOrders) == 0 && plan.NeedsTakeProfit && plan.TakeProfitPrice > 0 {
-			logger.Warnf("  ⚠️ Ladder take-profit tiers all below exchange minimum; degrading to full TP for %s %s", symbol, positionSide)
+		if len(plan.TakeProfitOrders) > 0 && len(adjusted.TakeProfitOrders) == 0 && plan.NeedsTakeProfit {
+			// All ladder TP tiers fell below the exchange minimum (dust remainder).
+			// Honor a pre-set full TP price if present; otherwise collapse to the
+			// nearest (first-to-fill) tier so the dust is still taken at the earliest
+			// configured target instead of leaving the position with no TP and looping
+			// forever (fix 2026-06-07).
+			if adjusted.TakeProfitPrice > 0 {
+				logger.Warnf("  ⚠️ Ladder take-profit tiers all below exchange minimum; using full TP @%.6f for %s %s", adjusted.TakeProfitPrice, symbol, positionSide)
+			} else if collapsePrice := nearestLadderTakeProfitPrice(plan.TakeProfitOrders, strings.ToLower(positionSide)); collapsePrice > 0 {
+				logger.Warnf("  ⚠️ Ladder take-profit tiers all below exchange minimum; collapsing to full TP @%.6f for %s %s", collapsePrice, symbol, positionSide)
+				adjusted.TakeProfitPrice = collapsePrice
+				adjusted.TakeProfitOrders = nil
+			}
 		}
 	}
 

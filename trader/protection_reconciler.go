@@ -231,6 +231,15 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 		}
 	}
 
+	// Anchor ladder take-profit tiers to the original entry quantity and drop tiers
+	// that have already been filled, so a vanished TP order is not re-placed against
+	// the shrinking remainder every reconcile cycle (fix 2026-06-07).
+	if plan != nil && len(plan.TakeProfitOrders) > 0 && at.store != nil {
+		if dbPos, err := at.store.Position().GetOpenPositionBySymbol(at.id, symbol, positionSide); err == nil && dbPos != nil && dbPos.EntryQuantity > 0 {
+			anchorLadderTakeProfitToEntry(plan, actionFromPositionSide(side), dbPos.EntryQuantity, quantity)
+		}
+	}
+
 	if plan == nil {
 		result = reconcileResultForUnmaterializedPlan(openOrders, positionSide, protectionConfigured)
 	}
