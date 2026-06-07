@@ -1063,27 +1063,30 @@ func (e *StrategyEngine) GetCandidateCoins() ([]CandidateCoin, error) {
 	}
 }
 
-// filterExcludedCoins removes excluded coins from the candidates list
+// filterExcludedCoins removes excluded coins from the candidates list.
+// It also unconditionally removes xyz: DEX assets (stocks/forex/commodities perps):
+// the trend/EMA strategy is designed for crypto, these assets use a different K-line
+// source (Hyperliquid) and broke the frontend chart (2026-06-07). Crypto-only pool.
 func (e *StrategyEngine) filterExcludedCoins(candidates []CandidateCoin) []CandidateCoin {
-	if len(e.config.CoinSource.ExcludedCoins) == 0 {
-		return candidates
-	}
-
-	// Build excluded set for O(1) lookup
+	// Build excluded set for O(1) lookup (may be empty)
 	excluded := make(map[string]bool)
 	for _, coin := range e.config.CoinSource.ExcludedCoins {
 		normalized := market.Normalize(coin)
 		excluded[normalized] = true
 	}
 
-	// Filter out excluded coins
 	filtered := make([]CandidateCoin, 0, len(candidates))
 	for _, c := range candidates {
-		if !excluded[c.Symbol] {
-			filtered = append(filtered, c)
-		} else {
-			logger.Infof("🚫 Excluded coin: %s", c.Symbol)
+		// Always drop xyz DEX assets (non-crypto: stocks/forex/commodities).
+		if strings.HasPrefix(strings.ToLower(c.Symbol), "xyz:") || hyperliquid.IsXYZAsset(c.Symbol) {
+			logger.Infof("🚫 Excluded non-crypto (xyz/DEX) asset from pool: %s", c.Symbol)
+			continue
 		}
+		if excluded[c.Symbol] {
+			logger.Infof("🚫 Excluded coin: %s", c.Symbol)
+			continue
+		}
+		filtered = append(filtered, c)
 	}
 
 	return filtered
