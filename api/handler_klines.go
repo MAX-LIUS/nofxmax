@@ -44,6 +44,20 @@ func (s *Server) handleKlines(c *gin.Context) {
 	var klines []market.Kline
 	exchangeLower := strings.ToLower(exchange)
 
+	// xyz: prefix = DEX asset (stocks/forex/commodities perps) — these only exist on
+	// Hyperliquid, regardless of the trader's configured exchange. Without this, a
+	// position like "xyz:MU" on an OKX trader routes to CoinAnk/OKX and 500s (the
+	// symbol doesn't exist there), breaking the K-line chart in the frontend.
+	if strings.HasPrefix(strings.ToLower(symbol), "xyz:") {
+		klines, err = s.getKlinesFromHyperliquid(symbol, interval, limit)
+		if err != nil {
+			SafeInternalError(c, "Get klines from Hyperliquid (xyz asset)", err)
+			return
+		}
+		c.JSON(http.StatusOK, klines)
+		return
+	}
+
 	// Route to appropriate data source based on exchange type
 	switch exchangeLower {
 	case "alpaca":
