@@ -331,47 +331,50 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 
 		switch trendPhase.Phase {
 		case market.TrendPhaseExhaustion:
+			// Soft-gate (validation 2026-06-07): blocking exhaustion-phase entries
+			// mislabeled good momentum continuation — of blocked exhaustion trades, 21
+			// would-be-profitable vs 16 avoided-loss (+43% if allowed). Downgrade to a
+			// soft penalty (size reduction) instead of a hard block.
 			checks = append(checks, EntryGateCheck{
 				Code:     "trend_phase_exhaustion",
 				Stage:    string(EntryGateStageMarketState),
 				Passed:   false,
-				Enforced: true,
-				Detail:   fmt.Sprintf("趋势耗竭阶段禁止开仓 (4h=%.2f%%, EMA20偏离=%.2f%%, 动量衰减=%.2f)", data.PriceChange4h, trendPhase.ExtensionPct, trendPhase.MomentumDecay),
+				Enforced: false,
+				Penalty:  30,
+				Detail:   fmt.Sprintf("趋势耗竭阶段降级软门禁缩仓 (4h=%.2f%%, EMA20偏离=%.2f%%, 动量衰减=%.2f)", data.PriceChange4h, trendPhase.ExtensionPct, trendPhase.MomentumDecay),
 				Values:   fmt.Sprintf("phase=%s chg4h=%.4f extension=%.4f decay=%.4f", trendPhase.Phase, data.PriceChange4h, trendPhase.ExtensionPct, trendPhase.MomentumDecay),
 			})
 		case market.TrendPhaseExtension:
-			// Block trend-following entries in extension phase
+			// Soft-gate (validation 2026-06-07): blocking extension-phase trend-following
+			// entries mislabeled good momentum continuation — of blocked extension trades,
+			// 42 would-be-profitable vs 27 avoided-loss (+84% if allowed). Downgrade to a
+			// soft penalty (size reduction). EMA-deviation-driven extensions (small real 4h
+			// move) get a lighter penalty; genuine large-4h extensions a heavier one.
 			isTrendFollowing := (isLong && data.PriceChange4h > 0) || (isShort && data.PriceChange4h < 0)
 			if isTrendFollowing {
-				// Asymmetric soft-gate: an EMA20-deviation-driven extension (small real 4h
-				// move but price far from EMA20) over-triggers in ranging markets
-				// (validation 2026-06-04). Downgrade those to a soft penalty; keep a hard
-				// block only for a genuine large 4h move.
 				emaDriven := trendPhase.Chg4hAbs < 1.5 && math.Abs(trendPhase.ExtensionPct) > 2.5
-				if regimeCfg.AsymmetricTrendAlignment && emaDriven {
-					penalty := regimeCfg.ExtensionEMADrivenPenalty
-					if penalty <= 0 {
-						penalty = 20
-					}
-					checks = append(checks, EntryGateCheck{
-						Code:     "trend_phase_extension_ema_driven",
-						Stage:    string(EntryGateStageMarketState),
-						Passed:   false,
-						Enforced: false,
-						Penalty:  penalty,
-						Detail:   fmt.Sprintf("EMA偏离驱动的延伸(4h仅%.2f%%,偏离%.2f%%)—降级软门禁缩仓而非硬拦", data.PriceChange4h, trendPhase.ExtensionPct),
-						Values:   fmt.Sprintf("phase=%s chg4h=%.4f extension=%.4f action=%s soft=ema_driven", trendPhase.Phase, data.PriceChange4h, trendPhase.ExtensionPct, d.Action),
-					})
-				} else {
-					checks = append(checks, EntryGateCheck{
-						Code:     "trend_phase_extension",
-						Stage:    string(EntryGateStageMarketState),
-						Passed:   false,
-						Enforced: true,
-						Detail:   fmt.Sprintf("趋势延伸阶段禁止顺势开仓 (4h=%.2f%%, EMA20偏离=%.2f%%) — 等回调到EMA20附近", data.PriceChange4h, trendPhase.ExtensionPct),
-						Values:   fmt.Sprintf("phase=%s chg4h=%.4f extension=%.4f action=%s", trendPhase.Phase, data.PriceChange4h, trendPhase.ExtensionPct, d.Action),
-					})
+				penalty := regimeCfg.ExtensionEMADrivenPenalty
+				if penalty <= 0 {
+					penalty = 20
 				}
+				if !emaDriven {
+					// Genuine large-4h extension: heavier penalty (more size reduction) but
+					// still allow — momentum often continues.
+					penalty = 30
+				}
+				code := "trend_phase_extension"
+				if emaDriven {
+					code = "trend_phase_extension_ema_driven"
+				}
+				checks = append(checks, EntryGateCheck{
+					Code:     code,
+					Stage:    string(EntryGateStageMarketState),
+					Passed:   false,
+					Enforced: false,
+					Penalty:  penalty,
+					Detail:   fmt.Sprintf("趋势延伸阶段降级软门禁缩仓 (4h=%.2f%%, EMA20偏离=%.2f%%, ema_driven=%v)", data.PriceChange4h, trendPhase.ExtensionPct, emaDriven),
+					Values:   fmt.Sprintf("phase=%s chg4h=%.4f extension=%.4f action=%s ema_driven=%v", trendPhase.Phase, data.PriceChange4h, trendPhase.ExtensionPct, d.Action, emaDriven),
+				})
 			} else {
 				// Counter-trend or neutral in extension: allow but require high confidence
 				minConf := 85
@@ -859,7 +862,17 @@ func evaluateConfidenceRiskGate(input entryGateInput) []EntryGateCheck {
 
 			// SL distance percentage cap — reject entries where SL is too far from entry
 			// Dynamic cap: altcoins get wider allowance, and high-RR trades get a bonus.
-			if rr.Entry > 0 {
+			// Disabled when MaxSLDistancePct < 0 (operator opts out — e.g. when protection
+			// uses a fixed wide stop like A1's 5% ladder SL, a tight open-time SL cap would
+			// reject the very setups the protection scheme is designed for; validated
+			// 2026-06-07: a 0.5% cap was rejecting 27 would-be-profitable trades).
+			slCapDisabled := false
+			if input.StrategyConfig != nil {
+				if getRegimeFilterConfig(input.StrategyConfig).MaxSLDistancePct < 0 {
+					slCapDisabled = true
+				}
+			}
+			if rr.Entry > 0 && !slCapDisabled {
 				slPctDist := slDist / rr.Entry * 100
 				maxSLPct := 2.0
 				if input.StrategyConfig != nil {
