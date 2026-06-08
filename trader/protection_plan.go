@@ -285,7 +285,13 @@ func (at *AutoTrader) BuildConfiguredProtectionPlan(entryPrice float64, action s
 		}
 		// Drawdown/native trailing owns the profit-taking side. When drawdown is enabled,
 		// keep ladder stop-loss legs but suppress ladder take-profit legs to avoid conflict.
-		if drawdownEnabled && ladderPlan != nil {
+		//
+		// EXCEPTION — ladder-TP + DD-on-runner coexistence (2026-06-08): when BOTH ladder TP
+		// and drawdown are enabled, the design is "ladder TP1/TP2 take staged profit, then DD
+		// trails ONLY the remaining runner". In that mode we must NOT suppress ladder TP — the
+		// ladder fills first (e.g. +3%/40%, +6%/35%), and DD only arms on the residual runner
+		// once the ladder TP has fully filled (gated in getActiveDrawdownRulesForPosition).
+		if drawdownEnabled && ladderPlan != nil && !ladderRunnerCoexistsWithDrawdown(protection) {
 			ladderPlan.TakeProfitOrders = nil
 			ladderPlan.NeedsTakeProfit = false
 			ladderPlan.TakeProfitPrice = 0

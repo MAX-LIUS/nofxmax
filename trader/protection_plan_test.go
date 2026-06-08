@@ -415,7 +415,7 @@ func TestBuildManualLadderProtectionPlanUsesConfiguredStopRulesWhenAIModeHasNoAI
 	}
 }
 
-func TestBuildConfiguredProtectionPlanDrawdownSuppressesStaticTPAndLadderOwnsStops(t *testing.T) {
+func TestBuildConfiguredProtectionPlanLadderTPCoexistsWithDrawdownAndLadderOwnsStops(t *testing.T) {
 	at := &AutoTrader{config: AutoTraderConfig{StrategyConfig: &store.StrategyConfig{Protection: store.ProtectionConfig{
 		FullTPSL: store.FullTPSLConfig{
 			Enabled:    true,
@@ -447,8 +447,13 @@ func TestBuildConfiguredProtectionPlanDrawdownSuppressesStaticTPAndLadderOwnsSto
 	if len(plan.StopLossOrders) != 1 || !almostEqual(plan.StopLossOrders[0].Price, 98) {
 		t.Fatalf("expected ladder stop to own stop side in configured plan, got %+v", plan)
 	}
-	if len(plan.TakeProfitOrders) != 0 || plan.NeedsTakeProfit || plan.TakeProfitPrice != 0 {
-		t.Fatalf("expected drawdown to suppress static TP side, got %+v", plan)
+	// Ladder-TP + DD-on-runner coexistence (2026-06-08): when BOTH ladder TP and
+	// drawdown are enabled, ladder TP is now PRESERVED (not suppressed). The ladder
+	// takes staged profit; DD only arms on the residual runner once ladder TP fully
+	// fills (gated in getActiveDrawdownRulesForPosition). So here the ladder TP leg
+	// at +5% (price 105) must remain.
+	if len(plan.TakeProfitOrders) != 1 || !almostEqual(plan.TakeProfitOrders[0].Price, 105) {
+		t.Fatalf("expected ladder TP preserved under coexistence mode, got %+v", plan)
 	}
 	if plan.StopLossPrice != 0 {
 		t.Fatalf("expected full stop suppressed by ladder stop, got %+v", plan)

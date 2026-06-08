@@ -566,6 +566,26 @@ func (at *AutoTrader) getActiveDrawdownRulesForPosition(symbol, side string) []s
 		return nil
 	}
 
+	// Ladder-TP + DD-on-runner coexistence gate (2026-06-08, Plan A): when both ladder
+	// TP and drawdown are enabled, drawdown must only trail the residual runner AFTER the
+	// ladder TP tiers have fully filled. Until the position is reduced past the ladder's
+	// cumulative TP close ratio, do NOT arm drawdown — otherwise DD would trail the full
+	// position (incl. the unfilled TP2 portion) at the +6% activation, an incorrect basis.
+	if (symbol != "" || side != "") && at.store != nil {
+		prot := at.config.StrategyConfig.Protection
+		if ladderRunnerCoexistsWithDrawdown(prot) {
+			pos, err := at.store.Position().GetOpenPositionBySymbol(at.id, symbol, strings.ToUpper(side))
+			if err != nil || pos == nil || pos.EntryQuantity <= 0 {
+				// Cannot confirm runner stage → stay conservative, don't arm DD yet.
+				return nil
+			}
+			ladderTPClose := ladderTakeProfitCloseRatioTotal(prot.LadderTPSL)
+			if !ladderRunnerStageReached(pos.EntryQuantity, pos.Quantity, ladderTPClose) {
+				return nil
+			}
+		}
+	}
+
 	if symbol != "" || side != "" {
 		key := positionKey(symbol, side)
 		at.protectionStateMutex.RLock()
