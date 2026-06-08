@@ -530,9 +530,16 @@ func (at *AutoTrader) validateProtectionPlanExecution(symbol, positionSide strin
 			if adjusted.StopLossPrice > 0 {
 				logger.Warnf("  ⚠️ Ladder stop-loss tiers all below exchange minimum; using full stop @%.6f for %s %s", adjusted.StopLossPrice, symbol, positionSide)
 			} else if collapsePrice := tightestLadderStopPrice(plan.StopLossOrders, strings.ToLower(positionSide)); collapsePrice > 0 {
-				logger.Warnf("  ⚠️ Ladder stop-loss tiers all below exchange minimum; collapsing to full stop @%.6f for %s %s", collapsePrice, symbol, positionSide)
-				adjusted.StopLossPrice = collapsePrice
-				adjusted.StopLossOrders = nil
+				// Only collapse to a stop that is still executable against current mark.
+				// A stop already breached by price would be rejected by the exchange and
+				// loop forever (fix 2026-06-09).
+				if hasMarkPrice && !isExecutableHeldStopPrice(strings.ToLower(positionSide), collapsePrice, markPrice) {
+					logger.Warnf("  ⚠️ Ladder stop collapse price %.6f already breached vs mark %.6f for %s %s; leaving stop to fallback/existing protection", collapsePrice, markPrice, symbol, positionSide)
+				} else {
+					logger.Warnf("  ⚠️ Ladder stop-loss tiers all below exchange minimum; collapsing to full stop @%.6f for %s %s", collapsePrice, symbol, positionSide)
+					adjusted.StopLossPrice = collapsePrice
+					adjusted.StopLossOrders = nil
+				}
 			}
 		}
 		if len(plan.TakeProfitOrders) > 0 && len(adjusted.TakeProfitOrders) == 0 && plan.NeedsTakeProfit {
@@ -544,9 +551,18 @@ func (at *AutoTrader) validateProtectionPlanExecution(symbol, positionSide strin
 			if adjusted.TakeProfitPrice > 0 {
 				logger.Warnf("  ⚠️ Ladder take-profit tiers all below exchange minimum; using full TP @%.6f for %s %s", adjusted.TakeProfitPrice, symbol, positionSide)
 			} else if collapsePrice := nearestLadderTakeProfitPrice(plan.TakeProfitOrders, strings.ToLower(positionSide)); collapsePrice > 0 {
-				logger.Warnf("  ⚠️ Ladder take-profit tiers all below exchange minimum; collapsing to full TP @%.6f for %s %s", collapsePrice, symbol, positionSide)
-				adjusted.TakeProfitPrice = collapsePrice
-				adjusted.TakeProfitOrders = nil
+				// Only collapse to a TP that is still executable against current mark.
+				// When price has already moved past the TP target (e.g. long TP below
+				// mark), the exchange rejects it (OKX 51279) and the reconciler loops
+				// forever re-placing a doomed order. In that case leave TP empty and let
+				// the stop / break-even own the exit (fix 2026-06-09).
+				if hasMarkPrice && !isExecutableHeldTakeProfitPrice(strings.ToLower(positionSide), collapsePrice, markPrice) {
+					logger.Warnf("  ⚠️ Ladder TP collapse price %.6f already passed vs mark %.6f for %s %s; not re-placing TP (price moved past target)", collapsePrice, markPrice, symbol, positionSide)
+				} else {
+					logger.Warnf("  ⚠️ Ladder take-profit tiers all below exchange minimum; collapsing to full TP @%.6f for %s %s", collapsePrice, symbol, positionSide)
+					adjusted.TakeProfitPrice = collapsePrice
+					adjusted.TakeProfitOrders = nil
+				}
 			}
 		}
 	}
@@ -600,6 +616,9 @@ func isNonRetryableProtectionReject(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "code=51280") ||
+		strings.Contains(msg, "code=51279") ||
+		strings.Contains(msg, "cannot be lower than the last price") ||
+		strings.Contains(msg, "cannot be higher than the last price") ||
 		strings.Contains(msg, "SL trigger price must be less than the last price") ||
 		strings.Contains(msg, "SL trigger price must be greater than the last price") ||
 		strings.Contains(msg, "TP trigger price must be less than the last price") ||
