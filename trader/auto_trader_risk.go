@@ -566,25 +566,13 @@ func (at *AutoTrader) getActiveDrawdownRulesForPosition(symbol, side string) []s
 		return nil
 	}
 
-	// Ladder-TP + DD-on-runner coexistence gate (2026-06-08, Plan A): when both ladder
-	// TP and drawdown are enabled, drawdown must only trail the residual runner AFTER the
-	// ladder TP tiers have fully filled. Until the position is reduced past the ladder's
-	// cumulative TP close ratio, do NOT arm drawdown — otherwise DD would trail the full
-	// position (incl. the unfilled TP2 portion) at the +6% activation, an incorrect basis.
-	if (symbol != "" || side != "") && at.store != nil {
-		prot := at.config.StrategyConfig.Protection
-		if ladderRunnerCoexistsWithDrawdown(prot) {
-			pos, err := at.store.Position().GetOpenPositionBySymbol(at.id, symbol, strings.ToUpper(side))
-			if err != nil || pos == nil || pos.EntryQuantity <= 0 {
-				// Cannot confirm runner stage → stay conservative, don't arm DD yet.
-				return nil
-			}
-			ladderTPClose := ladderTakeProfitCloseRatioTotal(prot.LadderTPSL)
-			if !ladderRunnerStageReached(pos.EntryQuantity, pos.Quantity, ladderTPClose) {
-				return nil
-			}
-		}
-	}
+	// Ladder-TP + DD-on-runner coexistence (2026-06-09, Plan B1): DD trails the runner
+	// for EVERY position, not only after the ladder TP has fully filled. No runner-stage
+	// gate — the runner DD arms whenever profit reaches the activation tier (+6%). Oversell
+	// is prevented structurally by the DD close_ratio being the runner share (25% =
+	// 100% - ladder TP cumulative 75%), sized off the ORIGINAL entry quantity in
+	// applyNativeTrailingDrawdown (partialQty = originalQty * cumulativeRatio), so ladder
+	// (75%) + DD runner (25%) = 100% with no overlap regardless of fill timing.
 
 	if symbol != "" || side != "" {
 		key := positionKey(symbol, side)
