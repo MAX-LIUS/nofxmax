@@ -199,7 +199,12 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 	// Drawdown/native trailing owns the profit-taking side. If drawdown profit-control is enabled,
 	// proactively remove old generic TP orders for the active position while keeping SL orders intact.
 	drawdownEnabled := at.config.StrategyConfig != nil && at.config.StrategyConfig.Protection.DrawdownTakeProfit.Enabled && len(at.config.StrategyConfig.Protection.DrawdownTakeProfit.Rules) > 0
-	if nativeTrailingArmed && plan != nil {
+	// Ladder-TP + DD-on-runner coexistence (Plan B1): the ladder TP (+3%/+6% staged
+	// profit-taking) must be PRESERVED — DD only owns the residual runner, not the whole
+	// profit side. So when coexistence is on, do NOT null the plan's ladder TP and do NOT
+	// cancel the on-exchange ladder TP orders (fix 2026-06-09).
+	ladderCoexists := at.config.StrategyConfig != nil && ladderRunnerCoexistsWithDrawdown(at.config.StrategyConfig.Protection)
+	if nativeTrailingArmed && plan != nil && !ladderCoexists {
 		plan.NeedsTakeProfit = false
 		plan.TakeProfitPrice = 0
 		plan.TakeProfitOrders = nil
@@ -207,7 +212,7 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 	// Preserve the configured/open-time ladder shape during held-position reconciliation.
 	// OKX can keep multiple conditional stop legs; only degrade later if exchange validation
 	// proves a tier is non-executable, not preemptively on every reconcile pass.
-	if drawdownEnabled && nativeTrailingArmed {
+	if drawdownEnabled && nativeTrailingArmed && !ladderCoexists {
 		hasGenericTP := false
 		for _, order := range openOrders {
 			if order.PositionSide != "" && !strings.EqualFold(order.PositionSide, positionSide) {
