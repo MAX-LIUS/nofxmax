@@ -678,9 +678,11 @@ func (at *AutoTrader) clearArmedDrawdownRecords(symbol, side string) {
 }
 
 // checkAndFixStaleTrailingActivation checks if existing trailing orders have an activePx
-// that the current price has already passed, but OKX hasn't activated them. If found,
-// cancels the stale order so the system can re-arm with immediate activation (no activePx).
-// Returns true if a stale order was cancelled and re-arm is needed.
+// that the current price has already passed, but OKX hasn't activated them (phantom
+// protection). Plan A (2026-06-09): instead of re-placing without activePx (which would
+// drop the required +6% activation anchor and loop forever), it cancels the phantom order
+// and converts protection to a MANAGED drawdown monitor (fixed retained-profit close at
+// the 40%-retracement price). Returns false so the caller does NOT re-arm native trailing.
 func (at *AutoTrader) checkAndFixStaleTrailingActivation(symbol, side string, entryPrice, markPrice float64, rules []store.DrawdownTakeProfitRule) bool {
 	if markPrice <= 0 {
 		return false
@@ -717,23 +719,56 @@ func (at *AutoTrader) checkAndFixStaleTrailingActivation(symbol, side string, en
 		if !pricePast {
 			continue
 		}
-		// Found a trailing order that should be activated but isn't — cancel it
-		logger.Infof("🔄 DD trailing stale activation detected: %s %s | mark=%.4f past activePx=%.4f — cancelling for re-arm with immediate activation", symbol, side, markPrice, activePx)
+		// Phantom trailing: activePx passed but OKX did not activate. Cancel it and
+		// convert to a managed drawdown monitor (keeps the +6% activation semantics via
+		// a fixed retained-profit close) instead of re-placing without activePx.
+		logger.Infof("🔄 DD trailing phantom activation: %s %s | mark=%.4f past activePx=%.4f — converting to managed drawdown (preserving +6%% anchor)", symbol, side, markPrice, activePx)
 		if cancelTrader, ok := at.trader.(interface {
 			CancelAlgoOrderByID(symbol string, algoID string) error
 		}); ok {
 			if err := cancelTrader.CancelAlgoOrderByID(symbol, order.OrderID); err != nil {
-				logger.Warnf("⚠️ Failed to cancel stale trailing order %s: %v", order.OrderID, err)
+				logger.Warnf("⚠️ Failed to cancel phantom trailing order %s: %v", order.OrderID, err)
 				continue
 			}
 		}
-		// Clear armed state and tier allocs to allow clean re-arm
-		// (prevents detectNativeTrailingFills from marking the cancelled order as "executed")
 		at.clearProtectionState(symbol, side)
 		at.clearDrawdownTierAllocs(symbol, side)
-		return true
+		// Arm managed drawdown for the matching rule so the runner still has a
+		// retracement exit without a native trailing order.
+		if managedRule, ok := matchDrawdownRuleByActivation(rules, entryPrice, side, activePx); ok {
+			activationPrice := calculateProfitBasedTrailingTriggerPrice(entryPrice, side, managedRule.MinProfitPct)
+			callbackRatio := calculateDrawdownRuleCallbackRatio(entryPrice, side, managedRule)
+			if at.applyManagedDrawdownFallback(symbol, side, entryPrice, managedRule, activationPrice, callbackRatio) {
+				logger.Infof("🟣 DD converted to managed drawdown after phantom activation: %s %s", symbol, side)
+			}
+		}
+		// Managed now owns the runner exit — do NOT re-arm native trailing.
+		return false
 	}
 	return false
+}
+
+// matchDrawdownRuleByActivation finds the drawdown rule whose +minProfit activation
+// price matches the given activePx (within tolerance). Falls back to the highest-minProfit
+// rule when no exact match is found.
+func matchDrawdownRuleByActivation(rules []store.DrawdownTakeProfitRule, entryPrice float64, side string, activePx float64) (store.DrawdownTakeProfitRule, bool) {
+	var best store.DrawdownTakeProfitRule
+	hasBest := false
+	for _, r := range rules {
+		r = normalizeDrawdownRule(r)
+		if r.MinProfitPct <= 0 || r.MaxDrawdownPct <= 0 || r.CloseRatioPct <= 0 {
+			continue
+		}
+		ap := calculateProfitBasedTrailingTriggerPrice(entryPrice, side, r.MinProfitPct)
+		if ap > 0 && activePx > 0 && math.Abs(ap-activePx)/activePx <= 0.01 {
+			return r, true
+		}
+		if !hasBest || r.MinProfitPct > best.MinProfitPct {
+			best = r
+			hasBest = true
+		}
+	}
+	return best, hasBest
 }
 
 func (at *AutoTrader) clearArmedDrawdownRecordsAboveMinProfit(symbol, side string, maxMinProfit float64) {
@@ -1617,25 +1652,16 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 			} else {
 				existingTier, _, plannedActivationPrice, plannedCallbackRate := at.findEquivalentPartialTrailingOrder(symbol, side, rule, entryPrice, openOrders)
 				if existingTier != nil && !at.shouldReplacePartialTrailingTier(existingTier, plannedActivationPrice, plannedCallbackRate) {
-					// Force replace if trailing order has activePx set but price already past threshold.
-					// This handles the case where the order was placed with a fixed activePx that
-					// OKX may not have auto-activated. Replace with no activePx for immediate activation.
-					needsReactivation := markPrice > 0 && existingTier.StopPrice > 0 && existingTier.ActivationStatus != "activated"
-					if needsReactivation {
-						if strings.EqualFold(side, "long") && markPrice >= existingTier.StopPrice {
-							logger.Infof("🔄 DD trailing not activated but price past: %s %s mark=%.4f >= activePx=%.4f — replacing for immediate activation", symbol, side, markPrice, existingTier.StopPrice)
-						} else if strings.EqualFold(side, "short") && markPrice <= existingTier.StopPrice {
-							logger.Infof("🔄 DD trailing not activated but price past: %s %s mark=%.4f <= activePx=%.4f — replacing for immediate activation", symbol, side, markPrice, existingTier.StopPrice)
-						} else {
-							needsReactivation = false
-						}
+					// Plan A (2026-06-09): an existing partial trailing tier that matches the
+					// plan (activePx anchored at +6%, correct callback) is KEPT as-is — even if
+					// price has passed activePx and OKX hasn't activated it. We no longer
+					// re-place it without activePx (that would drop the +6% anchor and loop).
+					// The phantom-not-activated case is converted to a managed drawdown monitor
+					// by checkAndFixStaleTrailingActivation, which preserves the +6% semantics.
+					if existingTier.StopPrice > 0 && plannedActivationPrice > 0 {
+						logger.Infof("ℹ️ Native partial trailing tier already exists on exchange (%s %s close=%.1f%% activation=%.6f callback=%.6f status=%s)", symbol, side, rule.CloseRatioPct, existingTier.StopPrice, existingTier.CallbackRate, existingTier.ActivationStatus)
 					}
-					if !needsReactivation {
-						if existingTier.StopPrice > 0 && plannedActivationPrice > 0 {
-							logger.Infof("ℹ️ Native partial trailing tier already exists on exchange (%s %s close=%.1f%% activation=%.6f callback=%.6f status=%s)", symbol, side, rule.CloseRatioPct, existingTier.StopPrice, existingTier.CallbackRate, existingTier.ActivationStatus)
-						}
-						return true
-					}
+					return true
 				}
 			}
 		}
@@ -1652,18 +1678,13 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 	}
 
 	plannedActivationPrice := calculateProfitBasedTrailingTriggerPrice(entryPrice, side, rule.MinProfitPct)
+	// Plan B1/A: the runner DD trailing MUST always carry an activation price anchored
+	// at the outer ladder TP (+6%). We do NOT drop activePx to "activate immediately"
+	// when price has already moved past it — that would leave the runner with no fixed
+	// activation anchor. If OKX then fails to auto-activate a passed-activePx order
+	// (phantom protection), checkAndFixStaleTrailingActivation converts it to a managed
+	// drawdown monitor instead of re-placing without activePx (fix 2026-06-09).
 	activationPrice := plannedActivationPrice
-	// If current price already past activation threshold, don't pass activePx
-	// so OKX activates the trailing stop immediately from placement.
-	if markPrice > 0 && plannedActivationPrice > 0 {
-		if strings.EqualFold(side, "long") && markPrice >= plannedActivationPrice {
-			activationPrice = 0
-			logger.Infof("🎯 DD trailing immediate activation: %s %s | mark=%.4f >= planned=%.4f", symbol, side, markPrice, plannedActivationPrice)
-		} else if strings.EqualFold(side, "short") && markPrice <= plannedActivationPrice {
-			activationPrice = 0
-			logger.Infof("🎯 DD trailing immediate activation: %s %s | mark=%.4f <= planned=%.4f", symbol, side, markPrice, plannedActivationPrice)
-		}
-	}
 	priceBasedCallbackRatio := calculateDrawdownRuleCallbackRatio(entryPrice, side, rule)
 	if plannedActivationPrice <= 0 || priceBasedCallbackRatio <= 0 {
 		return false
