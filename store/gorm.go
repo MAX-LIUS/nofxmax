@@ -36,14 +36,25 @@ func InitGorm(dbPath string) (*gorm.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	sqlDB.SetMaxOpenConns(1)
-	sqlDB.SetMaxIdleConns(1)
+	// Connection pool for SQLite.
+	// WAL mode (set below) allows 1 writer + N concurrent readers, so we raise
+	// MaxOpenConns above 1 to let dashboard read queries run concurrently instead of
+	// queueing behind a write on a single shared connection (fix 2026-06-10:
+	// "database is locked" + slow dashboard under reconciler/order-sync write load).
+	sqlDB.SetMaxOpenConns(8)
+	sqlDB.SetMaxIdleConns(4)
+	sqlDB.SetConnMaxLifetime(time.Hour)
 
 	// Enable foreign keys for SQLite
 	db.Exec("PRAGMA foreign_keys = ON")
-	db.Exec("PRAGMA journal_mode = DELETE")
-	db.Exec("PRAGMA synchronous = FULL")
-	db.Exec("PRAGMA busy_timeout = 5000")
+	// WAL: readers don't block the writer and vice versa — the standard fix for
+	// SQLite "database is locked" under concurrent read/write. synchronous=NORMAL is
+	// WAL-safe (durable against app crashes; only a power/OS crash may lose the last
+	// commit, which is acceptable since positions are reconciled from the exchange).
+	db.Exec("PRAGMA journal_mode = WAL")
+	db.Exec("PRAGMA synchronous = NORMAL")
+	db.Exec("PRAGMA busy_timeout = 10000")
+	db.Exec("PRAGMA wal_autocheckpoint = 1000")
 
 	gormDB = db
 	return db, nil
