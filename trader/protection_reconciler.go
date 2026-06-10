@@ -1151,6 +1151,34 @@ func (at *AutoTrader) cleanupInactiveProtectionState(active map[string]struct{})
 		}
 	}
 
+	// DB-backed orphan sweep (fix 2026-06-10): in-memory protection state for a symbol
+	// is evicted once its position fully closes, so the loops above can miss orphan
+	// protection orders that linger on the exchange/DB for a symbol with no remaining
+	// state. Scan the DB for symbols that still have live protection orders but no active
+	// position and cancel those too — independent of in-memory state survival.
+	if at.store != nil && at.exchangeID != "" {
+		if liveSymbols, err := at.store.Order().GetSymbolsWithLiveProtectionOrders(at.exchangeID); err == nil {
+			for _, symbol := range liveSymbols {
+				if symbol == "" {
+					continue
+				}
+				if _, stillActive := activeSymbols[symbol]; stillActive {
+					continue
+				}
+				if _, already := inactiveSymbols[symbol]; already {
+					continue
+				}
+				if err := at.cancelOrphanedProtectionOrdersForInactiveSymbol(symbol); err != nil {
+					logger.Warnf("⚠️ Protection cleanup (DB sweep): failed to cancel orphaned orders for %s: %v", symbol, err)
+				} else {
+					logger.Infof("🧹 Protection cleanup (DB sweep): canceled orphaned protection orders for inactive symbol %s", symbol)
+				}
+			}
+		} else {
+			logger.Warnf("⚠️ Protection cleanup: DB orphan sweep query failed: %v", err)
+		}
+	}
+
 	at.protectionStateMutex.Lock()
 	for key := range at.protectionState {
 		if _, ok := active[key]; !ok {

@@ -324,6 +324,22 @@ func (s *OrderStore) UpdateOrderRelatedPosition(orderID int64, positionID int64)
 	}).Error
 }
 
+// GetSymbolsWithLiveProtectionOrders returns the distinct symbols that currently have
+// live protection orders (TP/SL/trailing in NEW/PARTIALLY_FILLED) for the given exchange.
+// Used by the reconciler to sweep orphan protection orders left on symbols whose position
+// fully closed and whose in-memory protection state was already evicted (fix 2026-06-10).
+func (s *OrderStore) GetSymbolsWithLiveProtectionOrders(exchangeID string) ([]string, error) {
+	if exchangeID == "" {
+		return nil, nil
+	}
+	var symbols []string
+	err := s.db.Model(&TraderOrder{}).
+		Where("exchange_id = ? AND status IN ? AND type IN ?", exchangeID, []string{"NEW", "PARTIALLY_FILLED"}, []string{"ALGO", "TRAILING_STOP_MARKET", "STOP_MARKET", "TAKE_PROFIT_MARKET"}).
+		Distinct().
+		Pluck("symbol", &symbols).Error
+	return symbols, err
+}
+
 func (s *OrderStore) UpdateOrderActionByExchangeID(exchangeID string, exchangeOrderID string, orderAction string) error {
 	if exchangeID == "" || exchangeOrderID == "" || orderAction == "" {
 		return nil
