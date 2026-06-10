@@ -1474,22 +1474,36 @@ export function AdvancedChart({
         return distPct <= 0.08
       })
 
-      const supportZones = relevantZones
-        .filter((z: StructuralZone) => z.type === 'support')
-        .sort(
-          (a: StructuralZone, b: StructuralZone) =>
-            Math.abs(a.mid_price - currentPrice) -
-            Math.abs(b.mid_price - currentPrice)
+      // Rank by strength, not just distance: a dense resistance/support area
+      // (e.g. WLD 0.49-0.56) otherwise renders as many same-color bands packed
+      // together, looking like one big block. Prefer higher quality grade (A>B),
+      // then more touches/higher confidence, then nearest; show only the top 2
+      // per direction so the key levels stand out (fix 2026-06-10).
+      const zoneStrength = (z: StructuralZone): number => {
+        const gradeScore =
+          z.quality_grade === 'A' ? 2 : z.quality_grade === 'B' ? 1 : 0
+        return (
+          gradeScore * 1000 + (z.confidence || 0) + (z.touch_count || 0) * 5
         )
-        .slice(0, 5)
-      const resistanceZones = relevantZones
-        .filter((z: StructuralZone) => z.type === 'resistance')
-        .sort(
-          (a: StructuralZone, b: StructuralZone) =>
-            Math.abs(a.mid_price - currentPrice) -
-            Math.abs(b.mid_price - currentPrice)
-        )
-        .slice(0, 5)
+      }
+      const rankZones = (arr: StructuralZone[]) =>
+        arr
+          .sort((a: StructuralZone, b: StructuralZone) => {
+            const ds = zoneStrength(b) - zoneStrength(a)
+            if (ds !== 0) return ds
+            return (
+              Math.abs(a.mid_price - currentPrice) -
+              Math.abs(b.mid_price - currentPrice)
+            )
+          })
+          .slice(0, 2)
+
+      const supportZones = rankZones(
+        relevantZones.filter((z: StructuralZone) => z.type === 'support')
+      )
+      const resistanceZones = rankZones(
+        relevantZones.filter((z: StructuralZone) => z.type === 'resistance')
+      )
 
       const visibleZones = [...supportZones, ...resistanceZones]
       // Price scale width (right axis) — leave space for labels
