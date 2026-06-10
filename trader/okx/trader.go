@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"nofx/logger"
+	"nofx/trader/types"
 	"strings"
 	"sync"
 	"time"
@@ -64,6 +65,14 @@ type OKXTrader struct {
 	positionsCacheTime  time.Time
 	positionsCacheMutex sync.RWMutex
 
+	// Open-orders cache (per-symbol). Each GetOpenOrders does 3 serial OKX GETs
+	// (limit + conditional algo + trailing); the dashboard loads protection orders
+	// per position, so without a short cache N positions = N*3 serial round-trips.
+	// TTL is short so the reconciler still sees fresh order state; placement/cancel
+	// invalidate the symbol entry (fix 2026-06-10).
+	cachedOpenOrders     map[string]cachedOpenOrderEntry
+	openOrdersCacheMutex sync.RWMutex
+
 	// Instrument info cache
 	instrumentsCache      map[string]*OKXInstrument
 	instrumentsCacheTime  time.Time
@@ -75,6 +84,12 @@ type OKXTrader struct {
 
 	// Cache duration
 	cacheDuration time.Duration
+}
+
+// cachedOpenOrderEntry holds a short-lived per-symbol GetOpenOrders result.
+type cachedOpenOrderEntry struct {
+	orders []types.OpenOrder
+	at     time.Time
 }
 
 // OKXInstrument OKX instrument info
@@ -158,6 +173,7 @@ func NewOKXTrader(apiKey, secretKey, passphrase string) *OKXTrader {
 		httpClient:       httpClient,
 		cacheDuration:    15 * time.Second,
 		instrumentsCache: make(map[string]*OKXInstrument),
+		cachedOpenOrders: make(map[string]cachedOpenOrderEntry),
 	}
 
 	// Get current position mode first

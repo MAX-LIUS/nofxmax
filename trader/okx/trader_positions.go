@@ -125,6 +125,14 @@ func (t *OKXTrader) InvalidatePositionCache() {
 	t.positionsCacheMutex.Unlock()
 }
 
+// invalidateOpenOrdersCache clears the cached open orders for a symbol so the next
+// GetOpenOrders reflects an order just placed/cancelled (fix 2026-06-10).
+func (t *OKXTrader) invalidateOpenOrdersCache(symbol string) {
+	t.openOrdersCacheMutex.Lock()
+	delete(t.cachedOpenOrders, symbol)
+	t.openOrdersCacheMutex.Unlock()
+}
+
 // getInstrument gets instrument info
 func (t *OKXTrader) getInstrument(symbol string) (*OKXInstrument, error) {
 	instId := t.convertSymbol(symbol)

@@ -8,6 +8,7 @@ import (
 	"nofx/trader/types"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // OpenLong opens long position
@@ -466,6 +467,7 @@ func (t *OKXTrader) setTrailingStopLossWithTag(symbol string, positionSide strin
 }
 
 func (t *OKXTrader) setTrailingStopLossWithTagReturningID(symbol string, positionSide string, activationPrice float64, callbackRate float64, quantity float64, reasonTag string) (string, error) {
+	defer t.invalidateOpenOrdersCache(symbol)
 	instId := t.convertSymbol(symbol)
 
 	inst, err := t.getInstrument(symbol)
@@ -593,6 +595,7 @@ func (t *OKXTrader) cancelOtherTrailingStopOrders(symbol string, keepAlgoID stri
 }
 
 func (t *OKXTrader) CancelTrailingStopOrders(symbol string) error {
+	defer t.invalidateOpenOrdersCache(symbol)
 	instId := t.convertSymbol(symbol)
 	path := fmt.Sprintf("%s?instType=SWAP&instId=%s&ordType=move_order_stop", okxAlgoPendingPath, instId)
 	data, err := t.doRequest("GET", path, nil)
@@ -622,6 +625,7 @@ func (t *OKXTrader) CancelTrailingStopOrders(symbol string) error {
 }
 
 func (t *OKXTrader) CancelTrailingStopOrdersByIDs(symbol string, orderIDs []string) error {
+	defer t.invalidateOpenOrdersCache(symbol)
 	if len(orderIDs) == 0 {
 		return nil
 	}
@@ -657,6 +661,7 @@ func (t *OKXTrader) CancelTrailingStopOrdersByIDs(symbol string, orderIDs []stri
 }
 
 func (t *OKXTrader) cancelAlgoOrdersByTag(symbol string, ordType string, reasonTag string) error {
+	defer t.invalidateOpenOrdersCache(symbol)
 	instId := t.convertSymbol(symbol)
 	tag := okxReasonTag(reasonTag)
 	path := fmt.Sprintf("%s?instType=SWAP&instId=%s&ordType=%s", okxAlgoPendingPath, instId, ordType)
@@ -704,6 +709,7 @@ func (t *OKXTrader) SetStopLossTagged(symbol string, positionSide string, quanti
 }
 
 func (t *OKXTrader) setStopLossWithTag(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) error {
+	defer t.invalidateOpenOrdersCache(symbol)
 	instId := t.convertSymbol(symbol)
 
 	// Get instrument info
@@ -762,6 +768,7 @@ func (t *OKXTrader) SetTakeProfitTagged(symbol string, positionSide string, quan
 }
 
 func (t *OKXTrader) setTakeProfitWithTag(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) error {
+	defer t.invalidateOpenOrdersCache(symbol)
 	instId := t.convertSymbol(symbol)
 
 	// Get instrument info
@@ -811,6 +818,7 @@ func (t *OKXTrader) setTakeProfitWithTag(symbol string, positionSide string, qua
 }
 
 func (t *OKXTrader) CancelAlgoOrderByID(symbol string, algoID string) error {
+	defer t.invalidateOpenOrdersCache(symbol)
 	algoID = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(algoID, "_sl"), "_tp"))
 	if algoID == "" {
 		return nil
@@ -836,6 +844,7 @@ func (t *OKXTrader) CancelTakeProfitOrders(symbol string) error {
 
 // cancelAlgoOrders cancels algo orders
 func (t *OKXTrader) cancelAlgoOrders(symbol string, orderType string) error {
+	defer t.invalidateOpenOrdersCache(symbol)
 	instId := t.convertSymbol(symbol)
 
 	// Get pending algo orders
@@ -882,6 +891,7 @@ func (t *OKXTrader) cancelAlgoOrders(symbol string, orderType string) error {
 // the provided targets. This avoids wiping ladder/full TP orders when cleaning up
 // a failed drawdown plan.
 func (t *OKXTrader) CancelTakeProfitOrdersByPrices(symbol string, prices []float64) error {
+	defer t.invalidateOpenOrdersCache(symbol)
 	instId := t.convertSymbol(symbol)
 	path := fmt.Sprintf("%s?instType=SWAP&instId=%s&ordType=conditional", okxAlgoPendingPath, instId)
 	data, err := t.doRequest("GET", path, nil)
@@ -934,6 +944,7 @@ func (t *OKXTrader) CancelTakeProfitOrdersByPrices(symbol string, prices []float
 
 // CancelAllOrders cancels all pending orders
 func (t *OKXTrader) CancelAllOrders(symbol string) error {
+	defer t.invalidateOpenOrdersCache(symbol)
 	instId := t.convertSymbol(symbol)
 
 	// Get pending orders
@@ -973,6 +984,7 @@ func (t *OKXTrader) CancelAllOrders(symbol string) error {
 
 // CancelStopOrders cancels stop loss and take profit orders
 func (t *OKXTrader) CancelStopOrders(symbol string) error {
+	defer t.invalidateOpenOrdersCache(symbol)
 	return t.cancelAlgoOrders(symbol, "")
 }
 
@@ -1051,6 +1063,19 @@ func (t *OKXTrader) GetOrderStatus(symbol string, orderID string) (map[string]in
 
 // GetOpenOrders gets all open/pending orders for a symbol
 func (t *OKXTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
+	// Short-lived per-symbol cache: each call below does 3 serial OKX GETs, and the
+	// dashboard loads protection orders per position. Serve a fresh-enough cached
+	// copy to collapse N*3 round-trips during a dashboard load (fix 2026-06-10).
+	const openOrdersCacheTTL = 4 * time.Second
+	t.openOrdersCacheMutex.RLock()
+	if ent, ok := t.cachedOpenOrders[symbol]; ok && time.Since(ent.at) < openOrdersCacheTTL {
+		cached := make([]types.OpenOrder, len(ent.orders))
+		copy(cached, ent.orders)
+		t.openOrdersCacheMutex.RUnlock()
+		return cached, nil
+	}
+	t.openOrdersCacheMutex.RUnlock()
+
 	instId := t.convertSymbol(symbol)
 	var result []types.OpenOrder
 
@@ -1285,6 +1310,9 @@ func (t *OKXTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
 	}
 
 	logger.Infof("✓ OKX GetOpenOrders: found %d open orders for %s", len(result), symbol)
+	t.openOrdersCacheMutex.Lock()
+	t.cachedOpenOrders[symbol] = cachedOpenOrderEntry{orders: result, at: time.Now()}
+	t.openOrdersCacheMutex.Unlock()
 	return result, nil
 }
 
