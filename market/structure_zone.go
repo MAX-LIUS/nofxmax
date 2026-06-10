@@ -328,11 +328,25 @@ func collectAllZones(timeframeData map[string]*TimeframeSeriesData, currentPrice
 		return all[i].Low < all[j].Low
 	})
 
+	// Cap merged zone width. Without this, overlap-based chain merging across
+	// timeframes grows a zone unbounded (WLD: 0.492–0.556, ~13%, collapsing the
+	// whole resistance area into one indistinguishable block). A cross-TF zone may
+	// be slightly wider than a single-TF one, but must stay tight: cap at 1.5% of
+	// price (fix 2026-06-10).
+	maxZoneWidth := currentPrice * 0.015
+	if maxZoneWidth <= 0 {
+		maxZoneWidth = math.Inf(1)
+	}
+
 	var merged []StructuralZone
 	merged = append(merged, all[0])
 	for i := 1; i < len(all); i++ {
 		last := &merged[len(merged)-1]
-		if zonesOverlap(*last, all[i]) {
+		mergedHigh := last.High
+		if all[i].High > mergedHigh {
+			mergedHigh = all[i].High
+		}
+		if zonesOverlap(*last, all[i]) && (mergedHigh-last.Low) <= maxZoneWidth {
 			// Merge into existing zone
 			if all[i].High > last.High {
 				last.High = all[i].High
