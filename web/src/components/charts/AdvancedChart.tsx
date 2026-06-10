@@ -900,6 +900,32 @@ export function AdvancedChart({
         candlestickSeriesRef.current.setData(klineData)
         klineDataCacheRef.current = klineData
 
+        // Dynamic price precision: lightweight-charts defaults to precision=2 /
+        // minMove=0.01, which collapses low-priced symbols (e.g. WLD ~0.5) so
+        // support/resistance levels look like the same 2-decimal value. Derive
+        // precision from the latest close so mid-range levels are distinguishable
+        // (fix 2026-06-10).
+        if (klineData.length > 0) {
+          const ref = Number(klineData[klineData.length - 1].close) || 0
+          let precision = 2
+          if (ref > 0) {
+            if (ref >= 1000) precision = 2
+            else if (ref >= 100) precision = 3
+            else if (ref >= 10) precision = 4
+            else if (ref >= 1) precision = 4
+            else if (ref >= 0.1) precision = 5
+            else if (ref >= 0.01) precision = 6
+            else precision = 8
+          }
+          candlestickSeriesRef.current.applyOptions({
+            priceFormat: {
+              type: 'price',
+              precision,
+              minMove: Math.pow(10, -precision),
+            },
+          })
+        }
+
         // Store volume/quoteVolume data for tooltip
         klineDataRef.current.clear()
         klineData.forEach((k: any) => {

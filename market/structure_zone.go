@@ -35,6 +35,12 @@ func MergeIntoZones(levels []StructuralLevel, atr14, currentPrice float64) []Str
 	}
 
 	tolerance := math.Max(0.25*atr14, currentPrice*0.003)
+	// Cap the total width of a merged zone. Without this, chain-merging (each level
+	// only needs to be within `tolerance` of the running zone High) lets a zone grow
+	// unbounded — e.g. WLD 0.49→0.56 (~14%) collapsing support+resistance into one
+	// band so direction can't be told apart. A real S/R zone is tight; cap at the
+	// larger of 1×ATR14 or 1.2% of price (fix 2026-06-10).
+	maxZoneWidth := math.Max(atr14, currentPrice*0.012)
 
 	sorted := make([]StructuralLevel, len(levels))
 	copy(sorted, levels)
@@ -47,7 +53,9 @@ func MergeIntoZones(levels []StructuralLevel, atr14, currentPrice float64) []Str
 	for i < len(sorted) {
 		zone := newZoneFromLevel(sorted[i])
 		j := i + 1
-		for j < len(sorted) && sorted[j].Price-zone.High <= tolerance {
+		for j < len(sorted) &&
+			sorted[j].Price-zone.High <= tolerance &&
+			sorted[j].Price-zone.Low <= maxZoneWidth {
 			mergeLevel(&zone, sorted[j])
 			j++
 		}
