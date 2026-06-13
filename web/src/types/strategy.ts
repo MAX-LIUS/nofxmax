@@ -100,8 +100,8 @@ export interface EntryGateConfig {
 }
 
 export interface StrategyConfig {
-  // Strategy type: "ai_trading" (default) or "grid_trading"
-  strategy_type?: 'ai_trading' | 'grid_trading'
+  // Strategy type: "ai_trading" (default), "grid_trading", or "breakout_trading"
+  strategy_type?: 'ai_trading' | 'grid_trading' | 'breakout_trading'
   // Language setting: "zh" for Chinese, "en" for English
   // Determines the language used for data formatting and prompt generation
   language?: 'zh' | 'en'
@@ -116,6 +116,21 @@ export interface StrategyConfig {
   evolution?: EvolutionConfig
   // Grid trading configuration (only used when strategy_type is 'grid_trading')
   grid_config?: GridStrategyConfig
+  // Breakout entry configuration (only used when strategy_type is 'breakout_trading')
+  breakout_entry?: BreakoutEntryConfig
+}
+
+// BreakoutEntryConfig controls the standalone data-validated breakout engine.
+export interface BreakoutEntryConfig {
+  enabled?: boolean
+  // Timeframe series to evaluate, e.g. "1h", "15m". Defaults to primary/"1h".
+  timeframe?: string
+  // Prior-bar window for the high/low breakout. Default 20.
+  lookback?: number
+  // Leverage for breakout entries. Defaults to altcoin leverage.
+  leverage?: number
+  // Position size as a fraction of equity (1.0 = 100% of equity notional).
+  size_equity_frac?: number
 }
 
 export interface EvolutionConfig {

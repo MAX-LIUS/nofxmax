@@ -43,6 +43,10 @@ import {
   defaultGridConfig,
 } from '../components/strategy/GridConfigEditor'
 import {
+  BreakoutConfigEditor,
+  defaultBreakoutEntryConfig,
+} from '../components/strategy/BreakoutConfigEditor'
+import {
   ProtectionEditor,
   defaultProtectionConfig,
   normalizeProtectionConfig,
@@ -129,6 +133,7 @@ export function StrategyStudioPage() {
   // Accordion states for left panel
   const [expandedSections, setExpandedSections] = useState({
     gridConfig: true,
+    breakoutConfig: true,
     coinSource: true,
     indicators: false,
     preEntryGate: false,
@@ -640,6 +645,24 @@ export function StrategyStudioPage() {
         />
       ),
     },
+    // Breakout Config - only for breakout_trading
+    {
+      key: 'breakoutConfig' as const,
+      icon: Zap,
+      color: '#38BDF8',
+      title: tr('breakoutConfig'),
+      forStrategyType: 'breakout_trading' as const,
+      content: editingConfig && (
+        <BreakoutConfigEditor
+          config={editingConfig.breakout_entry || defaultBreakoutEntryConfig}
+          onChange={(breakoutEntry) =>
+            updateConfig('breakout_entry', breakoutEntry)
+          }
+          disabled={selectedStrategy?.is_default}
+          language={language}
+        />
+      ),
+    },
     // AI Trading sections
     {
       key: 'coinSource' as const,
@@ -1089,7 +1112,7 @@ export function StrategyStudioPage() {
                         {tr('strategyType')}
                       </span>
                     </div>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-3 gap-3">
                       <button
                         onClick={() => {
                           if (!selectedStrategy?.is_default) {
@@ -1147,6 +1170,41 @@ export function StrategyStudioPage() {
                         </div>
                         <p className="text-xs text-nofx-text-muted text-left">
                           {tr('gridTradingDesc')}
+                        </p>
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (!selectedStrategy?.is_default) {
+                            updateConfig('strategy_type', 'breakout_trading')
+                            // Clear grid config when switching away from grid
+                            updateConfig('grid_config', undefined)
+                            // Initialize breakout config if not exists
+                            if (!editingConfig.breakout_entry) {
+                              updateConfig(
+                                'breakout_entry',
+                                defaultBreakoutEntryConfig
+                              )
+                            }
+                          }
+                        }}
+                        disabled={selectedStrategy?.is_default}
+                        className={`p-3 rounded-lg border transition-all ${
+                          editingConfig.strategy_type === 'breakout_trading'
+                            ? 'border-nofx-gold bg-nofx-gold/10'
+                            : 'border-nofx-border hover:border-nofx-gold/50'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          <Zap
+                            className="w-4 h-4"
+                            style={{ color: '#38BDF8' }}
+                          />
+                          <span className="text-sm font-medium text-nofx-text">
+                            {tr('breakoutTrading')}
+                          </span>
+                        </div>
+                        <p className="text-xs text-nofx-text-muted text-left">
+                          {tr('breakoutTradingDesc')}
                         </p>
                       </button>
                     </div>

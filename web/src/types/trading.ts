@@ -17,7 +17,7 @@ export interface SystemStatus {
   allow_ai_open?: boolean
   allow_ai_close?: boolean
   ai_decision_mode?: 'conservative' | 'balanced' | 'aggressive'
-  strategy_type?: 'ai_trading' | 'grid_trading'
+  strategy_type?: 'ai_trading' | 'grid_trading' | 'breakout_trading'
   grid_symbol?: string
 }
 
