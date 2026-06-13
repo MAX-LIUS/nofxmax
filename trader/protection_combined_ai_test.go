@@ -95,7 +95,8 @@ func TestPreferDecisionProtectionPlanDropsConfiguredPercentLadderButKeepsFallbac
 	}
 }
 
-func TestBuildAIProtectionPlanClampsEarlyFullDrawdownClose(t *testing.T) {
+func TestBuildAIProtectionPlanCombinedPreservesAIDrawdownClose(t *testing.T) {
+	// No strategy cfg passed → drawdownCfg has empty Rules, so AI close_ratio_pct is preserved.
 	plan, err := buildAIProtectionPlan(2300.01, "open_long", &kernel.AIProtectionPlan{
 		Mode: "combined",
 		LadderRules: []kernel.AIProtectionLadderRule{
@@ -112,11 +113,11 @@ func TestBuildAIProtectionPlanClampsEarlyFullDrawdownClose(t *testing.T) {
 	if len(plan.DrawdownRules) != 2 {
 		t.Fatalf("expected drawdown rules, got %+v", plan.DrawdownRules)
 	}
-	if plan.DrawdownRules[0].CloseRatioPct != 65 {
-		t.Fatalf("expected early/full drawdown close to be clamped to 65%%, got %.2f", plan.DrawdownRules[0].CloseRatioPct)
+	if plan.DrawdownRules[0].CloseRatioPct != 100 {
+		t.Fatalf("expected AI close_ratio preserved at 100%%, got %.2f", plan.DrawdownRules[0].CloseRatioPct)
 	}
-	if plan.DrawdownRules[1].CloseRatioPct != 70 {
-		t.Fatalf("expected runner drawdown to preserve 30%% runner, got %.2f", plan.DrawdownRules[1].CloseRatioPct)
+	if plan.DrawdownRules[1].CloseRatioPct != 100 {
+		t.Fatalf("expected AI close_ratio preserved at 100%%, got %.2f", plan.DrawdownRules[1].CloseRatioPct)
 	}
 }
 
@@ -170,7 +171,7 @@ func TestAIDecisionLadderAbsolutePriceNotDoubleBuffered(t *testing.T) {
 	}
 }
 
-func TestClampAIDrawdownTierCeilingsMinProfitPct(t *testing.T) {
+func TestClampAIDrawdownTierCeilingsAppliesAuthoritativeCloseRatio(t *testing.T) {
 	cfg := store.DrawdownTakeProfitConfig{
 		Enabled:    true,
 		EngineMode: store.DrawdownEngineModeAI,
@@ -180,21 +181,26 @@ func TestClampAIDrawdownTierCeilingsMinProfitPct(t *testing.T) {
 			{MinProfitPct: 2.5, MaxDrawdownPct: 45, CloseRatioPct: 100},
 		},
 	}
-	// AI outputs min_profit_pct above strategy ceilings
+	// AI derives min_profit_pct from multi-TF structure; strategy config owns close_ratio_pct.
 	rules := []store.DrawdownTakeProfitRule{
 		{MinProfitPct: 1.38, MaxDrawdownPct: 62, CloseRatioPct: 65, RunnerKeepPct: 35, StageName: "first"},
 		{MinProfitPct: 2.99, MaxDrawdownPct: 55, CloseRatioPct: 45, RunnerKeepPct: 20, StageName: "second"},
 		{MinProfitPct: 3.91, MaxDrawdownPct: 48, CloseRatioPct: 100, StageName: "third"},
 	}
 	clamped := clampAIDrawdownTierCeilings(rules, cfg)
-	if clamped[0].MinProfitPct > 0.8 {
-		t.Errorf("tier 1 min_profit_pct should be clamped to <=0.8, got %.4f", clamped[0].MinProfitPct)
+	// close_ratio_pct is authoritative from strategy config (positional match).
+	if clamped[0].CloseRatioPct != 50 {
+		t.Errorf("tier 1 close_ratio_pct should be config-authoritative 50, got %.1f", clamped[0].CloseRatioPct)
 	}
-	if clamped[1].MinProfitPct > 1.5 {
-		t.Errorf("tier 2 min_profit_pct should be clamped to <=1.5, got %.4f", clamped[1].MinProfitPct)
+	if clamped[1].CloseRatioPct != 80 {
+		t.Errorf("tier 2 close_ratio_pct should be config-authoritative 80, got %.1f", clamped[1].CloseRatioPct)
 	}
-	if clamped[2].MinProfitPct > 2.5 {
-		t.Errorf("tier 3 min_profit_pct should be clamped to <=2.5, got %.4f", clamped[2].MinProfitPct)
+	if clamped[2].CloseRatioPct != 100 {
+		t.Errorf("tier 3 close_ratio_pct should be config-authoritative 100, got %.1f", clamped[2].CloseRatioPct)
+	}
+	// AI-derived min_profit_pct is preserved (no longer clamped to fixed template ceilings).
+	if clamped[0].MinProfitPct != 1.38 || clamped[1].MinProfitPct != 2.99 || clamped[2].MinProfitPct != 3.91 {
+		t.Errorf("AI min_profit_pct should be preserved, got %.4f/%.4f/%.4f", clamped[0].MinProfitPct, clamped[1].MinProfitPct, clamped[2].MinProfitPct)
 	}
 }
 
@@ -206,17 +212,19 @@ func TestClampAIDrawdownTierCeilingsFirstTierAllocation(t *testing.T) {
 			{MinProfitPct: 0.8, MaxDrawdownPct: 60, CloseRatioPct: 50},
 		},
 	}
-	// AI outputs first tier with only 35% close (too low)
+	// AI outputs first tier with 35% close; strategy config close_ratio_pct (50) is authoritative.
 	rules := []store.DrawdownTakeProfitRule{
 		{MinProfitPct: 0.7, MaxDrawdownPct: 60, CloseRatioPct: 35, RunnerKeepPct: 65, StageName: "first"},
 		{MinProfitPct: 1.2, MaxDrawdownPct: 55, CloseRatioPct: 80, StageName: "second"},
 	}
 	clamped := clampAIDrawdownTierCeilings(rules, cfg)
-	if clamped[0].CloseRatioPct < 50 {
-		t.Errorf("tier 1 close_ratio_pct should be clamped up to >=50, got %.1f", clamped[0].CloseRatioPct)
+	// Tier 1 close_ratio_pct is overridden by the authoritative strategy config value.
+	if clamped[0].CloseRatioPct != 50 {
+		t.Errorf("tier 1 close_ratio_pct should be config-authoritative 50, got %.1f", clamped[0].CloseRatioPct)
 	}
-	if clamped[0].RunnerKeepPct > 35 {
-		t.Errorf("tier 1 runner_keep_pct should be clamped to <=35, got %.1f", clamped[0].RunnerKeepPct)
+	// Tier 2 has no positional strategy rule, so AI value is preserved.
+	if clamped[1].CloseRatioPct != 80 {
+		t.Errorf("tier 2 close_ratio_pct should preserve AI value 80, got %.1f", clamped[1].CloseRatioPct)
 	}
 }
 

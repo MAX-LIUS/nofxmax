@@ -267,9 +267,9 @@ func TestBuildPositionProtectionRuntimeRestoresAIDrawdownRulesFromEntryDecision(
 	if len(tiers) != 3 {
 		t.Fatalf("expected 3 AI tiers, got %#v", runtime["scheduled_tiers"])
 	}
-	// AI tier 1 min_profit_pct (1.25) is clamped to strategy ceiling (0.8)
-	if got := tiers[0]["min_profit_pct"]; got != 0.8 {
-		t.Fatalf("expected first AI tier min profit clamped to 0.8, got %#v", got)
+	// AI tier 1 min_profit_pct (1.25) is derived from multi-TF structure and preserved (no ceiling clamp).
+	if got := tiers[0]["min_profit_pct"]; got != 1.25 {
+		t.Fatalf("expected first AI tier min profit preserved at 1.25, got %#v", got)
 	}
 	if got := tiers[2]["stage_name"]; got != "outer_exit" {
 		t.Fatalf("expected third AI tier stage restored, got %#v", got)

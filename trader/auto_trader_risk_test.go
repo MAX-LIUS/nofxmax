@@ -466,7 +466,7 @@ func TestApplyNativeTrailingDrawdownPersistsFullTrailingOrderID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load dynamic protection state: %v", err)
 	}
-	key := store.BuildDynamicProtectionKey("trader-1", "exchange-1", "BTCUSDT", "long", "100.00000000|0.00000000", "native_trailing", drawdownRuleFingerprint(100, 0, rule), 100)
+	key := store.BuildDynamicProtectionKey("trader-1", "exchange-1", "BTCUSDT", "long", "100.00000000|1.00000000", "native_trailing", drawdownRuleFingerprint(100, 0, rule), 100)
 	record, ok := state.Records[key]
 	if !ok {
 		t.Fatalf("expected native trailing dynamic protection record for key %q", key)
@@ -711,7 +711,7 @@ func TestApplyNativeTrailingDrawdownPersistsPartialTrailingOrderID(t *testing.T)
 	if err != nil {
 		t.Fatalf("load dynamic protection state: %v", err)
 	}
-	key := store.BuildDynamicProtectionKey("trader-1", "exchange-1", "BTCUSDT", "short", "100.00000000|0.00000000", "native_partial_trailing", stableDrawdownRuleFingerprint(100, rule), 50)
+	key := store.BuildDynamicProtectionKey("trader-1", "exchange-1", "BTCUSDT", "short", "100.00000000|2.00000000", "native_partial_trailing", stableDrawdownRuleFingerprint(100, rule), 50)
 	record, ok := state.Records[key]
 	if !ok {
 		t.Fatalf("expected native partial trailing dynamic protection record for key %q", key)
@@ -1103,7 +1103,7 @@ func TestGetActiveBreakEvenRulesReturnsAllTiers(t *testing.T) {
 	}
 }
 
-func TestApplyBreakEvenStopsOnlyAppliesHighestSatisfiedTier(t *testing.T) {
+func TestApplyBreakEvenStopsPlacesAllSatisfiedTiers(t *testing.T) {
 	fake := &fakeProtectionTrader{
 		positions: []map[string]interface{}{{"symbol": "BTCUSDT", "side": "long", "positionAmt": 1.0}},
 	}
@@ -1126,9 +1126,22 @@ func TestApplyBreakEvenStopsOnlyAppliesHighestSatisfiedTier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Should only call setStopLoss once (for BE2, the highest satisfied tier)
-	if fake.setStopLossCalls != 1 {
-		t.Fatalf("expected 1 stop loss call (highest tier), got %d", fake.setStopLossCalls)
+	// Multi-tier: each satisfied tier places its own stop at a distinct offset price.
+	if fake.setStopLossCalls != 2 {
+		t.Fatalf("expected 2 stop loss calls (BE1 + BE2), got %d", fake.setStopLossCalls)
+	}
+	// BE1 stop at +0.3% = 50150, BE2 stop at +0.6% = 50300 — both must be live.
+	var be1, be2 bool
+	for _, order := range fake.openOrders {
+		if math.Abs(order.StopPrice-50150) < 0.01 {
+			be1 = true
+		}
+		if math.Abs(order.StopPrice-50300) < 0.01 {
+			be2 = true
+		}
+	}
+	if !be1 || !be2 {
+		t.Fatalf("expected both BE1 (50150) and BE2 (50300) stops placed, got be1=%v be2=%v", be1, be2)
 	}
 }
 
