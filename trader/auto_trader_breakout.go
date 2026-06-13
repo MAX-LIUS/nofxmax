@@ -81,10 +81,22 @@ func (at *AutoTrader) runBreakoutEntries(ctx *kernel.Context, record *store.Deci
 			continue
 		}
 		series := md.TimeframeData[tf]
-		if series == nil || len(series.Klines) < lookback+1 {
+		if series == nil {
 			continue
 		}
-		sig := market.BreakoutSignalBars(series.Klines, lookback)
+		// CRITICAL: OKX /market/candles returns the current UNCLOSED bar as the last
+		// element. The validated backtest fires on a CLOSED-bar breakout (entering the
+		// next bar). Using the live, still-moving bar would trip on intrabar fakeouts
+		// that the close-confirmation edge specifically filters out. Drop the last
+		// (unclosed) bar and evaluate on closed bars only (fix 2026-06-13).
+		bars := series.Klines
+		if len(bars) >= 1 {
+			bars = bars[:len(bars)-1]
+		}
+		if len(bars) < lookback+1 {
+			continue
+		}
+		sig := market.BreakoutSignalBars(bars, lookback)
 		if sig == 0 {
 			continue
 		}
