@@ -29,3 +29,18 @@ func TestBreakoutSignal(t *testing.T) {
 		t.Fatalf("expected 0 on insufficient bars, got %d", g)
 	}
 }
+
+func mkB(high, low, close float64) KlineBar { return KlineBar{High: high, Low: low, Close: close} }
+
+func TestBreakoutSignalBars(t *testing.T) {
+	base := []KlineBar{mkB(10, 8, 9), mkB(11, 9, 10), mkB(12, 9, 11)}
+	if g := BreakoutSignalBars(append(append([]KlineBar{}, base...), mkB(13, 11, 13)), 3); g != 1 {
+		t.Fatalf("long expected, got %d", g)
+	}
+	if g := BreakoutSignalBars(append(append([]KlineBar{}, base...), mkB(8, 7, 7)), 3); g != -1 {
+		t.Fatalf("short expected, got %d", g)
+	}
+	if g := BreakoutSignalBars(append(append([]KlineBar{}, base...), mkB(12, 10, 11)), 3); g != 0 {
+		t.Fatalf("none expected, got %d", g)
+	}
+}

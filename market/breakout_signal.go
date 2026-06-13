@@ -32,3 +32,31 @@ func BreakoutSignal(klines []Kline, lookback int) int {
 	}
 	return 0
 }
+
+// BreakoutSignalBars is the KlineBar-typed variant used in the live decision cycle,
+// where per-timeframe series are already computed as []KlineBar. Identical logic to
+// BreakoutSignal: +1 if last close strictly breaks the prior `lookback`-bar high,
+// -1 if it strictly breaks the prior low, else 0.
+func BreakoutSignalBars(bars []KlineBar, lookback int) int {
+	if lookback <= 0 || len(bars) < lookback+1 {
+		return 0
+	}
+	last := bars[len(bars)-1]
+	hh := bars[len(bars)-1-lookback].High
+	ll := bars[len(bars)-1-lookback].Low
+	for i := len(bars) - lookback - 1; i < len(bars)-1; i++ {
+		if bars[i].High > hh {
+			hh = bars[i].High
+		}
+		if bars[i].Low < ll {
+			ll = bars[i].Low
+		}
+	}
+	if last.Close > hh {
+		return 1
+	}
+	if last.Close < ll {
+		return -1
+	}
+	return 0
+}
