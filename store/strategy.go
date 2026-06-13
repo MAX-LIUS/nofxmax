@@ -687,6 +687,13 @@ type RiskControlConfig struct {
 	EntryCooldownMinutes int `json:"entry_cooldown_minutes,omitempty"`
 	// Max allowed entry price deviation % between AI plan and execution (CODE ENFORCED, default: 1.5)
 	MaxEntryDeviationPct float64 `json:"max_entry_deviation_pct,omitempty"`
+
+	// Time-stop (CODE ENFORCED): force-close a position that has been held longer than
+	// TimeStopHours AND is still in loss worse than TimeStopLossPct. Cuts the
+	// "directionally-wrong trade bled slowly over 20-37h" loss pattern without touching
+	// winners (loss condition is required). 0/unset = disabled.
+	TimeStopHours   float64 `json:"time_stop_hours,omitempty"`   // e.g. 24
+	TimeStopLossPct float64 `json:"time_stop_loss_pct,omitempty"` // negative, e.g. -1.5
 }
 
 // NewStrategyStore creates a new StrategyStore

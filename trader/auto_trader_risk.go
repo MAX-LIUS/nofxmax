@@ -147,6 +147,14 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			}
 		}
 
+		// Time-stop (independent of drawdown rules): force-close a position held too long
+		// that is still in loss. Cuts the slow-bleed "wrong direction held 20-37h" pattern
+		// (fix 2026-06-12). Runs BEFORE the drawdown-rules gate so it works even when no
+		// drawdown rules are configured. Winners are never touched (loss condition required).
+		if at.maybeTimeStopClose(symbol, side, entryPrice, markPrice, quantity, posCreatedTime) {
+			continue
+		}
+
 		rules := at.getActiveDrawdownRulesForPosition(symbol, side)
 		if len(rules) == 0 {
 			continue
