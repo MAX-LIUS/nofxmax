@@ -31,9 +31,16 @@ type Strategy struct {
 
 func (Strategy) TableName() string { return "strategies" }
 
+// Strategy type identifiers.
+const (
+	StrategyTypeAI       = "ai_trading"
+	StrategyTypeGrid     = "grid_trading"
+	StrategyTypeBreakout = "breakout_trading"
+)
+
 // StrategyConfig strategy configuration details (JSON structure)
 type StrategyConfig struct {
-	// Strategy type: "ai_trading" (default) or "grid_trading"
+	// Strategy type: "ai_trading" (default), "grid_trading", or "breakout_trading"
 	StrategyType string `json:"strategy_type,omitempty"`
 
 	// language setting: "zh" for Chinese, "en" for English

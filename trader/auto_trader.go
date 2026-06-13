@@ -110,7 +110,7 @@ type AutoTraderConfig struct {
 	IsCrossMargin bool // true=cross margin mode, false=isolated margin mode
 
 	// Competition visibility
-	ShowInCompetition bool   // Whether to show in competition page
+	ShowInCompetition bool    // Whether to show in competition page
 	AllowAIOpen       bool    // Whether AI is allowed to issue open_long / open_short
 	AllowAIClose      bool    // Whether AI is allowed to issue close_long / close_short
 	AllowAIStopClose  bool    // Whether AI can close for stop-loss reasons
@@ -124,12 +124,12 @@ type AutoTraderConfig struct {
 
 // AutoTrader automatic trader
 type AutoTrader struct {
-	id                    string // Trader unique identifier
-	name                  string // Trader display name
-	aiModel               string // AI model name
-	exchange              string // Trading platform type (binance/bybit/etc)
-	exchangeID            string // Exchange account UUID
-	showInCompetition     bool   // Whether to show in competition page
+	id                    string  // Trader unique identifier
+	name                  string  // Trader display name
+	aiModel               string  // AI model name
+	exchange              string  // Trading platform type (binance/bybit/etc)
+	exchangeID            string  // Exchange account UUID
+	showInCompetition     bool    // Whether to show in competition page
 	allowAIOpen           bool    // Whether AI can actively open positions
 	allowAIClose          bool    // Whether AI can actively close positions
 	allowAIStopClose      bool    // Whether AI can close for stop-loss reasons
@@ -168,8 +168,8 @@ type AutoTrader struct {
 	drawdownAIRules       map[string][]store.DrawdownTakeProfitRule // symbol_side -> per-position AI drawdown rules restored from entry decision
 	drawdownRunnerState   map[string]DrawdownRunnerState            // symbol_side -> active runner semantics after partial drawdown
 	drawdownTierAllocs    map[string][]store.DrawdownTierAllocation // symbol_side -> fixed tier allocations computed at open
-	drawdownTierAllocMu   sync.RWMutex                             // Protects drawdownTierAllocs
-	nativeTrailingArmTime map[string]time.Time                     // fingerprint -> last successful arm time (prevents re-arm loop)
+	drawdownTierAllocMu   sync.RWMutex                              // Protects drawdownTierAllocs
+	nativeTrailingArmTime map[string]time.Time                      // fingerprint -> last successful arm time (prevents re-arm loop)
 	immediateTrailingIDs  map[string]string                         // symbol_side -> immediate trailing order ID (canceled when tier trailing arms)
 	cooldownManager       *entryCooldownManager                     // Post-loss entry cooldown per symbol
 	lastBalanceSyncTime   time.Time                                 // Last balance sync time
@@ -579,18 +579,12 @@ func (at *AutoTrader) Run() error {
 			logger.Errorf("❌ [%s] Failed to initialize grid: %v", at.name, err)
 			return fmt.Errorf("grid initialization failed: %w", err)
 		}
+	} else if at.IsBreakoutStrategy() {
+		logger.Infof("🟦 [%s] Breakout trading strategy detected (data-validated edge + AI soft-veto sizing)", at.name)
 	}
 
 	// Execute immediately on first run
-	if isGridStrategy {
-		if err := at.RunGridCycle(); err != nil {
-			logger.Infof("❌ Grid execution failed: %v", err)
-		}
-	} else {
-		if err := at.runCycle(); err != nil {
-			logger.Infof("❌ Execution failed: %v", err)
-		}
-	}
+	at.executeCycleByType(isGridStrategy)
 
 	for {
 		at.isRunningMutex.RLock()
@@ -603,15 +597,7 @@ func (at *AutoTrader) Run() error {
 
 		select {
 		case <-ticker.C:
-			if isGridStrategy {
-				if err := at.RunGridCycle(); err != nil {
-					logger.Infof("❌ Grid execution failed: %v", err)
-				}
-			} else {
-				if err := at.runCycle(); err != nil {
-					logger.Infof("❌ Execution failed: %v", err)
-				}
-			}
+			at.executeCycleByType(isGridStrategy)
 		case <-at.stopMonitorCh:
 			logger.Infof("[%s] ⏹ Stop signal received, exiting automatic trading main loop", at.name)
 			return nil

@@ -553,7 +553,34 @@ func (at *AutoTrader) IsGridStrategy() bool {
 	if at.config.StrategyConfig == nil {
 		return false
 	}
-	return at.config.StrategyConfig.StrategyType == "grid_trading" && at.config.StrategyConfig.GridConfig != nil
+	return at.config.StrategyConfig.StrategyType == store.StrategyTypeGrid && at.config.StrategyConfig.GridConfig != nil
+}
+
+// IsBreakoutStrategy returns true if current strategy is the standalone breakout engine.
+func (at *AutoTrader) IsBreakoutStrategy() bool {
+	if at.config.StrategyConfig == nil {
+		return false
+	}
+	return at.config.StrategyConfig.StrategyType == store.StrategyTypeBreakout
+}
+
+// executeCycleByType dispatches one trading cycle by strategy type. Grid and
+// breakout are standalone engines; everything else is the AI cycle.
+func (at *AutoTrader) executeCycleByType(isGrid bool) {
+	switch {
+	case isGrid:
+		if err := at.RunGridCycle(); err != nil {
+			logger.Infof("❌ Grid execution failed: %v", err)
+		}
+	case at.IsBreakoutStrategy():
+		if err := at.RunBreakoutCycle(); err != nil {
+			logger.Infof("❌ Breakout execution failed: %v", err)
+		}
+	default:
+		if err := at.runCycle(); err != nil {
+			logger.Infof("❌ Execution failed: %v", err)
+		}
+	}
 }
 
 // saveGridDecisionRecord saves the grid decision to database
