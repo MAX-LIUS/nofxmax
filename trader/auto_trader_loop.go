@@ -557,6 +557,12 @@ func (at *AutoTrader) runCycle() error {
 
 		record.Decisions = append(record.Decisions, actionRecord)
 	}
+
+	// Code-level breakout entries (data-validated edge), independent of the AI.
+	// Runs after AI decisions so it can skip symbols the AI already opened; reuses
+	// executeDecisionWithRecord and thus inherits all risk controls + protection.
+	at.runBreakoutEntries(ctx, record)
+
 	attachQualityGateReviewSummary(record)
 
 	// 9. Save decision record

@@ -61,8 +61,25 @@ type StrategyConfig struct {
 	// Evolution engine configuration
 	Evolution EvolutionConfig `json:"evolution,omitempty"`
 
+	// Breakout entry engine (CODE ENFORCED, data-validated 2026-06-13). When enabled,
+	// the decision cycle also opens on a pure breakout rule (close breaks prior-N-bar
+	// high/low), independent of the AI. Inherits all existing risk controls (cooldown,
+	// max positions, position-value cap, configured ladder/runner/time-stop protection).
+	BreakoutEntry BreakoutEntryConfig `json:"breakout_entry,omitempty"`
+
 	// Grid trading configuration (only used when StrategyType == "grid_trading")
 	GridConfig *GridStrategyConfig `json:"grid_config,omitempty"`
+}
+
+// BreakoutEntryConfig controls the code-level breakout entry engine.
+type BreakoutEntryConfig struct {
+	Enabled   bool   `json:"enabled,omitempty"`
+	Timeframe string `json:"timeframe,omitempty"`  // which timeframe series to use, e.g. "1h","15m". Default primary.
+	Lookback  int    `json:"lookback,omitempty"`   // prior-bar window for high/low break. Default 20.
+	Leverage  int    `json:"leverage,omitempty"`   // leverage for breakout entries. Default altcoin leverage.
+	// Position size as a fraction of equity (e.g. 0.5 = 50% of equity notional).
+	// 0/unset → fall back to a conservative default.
+	SizeEquityFrac float64 `json:"size_equity_frac,omitempty"`
 }
 
 type EntryStructureConfig struct {
