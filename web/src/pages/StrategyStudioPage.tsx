@@ -488,11 +488,10 @@ export function StrategyStudioPage() {
     section: K,
     value: StrategyConfig[K]
   ) => {
-    if (!editingConfig) return
-    setEditingConfig({
-      ...editingConfig,
-      [section]: value,
-    })
+    // Functional update so multiple updateConfig calls within a single event
+    // handler compose correctly instead of each spreading a stale editingConfig
+    // (which made the second call silently overwrite the first).
+    setEditingConfig((prev) => (prev ? { ...prev, [section]: value } : prev))
     setHasChanges(true)
   }
 
