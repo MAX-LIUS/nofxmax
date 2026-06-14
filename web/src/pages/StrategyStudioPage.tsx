@@ -53,6 +53,7 @@ import {
 } from '../components/strategy/ProtectionEditor'
 import { normalizeEntryStructureConfig } from '../components/strategy/EntryStructureEditor'
 import { PreEntryGateEditor } from '../components/strategy/PreEntryGateEditor'
+import { EntryPipelinePanel } from '../components/strategy/EntryPipelinePanel'
 import { EvolutionEditor } from '../components/strategy/EvolutionEditor'
 import { DeepVoidBackground } from '../components/common/DeepVoidBackground'
 import { t } from '../i18n/translations'
@@ -718,70 +719,81 @@ export function StrategyStudioPage() {
           : 'Pre-Entry Gate',
       forStrategyType: 'ai_trading' as const,
       content: editingConfig && (
-        <PreEntryGateEditor
-          config={{
-            ...normalizeProtectionConfig(editingConfig.protection)
-              .regime_filter,
-            min_confidence:
+        <div className="space-y-4">
+          <EntryPipelinePanel
+            riskControl={editingConfig.risk_control}
+            regimeFilter={
               normalizeProtectionConfig(editingConfig.protection).regime_filter
-                .min_confidence ?? editingConfig.risk_control.min_confidence,
-            min_risk_reward_ratio:
-              normalizeProtectionConfig(editingConfig.protection).regime_filter
-                .min_risk_reward_ratio ??
-              editingConfig.risk_control.min_risk_reward_ratio,
-            policy_mode:
-              normalizeProtectionConfig(editingConfig.protection).regime_filter
-                .policy_mode ??
-              (editingConfig.strategy_control_policy?.mode as
-                | 'strict'
-                | 'audit_only'
-                | 'recommend_only'
-                | undefined) ??
-              'strict',
-            entry_structure:
-              normalizeProtectionConfig(editingConfig.protection).regime_filter
-                .entry_structure ?? editingConfig.entry_structure,
-          }}
-          onChange={(regimeFilter) => {
-            // Must do a single setEditingConfig to avoid stale closure overwrites
-            if (!editingConfig) return
-            const currentProtection = normalizeProtectionConfig(
-              editingConfig.protection
-            )
-            setEditingConfig({
-              ...editingConfig,
-              protection: {
-                ...currentProtection,
-                regime_filter: regimeFilter,
-              },
-              risk_control: {
-                ...editingConfig.risk_control,
-                min_confidence:
-                  regimeFilter.min_confidence ??
-                  editingConfig.risk_control.min_confidence,
-                min_risk_reward_ratio:
-                  regimeFilter.min_risk_reward_ratio ??
-                  editingConfig.risk_control.min_risk_reward_ratio,
-              },
-              ...(regimeFilter.policy_mode
-                ? {
-                    strategy_control_policy: {
-                      ...editingConfig.strategy_control_policy,
-                      mode: regimeFilter.policy_mode,
-                    },
-                  }
-                : {}),
-              ...(regimeFilter.entry_structure
-                ? {
-                    entry_structure: regimeFilter.entry_structure,
-                  }
-                : {}),
-            })
-            setHasChanges(true)
-          }}
-          disabled={selectedStrategy?.is_default}
-          language={language}
-        />
+            }
+            language={language}
+          />
+          <PreEntryGateEditor
+            config={{
+              ...normalizeProtectionConfig(editingConfig.protection)
+                .regime_filter,
+              min_confidence:
+                normalizeProtectionConfig(editingConfig.protection)
+                  .regime_filter.min_confidence ??
+                editingConfig.risk_control.min_confidence,
+              min_risk_reward_ratio:
+                normalizeProtectionConfig(editingConfig.protection)
+                  .regime_filter.min_risk_reward_ratio ??
+                editingConfig.risk_control.min_risk_reward_ratio,
+              policy_mode:
+                normalizeProtectionConfig(editingConfig.protection)
+                  .regime_filter.policy_mode ??
+                (editingConfig.strategy_control_policy?.mode as
+                  | 'strict'
+                  | 'audit_only'
+                  | 'recommend_only'
+                  | undefined) ??
+                'strict',
+              entry_structure:
+                normalizeProtectionConfig(editingConfig.protection)
+                  .regime_filter.entry_structure ??
+                editingConfig.entry_structure,
+            }}
+            onChange={(regimeFilter) => {
+              // Must do a single setEditingConfig to avoid stale closure overwrites
+              if (!editingConfig) return
+              const currentProtection = normalizeProtectionConfig(
+                editingConfig.protection
+              )
+              setEditingConfig({
+                ...editingConfig,
+                protection: {
+                  ...currentProtection,
+                  regime_filter: regimeFilter,
+                },
+                risk_control: {
+                  ...editingConfig.risk_control,
+                  min_confidence:
+                    regimeFilter.min_confidence ??
+                    editingConfig.risk_control.min_confidence,
+                  min_risk_reward_ratio:
+                    regimeFilter.min_risk_reward_ratio ??
+                    editingConfig.risk_control.min_risk_reward_ratio,
+                },
+                ...(regimeFilter.policy_mode
+                  ? {
+                      strategy_control_policy: {
+                        ...editingConfig.strategy_control_policy,
+                        mode: regimeFilter.policy_mode,
+                      },
+                    }
+                  : {}),
+                ...(regimeFilter.entry_structure
+                  ? {
+                      entry_structure: regimeFilter.entry_structure,
+                    }
+                  : {}),
+              })
+              setHasChanges(true)
+            }}
+            disabled={selectedStrategy?.is_default}
+            language={language}
+          />
+        </div>
       ),
     },
     {
