@@ -161,6 +161,22 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			continue
 		}
 
+		// Config trailing take-profit. Done BEFORE the AI-drawdown-rules early-return so it
+		// works even when no drawdown rules are configured. Gated on the feature flag so when
+		// disabled this block is a complete no-op (zero behavior change vs. prior versions):
+		// the peak cache is only touched here when trailing TP is actually enabled.
+		if at.config.StrategyConfig != nil && at.config.StrategyConfig.RiskControl.TrailingTakeProfitEnabled {
+			currentPnLPctEarly := calculatePositionPnLPct(side, entryPrice, markPrice)
+			at.UpdatePeakPnL(symbol, side, currentPnLPctEarly)
+			earlyPosKey := symbol + "_" + side
+			at.peakPnLCacheMutex.RLock()
+			earlyPeak := at.peakPnLCache[earlyPosKey]
+			at.peakPnLCacheMutex.RUnlock()
+			if at.maybeTrailingTPClose(symbol, side, entryPrice, markPrice, quantity, earlyPeak) {
+				continue
+			}
+		}
+
 		rules := at.getActiveDrawdownRulesForPosition(symbol, side)
 		if len(rules) == 0 {
 			continue

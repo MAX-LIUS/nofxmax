@@ -1346,12 +1346,17 @@ func (t *OKXTrader) PlaceLimitOrder(req *types.LimitOrderRequest) (*types.LimitO
 		posSide = "short"
 	}
 
+	ordType := "limit"
+	if req.PostOnly {
+		ordType = "post_only"
+	}
+
 	body := map[string]interface{}{
 		"instId":  instId,
 		"tdMode":  "cross",
 		"side":    side,
 		"posSide": posSide,
-		"ordType": "limit",
+		"ordType": ordType,
 		"sz":      szStr,
 		"px":      fmt.Sprintf("%.8f", req.Price),
 		"clOrdId": genOkxClOrdID(),
