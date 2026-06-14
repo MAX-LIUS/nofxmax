@@ -55,6 +55,29 @@ function formatUsdx(qty: number, price: number): string {
   return `$${val.toFixed(1)}`
 }
 
+function formatUsd(value: number | undefined | null): string {
+  if (value === undefined || value === null || Number.isNaN(value)) return '—'
+  const sign = value > 0 ? '+' : value < 0 ? '-' : ''
+  const abs = Math.abs(value)
+  return `${sign}$${abs.toFixed(2)}`
+}
+
+// formatHoldTime renders ms-since-entry as a compact duration (e.g. "2h", "1d 4h", "45m").
+function formatHoldTime(entryTimeMs: number | undefined): string {
+  if (!entryTimeMs || entryTimeMs <= 0) return '—'
+  const mins = Math.floor((Date.now() - entryTimeMs) / 60000)
+  if (mins < 1) return '<1m'
+  if (mins < 60) return `${mins}m`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) {
+    const m = mins % 60
+    return m > 0 ? `${hrs}h ${m}m` : `${hrs}h`
+  }
+  const days = Math.floor(hrs / 24)
+  const h = hrs % 24
+  return h > 0 ? `${days}d ${h}h` : `${days}d`
+}
+
 function classifyZone(
   order: OpenOrder,
   entryPrice: number,
@@ -257,6 +280,15 @@ const PositionCard = memo(function PositionCard({
   const peakPnlPct = Number(rt?.drawdown_peak_pnl_pct ?? currentPnlPct)
   const currentDrawdownPct = Number(rt?.current_drawdown_pct ?? 0)
 
+  // Real overall result of the position: accumulated realized (from partial closes)
+  // + current unrealized - total fees. Falls back to raw unrealized when net_pnl absent.
+  const entryTimeMs = position.entry_time
+  const realizedPnl = Number(position.realized_pnl ?? 0)
+  const totalFee = Number(position.fee ?? 0)
+  const netPnl = Number(position.net_pnl ?? position.unrealized_pnl ?? 0)
+  const isPartiallyClosed =
+    entryQty > 0 && nowQty > 0 && nowQty < entryQty - 1e-9
+
   const filteredOrders = useMemo(
     () =>
       orders.filter((o) => {
@@ -344,6 +376,61 @@ const PositionCard = memo(function PositionCard({
             </>
           )}
         </span>
+        {entryTimeMs && entryTimeMs > 0 && (
+          <span>
+            {language === 'zh' ? '持仓' : 'Held'}{' '}
+            <span className="font-mono text-nofx-text-main">
+              {formatHoldTime(entryTimeMs)}
+            </span>
+          </span>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+        <span className="text-nofx-text-muted">
+          {language === 'zh' ? '净盈亏' : 'Net PnL'}{' '}
+          <span
+            className={`font-mono font-semibold ${
+              netPnl >= 0 ? 'text-nofx-green' : 'text-nofx-red'
+            }`}
+          >
+            {formatUsd(netPnl)}
+          </span>
+          <span className="text-nofx-text-muted ml-1">
+            ({language === 'zh' ? '含手续费' : 'incl. fees'})
+          </span>
+        </span>
+        {isPartiallyClosed && (
+          <span className="text-nofx-text-muted">
+            {language === 'zh' ? '已实现' : 'Realized'}{' '}
+            <span
+              className={`font-mono ${
+                realizedPnl >= 0 ? 'text-nofx-green' : 'text-nofx-red'
+              }`}
+            >
+              {formatUsd(realizedPnl)}
+            </span>
+            <span className="text-nofx-text-muted mx-0.5">+</span>
+            {language === 'zh' ? '浮动' : 'Unreal.'}{' '}
+            <span
+              className={`font-mono ${
+                position.unrealized_pnl >= 0
+                  ? 'text-nofx-green'
+                  : 'text-nofx-red'
+              }`}
+            >
+              {formatUsd(position.unrealized_pnl)}
+            </span>
+          </span>
+        )}
+        {totalFee > 0 && (
+          <span className="text-nofx-text-muted">
+            {language === 'zh' ? '手续费' : 'Fees'}{' '}
+            <span className="font-mono text-nofx-red">
+              -${totalFee.toFixed(2)}
+            </span>
+          </span>
+        )}
       </div>
 
       {rows.length > 0 ? (

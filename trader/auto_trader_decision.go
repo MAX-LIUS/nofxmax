@@ -236,9 +236,15 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 		entryQuantity := quantity
 		var entryReviewSummary map[string]interface{}
 		var entryStructureAudit map[string]interface{}
+		var entryTimeMs int64
+		var realizedPnl float64
+		var accumulatedFee float64
 		if at.store != nil {
 			if openPos, err := at.store.Position().GetOpenPositionBySymbol(at.id, symbol, positionSideUpper); err == nil && openPos != nil {
 				entryDecisionCycle = openPos.EntryDecisionCycle
+				entryTimeMs = openPos.EntryTime
+				realizedPnl = openPos.RealizedPnL
+				accumulatedFee = openPos.Fee
 				if openPos.EntryQuantity > 0 {
 					entryQuantity = openPos.EntryQuantity
 				}
@@ -293,6 +299,13 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 			"entry_decision_cycle":      entryDecisionCycle,
 			"entry_review_summary":      entryReviewSummary,
 			"entry_structure_audit":     entryStructureAudit,
+			"entry_time":                entryTimeMs,
+			"realized_pnl":              realizedPnl,
+			"fee":                       accumulatedFee,
+			// net_pnl = accumulated realized (gross) + current unrealized (gross) - total fees.
+			// This is the true overall result of the position including partially-closed
+			// portions and all fees, which the exchange's unrealized_pnl alone omits.
+			"net_pnl": realizedPnl + unrealizedPnl - accumulatedFee,
 		})
 	}
 

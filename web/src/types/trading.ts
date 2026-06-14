@@ -258,6 +258,10 @@ export interface Position {
   leverage: number
   unrealized_pnl: number
   unrealized_pnl_pct: number
+  entry_time?: number
+  realized_pnl?: number
+  fee?: number
+  net_pnl?: number
   liquidation_price: number
   margin_used: number
   protection_state?: string
