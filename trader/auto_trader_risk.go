@@ -155,6 +155,12 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			continue
 		}
 
+		// Max-hold stop: clears long-held non-runners (flat grinders, break-even/dust tails)
+		// that the time-stop's loss condition never catches. Profitable runners are spared.
+		if at.maybeMaxHoldClose(symbol, side, entryPrice, markPrice, quantity, posCreatedTime) {
+			continue
+		}
+
 		rules := at.getActiveDrawdownRulesForPosition(symbol, side)
 		if len(rules) == 0 {
 			continue

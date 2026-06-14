@@ -718,6 +718,15 @@ type RiskControlConfig struct {
 	// winners (loss condition is required). 0/unset = disabled.
 	TimeStopHours   float64 `json:"time_stop_hours,omitempty"`   // e.g. 24
 	TimeStopLossPct float64 `json:"time_stop_loss_pct,omitempty"` // negative, e.g. -1.5
+
+	// Max-hold stop (CODE ENFORCED): force-close any position held longer than
+	// MaxHoldHours UNLESS it is a profitable runner (unrealized pnl >= MaxHoldProfitExemptPct).
+	// Unlike TimeStop (which only triggers on a loss worse than a threshold), this also clears
+	// break-even / dust tails that grind sideways and occupy a position slot. Profitable runners
+	// are explicitly spared so trends are not cut short. 0/unset = disabled.
+	// Backtest (claude, 2026-05/06): MaxHoldHours=18, ProfitExemptPct=2.0 cut net loss by ~1/3.
+	MaxHoldHours           float64 `json:"max_hold_hours,omitempty"`             // e.g. 18
+	MaxHoldProfitExemptPct float64 `json:"max_hold_profit_exempt_pct,omitempty"` // positive, e.g. 2.0
 }
 
 // NewStrategyStore creates a new StrategyStore
