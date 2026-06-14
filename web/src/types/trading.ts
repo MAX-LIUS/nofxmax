@@ -567,6 +567,19 @@ export interface Statistics {
   failed_cycles: number
   total_open_positions: number
   total_close_positions: number
+  // Expectancy metrics (net of fees) — quantify whether the strategy has a positive edge.
+  closed_trades?: number
+  net_wins?: number
+  net_win_rate?: number
+  avg_win_usd?: number
+  avg_loss_usd?: number
+  payoff_ratio?: number
+  expectancy_usd?: number
+  gross_pnl_usd?: number
+  total_fees_usd?: number
+  net_pnl_usd?: number
+  fee_drag_ratio?: number
+  health_flag?: 'positive' | 'marginal' | 'negative'
 }
 
 // AI Trading相关类型

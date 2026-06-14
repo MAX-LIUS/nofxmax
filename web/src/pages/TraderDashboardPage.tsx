@@ -8,6 +8,7 @@ const ChartTabs = lazy(() =>
 )
 import { DecisionCard } from '../components/trader/DecisionCard'
 import { PositionProtectionPanel } from '../components/trader/PositionProtectionPanel'
+import { ExpectancyPanel } from '../components/trader/ExpectancyPanel'
 import { EvolutionProfilePanel } from '../components/trader/EvolutionProfilePanel'
 import { InsightPanel } from '../components/trader/InsightPanel'
 const PositionHistory = lazy(() =>
@@ -147,6 +148,7 @@ export function TraderDashboardPage({
   decisions,
   decisionsLimit,
   onDecisionsLimitChange,
+  stats,
   lastUpdate,
   language,
   traders,
@@ -881,6 +883,9 @@ export function TraderDashboardPage({
           />
           <SystemHealthCard decisions={decisions} language={language} />
         </div>
+
+        {/* Strategy expectancy (net-of-fees edge) */}
+        <ExpectancyPanel stats={stats} language={language} />
 
         {/* Grid Risk Panel - Only show for grid trading strategy */}
         {status?.strategy_type === 'grid_trading' && selectedTraderId && (
