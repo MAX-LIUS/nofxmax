@@ -173,24 +173,75 @@ func (at *AutoTrader) tryMakerEntry(symbol, side string, quantity float64, lever
 			}
 			return result, true, true
 		case "CANCELED", "CANCELLED", "REJECTED", "EXPIRED":
-			logger.Warnf("  ⚠️ Maker entry order %s ended early with status=%s", placed.OrderID, status)
+			// Order ended early. If it partially filled before ending, treat the
+			// partial as terminal (no market top-up) to avoid an oversized position —
+			// under-filling is safe, over-filling is not. Exchange position sync
+			// reconciles the actual recorded quantity afterward.
+			if res, filled := makerPartialResult(placed.OrderID, symbol, st); filled {
+				logger.Warnf("  ⚠️ Maker entry order %s ended (%s) with partial fill %.8f; accepting partial, skipping market top-up", placed.OrderID, status, res["executedQty"])
+				return res, true, true
+			}
+			logger.Warnf("  ⚠️ Maker entry order %s ended early with status=%s (no fill)", placed.OrderID, status)
 			return nil, false, true
 		}
 	}
 
 	// Timeout: cancel the resting order so it cannot fill later unexpectedly.
-	if cErr := ex.CancelOrder(symbol, placed.OrderID); cErr != nil {
-		logger.Warnf("  ⚠️ Maker entry: failed to cancel unfilled order %s: %v", placed.OrderID, cErr)
-		// Re-check: it may have filled in the race between timeout and cancel.
-		if st, sErr := ex.GetOrderStatus(symbol, placed.OrderID); sErr == nil {
-			if status, _ := st["status"].(string); strings.ToUpper(status) == "FILLED" {
-				logger.Infof("  ✅ Maker entry filled during cancel race: %s", placed.OrderID)
-				return map[string]interface{}{"orderId": placed.OrderID, "symbol": symbol, "status": "FILLED"}, true, true
+	cancelErr := ex.CancelOrder(symbol, placed.OrderID)
+	if cancelErr != nil {
+		logger.Warnf("  ⚠️ Maker entry: failed to cancel unfilled order %s: %v", placed.OrderID, cancelErr)
+	}
+	// Re-check final state after the cancel attempt. This covers two cases:
+	//   1) it fully filled in the race between timeout and cancel, or
+	//   2) it partially filled before being cancelled.
+	// In both cases we treat what filled as terminal and never add a market
+	// top-up — under-filling is safe, over-filling risks an oversized position.
+	if st, sErr := ex.GetOrderStatus(symbol, placed.OrderID); sErr == nil {
+		status, _ := st["status"].(string)
+		if strings.ToUpper(status) == "FILLED" {
+			logger.Infof("  ✅ Maker entry filled during cancel race: %s", placed.OrderID)
+			result := map[string]interface{}{"orderId": placed.OrderID, "symbol": symbol, "status": "FILLED"}
+			if avg, ok := st["avgPrice"].(float64); ok && avg > 0 {
+				result["avgPrice"] = avg
 			}
+			return result, true, true
+		}
+		if res, filled := makerPartialResult(placed.OrderID, symbol, st); filled {
+			logger.Warnf("  ⚠️ Maker entry %s timed out with partial fill %.8f; accepting partial, skipping market top-up", placed.OrderID, res["executedQty"])
+			return res, true, true
 		}
 	}
 	logger.Infof("  ⏱ Maker entry unfilled within %s for %s; cancelled.", mc.timeout, symbol)
 	return nil, false, true
+}
+
+// makerPartialResult inspects an order-status map and, if a positive executed
+// quantity is present, returns a terminal order result with filled=true.
+// Returning filled=true on a partial fill is intentional: the caller must NOT
+// place a market order for the full quantity on top of an already-partially-filled
+// maker order, which would create an oversized position. The recorded quantity is
+// later reconciled by exchange position sync.
+func makerPartialResult(orderID, symbol string, st map[string]interface{}) (map[string]interface{}, bool) {
+	executed := 0.0
+	switch v := st["executedQty"].(type) {
+	case float64:
+		executed = v
+	case int64:
+		executed = float64(v)
+	}
+	if executed <= 0 {
+		return nil, false
+	}
+	result := map[string]interface{}{
+		"orderId":     orderID,
+		"symbol":      symbol,
+		"status":      "FILLED",
+		"executedQty": executed,
+	}
+	if avg, ok := st["avgPrice"].(float64); ok && avg > 0 {
+		result["avgPrice"] = avg
+	}
+	return result, true
 }
 
 // makerEntryShouldFallback reports whether the caller should cross with a market order

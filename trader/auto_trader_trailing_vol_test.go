@@ -120,3 +120,37 @@ func TestDeriveTickFromBook(t *testing.T) {
 		t.Errorf("tick=%.4f want 0.05", tick)
 	}
 }
+
+func TestMakerPartialResult(t *testing.T) {
+	// No fill: must report not-filled so caller knows nothing executed.
+	if _, filled := makerPartialResult("o1", "BTCUSDT", map[string]interface{}{
+		"status": "CANCELED", "executedQty": 0.0,
+	}); filled {
+		t.Errorf("zero executedQty should return filled=false")
+	}
+
+	// Partial fill: must report filled=true (terminal) so the caller does NOT
+	// place a full market top-up that would oversize the position.
+	res, filled := makerPartialResult("o2", "BTCUSDT", map[string]interface{}{
+		"status": "CANCELED", "executedQty": 0.003, "avgPrice": 65000.0,
+	})
+	if !filled {
+		t.Fatalf("partial executedQty should return filled=true")
+	}
+	if res["executedQty"].(float64) != 0.003 {
+		t.Errorf("executedQty=%v want 0.003", res["executedQty"])
+	}
+	if res["status"].(string) != "FILLED" {
+		t.Errorf("status=%v want FILLED", res["status"])
+	}
+	if res["avgPrice"].(float64) != 65000.0 {
+		t.Errorf("avgPrice=%v want 65000", res["avgPrice"])
+	}
+
+	// int64 executedQty (defensive: some paths may type it differently).
+	if _, filled := makerPartialResult("o3", "ETHUSDT", map[string]interface{}{
+		"executedQty": int64(2),
+	}); !filled {
+		t.Errorf("int64 positive executedQty should return filled=true")
+	}
+}

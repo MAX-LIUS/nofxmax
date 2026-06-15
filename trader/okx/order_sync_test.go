@@ -195,3 +195,37 @@ func TestSyncOrdersFromOKXWithFullCloseHandler_UsesAnchoredParentOrderOwner(t *t
 		t.Fatalf("expected no position under sync trader, got %+v", syncPositions)
 	}
 }
+
+func TestMatchProtectionReasonByPrice(t *testing.T) {
+	cands := []protectionCandidate{
+		{OrderAction: "full_sl", StopPrice: 61882.1, Quantity: 0.0007},
+		{OrderAction: "managed_drawdown_runner_exit", StopPrice: 69045.4, Quantity: 0.0002},
+		{OrderAction: "full_tp", StopPrice: 67093.3, Quantity: 0.0003},
+	}
+
+	// Fill near the runner trailing trigger -> attributed to runner exit.
+	if got := matchProtectionReasonByPrice(69050.0, cands, 0.6); got != "managed_drawdown_runner_exit" {
+		t.Errorf("near-trailing fill: got %q want managed_drawdown_runner_exit", got)
+	}
+
+	// Fill near the stop -> full_sl.
+	if got := matchProtectionReasonByPrice(61870.0, cands, 0.6); got != "full_sl" {
+		t.Errorf("near-stop fill: got %q want full_sl", got)
+	}
+
+	// Fill far from every trigger (>0.6%) -> no attribution.
+	if got := matchProtectionReasonByPrice(65000.0, cands, 0.6); got != "" {
+		t.Errorf("far fill: got %q want empty", got)
+	}
+
+	// Guard: zero fill price returns empty.
+	if got := matchProtectionReasonByPrice(0, cands, 0.6); got != "" {
+		t.Errorf("zero fill price: got %q want empty", got)
+	}
+
+	// Guard: candidate with no stop price is skipped.
+	noStop := []protectionCandidate{{OrderAction: "ladder_tp", StopPrice: 0, Quantity: 1}}
+	if got := matchProtectionReasonByPrice(100.0, noStop, 0.6); got != "" {
+		t.Errorf("zero-stop candidate: got %q want empty", got)
+	}
+}

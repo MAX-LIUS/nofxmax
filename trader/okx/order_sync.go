@@ -3,6 +3,7 @@ package okx
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"nofx/logger"
 	"nofx/market"
 	"nofx/store"
@@ -34,6 +35,46 @@ func protectionReasonFromTag(tag string) string {
 	}
 	return ""
 }
+
+// protectionCandidate is the minimal view of a locally-recorded protection order
+// used to attribute a close fill to its protection mechanism.
+type protectionCandidate struct {
+	OrderAction string  // full reason, e.g. "managed_drawdown_runner_exit", "ladder_tp", "native_trailing"
+	StopPrice   float64 // trigger/activation price
+	Quantity    float64
+}
+
+// matchProtectionReasonByPrice attributes a close fill to a protection mechanism
+// when the OKX tag/parent lookup could not (the broker tag is 16 chars and leaves
+// no room for a reason, and a triggered algo's fill ordId differs from the stored
+// algoId). It picks the live protection order whose trigger price is closest to the
+// fill price within tolerancePct. It is purely additive: callers only use it when the
+// reason is otherwise empty, so it can never override a known reason.
+//
+// fillPrice must be > 0. Returns "" when no candidate is within tolerance.
+func matchProtectionReasonByPrice(fillPrice float64, candidates []protectionCandidate, tolerancePct float64) string {
+	if fillPrice <= 0 || len(candidates) == 0 {
+		return ""
+	}
+	if tolerancePct <= 0 {
+		tolerancePct = 0.6 // default: 0.6% around the fill price
+	}
+	bestReason := ""
+	bestDistPct := tolerancePct
+	for _, c := range candidates {
+		if c.StopPrice <= 0 || strings.TrimSpace(c.OrderAction) == "" {
+			continue
+		}
+		distPct := math.Abs(c.StopPrice-fillPrice) / fillPrice * 100
+		if distPct <= bestDistPct {
+			bestDistPct = distPct
+			bestReason = strings.TrimSpace(c.OrderAction)
+		}
+	}
+	return bestReason
+}
+
+
 
 // OKXTrade represents a trade record from OKX fills history
 type OKXTrade struct {
@@ -419,6 +460,30 @@ func (t *OKXTrader) SyncOrdersFromOKXWithFullCloseHandler(traderID string, excha
 		if canonicalAction == "close_long" || canonicalAction == "close_short" {
 			if reason := protectionReasonFromTag(trade.Tag); reason != "" {
 				requestedReason = reason
+			}
+			// Tag/parent lookup often cannot resolve the protection mechanism (the
+			// 16-char broker tag leaves no room for a reason, and a triggered algo's
+			// fill ordId differs from the stored algoId). As a purely-additive
+			// fallback, attribute the fill to the live protection order whose trigger
+			// price is closest to the fill price. Only applies when still unresolved.
+			if requestedReason == canonicalAction && orderStore != nil {
+				if live, lerr := orderStore.GetTraderOrdersFiltered(ownerTraderID, symbol, "NEW", 50); lerr == nil && len(live) > 0 {
+					cands := make([]protectionCandidate, 0, len(live))
+					for _, o := range live {
+						if o == nil || !o.ReduceOnly {
+							continue
+						}
+						cands = append(cands, protectionCandidate{
+							OrderAction: o.OrderAction,
+							StopPrice:   o.StopPrice,
+							Quantity:    o.Quantity,
+						})
+					}
+					if matched := matchProtectionReasonByPrice(trade.FillPrice, cands, 0.6); matched != "" {
+						requestedReason = matched
+						logger.Infof("  🔖 Close fill %s %s attributed to protection reason=%s by price match (fill=%.6f)", symbol, canonicalAction, matched, trade.FillPrice)
+					}
+				}
 			}
 		}
 		orderRecord := &store.TraderOrder{
