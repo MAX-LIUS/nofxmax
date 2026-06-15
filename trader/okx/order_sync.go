@@ -302,6 +302,22 @@ func (t *OKXTrader) SyncOpenProtectionOrdersToStore(traderID string, exchangeID 
 						posSide = "LONG"
 					}
 				}
+				// Disambiguate a stop sitting on the PROFIT side of entry: that is a
+				// break-even stop, not the -X% full stop. The 16-char broker tag leaves
+				// no room for a reason, so an untagged conditional SL would otherwise be
+				// mislabeled full_sl. Use the live position entry price to classify by
+				// where the stop trigger sits relative to entry.
+				if reason == "full_sl" && order.SlTriggerPx != "" && st != nil && st.Position() != nil {
+					if slPx, perr := strconv.ParseFloat(order.SlTriggerPx, 64); perr == nil && slPx > 0 {
+						if pos, gerr := st.Position().GetOpenPositionBySymbol(traderID, symbol, posSide); gerr == nil && pos != nil && pos.EntryPrice > 0 {
+							onProfitSide := (posSide == "LONG" && slPx > pos.EntryPrice) ||
+								(posSide == "SHORT" && slPx < pos.EntryPrice)
+							if onProfitSide {
+								reason = "break_even_stop"
+							}
+						}
+					}
+				}
 				qty, _ := strconv.ParseFloat(order.Sz, 64)
 				if inst, err := t.getInstrument(symbol); err == nil && inst.CtVal > 0 {
 					qty *= inst.CtVal

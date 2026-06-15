@@ -21,6 +21,8 @@ func TestClassifyClose(t *testing.T) {
 		{"fallback_maxloss_sl", CategoryProtection, MechFallbackSL},
 		{"time_stop", CategoryProtection, MechTimeStop},
 		{"emergency_protection_close", CategoryProtection, MechEmergency},
+		{"max_hold", CategoryProtection, MechMaxHold},
+		{"close_by_side", CategorySystem, MechUnknownClose},
 		{"ai_close_long", CategoryAI, MechAIClose},
 		{"ai_close_short", CategoryAI, MechAIClose},
 		{"manual_close_long", CategoryManual, MechManualClose},

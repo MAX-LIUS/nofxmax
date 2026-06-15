@@ -33,6 +33,7 @@ const (
 	MechManagedDrawdown = "managed_drawdown"
 	MechBreakEven       = "break_even_stop"
 	MechTimeStop        = "time_stop"
+	MechMaxHold         = "max_hold"
 	MechTrailingTP      = "trailing_take_profit"
 	MechAIClose         = "ai_close"
 	MechManualClose     = "manual_close"
@@ -91,8 +92,15 @@ func ClassifyClose(rawReason string) Attribution {
 		return Attribution{CategoryProtection, MechFullSL}
 	case strings.Contains(r, "time_stop"):
 		return Attribution{CategoryProtection, MechTimeStop}
+	case strings.Contains(r, "max_hold"):
+		// Held past MaxHoldHours and not a profitable runner — a time-dimension
+		// forced exit that frees the slot. Grouped with time-stop semantics.
+		return Attribution{CategoryProtection, MechMaxHold}
 	case strings.Contains(r, "emergency"):
 		return Attribution{CategoryProtection, MechEmergency}
+	case strings.Contains(r, "close_by_side"):
+		// Generic internal close helper with no specific mechanism attached.
+		return Attribution{CategorySystem, MechUnknownClose}
 
 	// AI proactive close.
 	case strings.HasPrefix(r, "ai_close"):
