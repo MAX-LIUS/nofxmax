@@ -765,3 +765,74 @@ func (s *Server) handleOpenOrders(c *gin.Context) {
 
 	c.JSON(http.StatusOK, openOrders)
 }
+
+// handleCloseAttribution returns the canonical close-attribution summary for a
+// trader: every exit bucketed by category (ai/protection/manual/exchange/system)
+// and specific mechanism, with count and realized PnL/fee contribution. This is
+// the per-trade traceability view for auditing how positions actually closed.
+func (s *Server) handleCloseAttribution(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		SafeBadRequest(c, "Invalid trader ID")
+		return
+	}
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		SafeNotFound(c, "Trader")
+		return
+	}
+	traderStore := trader.GetStore()
+	if traderStore == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Store not available"})
+		return
+	}
+
+	// Trailing window in days (default 30, max 365).
+	days := 30
+	if d, perr := strconv.Atoi(c.DefaultQuery("days", "30")); perr == nil && d > 0 && d <= 365 {
+		days = d
+	}
+	sinceMs := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
+
+	rows, err := traderStore.PositionClose().GetAttributionSummary(trader.GetID(), sinceMs)
+	if err != nil {
+		SafeInternalError(c, "Attribution summary", err)
+		return
+	}
+
+	// Roll up by category for a quick top-level view.
+	type catAgg struct {
+		Category    string  `json:"category"`
+		Count       int64   `json:"count"`
+		RealizedPnL float64 `json:"realized_pnl"`
+		Fees        float64 `json:"fees"`
+	}
+	catMap := map[string]*catAgg{}
+	var totalCount int64
+	var totalPnL float64
+	for _, r := range rows {
+		totalCount += r.Count
+		totalPnL += r.RealizedPnL
+		a, ok := catMap[r.Category]
+		if !ok {
+			a = &catAgg{Category: r.Category}
+			catMap[r.Category] = a
+		}
+		a.Count += r.Count
+		a.RealizedPnL += r.RealizedPnL
+		a.Fees += r.Fees
+	}
+	categories := make([]*catAgg, 0, len(catMap))
+	for _, a := range catMap {
+		categories = append(categories, a)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"trader_id":    trader.GetID(),
+		"window_days":  days,
+		"total_events": totalCount,
+		"total_pnl":    totalPnL,
+		"by_category":  categories,
+		"by_mechanism": rows,
+	})
+}

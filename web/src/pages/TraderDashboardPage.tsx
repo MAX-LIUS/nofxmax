@@ -9,6 +9,7 @@ const ChartTabs = lazy(() =>
 import { DecisionCard } from '../components/trader/DecisionCard'
 import { PositionProtectionPanel } from '../components/trader/PositionProtectionPanel'
 import { ExpectancyPanel } from '../components/trader/ExpectancyPanel'
+import { CloseAttributionPanel } from '../components/trader/CloseAttributionPanel'
 import { EvolutionProfilePanel } from '../components/trader/EvolutionProfilePanel'
 import { InsightPanel } from '../components/trader/InsightPanel'
 const PositionHistory = lazy(() =>
@@ -886,6 +887,12 @@ export function TraderDashboardPage({
 
         {/* Strategy expectancy (net-of-fees edge) */}
         <ExpectancyPanel stats={stats} language={language} />
+
+        {/* Close attribution: every exit traced to AI/protection/manual/exchange */}
+        <CloseAttributionPanel
+          traderId={selectedTraderId}
+          language={language}
+        />
 
         {/* Grid Risk Panel - Only show for grid trading strategy */}
         {status?.strategy_type === 'grid_trading' && selectedTraderId && (

@@ -247,6 +247,16 @@ func (s *PositionStore) logCloseEvent(pos *TraderPosition, closeReason, executio
 	if s.db == nil || pos == nil || closeQty <= 0 {
 		return nil
 	}
+	// Canonical attribution: prefer the most specific reason available. closeReason
+	// carries the resolved mechanism (e.g. managed_drawdown_runner_exit); fall back
+	// to executionSource when closeReason is a bare action.
+	attrInput := closeReason
+	if ClassifyClose(attrInput).Mechanism == MechSyncExternal && executionSource != "" {
+		if alt := ClassifyClose(executionSource); alt.Mechanism != MechSyncExternal && alt.Mechanism != MechUnknownClose {
+			attrInput = executionSource
+		}
+	}
+	attr := ClassifyClose(attrInput)
 	closeRatioPct := 0.0
 	baseQty := pos.EntryQuantity
 	if baseQty <= 0 {
@@ -279,6 +289,8 @@ func (s *PositionStore) logCloseEvent(pos *TraderPosition, closeReason, executio
 		CloseReason:      closeReason,
 		ExecutionSource:  executionSource,
 		ExecutionType:    executionType,
+		Category:         attr.Category,
+		Mechanism:        attr.Mechanism,
 		DecisionCycle:    decisionCycle,
 		ExchangeOrderID:  exchangeOrderID,
 		ParentOrderID:    parentOrderID,

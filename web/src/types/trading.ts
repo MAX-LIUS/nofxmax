@@ -785,6 +785,32 @@ export interface PositionHistoryResponse {
   direction_stats: DirectionStats[]
 }
 
+// Close attribution: every exit bucketed by canonical category + mechanism.
+export interface AttributionCategoryRow {
+  category: string
+  count: number
+  realized_pnl: number
+  fees: number
+}
+
+export interface AttributionMechanismRow {
+  category: string
+  mechanism: string
+  count: number
+  realized_pnl: number
+  fees: number
+  close_value_usdt: number
+}
+
+export interface CloseAttributionResponse {
+  trader_id: string
+  window_days: number
+  total_events: number
+  total_pnl: number
+  by_category: AttributionCategoryRow[]
+  by_mechanism: AttributionMechanismRow[]
+}
+
 // Grid Risk Information for frontend display
 export interface GridRiskInfo {
   // Leverage info

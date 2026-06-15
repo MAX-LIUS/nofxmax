@@ -9,6 +9,7 @@ import type {
   OpenOrder,
   EvolutionProfile,
   GateBlockEntry,
+  CloseAttributionResponse,
 } from '../../types'
 import { API_BASE, httpClient } from './helpers'
 
@@ -135,6 +136,17 @@ export const dataApi = {
       `${API_BASE}/open-orders?${params}`
     )
     if (!result.success) throw new Error('Failed to fetch open orders')
+    return result.data!
+  },
+
+  async getCloseAttribution(
+    traderId: string,
+    days: number = 30
+  ): Promise<CloseAttributionResponse> {
+    const result = await httpClient.get<CloseAttributionResponse>(
+      `${API_BASE}/positions/attribution?trader_id=${traderId}&days=${days}`
+    )
+    if (!result.success) throw new Error('Failed to fetch close attribution')
     return result.data!
   },
 

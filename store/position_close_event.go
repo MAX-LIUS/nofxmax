@@ -19,6 +19,8 @@ type PositionCloseEvent struct {
 	CloseReason      string  `gorm:"column:close_reason;default:''" json:"close_reason"`
 	ExecutionSource  string  `gorm:"column:execution_source;default:''" json:"execution_source"`
 	ExecutionType    string  `gorm:"column:execution_type;default:''" json:"execution_type"`
+	Category         string  `gorm:"column:category;default:'';index:idx_close_events_category" json:"category"`
+	Mechanism        string  `gorm:"column:mechanism;default:''" json:"mechanism"`
 	ProtectionStatus string  `gorm:"column:protection_status;default:''" json:"protection_status"`
 	DecisionCycle    int     `gorm:"column:decision_cycle;default:0" json:"decision_cycle"`
 	ExchangeOrderID  string  `gorm:"column:exchange_order_id;default:''" json:"exchange_order_id"`
@@ -60,6 +62,14 @@ func (s *PositionCloseEventStore) InitTables() error {
 	if s.db.Dialector.Name() != "postgres" {
 		s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_close_events_parent_order_id ON position_close_events(parent_order_id)`)
 	}
+	// One-time idempotent backfill: classify any pre-existing events that lack
+	// canonical attribution (category empty). Only touches unclassified rows.
+	if n, err := s.BackfillAttribution(""); err != nil {
+		// Non-fatal: attribution is additive observability, never block startup.
+		fmt.Printf("⚠️ close-event attribution backfill skipped: %v\n", err)
+	} else if n > 0 {
+		fmt.Printf("🔖 close-event attribution backfilled %d rows\n", n)
+	}
 	return nil
 }
 
@@ -92,6 +102,11 @@ func (s *PositionCloseEventStore) UpdateReasonByOrderID(traderID, exchangeOrderI
 	updates := map[string]interface{}{}
 	if closeReason != "" {
 		updates["close_reason"] = closeReason
+		// Keep canonical attribution in sync whenever the reason is refined
+		// (e.g. order-sync price-match resolves a bare close into managed_drawdown).
+		attr := ClassifyClose(closeReason)
+		updates["category"] = attr.Category
+		updates["mechanism"] = attr.Mechanism
 	}
 	if executionSource != "" {
 		updates["execution_source"] = executionSource
@@ -128,4 +143,71 @@ func (s *PositionCloseEventStore) GetByTraderAndExchangeOrderID(traderID, exchan
 		return nil, fmt.Errorf("failed to query close event by order id: %w", err)
 	}
 	return &event, nil
+}
+
+// AttributionRow is one aggregated bucket in the close-attribution summary.
+type AttributionRow struct {
+	Category     string  `json:"category"`
+	Mechanism    string  `json:"mechanism"`
+	Count        int64   `json:"count"`
+	RealizedPnL  float64 `json:"realized_pnl"`
+	Fees         float64 `json:"fees"`
+	CloseValue   float64 `json:"close_value_usdt"`
+}
+
+// GetAttributionSummary aggregates close events by canonical category+mechanism
+// for a trader over the trailing sinceMs window. It is the monitoring view that
+// makes every exit traceable: AI vs protection vs manual vs exchange, with the
+// specific mechanism and its realized PnL/fee contribution.
+func (s *PositionCloseEventStore) GetAttributionSummary(traderID string, sinceMs int64) ([]AttributionRow, error) {
+	var rows []AttributionRow
+	q := s.db.Model(&PositionCloseEvent{}).
+		Select("COALESCE(NULLIF(category,''),'unclassified') AS category, " +
+			"COALESCE(NULLIF(mechanism,''),'unclassified') AS mechanism, " +
+			"COUNT(*) AS count, " +
+			"COALESCE(SUM(realized_pnl_delta),0) AS realized_pnl, " +
+			"COALESCE(SUM(fee_delta),0) AS fees, " +
+			"COALESCE(SUM(close_value_usdt),0) AS close_value").
+		Where("trader_id = ?", traderID)
+	if sinceMs > 0 {
+		q = q.Where("event_time >= ?", sinceMs)
+	}
+	err := q.Group("category, mechanism").Order("count DESC").Scan(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to aggregate attribution summary: %w", err)
+	}
+	return rows, nil
+}
+
+// BackfillAttribution classifies and writes category/mechanism for any close
+// events that predate the attribution columns (category empty). It is idempotent
+// and safe to run repeatedly. Returns the number of rows updated.
+func (s *PositionCloseEventStore) BackfillAttribution(traderID string) (int64, error) {
+	var events []PositionCloseEvent
+	q := s.db.Where("category = '' OR category IS NULL")
+	if traderID != "" {
+		q = q.Where("trader_id = ?", traderID)
+	}
+	if err := q.Find(&events).Error; err != nil {
+		return 0, fmt.Errorf("failed to load events for backfill: %w", err)
+	}
+	var updated int64
+	for _, ev := range events {
+		// Prefer the most specific reason: close_reason, then execution_source.
+		input := ev.CloseReason
+		attr := ClassifyClose(input)
+		if attr.Mechanism == MechSyncExternal || attr.Mechanism == MechUnknownClose {
+			if ev.ExecutionSource != "" {
+				if alt := ClassifyClose(ev.ExecutionSource); alt.Mechanism != MechSyncExternal && alt.Mechanism != MechUnknownClose {
+					attr = alt
+				}
+			}
+		}
+		if err := s.db.Model(&PositionCloseEvent{}).Where("id = ?", ev.ID).
+			Updates(map[string]interface{}{"category": attr.Category, "mechanism": attr.Mechanism}).Error; err != nil {
+			return updated, fmt.Errorf("failed to backfill event %d: %w", ev.ID, err)
+		}
+		updated++
+	}
+	return updated, nil
 }

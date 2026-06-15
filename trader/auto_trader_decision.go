@@ -446,6 +446,13 @@ func (at *AutoTrader) recordPositionChange(orderID, symbol, side, action string,
 	case "open_long", "open_short":
 		// Open position: create new position record
 		nowMs := time.Now().UTC().UnixMilli()
+		// Entry source attribution: breakout strategy vs normal AI decision. Both
+		// are model/strategy initiated; the sync path uses "sync" for exchange-side
+		// discoveries. ClassifyOpen maps these to canonical category/mechanism.
+		entrySource := "ai_open"
+		if at.lastTriggerTypes != nil && strings.Contains(strings.ToLower(at.lastTriggerTypes[symbol]), "breakout") {
+			entrySource = "breakout"
+		}
 		pos := &store.TraderPosition{
 			TraderID:           at.id,
 			ExchangeID:         at.exchangeID, // Exchange account UUID
@@ -459,6 +466,7 @@ func (at *AutoTrader) recordPositionChange(orderID, symbol, side, action string,
 			EntryTime:          nowMs,
 			Leverage:           leverage,
 			Status:             "OPEN",
+			Source:             entrySource,
 			EntrySceneTags:     at.buildEntrySceneTags(symbol),
 			CreatedAt:          nowMs,
 			UpdatedAt:          nowMs,
