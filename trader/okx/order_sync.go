@@ -461,11 +461,23 @@ func (t *OKXTrader) SyncOrdersFromOKXWithFullCloseHandler(traderID string, excha
 			if reason := protectionReasonFromTag(trade.Tag); reason != "" {
 				requestedReason = reason
 			}
-			// Tag/parent lookup often cannot resolve the protection mechanism (the
-			// 16-char broker tag leaves no room for a reason, and a triggered algo's
-			// fill ordId differs from the stored algoId). As a purely-additive
-			// fallback, attribute the fill to the live protection order whose trigger
-			// price is closest to the fill price. Only applies when still unresolved.
+			// Deterministic attribution: when an OKX TP/SL/trailing algo triggers,
+			// it spawns a regular order whose detail carries the originating algoId.
+			// The fill's ordId differs from the stored algoId, so resolve the link
+			// via the order-detail API, then map algoId -> the protection order's
+			// recorded reason. This is exact (not price-proximity). Only runs when
+			// the tag could not resolve the mechanism.
+			if requestedReason == canonicalAction && orderStore != nil && parentOrderID != "" {
+				if algoID, aerr := t.GetOrderLinkedAlgoID(symbol, parentOrderID); aerr == nil && algoID != "" {
+					if protOrd, perr := orderStore.GetOrderByExchangeID(exchangeID, algoID); perr == nil && protOrd != nil && protOrd.OrderAction != "" {
+						requestedReason = protOrd.OrderAction
+						logger.Infof("  🔗 Close fill %s %s attributed to reason=%s via algoId=%s (deterministic)", symbol, canonicalAction, requestedReason, algoID)
+					}
+				}
+			}
+			// Fallback: tag and algoId both unresolved. Attribute the fill to the
+			// live protection order whose trigger price is closest to the fill
+			// price. Purely additive; only applies when still unresolved.
 			if requestedReason == canonicalAction && orderStore != nil {
 				if live, lerr := orderStore.GetTraderOrdersFiltered(ownerTraderID, symbol, "NEW", 50); lerr == nil && len(live) > 0 {
 					cands := make([]protectionCandidate, 0, len(live))

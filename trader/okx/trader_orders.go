@@ -999,15 +999,17 @@ func (t *OKXTrader) GetOrderStatus(symbol string, orderID string) (map[string]in
 	}
 
 	var orders []struct {
-		OrdId     string `json:"ordId"`
-		State     string `json:"state"`
-		AvgPx     string `json:"avgPx"`
-		AccFillSz string `json:"accFillSz"`
-		Fee       string `json:"fee"`
-		Side      string `json:"side"`
-		OrdType   string `json:"ordType"`
-		CTime     string `json:"cTime"`
-		UTime     string `json:"uTime"`
+		OrdId       string `json:"ordId"`
+		State       string `json:"state"`
+		AvgPx       string `json:"avgPx"`
+		AccFillSz   string `json:"accFillSz"`
+		Fee         string `json:"fee"`
+		Side        string `json:"side"`
+		OrdType     string `json:"ordType"`
+		CTime       string `json:"cTime"`
+		UTime       string `json:"uTime"`
+		AlgoId      string `json:"algoId"`      // set when this order was spawned by an algo (TP/SL/trailing)
+		AlgoClOrdId string `json:"algoClOrdId"` // client algo id, if provided at algo placement
 	}
 
 	if err := json.Unmarshal(data, &orders); err != nil {
@@ -1058,7 +1060,28 @@ func (t *OKXTrader) GetOrderStatus(symbol string, orderID string) (map[string]in
 		"time":        cTime,
 		"updateTime":  uTime,
 		"commission":  -fee, // OKX returns negative value
+		"algoId":      order.AlgoId,
+		"algoClOrdId": order.AlgoClOrdId,
 	}, nil
+}
+
+// GetOrderLinkedAlgoID returns the algoId that spawned the given order, or "".
+// When an OKX TP/SL/trailing algo triggers, it creates a regular order whose
+// detail carries the originating algoId. This is the deterministic link from a
+// close fill back to the protection order that caused it (the fill's ordId is a
+// fresh id, not the stored algoId). Returns "" when the order was not algo-spawned.
+func (t *OKXTrader) GetOrderLinkedAlgoID(symbol, orderID string) (string, error) {
+	if orderID == "" {
+		return "", nil
+	}
+	st, err := t.GetOrderStatus(symbol, orderID)
+	if err != nil {
+		return "", err
+	}
+	if algoID, ok := st["algoId"].(string); ok && algoID != "" {
+		return algoID, nil
+	}
+	return "", nil
 }
 
 // GetOpenOrders gets all open/pending orders for a symbol

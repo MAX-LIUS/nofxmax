@@ -229,3 +229,35 @@ func TestMatchProtectionReasonByPrice(t *testing.T) {
 		t.Errorf("zero-stop candidate: got %q want empty", got)
 	}
 }
+
+func TestGetOrderLinkedAlgoID(t *testing.T) {
+	// Order detail returns algoId when the order was spawned by an algo trigger.
+	tr := &OKXTrader{
+		apiKey: "k", secretKey: "s", passphrase: "p",
+		httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body := `{"code":"0","msg":"","data":[]}`
+			switch {
+			case strings.HasPrefix(req.URL.Path, "/api/v5/trade/order"):
+				body = `{"code":"0","msg":"","data":[{"ordId":"order-close","state":"filled","avgPx":"100","accFillSz":"1","fee":"-0.01","side":"buy","ordType":"market","cTime":"1","uTime":"2","algoId":"algo-xyz","algoClOrdId":"cl-1"}]}`
+			case strings.HasPrefix(req.URL.Path, "/api/v5/public/instruments"):
+				body = `{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","ctVal":"0.0001","ctMult":"1","lotSz":"1","minSz":"1","maxMktSz":"1000000","tickSz":"0.1","ctType":"linear"}]}`
+			default:
+				t.Fatalf("unexpected path: %s", req.URL.Path)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		})},
+		instrumentsCache: make(map[string]*OKXInstrument),
+	}
+	algoID, err := tr.GetOrderLinkedAlgoID("BTCUSDT", "order-close")
+	if err != nil {
+		t.Fatalf("GetOrderLinkedAlgoID: %v", err)
+	}
+	if algoID != "algo-xyz" {
+		t.Errorf("algoID=%q want algo-xyz", algoID)
+	}
+
+	// Empty orderID short-circuits.
+	if id, _ := tr.GetOrderLinkedAlgoID("BTCUSDT", ""); id != "" {
+		t.Errorf("empty orderID should return empty, got %q", id)
+	}
+}
