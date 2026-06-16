@@ -759,6 +759,20 @@ type RiskControlConfig struct {
 	MakerEntryTimeoutSec     int  `json:"maker_entry_timeout_sec,omitempty"`     // e.g. 15
 	MakerEntryOffsetTicks    int  `json:"maker_entry_offset_ticks,omitempty"`    // ticks inside best bid/ask, default 0 (at touch)
 	MakerEntryFallbackMarket bool `json:"maker_entry_fallback_market,omitempty"` // if unfilled, cross with market
+
+	// Strong-signal position replacement (CODE ENFORCED): when at MaxPositions and a new
+	// high-conviction entry arrives, close the weakest existing position to free a slot instead
+	// of dropping the signal. Victims are ranked by (smaller notional + longer hold + weaker pnl);
+	// strong winners and freshly-opened positions are protected. The cut runs only AFTER cheap,
+	// balance-independent prechecks (signal-strength floor + entry price deviation) pass, so the
+	// "cut a position but then fail to open" window is minimized. After the cut the position list
+	// is re-fetched and the max-positions guard is re-enforced before the open proceeds.
+	// Disabled when ReplaceWeakestEnabled is false.
+	ReplaceWeakestEnabled      bool    `json:"replace_weakest_enabled,omitempty"`
+	ReplaceMinConfidence       int     `json:"replace_min_confidence,omitempty"`        // new-signal absolute confidence floor, e.g. 80
+	ReplaceMinHoldMinutes      int     `json:"replace_min_hold_minutes,omitempty"`      // victim must be held at least this long, e.g. 30
+	ReplaceMaxVictimProfitPct  float64 `json:"replace_max_victim_profit_pct,omitempty"` // never cut a winner above this pnl%, e.g. 1.0
+	ReplaceMinConfidenceMargin int     `json:"replace_min_confidence_margin,omitempty"` // new conf must beat victim entry conf by this, e.g. 5
 }
 
 // NewStrategyStore creates a new StrategyStore

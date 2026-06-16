@@ -118,11 +118,6 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 		return fmt.Errorf("failed to get positions: %w", err)
 	}
 
-	// [CODE ENFORCED] Check max positions limit
-	if err := at.enforceMaxPositions(len(positions)); err != nil {
-		return err
-	}
-
 	// Check if there's already a position in the same symbol and direction
 	for _, pos := range positions {
 		if pos["symbol"] == decision.Symbol && pos["side"] == "long" {
@@ -132,6 +127,15 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 
 	// Get current price
 	marketData, err := at.getExecutionMarketData(decision.Symbol)
+	if err != nil {
+		return err
+	}
+
+	// [CODE ENFORCED] Capacity check with optional strong-signal replacement. When at capacity and
+	// replacement is enabled, this cuts the weakest eligible position to free a slot (after the
+	// entry-price deviation precheck passes), then re-fetches positions and re-enforces the limit.
+	// The cut runs BEFORE the balance fetch below so freed margin is reflected downstream.
+	positions, err = at.enforceCapacityWithReplacement(decision, "long", positions, marketData.CurrentPrice)
 	if err != nil {
 		return err
 	}
@@ -278,11 +282,6 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 		return fmt.Errorf("failed to get positions: %w", err)
 	}
 
-	// [CODE ENFORCED] Check max positions limit
-	if err := at.enforceMaxPositions(len(positions)); err != nil {
-		return err
-	}
-
 	// Check if there's already a position in the same symbol and direction
 	for _, pos := range positions {
 		if pos["symbol"] == decision.Symbol && pos["side"] == "short" {
@@ -292,6 +291,15 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 
 	// Get current price
 	marketData, err := at.getExecutionMarketData(decision.Symbol)
+	if err != nil {
+		return err
+	}
+
+	// [CODE ENFORCED] Capacity check with optional strong-signal replacement. When at capacity and
+	// replacement is enabled, this cuts the weakest eligible position to free a slot (after the
+	// entry-price deviation precheck passes), then re-fetches positions and re-enforces the limit.
+	// The cut runs BEFORE the balance fetch below so freed margin is reflected downstream.
+	positions, err = at.enforceCapacityWithReplacement(decision, "short", positions, marketData.CurrentPrice)
 	if err != nil {
 		return err
 	}
