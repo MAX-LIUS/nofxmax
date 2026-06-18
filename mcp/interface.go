@@ -14,6 +14,10 @@ type ClientEmbedder interface {
 type AIClient interface {
 	SetAPIKey(apiKey string, customURL string, customModel string)
 	SetTimeout(timeout time.Duration)
+	// SetFallbackEndpoints configures backup endpoints for automatic failover.
+	// When the primary endpoint fails, the client switches to the next fallback
+	// instead of retrying the failed endpoint.
+	SetFallbackEndpoints(endpoints []FallbackEndpoint)
 	CallWithMessages(systemPrompt, userPrompt string) (string, error)
 	CallWithRequest(req *Request) (string, error)
 	// CallWithRequestStream streams the LLM response via SSE.

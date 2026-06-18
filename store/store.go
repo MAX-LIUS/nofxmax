@@ -26,8 +26,9 @@ type Store struct {
 	position       *PositionStore
 	positionClose  *PositionCloseEventStore
 	strategy       *StrategyStore
-	equity         *EquityStore
-	order          *OrderStore
+	equity           *EquityStore
+	equityAdjustment *EquityAdjustmentStore
+	order            *OrderStore
 	grid           *GridStore
 	aiCharge       *AIChargeStore
 	evolution      *EvolutionStore
@@ -156,6 +157,9 @@ func (s *Store) initTables() error {
 	}
 	if err := s.Equity().initTables(); err != nil {
 		return fmt.Errorf("failed to initialize equity tables: %w", err)
+	}
+	if err := s.EquityAdjustment().initTables(); err != nil {
+		return fmt.Errorf("failed to initialize equity adjustment tables: %w", err)
 	}
 	if err := s.Order().InitTables(); err != nil {
 		return fmt.Errorf("failed to initialize order tables: %w", err)
@@ -293,6 +297,16 @@ func (s *Store) Equity() *EquityStore {
 		s.equity = NewEquityStore(s.gdb)
 	}
 	return s.equity
+}
+
+// EquityAdjustment gets equity adjustment storage
+func (s *Store) EquityAdjustment() *EquityAdjustmentStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.equityAdjustment == nil {
+		s.equityAdjustment = NewEquityAdjustmentStore(s.gdb)
+	}
+	return s.equityAdjustment
 }
 
 // Order gets order storage

@@ -63,13 +63,22 @@ func (t *OKXTrader) GetBalance() (map[string]interface{}, error) {
 
 	totalEq, _ := strconv.ParseFloat(balance.TotalEq, 64)
 
+	// OKX totalEq already includes unrealized PnL, so we need to calculate wallet balance
+	// to be consistent with Binance's interface:
+	// - totalWalletBalance = wallet balance (excluding unrealized PnL)
+	// - totalUnrealizedProfit = unrealized PnL
+	// - totalEq = totalWalletBalance + totalUnrealizedProfit
+	walletBalance := totalEq - usdtUPL
+
 	result := map[string]interface{}{
-		"totalWalletBalance":    totalEq,
+		"totalWalletBalance":    walletBalance,        // Wallet balance EXCLUDING unrealized PnL
+		"totalEquity":           totalEq,              // Total equity INCLUDING unrealized PnL (OKX totalEq)
 		"availableBalance":      usdtAvail,
 		"totalUnrealizedProfit": usdtUPL,
 	}
 
-	logger.Infof("✓ OKX balance: Total equity=%.2f, Available=%.2f, Unrealized PnL=%.2f", totalEq, usdtAvail, usdtUPL)
+	logger.Infof("✓ OKX balance: Total equity=%.2f, Wallet=%.2f, Available=%.2f, Unrealized PnL=%.2f",
+		totalEq, walletBalance, usdtAvail, usdtUPL)
 
 	// Update cache
 	t.balanceCacheMutex.Lock()
@@ -82,6 +91,14 @@ func (t *OKXTrader) GetBalance() (map[string]interface{}, error) {
 
 // SetMarginMode sets margin mode
 func (t *OKXTrader) SetMarginMode(symbol string, isCrossMargin bool) error {
+	// In long_short_mode (hedge mode), OKX enforces cross margin and does not allow
+	// per-instrument margin mode changes. Attempting to call set-isolated-mode will
+	// return "Parameter type error" (code 51000). Skip the call entirely.
+	if t.positionMode == "long_short_mode" {
+		// Silently skip - this is expected behavior in hedge mode
+		return nil
+	}
+
 	instId := t.convertSymbol(symbol)
 
 	mgnMode := "isolated"

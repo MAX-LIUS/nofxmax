@@ -171,6 +171,18 @@ Only include fields you want to change.`,
 				`:id = trader_id from GET /api/my-traders.
 Body: {"symbol":"<string, e.g. BTCUSDT — must match an open position symbol from GET /api/positions>"}`,
 				s.handleClosePosition)
+			// Equity adjustments (deposits/withdrawals tracking)
+			s.routeWithSchema(protected, "POST", "/traders/:id/equity-adjustments", "Record a deposit or withdrawal",
+				`:id = trader_id from GET /api/my-traders.
+Body: {"amount":<float, e.g. 100.0>,"type":"deposit|withdrawal","description":"<string optional>","timestamp":"<RFC3339 optional>"}`,
+				s.handleCreateEquityAdjustment)
+			s.routeWithSchema(protected, "GET", "/traders/:id/equity-adjustments", "Get all equity adjustments",
+				`:id = trader_id from GET /api/my-traders.`,
+				s.handleGetEquityAdjustments)
+			s.routeWithSchema(protected, "DELETE", "/traders/:id/equity-adjustments", "Delete an equity adjustment",
+				`:id = trader_id from GET /api/my-traders.
+Body: {"adjustment_id":<int64>}`,
+				s.handleDeleteEquityAdjustment)
 			// Lightweight runtime AI execution controls. These do not reload/restart the trader.
 			s.routeWithSchema(protected, "PUT", "/traders/:id/ai-controls", "Update AI open/close execution gates and decision style",
 				`Body: {"allow_ai_open":<bool optional>,"allow_ai_close":<bool optional>,"ai_decision_mode":"conservative|balanced|aggressive" optional,"clear_safe_mode":true optional}`,

@@ -68,8 +68,8 @@ func (t *BybitTrader) GetBalance() (map[string]interface{}, error) {
 	}
 
 	// If no totalWalletBalance, use totalEquity
-	if totalWalletBalance == 0 {
-		totalWalletBalance = totalEquity
+	if totalWalletBalance == 0 && totalEquity > 0 {
+		totalWalletBalance = totalEquity - totalPerpUPL
 	}
 
 	balance := map[string]interface{}{

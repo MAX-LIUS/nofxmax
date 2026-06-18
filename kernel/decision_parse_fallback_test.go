@@ -3,7 +3,7 @@ package kernel
 import "testing"
 
 func TestParseFullDecisionResponseMarksMissingJSONFallback(t *testing.T) {
-	decision, err := parseFullDecisionResponse("analysis only; no structured decision", 1000, 5, 3, 0.2, 0.1)
+	decision, err := parseFullDecisionResponse("analysis only; no structured decision", 1000, 5, 3, 0.2, 0.1, nil)
 	if err != nil {
 		t.Fatalf("expected missing JSON fallback to remain backward-compatible, got error: %v", err)
 	}
@@ -16,7 +16,7 @@ func TestParseFullDecisionResponseMarksMissingJSONFallback(t *testing.T) {
 }
 
 func TestParseFullDecisionResponseDoesNotMarkLegalEmptyArrayFallback(t *testing.T) {
-	decision, err := parseFullDecisionResponse("[]", 1000, 5, 3, 0.2, 0.1)
+	decision, err := parseFullDecisionResponse("[]", 1000, 5, 3, 0.2, 0.1, nil)
 	if err != nil {
 		t.Fatalf("expected legal empty array to parse, got error: %v", err)
 	}

@@ -117,6 +117,7 @@ func (pb *PromptBuilder) buildSystemPromptZH() string {
   - close_short: 平已有空仓
   - hold: 保持当前仓位不变
   - wait: 该币种本轮不操作
+  - ⚠️ 平仓必须区分方向：平多仓用 close_long，平空仓用 close_short。**严禁使用 "close"**（非法值，会导致整轮决策被拒绝并触发安全模式）。
 - **leverage**: 杠杆倍数（开新仓时必需）
 - **position_size_usd**: 仓位大小（USDT，开新仓时必需）
 - **stop_loss**: 直接止损价（可选，仅当你不使用 protection_plan 时）
@@ -344,6 +345,7 @@ func (pb *PromptBuilder) buildSystemPromptEN() string {
   - close_short: Close an existing short position
   - hold: Keep current position unchanged
   - wait: No action for this symbol
+  - ⚠️ Closing positions MUST specify direction: use close_long for longs, close_short for shorts. **Never use "close"** (invalid value that will reject the entire decision cycle and trigger safe mode).
 - **leverage**: Leverage multiplier (required for open_long/open_short)
 - **position_size_usd**: Position size in USDT (required for open_long/open_short)
 - **stop_loss**: Stop-loss price (optional direct price, only when you are not using protection_plan)

@@ -124,10 +124,12 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 	}
 
 	// Use totalEquity directly if provided by trader (more accurate)
+	// This is already the total account value (wallet + unrealized PnL)
 	if eq, ok := balance["totalEquity"].(float64); ok && eq > 0 {
 		totalEquity = eq
 	} else {
 		// Fallback: Total Equity = Wallet balance + Unrealized profit
+		// This works for exchanges like Binance where totalWalletBalance excludes unrealized PnL
 		totalEquity = totalWalletBalance + totalUnrealizedProfit
 	}
 
@@ -164,12 +166,26 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 			totalUnrealizedProfit, totalUnrealizedPnLCalculated, diff)
 	}
 
-	totalPnL := totalEquity - at.initialBalance
+	// Calculate total PnL excluding fund transfers (deposits/withdrawals)
+	// Total PnL = current equity - (initial balance + total adjustments)
+	totalAdjustments := 0.0
+	if at.store != nil {
+		adjustments, err := at.store.EquityAdjustment().GetTotalAdjustments(at.id)
+		if err != nil {
+			logger.Infof("⚠️ Failed to get equity adjustments, assuming 0: %v", err)
+		} else {
+			totalAdjustments = adjustments
+		}
+	}
+
+	adjustedInitialBalance := at.initialBalance + totalAdjustments
+	totalPnL := totalEquity - adjustedInitialBalance
 	totalPnLPct := 0.0
-	if at.initialBalance > 0 {
-		totalPnLPct = (totalPnL / at.initialBalance) * 100
+	if adjustedInitialBalance > 0 {
+		totalPnLPct = (totalPnL / adjustedInitialBalance) * 100
 	} else {
-		logger.Infof("⚠️ Initial Balance abnormal: %.2f, cannot calculate P&L percentage", at.initialBalance)
+		logger.Infof("⚠️ Adjusted initial balance abnormal: %.2f (initial=%.2f, adjustments=%.2f), cannot calculate P&L percentage",
+			adjustedInitialBalance, at.initialBalance, totalAdjustments)
 	}
 
 	marginUsedPct := 0.0

@@ -765,6 +765,25 @@ func (at *AutoTrader) SetOverrideBasePrompt(override bool) {
 	at.overrideBasePrompt = override
 }
 
+// SetFallbackEndpoints configures fallback endpoints for the AI client
+func (at *AutoTrader) SetFallbackEndpoints(endpoints []store.FallbackEndpoint) {
+	if at.mcpClient == nil {
+		return
+	}
+	// Convert store.FallbackEndpoint to mcp.FallbackEndpoint
+	mcpEndpoints := make([]mcp.FallbackEndpoint, len(endpoints))
+	for i, ep := range endpoints {
+		mcpEndpoints[i] = mcp.FallbackEndpoint{
+			Name:     ep.Name,
+			BaseURL:  ep.BaseURL,
+			APIKey:   ep.APIKey,
+			Model:    ep.Model,
+			Priority: ep.Priority,
+		}
+	}
+	at.mcpClient.SetFallbackEndpoints(mcpEndpoints)
+}
+
 // GetSystemPromptTemplate gets current system prompt template name (from strategy config)
 func (at *AutoTrader) GetSystemPromptTemplate() string {
 	if at.strategyEngine != nil {
