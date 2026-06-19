@@ -167,6 +167,12 @@ Only include fields you want to change.`,
 			s.routeWithSchema(protected, "POST", "/traders/:id/sync-balance", "Sync account balance from exchange",
 				`:id = trader_id from GET /api/my-traders. No request body needed. Refreshes initial_balance from the exchange.`,
 				s.handleSyncBalance)
+			s.routeWithSchema(protected, "POST", "/traders/:id/reset-equity-curve", "Reset equity curve history",
+				`:id = trader_id from GET /api/my-traders. No request body needed. Deletes all equity snapshots for fresh start.`,
+				s.handleResetEquityCurve)
+			s.routeWithSchema(protected, "POST", "/traders/:id/reset-total-pnl", "Reset total PnL to zero",
+				`:id = trader_id from GET /api/my-traders. No request body needed. Sets initial_balance to current total_equity.`,
+				s.handleResetTotalPnL)
 			s.routeWithSchema(protected, "POST", "/traders/:id/close-position", "Force-close an open position",
 				`:id = trader_id from GET /api/my-traders.
 Body: {"symbol":"<string, e.g. BTCUSDT — must match an open position symbol from GET /api/positions>"}`,

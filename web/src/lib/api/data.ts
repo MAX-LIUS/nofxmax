@@ -76,10 +76,12 @@ export const dataApi = {
     return result.data!
   },
 
-  async getEquityHistory(traderId?: string): Promise<any[]> {
-    const url = traderId
-      ? `${API_BASE}/equity-history?trader_id=${traderId}`
-      : `${API_BASE}/equity-history`
+  async getEquityHistory(traderId?: string, days?: number): Promise<any[]> {
+    const params = new URLSearchParams()
+    if (traderId) params.append('trader_id', traderId)
+    if (days) params.append('days', days.toString())
+
+    const url = `${API_BASE}/equity-history${params.toString() ? '?' + params.toString() : ''}`
     const result = await httpClient.get<any[]>(url)
     if (!result.success) throw new Error('Failed to fetch equity history')
     return result.data!
