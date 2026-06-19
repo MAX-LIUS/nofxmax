@@ -380,52 +380,53 @@ export function EquityChart({ traderId, embedded = false }: EquityChartProps) {
         </div>
 
         {/* Controls: Time Range + Display Mode + Reset Buttons */}
-        <div className="flex flex-col gap-2">
-          {/* Time Range Selector */}
-          <div
-            className="flex gap-0.5 rounded p-0.5 self-start sm:self-auto"
-            style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
-          >
-            {([1, 7, 30, 90, 180, 0] as TimeRange[]).map((days) => (
-              <button
-                key={days}
-                onClick={() => setTimeRange(days)}
-                className="px-2 sm:px-3 py-1 rounded text-xs font-bold transition-all"
-                style={
-                  timeRange === days
-                    ? {
-                        background: '#F0B90B',
-                        color: '#000',
-                        boxShadow: '0 2px 8px rgba(240, 185, 11, 0.4)',
-                      }
-                    : { background: 'transparent', color: '#848E9C' }
-                }
-                title={
-                  days === 0
+        <div className="flex flex-col gap-2 sm:gap-3">
+          {/* Row 1: Time Range Selector + Display Mode */}
+          <div className="flex flex-wrap gap-2 items-center">
+            {/* Time Range */}
+            <div
+              className="flex gap-0.5 rounded p-0.5"
+              style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
+            >
+              {([1, 7, 30, 90, 180, 0] as TimeRange[]).map((days) => (
+                <button
+                  key={days}
+                  onClick={() => setTimeRange(days)}
+                  className="px-2 sm:px-3 py-1 rounded text-xs font-bold transition-all whitespace-nowrap"
+                  style={
+                    timeRange === days
+                      ? {
+                          background: '#F0B90B',
+                          color: '#000',
+                          boxShadow: '0 2px 8px rgba(240, 185, 11, 0.4)',
+                        }
+                      : { background: 'transparent', color: '#848E9C' }
+                  }
+                  title={
+                    days === 0
+                      ? language === 'zh'
+                        ? '全部数据'
+                        : 'All Data'
+                      : `${language === 'zh' ? '最近' : 'Last'} ${days} ${language === 'zh' ? '天' : 'days'}`
+                  }
+                >
+                  {days === 0
                     ? language === 'zh'
                       ? '全部'
                       : 'All'
-                    : `${days}${language === 'zh' ? '日' : 'd'}`
-                }
-              >
-                {days === 0
-                  ? language === 'zh'
-                    ? '全部'
-                    : 'All'
-                  : `${days}${language === 'zh' ? '日' : 'd'}`}
-              </button>
-            ))}
-          </div>
+                    : `${days}${language === 'zh' ? '天' : 'd'}`}
+                </button>
+              ))}
+            </div>
 
-          {/* Display Mode Toggle + Reset Buttons */}
-          <div className="flex gap-2">
+            {/* Display Mode */}
             <div
-              className="flex gap-0.5 sm:gap-1 rounded p-0.5 sm:p-1"
+              className="flex gap-0.5 rounded p-0.5"
               style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
             >
               <button
                 onClick={() => setDisplayMode('dollar')}
-                className="px-3 sm:px-4 py-1.5 sm:py-2 rounded text-xs sm:text-sm font-bold transition-all flex items-center gap-1"
+                className="px-2 sm:px-3 py-1 rounded text-xs font-bold transition-all flex items-center gap-1 whitespace-nowrap"
                 style={
                   displayMode === 'dollar'
                     ? {
@@ -436,11 +437,12 @@ export function EquityChart({ traderId, embedded = false }: EquityChartProps) {
                     : { background: 'transparent', color: '#848E9C' }
                 }
               >
-                <DollarSign className="w-4 h-4" /> USDT
+                <DollarSign className="w-3 h-3 sm:w-4 sm:h-4" />
+                <span className="hidden xs:inline">USDT</span>
               </button>
               <button
                 onClick={() => setDisplayMode('percent')}
-                className="px-3 sm:px-4 py-1.5 sm:py-2 rounded text-xs sm:text-sm font-bold transition-all flex items-center gap-1"
+                className="px-2 sm:px-3 py-1 rounded text-xs font-bold transition-all flex items-center gap-1 whitespace-nowrap"
                 style={
                   displayMode === 'percent'
                     ? {
@@ -451,21 +453,27 @@ export function EquityChart({ traderId, embedded = false }: EquityChartProps) {
                     : { background: 'transparent', color: '#848E9C' }
                 }
               >
-                <Percent className="w-4 h-4" />
+                <Percent className="w-3 h-3 sm:w-4 sm:h-4" />
               </button>
             </div>
+          </div>
 
-            {/* Reset Buttons */}
+          {/* Row 2: Reset Buttons */}
+          <div className="flex gap-2 flex-wrap">
             <button
               onClick={handleResetTotalPnL}
               disabled={resettingPnL}
-              className="px-2 sm:px-3 py-1.5 sm:py-2 rounded text-xs font-bold transition-all flex items-center gap-1 hover:opacity-80 disabled:opacity-50"
+              className="px-2 sm:px-3 py-1.5 rounded text-xs font-bold transition-all flex items-center gap-1 hover:opacity-80 disabled:opacity-50 whitespace-nowrap"
               style={{
                 background: 'rgba(14, 203, 129, 0.1)',
                 color: '#0ECB81',
                 border: '1px solid rgba(14, 203, 129, 0.3)',
               }}
-              title={language === 'zh' ? '重置总盈亏' : 'Reset Total PnL'}
+              title={
+                language === 'zh'
+                  ? '将当前净值设为新的初始余额，总盈亏归零'
+                  : 'Set current equity as new initial balance, reset total PnL to zero'
+              }
             >
               {resettingPnL ? (
                 <Loader2 className="w-3 h-3 sm:w-4 sm:h-4 animate-spin" />
@@ -473,6 +481,9 @@ export function EquityChart({ traderId, embedded = false }: EquityChartProps) {
                 <RotateCcw className="w-3 h-3 sm:w-4 sm:h-4" />
               )}
               <span className="hidden sm:inline">
+                {language === 'zh' ? '重置总盈亏' : 'Reset Total PnL'}
+              </span>
+              <span className="sm:hidden">
                 {language === 'zh' ? '重置盈亏' : 'Reset PnL'}
               </span>
             </button>
@@ -480,13 +491,17 @@ export function EquityChart({ traderId, embedded = false }: EquityChartProps) {
             <button
               onClick={handleResetEquityCurve}
               disabled={resettingCurve}
-              className="px-2 sm:px-3 py-1.5 sm:py-2 rounded text-xs font-bold transition-all flex items-center gap-1 hover:opacity-80 disabled:opacity-50"
+              className="px-2 sm:px-3 py-1.5 rounded text-xs font-bold transition-all flex items-center gap-1 hover:opacity-80 disabled:opacity-50 whitespace-nowrap"
               style={{
                 background: 'rgba(246, 70, 93, 0.1)',
                 color: '#F6465D',
                 border: '1px solid rgba(246, 70, 93, 0.3)',
               }}
-              title={language === 'zh' ? '重置净值曲线' : 'Reset Equity Curve'}
+              title={
+                language === 'zh'
+                  ? '删除所有历史净值数据，无法恢复！'
+                  : 'Delete all historical equity data, cannot be undone!'
+              }
             >
               {resettingCurve ? (
                 <Loader2 className="w-3 h-3 sm:w-4 sm:h-4 animate-spin" />
@@ -494,7 +509,10 @@ export function EquityChart({ traderId, embedded = false }: EquityChartProps) {
                 <Trash2 className="w-3 h-3 sm:w-4 sm:h-4" />
               )}
               <span className="hidden sm:inline">
-                {language === 'zh' ? '重置曲线' : 'Reset Curve'}
+                {language === 'zh' ? '清空历史曲线' : 'Clear History Curve'}
+              </span>
+              <span className="sm:hidden">
+                {language === 'zh' ? '清空曲线' : 'Clear Curve'}
               </span>
             </button>
           </div>
