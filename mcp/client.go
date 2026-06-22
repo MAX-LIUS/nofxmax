@@ -95,8 +95,16 @@ type Client struct {
 	Hooks ClientHooks
 
 	// Fallback endpoints for automatic failover
-	FallbackEndpoints []FallbackEndpoint
+	FallbackEndpoints    []FallbackEndpoint
 	currentEndpointIndex int // Track which endpoint we're currently using
+
+	// Primary endpoint snapshot, captured when fallbacks are configured.
+	// Used to restore the primary connection params at the start of every call,
+	// so each call begins from the primary and only falls back on failure.
+	primaryBaseURL     string
+	primaryAPIKey      string
+	primaryModel       string
+	primarySnapshotted bool
 }
 
 // New creates default client (backward compatible)
@@ -181,9 +189,28 @@ func (client *Client) SetAPIKey(apiKey, apiURL, customModel string) {
 func (client *Client) SetFallbackEndpoints(endpoints []FallbackEndpoint) {
 	client.FallbackEndpoints = endpoints
 	client.currentEndpointIndex = -1 // -1 means using primary endpoint
+	// Snapshot the current (primary) connection params so we can always restore
+	// to the primary at the start of each call. SetAPIKey runs before this, so
+	// the client currently holds the primary endpoint's values.
+	client.primaryBaseURL = client.BaseURL
+	client.primaryAPIKey = client.APIKey
+	client.primaryModel = client.Model
+	client.primarySnapshotted = true
 	if len(endpoints) > 0 {
 		client.Log.Infof("🔄 [MCP] Configured %d fallback endpoint(s)", len(endpoints))
 	}
+}
+
+// restoreToPrimary restores the primary endpoint connection params and resets
+// the endpoint index. Safe to call repeatedly; no-op if no snapshot exists.
+func (client *Client) restoreToPrimary() {
+	if !client.primarySnapshotted {
+		return
+	}
+	client.BaseURL = client.primaryBaseURL
+	client.APIKey = client.primaryAPIKey
+	client.Model = client.primaryModel
+	client.currentEndpointIndex = -1
 }
 
 // switchToNextEndpoint switches to the next available fallback endpoint
@@ -216,14 +243,6 @@ func (client *Client) switchToNextEndpoint() bool {
 	return true
 }
 
-// resetToPrimaryEndpoint resets back to the primary endpoint after successful call
-func (client *Client) resetToPrimaryEndpoint() {
-	if client.currentEndpointIndex > -1 {
-		client.currentEndpointIndex = -1
-		client.Log.Infof("✓ [MCP] Reset to primary endpoint")
-	}
-}
-
 func (client *Client) SetTimeout(timeout time.Duration) {
 	client.HTTPClient.Timeout = timeout
 }
@@ -238,11 +257,17 @@ func (client *Client) CallWithMessages(systemPrompt, userPrompt string) (string,
 	var lastErr error
 	maxRetries := client.Cfg.MaxRetries
 
+	// Always start each call from the primary endpoint. Even if a previous call
+	// ended on a fallback, restore primary params here so we re-try primary first.
+	// This makes failover per-call: primary preferred, fallback only on failure,
+	// next call back to primary.
+	if len(client.FallbackEndpoints) > 0 {
+		client.restoreToPrimary()
+	}
+
 	// Try primary endpoint first
 	result, err := client.Hooks.Call(systemPrompt, userPrompt)
 	if err == nil {
-		// Success on primary - reset to primary if we were using fallback
-		client.resetToPrimaryEndpoint()
 		return result, nil
 	}
 
@@ -256,13 +281,17 @@ func (client *Client) CallWithMessages(systemPrompt, userPrompt string) (string,
 			client.Log.Infof("🔄 Trying fallback endpoint...")
 			result, err := client.Hooks.Call(systemPrompt, userPrompt)
 			if err == nil {
-				client.Log.Infof("✓ Fallback endpoint succeeded")
+				client.Log.Infof("✓ Fallback endpoint succeeded (will retry primary first next call)")
+				// Restore primary params immediately so the next call starts from
+				// the primary endpoint again, not this fallback.
+				client.restoreToPrimary()
 				return result, nil
 			}
 			lastErr = err
 			client.Log.Warnf("⚠️ Fallback endpoint failed: %v", err)
 		}
-		// All fallbacks exhausted
+		// All fallbacks exhausted — restore primary for the next call.
+		client.restoreToPrimary()
 		return "", fmt.Errorf("all endpoints failed (primary + %d fallbacks): %w", len(client.FallbackEndpoints), lastErr)
 	}
 
@@ -707,11 +736,17 @@ func (client *Client) CallWithRequest(req *Request) (string, error) {
 	var lastErr error
 	maxRetries := client.Cfg.MaxRetries
 
+	// Always start each call from the primary endpoint (per-call failover).
+	if len(client.FallbackEndpoints) > 0 {
+		client.restoreToPrimary()
+		if req.Model == "" {
+			req.Model = client.Model
+		}
+	}
+
 	// Try primary endpoint first
 	result, err := client.callWithRequest(req)
 	if err == nil {
-		// Success on primary - reset to primary if we were using fallback
-		client.resetToPrimaryEndpoint()
 		return result, nil
 	}
 
@@ -723,15 +758,20 @@ func (client *Client) CallWithRequest(req *Request) (string, error) {
 		// Try each fallback endpoint once
 		for client.switchToNextEndpoint() {
 			client.Log.Infof("🔄 Trying fallback endpoint...")
-			result, err := client.callWithRequest(req)
+			// Use the fallback endpoint's model for this request.
+			fbReq := *req
+			fbReq.Model = client.Model
+			result, err := client.callWithRequest(&fbReq)
 			if err == nil {
-				client.Log.Infof("✓ Fallback endpoint succeeded")
+				client.Log.Infof("✓ Fallback endpoint succeeded (will retry primary first next call)")
+				client.restoreToPrimary()
 				return result, nil
 			}
 			lastErr = err
 			client.Log.Warnf("⚠️ Fallback endpoint failed: %v", err)
 		}
-		// All fallbacks exhausted
+		// All fallbacks exhausted — restore primary for the next call.
+		client.restoreToPrimary()
 		return "", fmt.Errorf("all endpoints failed (primary + %d fallbacks): %w", len(client.FallbackEndpoints), lastErr)
 	}
 
@@ -777,11 +817,15 @@ func (client *Client) CallWithRequestFull(req *Request) (*LLMResponse, error) {
 	var lastErr error
 	maxRetries := client.Cfg.MaxRetries
 
+	// Always start each call from the primary endpoint (per-call failover).
+	if len(client.FallbackEndpoints) > 0 {
+		client.restoreToPrimary()
+		req.Model = client.Model
+	}
+
 	// Try primary endpoint first
 	result, err := client.callWithRequestFull(req)
 	if err == nil {
-		// Success on primary - reset to primary if we were using fallback
-		client.resetToPrimaryEndpoint()
 		return result, nil
 	}
 
@@ -793,15 +837,19 @@ func (client *Client) CallWithRequestFull(req *Request) (*LLMResponse, error) {
 		// Try each fallback endpoint once
 		for client.switchToNextEndpoint() {
 			client.Log.Infof("🔄 Trying fallback endpoint...")
-			result, err := client.callWithRequestFull(req)
+			fbReq := *req
+			fbReq.Model = client.Model
+			result, err := client.callWithRequestFull(&fbReq)
 			if err == nil {
-				client.Log.Infof("✓ Fallback endpoint succeeded")
+				client.Log.Infof("✓ Fallback endpoint succeeded (will retry primary first next call)")
+				client.restoreToPrimary()
 				return result, nil
 			}
 			lastErr = err
 			client.Log.Warnf("⚠️ Fallback endpoint failed: %v", err)
 		}
-		// All fallbacks exhausted
+		// All fallbacks exhausted — restore primary for the next call.
+		client.restoreToPrimary()
 		return nil, fmt.Errorf("all endpoints failed (primary + %d fallbacks): %w", len(client.FallbackEndpoints), lastErr)
 	}
 

@@ -1,0 +1,92 @@
+package backtest
+
+import (
+	"database/sql"
+	"fmt"
+	"time"
+
+	"nofx/market"
+)
+
+// LoadClaudeEntries reads CLOSED positions for the given trader from the DB and
+// returns them as backtest entries (ascending by entry time). Positions with
+// zero/invalid entry price or quantity are skipped.
+func LoadClaudeEntries(db *sql.DB, traderIDLike string) ([]Entry, error) {
+	rows, err := db.Query(`
+		SELECT symbol, side, entry_price, entry_time, exit_time, quantity, realized_pnl
+		FROM trader_positions
+		WHERE trader_id LIKE ? AND status='CLOSED'
+		ORDER BY entry_time ASC`, traderIDLike)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Entry
+	for rows.Next() {
+		var (
+			symbol, side                          string
+			entryPrice, qty, realized             float64
+			entryTime, exitTime                   sql.NullInt64
+		)
+		if err := rows.Scan(&symbol, &side, &entryPrice, &entryTime, &exitTime, &qty, &realized); err != nil {
+			return nil, err
+		}
+		if entryPrice <= 0 || qty <= 0 {
+			continue
+		}
+		out = append(out, Entry{
+			Symbol:      symbol,
+			Side:        side,
+			EntryPrice:  entryPrice,
+			EntryTime:   entryTime.Int64,
+			ExitTime:    exitTime.Int64,
+			Quantity:    qty,
+			RealizedPnL: realized,
+		})
+	}
+	return out, rows.Err()
+}
+
+// BarsProvider fetches ascending OHLC bars for a symbol/timeframe over a range.
+// Abstracted so tests can inject fakes and prod uses OKX.
+type BarsProvider func(symbol, timeframe string, start, end time.Time) ([]market.Kline, error)
+
+// OKXBars is the production provider backed by OKX history-candles.
+func OKXBars(symbol, timeframe string, start, end time.Time) ([]market.Kline, error) {
+	return market.GetKlinesRangeOKX(symbol, timeframe, start, end)
+}
+
+// fetchEntryBars returns bars for one entry with `preBars` of pre-entry history
+// (for ATR) and forward bars until exit (or +maxHoldHours if open-ended), plus
+// the index of the entry bar within the returned slice.
+func fetchEntryBars(e Entry, tf string, preBars, maxHoldHours int, provider BarsProvider) ([]market.Kline, int, error) {
+	tfDur := time.Hour // backtest uses 1h
+	start := time.UnixMilli(e.EntryTime).Add(-time.Duration(preBars+2) * tfDur)
+	endMs := e.ExitTime
+	if endMs <= 0 {
+		endMs = e.EntryTime + int64(maxHoldHours)*int64(time.Hour/time.Millisecond)
+	}
+	// pad the window so the exit bar is included
+	end := time.UnixMilli(endMs).Add(2 * tfDur)
+
+	bars, err := provider(e.Symbol, tf, start, end)
+	if err != nil {
+		return nil, -1, err
+	}
+	if len(bars) == 0 {
+		return nil, -1, fmt.Errorf("no bars for %s", e.Symbol)
+	}
+	// entry index = first bar whose OpenTime >= entryTime
+	entryIdx := -1
+	for i, b := range bars {
+		if b.OpenTime >= e.EntryTime {
+			entryIdx = i
+			break
+		}
+	}
+	if entryIdx < 0 {
+		entryIdx = len(bars) - 1
+	}
+	return bars, entryIdx, nil
+}

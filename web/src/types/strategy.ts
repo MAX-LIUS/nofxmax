@@ -110,6 +110,7 @@ export interface StrategyConfig {
   custom_prompt?: string
   risk_control: RiskControlConfig
   protection: ProtectionConfig
+  atr_protection?: ATRProtectionConfig
   entry_structure?: EntryStructureConfig
   prompt_sections?: PromptSectionsConfig
   strategy_control_policy?: StrategyControlPolicyConfig
@@ -260,6 +261,36 @@ export interface RegimeFilterConfig {
 
   // Entry structure (embedded, moved from top-level entry_structure)
   entry_structure?: EntryStructureConfig
+}
+
+// ATRProtectionConfig: opt-in ATR-driven protection distances. When enabled,
+// the TP/SL ladder + break-even trigger distances are computed as multiples of
+// the symbol's ATR (timeframe below) instead of fixed percentages. A multiple
+// of 0 leaves that dimension on its configured percent. Disabled = no-op.
+export type ATRDimMode = 'percent' | 'fixed' | 'ai'
+
+export interface ATRProtectionConfig {
+  enabled: boolean
+  timeframe?: string
+  atr_period?: number
+  multiple_mode?: 'fixed' | 'ai'
+  // Per-dimension mode: percent (keep %), fixed (ATR×manual), ai (ATR×AI)
+  sl_mode?: ATRDimMode
+  tp1_mode?: ATRDimMode
+  tp2_mode?: ATRDimMode
+  be1_mode?: ATRDimMode
+  be2_mode?: ATRDimMode
+  dd_mode?: ATRDimMode
+  stop_loss_atr?: number
+  take_profit_1_atr?: number
+  take_profit_2_atr?: number
+  break_even_1_atr?: number
+  break_even_2_atr?: number
+  drawdown_min_profit_atr?: number
+  min_eff_pct?: number
+  max_eff_pct?: number
+  ai_min_mult?: number
+  ai_max_mult?: number
 }
 
 export interface ProtectionConfig {

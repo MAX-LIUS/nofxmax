@@ -176,6 +176,10 @@ func (s *Store) initTables() error {
 	if err := s.Evolution().AutoMigrate(); err != nil {
 		return fmt.Errorf("failed to initialize evolution tables: %w", err)
 	}
+	// 统一保护系统表迁移
+	if err := MigrateUnifiedProtection(s.db); err != nil {
+		return fmt.Errorf("failed to initialize unified protection tables: %w", err)
+	}
 	return nil
 }
 

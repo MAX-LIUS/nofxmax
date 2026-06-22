@@ -51,6 +51,7 @@ import {
   defaultProtectionConfig,
   normalizeProtectionConfig,
 } from '../components/strategy/ProtectionEditor'
+import { ATRProtectionEditor } from '../components/strategy/ATRProtectionEditor'
 import { normalizeEntryStructureConfig } from '../components/strategy/EntryStructureEditor'
 import { PreEntryGateEditor } from '../components/strategy/PreEntryGateEditor'
 import { EntryPipelinePanel } from '../components/strategy/EntryPipelinePanel'
@@ -806,12 +807,20 @@ export function StrategyStudioPage() {
           : 'Protection / Profit Control',
       forStrategyType: 'ai_trading' as const,
       content: editingConfig && (
-        <ProtectionEditor
-          config={normalizeProtectionConfig(editingConfig.protection)}
-          onChange={(protection) => updateConfig('protection', protection)}
-          disabled={selectedStrategy?.is_default}
-          language={language}
-        />
+        <>
+          <ProtectionEditor
+            config={normalizeProtectionConfig(editingConfig.protection)}
+            onChange={(protection) => updateConfig('protection', protection)}
+            disabled={selectedStrategy?.is_default}
+            language={language}
+          />
+          <ATRProtectionEditor
+            config={editingConfig.atr_protection}
+            onChange={(atr) => updateConfig('atr_protection', atr)}
+            disabled={selectedStrategy?.is_default}
+            language={language === 'en' ? 'en' : 'zh'}
+          />
+        </>
       ),
     },
     {

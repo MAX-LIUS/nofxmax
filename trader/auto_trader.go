@@ -129,6 +129,7 @@ type AutoTrader struct {
 	aiModel               string  // AI model name
 	exchange              string  // Trading platform type (binance/bybit/etc)
 	exchangeID            string  // Exchange account UUID
+	ownsAccountProtection bool    // Whether this instance owns its account's protection lifecycle (account exclusivity)
 	showInCompetition     bool    // Whether to show in competition page
 	allowAIOpen           bool    // Whether AI can actively open positions
 	allowAIClose          bool    // Whether AI can actively close positions
@@ -493,8 +494,16 @@ func (at *AutoTrader) Run() error {
 	defer at.monitorWg.Done()
 
 	// Start drawdown monitoring
-	at.startDrawdownMonitor()
-	at.startProtectionReconciler()
+	// Account exclusivity: only the sole protection owner of this exchange account
+	// may run the reconciler/drawdown monitor. A second instance sharing the same
+	// account would fight over the shared net position's protection orders.
+	at.ownsAccountProtection = claimAccountProtectionOwnership(at.exchangeID, at.id)
+	if at.ownsAccountProtection {
+		at.startDrawdownMonitor()
+		at.startProtectionReconciler()
+	} else {
+		logger.Warnf("⚠️ [%s] Protection reconciler/drawdown monitor DISABLED: exchange account %s is already owned by another active trader instance (shared-account conflict prevented)", at.name, at.exchangeID)
+	}
 
 	// Start Lighter order sync if using Lighter exchange
 	if at.exchange == "lighter" {
@@ -619,6 +628,12 @@ func (at *AutoTrader) Stop() {
 
 	close(at.stopMonitorCh) // Notify monitoring goroutine to stop
 	at.monitorWg.Wait()     // Wait for monitoring goroutine to finish
+	// Release account protection ownership so a future instance on the same
+	// exchange account can take over after this one stops.
+	if at.ownsAccountProtection {
+		releaseAccountProtectionOwnership(at.exchangeID, at.id)
+		at.ownsAccountProtection = false
+	}
 	logger.Info("⏹ Automatic trading system stopped")
 }
 

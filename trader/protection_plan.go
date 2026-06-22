@@ -270,8 +270,26 @@ func (at *AutoTrader) BuildConfiguredProtectionPlan(entryPrice float64, action s
 	if at.config.StrategyConfig == nil {
 		return nil, nil
 	}
+	return at.buildConfiguredProtectionPlanWith(entryPrice, action, at.config.StrategyConfig.Protection)
+}
 
-	protection := at.config.StrategyConfig.Protection
+// BuildConfiguredProtectionPlanForSymbol is the entry-time variant that applies
+// opt-in ATR-driven distances (when ATRProtection is enabled for this trader)
+// before building the plan. Non-ATR traders behave identically to
+// BuildConfiguredProtectionPlan.
+func (at *AutoTrader) BuildConfiguredProtectionPlanForSymbol(entryPrice float64, action, symbol string) (*ProtectionPlan, error) {
+	if at.config.StrategyConfig == nil {
+		return nil, nil
+	}
+	protection, _ := at.resolveATRProtection(entryPrice, symbol)
+	return at.buildConfiguredProtectionPlanWith(entryPrice, action, protection)
+}
+
+func (at *AutoTrader) buildConfiguredProtectionPlanWith(entryPrice float64, action string, protection store.ProtectionConfig) (*ProtectionPlan, error) {
+	if at.config.StrategyConfig == nil {
+		return nil, nil
+	}
+
 	ownerPolicy := evaluateProtectionOwnerPolicy(protection)
 	drawdownEnabled := ownerPolicy.UseDrawdownTP && len(protection.DrawdownTakeProfit.Rules) > 0
 

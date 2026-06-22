@@ -484,3 +484,9 @@ func GetBoxDataWithExchange(symbol, exchange string) (*BoxData, error) {
 
 	return calculateBoxData(klines, currentPrice), nil
 }
+
+// GetKlines 是 getKlines 的导出包装，供包外（如 trader 的趋势监控）按交易所拉取 K 线。
+// 优先交易所原生 API，回落 CoinAnk/Hyperliquid（与内部逻辑一致）。
+func GetKlines(symbol, interval, exchange string, limit int) ([]Kline, error) {
+	return getKlines(symbol, interval, exchange, limit)
+}

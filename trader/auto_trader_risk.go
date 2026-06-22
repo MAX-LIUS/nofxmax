@@ -202,7 +202,9 @@ func (at *AutoTrader) checkPositionDrawdown() {
 		}
 
 		// Break-even: apply exchange-side BE stops when profit thresholds are met.
-		matchedBreakEvenRules := at.getActiveBreakEvenRules()
+		// ATR-aware: when ATR protection is on, BE triggers are ATR-scaled to match
+		// the distances used at open (no percent/ATR mismatch).
+		matchedBreakEvenRules := at.getActiveBreakEvenRulesATR(symbol, entryPrice)
 		if len(matchedBreakEvenRules) > 0 {
 			if at.isBreakEvenSuppressedByRunner(symbol, side) {
 				logger.Infof("🟠 Break-even monitor: %s %s suppressed by runner semantics, skipping mechanical BE apply", symbol, side)

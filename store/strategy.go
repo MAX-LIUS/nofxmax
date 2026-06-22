@@ -56,6 +56,8 @@ type StrategyConfig struct {
 	RiskControl RiskControlConfig `json:"risk_control"`
 	// unified protection / profit-control configuration
 	Protection ProtectionConfig `json:"protection,omitempty"`
+	// OPT-IN ATR-driven protection distances (off by default = no-op)
+	ATRProtection ATRProtectionConfig `json:"atr_protection,omitempty"`
 	// structural entry contract configuration
 	EntryStructure EntryStructureConfig `json:"entry_structure,omitempty"`
 	// editable sections of System Prompt
