@@ -6,12 +6,12 @@ import (
 
 // SweepPoint is one parameter combination and its portfolio outcome.
 type SweepPoint struct {
-	SLATR    float64
-	TP1ATR   float64
-	TP2ATR   float64
-	BE1ATR   float64
-	BE2ATR   float64
-	Result   PortfolioResult
+	SLATR  float64
+	TP1ATR float64
+	TP2ATR float64
+	BE1ATR float64
+	BE2ATR float64
+	Result PortfolioResult
 }
 
 // ATRGrid defines the candidate ATR multiples to sweep over each dimension.

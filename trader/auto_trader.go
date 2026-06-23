@@ -158,6 +158,10 @@ type AutoTrader struct {
 	monitorWg             sync.WaitGroup                            // Used to wait for monitoring goroutine to finish
 	peakPnLCache          map[string]float64                        // Peak profit cache (symbol -> peak P&L percentage)
 	peakPnLCacheMutex     sync.RWMutex                              // Cache read-write lock
+	gbGuardMutex          sync.Mutex                                // Protects giveback-guard portfolio state below
+	gbPortfolioPeakUnreal float64                                   // Giveback guard: portfolio total-unrealized high-water (quote)
+	gbL2FiredAtPeak       float64                                   // Giveback guard L2 ratchet: portfolio peak at last fire (0 = armed)
+	gbL1FiredAtPeak       map[string]float64                        // Giveback guard L1 ratchet: symbol_side -> position profit% peak at last fire
 	protectionStateMutex  sync.RWMutex                              // Protects last protection reconcile state
 	protectionState       map[string]string                         // symbol_side -> last known protection status
 	breakEvenStateMutex   sync.RWMutex                              // Protects break-even armed state per position
@@ -376,6 +380,7 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		monitorWg:             sync.WaitGroup{},
 		peakPnLCache:          make(map[string]float64),
 		peakPnLCacheMutex:     sync.RWMutex{},
+		gbL1FiredAtPeak:       make(map[string]float64),
 		protectionStateMutex:  sync.RWMutex{},
 		protectionState:       make(map[string]string),
 		breakEvenStateMutex:   sync.RWMutex{},

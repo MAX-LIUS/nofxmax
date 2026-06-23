@@ -242,6 +242,44 @@ type ProtectionConfig struct {
 	DrawdownTakeProfit DrawdownTakeProfitConfig `json:"drawdown_take_profit,omitempty"`
 	BreakEvenStop      BreakEvenStopConfig      `json:"break_even_stop,omitempty"`
 	RegimeFilter       RegimeFilterConfig       `json:"regime_filter,omitempty"`
+	GivebackGuard      GivebackGuardConfig      `json:"giveback_guard,omitempty"`
+}
+
+// GivebackGuardConfig configures the portfolio giveback guard (L1 per-symbol +
+// L2 portfolio circuit breaker), validated by the gbsim backtest (L1+L2 was the
+// strongest config across short-sample, 12mo, walk-forward, and 18mo tests).
+//
+// Zero value = disabled = complete no-op (existing traders unaffected). When
+// DryRun is true the guard only logs the intended trim ("would close X%")
+// without placing any order — used to observe trigger timing before going live.
+//
+// Mechanism (per drawdown-monitor tick):
+//
+//	L2: track portfolio total-unrealized high-water (quote). When the book
+//	    gives back >= L2GivebackPct of that peak AND peak >= L2MinPeakEquityPct
+//	    of account equity, trim L2ClosePct of EACH currently-winning position.
+//	    Ratcheted: fires once per episode, re-arms on a new portfolio high.
+//	L1: per-symbol — when a position gives back >= L1GivebackPct of its own
+//	    peak profit% (after peaking >= L1MinPeakPct), trim L1ClosePct. Ratchet
+//	    re-arms on a new per-position profit peak.
+type GivebackGuardConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+	DryRun  bool `json:"dry_run,omitempty"`
+
+	// L2 portfolio circuit breaker.
+	L2Enabled          bool    `json:"l2_enabled,omitempty"`
+	L2GivebackPct      float64 `json:"l2_giveback_pct,omitempty"`        // e.g. 50
+	L2MinPeakEquityPct float64 `json:"l2_min_peak_equity_pct,omitempty"` // e.g. 1.0 = peak unreal >= 1% of equity
+	L2ClosePct         float64 `json:"l2_close_pct,omitempty"`           // e.g. 50
+
+	// L1 per-symbol velocity guard.
+	L1Enabled     bool    `json:"l1_enabled,omitempty"`
+	L1GivebackPct float64 `json:"l1_giveback_pct,omitempty"` // e.g. 40
+	L1MinPeakPct  float64 `json:"l1_min_peak_pct,omitempty"` // e.g. 3 (position profit %)
+	L1ClosePct    float64 `json:"l1_close_pct,omitempty"`    // e.g. 50
+
+	// Monitor cadence floor (seconds); 0 => reuse drawdown monitor cadence.
+	PollIntervalSeconds int `json:"poll_interval_seconds,omitempty"`
 }
 
 type ProtectionMode string

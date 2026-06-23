@@ -117,6 +117,10 @@ func (at *AutoTrader) getDrawdownMonitorInterval() time.Duration {
 
 // checkPositionDrawdown checks position drawdown situation
 func (at *AutoTrader) checkPositionDrawdown() {
+	// Portfolio giveback guard (L1 per-symbol + L2 portfolio circuit breaker).
+	// Runs first because L2 is portfolio-level. No-op unless explicitly enabled.
+	at.runGivebackGuard()
+
 	// Get current positions
 	positions, err := at.trader.GetPositions()
 	if err != nil {

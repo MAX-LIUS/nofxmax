@@ -67,7 +67,7 @@ func GenerateEMACrossEntries(symbol string, bars []market.Kline, fast, slow, coo
 			Side:       side,
 			EntryPrice: entryPrice,
 			EntryTime:  bars[i].OpenTime,
-			ExitTime:   0, // open-ended; replay caps at maxHold
+			ExitTime:   0,                        // open-ended; replay caps at maxHold
 			Quantity:   notionalUSD / entryPrice, // equal-notional sizing
 		})
 	}

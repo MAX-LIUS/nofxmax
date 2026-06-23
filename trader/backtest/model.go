@@ -25,8 +25,8 @@ func ClaudeBaselineParams() ProtectionParams {
 type ValueUnit string
 
 const (
-	UnitPercent  ValueUnit = "percent"     // fixed % of entry price (Claude baseline)
-	UnitATRMult  ValueUnit = "atr_multiple" // multiple of ATR (Claude-R)
+	UnitPercent ValueUnit = "percent"      // fixed % of entry price (Claude baseline)
+	UnitATRMult ValueUnit = "atr_multiple" // multiple of ATR (Claude-R)
 )
 
 // LadderLeg is one tier of the ladder TP/SL.
@@ -73,7 +73,7 @@ type ProtectionParams struct {
 // Entry is one historical trade entry to replay protection over.
 type Entry struct {
 	Symbol     string
-	Side       string  // "LONG" or "SHORT"
+	Side       string // "LONG" or "SHORT"
 	EntryPrice float64
 	EntryTime  int64   // ms
 	ExitTime   int64   // ms; 0 = open-ended (replay until data end)
@@ -85,16 +85,16 @@ type Entry struct {
 
 // TradeResult is the outcome of replaying one entry under a ProtectionParams.
 type TradeResult struct {
-	Symbol         string
-	Side           string
-	EntryPrice     float64
-	ExitPrice      float64 // volume-weighted average exit
-	ClosedQty      float64
-	RealizedPnL    float64 // sum over partial closes, in quote currency
-	ReturnPct      float64 // realized PnL as % of notional at entry
-	BarsHeld       int
-	CloseReasons   []string // ordered list of what fired (sl/tp1/be1/dd/...)
-	FullyClosed    bool
+	Symbol       string
+	Side         string
+	EntryPrice   float64
+	ExitPrice    float64 // volume-weighted average exit
+	ClosedQty    float64
+	RealizedPnL  float64 // sum over partial closes, in quote currency
+	ReturnPct    float64 // realized PnL as % of notional at entry
+	BarsHeld     int
+	CloseReasons []string // ordered list of what fired (sl/tp1/be1/dd/...)
+	FullyClosed  bool
 }
 
 // PortfolioResult aggregates many TradeResults.

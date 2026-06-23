@@ -25,9 +25,9 @@ func LoadClaudeEntries(db *sql.DB, traderIDLike string) ([]Entry, error) {
 	var out []Entry
 	for rows.Next() {
 		var (
-			symbol, side                          string
-			entryPrice, qty, realized             float64
-			entryTime, exitTime                   sql.NullInt64
+			symbol, side              string
+			entryPrice, qty, realized float64
+			entryTime, exitTime       sql.NullInt64
 		)
 		if err := rows.Scan(&symbol, &side, &entryPrice, &entryTime, &exitTime, &qty, &realized); err != nil {
 			return nil, err

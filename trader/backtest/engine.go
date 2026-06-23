@@ -122,3 +122,28 @@ func sliceOHLC(bars []market.Kline, upto int) (highs, lows, closes []float64) {
 	}
 	return
 }
+
+// sliceOHLCRange extracts OHLC slices over the inclusive bar index range
+// [lo, hi]. Used to bound indicator (ATR/ADX) lookback to a fixed pre-entry
+// window so per-entry cost stays O(window) regardless of how late the entry is.
+func sliceOHLCRange(bars []market.Kline, lo, hi int) (highs, lows, closes []float64) {
+	if lo < 0 {
+		lo = 0
+	}
+	if hi >= len(bars) {
+		hi = len(bars) - 1
+	}
+	if hi < lo {
+		return nil, nil, nil
+	}
+	n := hi - lo + 1
+	highs = make([]float64, n)
+	lows = make([]float64, n)
+	closes = make([]float64, n)
+	for i := 0; i < n; i++ {
+		highs[i] = bars[lo+i].High
+		lows[i] = bars[lo+i].Low
+		closes[i] = bars[lo+i].Close
+	}
+	return
+}
