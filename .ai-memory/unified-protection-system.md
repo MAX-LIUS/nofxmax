@@ -1,8 +1,26 @@
 # 统一保护系统 - AI 记忆文档
 
-> **状态**: 生产运行 | churn 已根治 | 组合回吐护栏(GivebackGuard)**已转实盘 + 全策略无差别生效**
-> **更新**: 2026-06-23 (回吐护栏 L1+L2 实盘上线,dry_run=false,全部 4 个策略统一配置)
-> **版本**: v1.11.0
+> **状态**: 生产运行 | churn 已根治 | 回吐护栏实盘全策略生效 | trader 级 custom_prompt bug 已修复
+> **更新**: 2026-06-23 (回吐护栏实盘 + GPT 不开仓根因修复:trader 级 custom_prompt 死字段)
+> **版本**: v1.12.0
+
+---
+
+## 🔧 GPT 不开仓修复(2026-06-23)= trader 级 custom_prompt 死字段 bug
+
+**现象**:GPT 长期零开仓。用户已把 GPT 改挂 Claude-R 策略(85b160fb)仍不开仓。
+
+**诊断(铁证)**:查 decision_records 发现 GPT 的 AI 调用全部成功、每轮都输出 open_long(SUI/BTC/XAG),但 execution_log 全被 `[market_state]` 趋势对齐 gate 拦:"EMA20方向冲突/opposes regime trending_down"。即 GPT(openai 模型)在下跌行情里固执逆势抄底做多→gate 正确拦截→死锁。对照:同挂 85b160fb 的 Claude-R(claude 模型)同期全在 open_short 顺势,WLD/ETH/FIL 空单都开出。**同策略同 gate,唯一变量=AI 模型**。根因=openai 模型方向倾向,非策略严格度。
+
+**修复中发现的真 bug**:给 GPT 写 traders 表 custom_prompt 后完全不生效。挖出根因:`AutoTrader.SetCustomPrompt` 只把值存进 `at.customPrompt` 字段,**全代码无人读取**(死字段);engine 构建 prompt 实际读的是 `strategyEngine.GetConfig().CustomPrompt`(=StrategyConfig 级)。所以 traders 表 custom_prompt 一直从未进过 prompt(UI 能填、manager 也调了 SetCustomPrompt,全白费)。
+
+**修复**(commit `281e5dc`):`SetCustomPrompt` 改为同时注入 `strategyEngine.GetConfig().CustomPrompt`。因每个 trader 启动时各自 ParseConfig 得到**独立内存副本** StrategyConfig,注入 GPT 不连累共用 85b160fb 的 Claude-R。engine_prompt.go:486 是纯追加模式(不读 override),GPT 用 override=false 追加正合适。加回归单测 2 个(注入生效+nil engine 安全)全绿。新镜像 `8ec2d8a0fd22` 已部署。
+
+**GPT 专属 prompt**(traders 表 custom_prompt,867B,针对 openai 抄底特点):方向纪律最高优先级——价格<EMA20/4h跌→只 open_short;>EMA20/4h涨→只 open_long;逆势单=废单会被 gate 拦;点名"你的已知偏差是抄底做多"。
+
+**实战验证**:重启后 cycle 512(12:52)system_prompt 确认含"方向纪律",GPT 决策从 open_long 翻转为 **open_short BTCUSDT**。本轮被拦理由变成"RSI7=19.3 极端超卖怕反弹"(与 Claude-R 同款合理保护,非方向死锁)。方向死锁已解除,GPT 行为与 Claude-R 对齐。
+
+**给其它 trader 加专属引导的正确姿势**:写 traders 表 `custom_prompt`(override_base_prompt=0 追加),重启 trader 生效。现在真生效了。
 
 ---
 
