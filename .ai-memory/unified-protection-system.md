@@ -1,28 +1,26 @@
 # 统一保护系统 - AI 记忆文档
 
-> **状态**: 生产运行 | churn 已根治 | 组合回吐护栏(GivebackGuard)已 commit + 部署上线(DryRun 观察中)
-> **更新**: 2026-06-23 (回吐护栏 L1+L2 部署完成,DryRun 模式,等观察后拍板转实盘平仓)
-> **版本**: v1.10.0
+> **状态**: 生产运行 | churn 已根治 | 组合回吐护栏(GivebackGuard)**已转实盘 + 全策略无差别生效**
+> **更新**: 2026-06-23 (回吐护栏 L1+L2 实盘上线,dry_run=false,全部 4 个策略统一配置)
+> **版本**: v1.11.0
 
 ---
 
-## 🚀 部署状态(2026-06-23,回吐护栏上线 DryRun)
+## 🚀 部署状态(2026-06-23,回吐护栏实盘 + 全策略无差别)
 
-**已完成全链路**:代码 → 单测(5 绿) → go vet 干净 → 全 trader/backtest 测试绿 → 整模块 build OK → commit `bff0318`(分支 feat/expectancy-maker-trailing-vol) → docker 镜像 `nofxmax-nofx:latest`=`5d5c84db7c9b` → 写线上配置(Claude本体策略 6fd686fe)→ 重建容器(13:35 CST 重启,新镜像 healthy,四个 trader 全部 auto-start)。
+**最新(实盘)**:用户指令"直接上线,所有 trader 无差别生效"。已对**全部 4 个策略**(NowAI260505 c14af6fe、NowAI260512 b7d2782b、claude 6fd686fe、Claude-R 85b160fb)写入 `dry_run:false` 实盘配置,08:42(UTC)force-recreate 重启,新镜像 healthy,3 个运行中 trader(claude/GPT/Claude-R;OKX91 is_running=0 未启)全部 clean auto-start,无 panic。
+- 实盘后日志:`✂️ [GivebackGuard] closing...`(实际平仓)、`🟠 [GivebackGuard L2]`(组合熔断);不再有 DRY-RUN 行。
+- 全策略配置备份:`.deploy-backup/all_strategies_backup.tsv`(打护栏前,4 行 id+quote(config),含 secrets,已 gitignore)。
 
-**线上配置(策略 6fd686fe "claude",DryRun)**:
+**统一配置(4 策略一致)**:
 ```json
-"giveback_guard":{"enabled":true,"dry_run":true,
+"giveback_guard":{"enabled":true,"dry_run":false,
  "l2_enabled":true,"l2_giveback_pct":50,"l2_min_peak_equity_pct":1.0,"l2_close_pct":50,
  "l1_enabled":true,"l1_giveback_pct":40,"l1_min_peak_pct":3,"l1_close_pct":50}
 ```
-DryRun=true ⇒ 只打日志 `🟡 [GivebackGuard DRY-RUN] would close...`,不下任何单。护栏在 `checkPositionDrawdown` 顶部跑(复用 drawdown monitor 节奏,Claude本体=15s)。零值配置=完全 no-op,其它三个 trader 未配置=不受影响。
 
-**观察要点**:盯日志 `🟡 [GivebackGuard DRY-RUN]`(L1 单币)和 `🟠 [GivebackGuard L2]`(组合熔断)。确认触发时机合理(在回吐初期、不被噪声误触)后,再把 dry_run 改 false 转实盘平仓(需用户拍板)。
+**回滚(实盘→关)**:① 全关:`UPDATE strategies SET config=json_set(config,'$.protection.giveback_guard.enabled',json('false'))` 然后重启;或退回 DryRun:把 `.dry_run` 设 `true`。② 整行恢复:从 `all_strategies_backup.tsv` 逐行 `UPDATE strategies SET config=<quote值> WHERE id=<id>`。③ 回代码:`git revert bff0318` + rebuild。
 
-**回滚**:护栏代码默认 no-op,新镜像无配置=行为同旧。回滚路径=① 关配置:`UPDATE strategies SET config=json_remove(config,'$.protection.giveback_guard') WHERE id='6fd686fe-...'` 然后重建容器;② 回代码:`git revert bff0318` + 重 build。线上配置备份在 `.deploy-backup/claude_strategy_config.json`(打护栏前原始 9367 bytes)。
-
-**转实盘平仓步骤(待拍板)**:`UPDATE strategies SET config=json_set(config,'$.protection.giveback_guard.dry_run',json('false')) WHERE id='6fd686fe-...'` → `docker compose up -d nofx`(其实改完需重启 trader 才生效,因 config 启动时载入内存)。
 
 ---
 
