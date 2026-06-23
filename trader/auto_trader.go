@@ -145,8 +145,6 @@ type AutoTrader struct {
 	cycleNumber           int                    // Current cycle number
 	initialBalance        float64
 	dailyPnL              float64
-	customPrompt          string // Custom trading strategy prompt
-	overrideBasePrompt    bool   // Whether to override base prompt
 	lastResetTime         time.Time
 	stopUntil             time.Time
 	isRunning             bool
@@ -773,28 +771,6 @@ func (at *AutoTrader) SetAIDecisionMode(mode string) {
 // SetShowInCompetition sets whether trader should be shown in competition
 func (at *AutoTrader) SetShowInCompetition(show bool) {
 	at.showInCompetition = show
-}
-
-// SetCustomPrompt sets custom trading strategy prompt.
-//
-// The strategy engine builds the system prompt from its own StrategyConfig
-// (engine reads config.CustomPrompt). Previously this only set at.customPrompt,
-// a field nothing ever read, so trader-level custom prompts never reached the
-// prompt at all. We now also inject into the engine's config. Each trader holds
-// its own in-memory StrategyConfig copy, so this stays isolated to this trader
-// even when several traders share the same strategy row.
-func (at *AutoTrader) SetCustomPrompt(prompt string) {
-	at.customPrompt = prompt
-	if at.strategyEngine != nil {
-		if cfg := at.strategyEngine.GetConfig(); cfg != nil {
-			cfg.CustomPrompt = prompt
-		}
-	}
-}
-
-// SetOverrideBasePrompt sets whether to override base prompt
-func (at *AutoTrader) SetOverrideBasePrompt(override bool) {
-	at.overrideBasePrompt = override
 }
 
 // SetFallbackEndpoints configures fallback endpoints for the AI client

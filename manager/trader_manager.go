@@ -731,17 +731,6 @@ func (tm *TraderManager) addTraderFromStore(traderCfg *store.Trader, aiModelCfg 
 		logger.Infof("✓ Configured %d fallback endpoint(s) for trader %s", len(fallbackEndpoints), traderCfg.Name)
 	}
 
-	// Set custom prompt (if exists)
-	if traderCfg.CustomPrompt != "" {
-		at.SetCustomPrompt(traderCfg.CustomPrompt)
-		at.SetOverrideBasePrompt(traderCfg.OverrideBasePrompt)
-		if traderCfg.OverrideBasePrompt {
-			logger.Infof("✓ Set custom trading strategy prompt (overriding base prompt)")
-		} else {
-			logger.Infof("✓ Set custom trading strategy prompt (supplementing base prompt)")
-		}
-	}
-
 	tm.traders[traderCfg.ID] = at
 	logger.Infof("✓ Trader '%s' (%s + %s/%s) loaded to memory", traderCfg.Name, aiModelCfg.Provider, exchangeCfg.ExchangeType, exchangeCfg.AccountName)
 

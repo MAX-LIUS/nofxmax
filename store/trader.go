@@ -188,16 +188,6 @@ func (s *TraderStore) UpdateInitialBalance(userID, id string, newBalance float64
 		Update("initial_balance", newBalance).Error
 }
 
-// UpdateCustomPrompt updates custom prompt
-func (s *TraderStore) UpdateCustomPrompt(userID, id string, customPrompt string, overrideBase bool) error {
-	return s.db.Model(&Trader{}).
-		Where("id = ? AND user_id = ?", id, userID).
-		Updates(map[string]interface{}{
-			"custom_prompt":        customPrompt,
-			"override_base_prompt": overrideBase,
-		}).Error
-}
-
 // Delete deletes trader and associated data
 func (s *TraderStore) Delete(userID, id string) error {
 	// Delete associated equity snapshots first

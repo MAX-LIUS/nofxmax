@@ -161,9 +161,6 @@ Only include fields you want to change.`,
 			s.routeWithSchema(protected, "POST", "/traders/:id/stop", "Stop trader — halts live trading",
 				`:id = trader_id from GET /api/my-traders. No request body needed. Gracefully stops the trading loop.`,
 				s.handleStopTrader)
-			s.routeWithSchema(protected, "PUT", "/traders/:id/prompt", "Override the trader's AI system prompt",
-				`Body: {"prompt":"<string — the full custom prompt text>"}`,
-				s.handleUpdateTraderPrompt)
 			s.routeWithSchema(protected, "POST", "/traders/:id/sync-balance", "Sync account balance from exchange",
 				`:id = trader_id from GET /api/my-traders. No request body needed. Refreshes initial_balance from the exchange.`,
 				s.handleSyncBalance)
