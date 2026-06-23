@@ -775,9 +775,21 @@ func (at *AutoTrader) SetShowInCompetition(show bool) {
 	at.showInCompetition = show
 }
 
-// SetCustomPrompt sets custom trading strategy prompt
+// SetCustomPrompt sets custom trading strategy prompt.
+//
+// The strategy engine builds the system prompt from its own StrategyConfig
+// (engine reads config.CustomPrompt). Previously this only set at.customPrompt,
+// a field nothing ever read, so trader-level custom prompts never reached the
+// prompt at all. We now also inject into the engine's config. Each trader holds
+// its own in-memory StrategyConfig copy, so this stays isolated to this trader
+// even when several traders share the same strategy row.
 func (at *AutoTrader) SetCustomPrompt(prompt string) {
 	at.customPrompt = prompt
+	if at.strategyEngine != nil {
+		if cfg := at.strategyEngine.GetConfig(); cfg != nil {
+			cfg.CustomPrompt = prompt
+		}
+	}
 }
 
 // SetOverrideBasePrompt sets whether to override base prompt
