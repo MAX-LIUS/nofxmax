@@ -1,10 +1,33 @@
 # 统一保护系统 - AI 记忆文档
 
-> **状态**: 生产运行 | churn 已根治并部署 | 全部代码已 commit+push | 当前任务=趋势反转利润回吐抑制(等用户确认改配置)
-> **更新**: 2026-06-23 (churn 根治部署完成 + 交易复盘 + 回吐抑制方案待执行)
-> **版本**: v1.9.0
+> **状态**: 生产运行 | churn 已根治 | 组合回吐护栏(GivebackGuard)已 commit + 部署上线(DryRun 观察中)
+> **更新**: 2026-06-23 (回吐护栏 L1+L2 部署完成,DryRun 模式,等观察后拍板转实盘平仓)
+> **版本**: v1.10.0
 
 ---
+
+## 🚀 部署状态(2026-06-23,回吐护栏上线 DryRun)
+
+**已完成全链路**:代码 → 单测(5 绿) → go vet 干净 → 全 trader/backtest 测试绿 → 整模块 build OK → commit `bff0318`(分支 feat/expectancy-maker-trailing-vol) → docker 镜像 `nofxmax-nofx:latest`=`5d5c84db7c9b` → 写线上配置(Claude本体策略 6fd686fe)→ 重建容器(13:35 CST 重启,新镜像 healthy,四个 trader 全部 auto-start)。
+
+**线上配置(策略 6fd686fe "claude",DryRun)**:
+```json
+"giveback_guard":{"enabled":true,"dry_run":true,
+ "l2_enabled":true,"l2_giveback_pct":50,"l2_min_peak_equity_pct":1.0,"l2_close_pct":50,
+ "l1_enabled":true,"l1_giveback_pct":40,"l1_min_peak_pct":3,"l1_close_pct":50}
+```
+DryRun=true ⇒ 只打日志 `🟡 [GivebackGuard DRY-RUN] would close...`,不下任何单。护栏在 `checkPositionDrawdown` 顶部跑(复用 drawdown monitor 节奏,Claude本体=15s)。零值配置=完全 no-op,其它三个 trader 未配置=不受影响。
+
+**观察要点**:盯日志 `🟡 [GivebackGuard DRY-RUN]`(L1 单币)和 `🟠 [GivebackGuard L2]`(组合熔断)。确认触发时机合理(在回吐初期、不被噪声误触)后,再把 dry_run 改 false 转实盘平仓(需用户拍板)。
+
+**回滚**:护栏代码默认 no-op,新镜像无配置=行为同旧。回滚路径=① 关配置:`UPDATE strategies SET config=json_remove(config,'$.protection.giveback_guard') WHERE id='6fd686fe-...'` 然后重建容器;② 回代码:`git revert bff0318` + 重 build。线上配置备份在 `.deploy-backup/claude_strategy_config.json`(打护栏前原始 9367 bytes)。
+
+**转实盘平仓步骤(待拍板)**:`UPDATE strategies SET config=json_set(config,'$.protection.giveback_guard.dry_run',json('false')) WHERE id='6fd686fe-...'` → `docker compose up -d nofx`(其实改完需重启 trader 才生效,因 config 启动时载入内存)。
+
+---
+
+## 📦 历史背景(护栏设计+回测,已落地)
+
 
 ## 🔥 当前正在做的事(clear 后第一件事看这里)
 
