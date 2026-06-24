@@ -495,6 +495,60 @@ func (at *AutoTrader) loadGivebackGuardStateFromStore() {
 		state.PortfolioPeakUnreal, state.L2FiredAtPeak, len(prunedL1), len(state.L1FiredAtPeak)-len(prunedL1))
 }
 
+// restoreEntryCooldownsFromStore rebuilds post-loss entry cooldowns after a
+// restart. The cooldown map is memory-only and is normally set when a live
+// position transitions to closed; on restart that transition is never observed,
+// so a symbol just stopped out at a loss would be immediately re-tradable,
+// bypassing the consecutive-loss cooldown (a real risk control). We recompute
+// each symbol's cooldown deadline from its last closed trade: deadline =
+// exitTime + duration*consecutiveLosses, and re-arm any still in the future.
+func (at *AutoTrader) restoreEntryCooldownsFromStore() {
+	if at == nil || at.store == nil || at.cooldownManager == nil {
+		return
+	}
+	// Look back over recent closed trades; cooldown maxes at 4x duration, so any
+	// loss older than 4*duration cannot still be cooling. Scan a generous window.
+	trades, err := at.store.Position().GetRecentTrades(at.id, 50)
+	if err != nil {
+		logger.Warnf("⚠️ Entry cooldown: failed to load recent trades for restore: %v", err)
+		return
+	}
+	// Only the latest trade per symbol matters. Cooldown blocks entry, so a win
+	// on a symbol can only happen after any prior loss-cooldown already expired —
+	// meaning if the most recent trade is a win, there is no active cooldown. We
+	// therefore consider just the first (latest) trade seen per symbol and arm a
+	// cooldown only when that latest trade is a loss. GetRecentTrades is exit_time
+	// DESC, so the first trade seen per symbol is the latest.
+	seen := make(map[string]bool)
+	restored := 0
+	for _, t := range trades {
+		if seen[t.Symbol] || t.ExitTime <= 0 {
+			continue
+		}
+		seen[t.Symbol] = true // latest trade for this symbol decided; ignore older ones
+		if t.RealizedPnL >= 0 {
+			continue // latest trade was a win → no active cooldown
+		}
+		consecutiveLosses := at.store.Position().GetConsecutiveLossCount(at.id, t.Symbol, t.Side)
+		if consecutiveLosses < 1 {
+			consecutiveLosses = 1
+		}
+		if consecutiveLosses > 4 {
+			consecutiveLosses = 4
+		}
+		// t.ExitTime is in seconds (GetRecentTrades divides ms by 1000).
+		until := time.Unix(t.ExitTime, 0).Add(at.cooldownManager.duration * time.Duration(consecutiveLosses))
+		if at.cooldownManager.RestoreCooldown(t.Symbol, until) {
+			restored++
+			logger.Infof("⏳ [%s] Entry cooldown restored for %s (%dx, until %s)",
+				at.name, t.Symbol, consecutiveLosses, until.Format("15:04:05"))
+		}
+	}
+	if restored > 0 {
+		logger.Infof("🔁 Entry cooldown: restored %d active post-loss cooldown(s)", restored)
+	}
+}
+
 func (at *AutoTrader) loadDynamicProtectionStateFromStore() {
 	if at == nil || at.store == nil {
 		return
@@ -586,6 +640,7 @@ func (at *AutoTrader) Run() error {
 	at.loadDynamicProtectionStateFromStore()
 	at.loadPeakPnLFromStore()
 	at.loadGivebackGuardStateFromStore()
+	at.restoreEntryCooldownsFromStore()
 	logger.Infof("💰 Initial balance: %.2f USDT", at.initialBalance)
 	logger.Infof("⚙️  Scan interval: %v", at.config.ScanInterval)
 	logger.Info("🤖 AI will make full decisions on leverage, position size, stop loss/take profit, etc.")

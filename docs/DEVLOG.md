@@ -50,4 +50,11 @@
   - **结论**：3% 是真实经济分界，不对 sub-3% 回吐做额外控制，维持现状。
   - **顺带做（用户已认可）GivebackGuard L2 持久化**：此前 `gbPortfolioPeakUnreal/gbL2FiredAtPeak/gbL1FiredAtPeak` 纯内存，重启清零→可能首个反转就误触发 L2 或丢 latch 误砍赢单。新增 `giveback_guard_states` 表（每 trader 一行：组合浮盈高水位 + L2 latch + L1 各仓位 ratchet JSON）+ `SaveGivebackGuardState/LoadGivebackGuardState`；`runGivebackGuard` 每轮（默认 60s）落库一次；启动 `loadGivebackGuardStateFromStore` 恢复并按当前 OPEN 仓位裁剪 L1。加 3 个 round-trip 测试。
   - **验证**：`go build ./...` ✅、`go test ./store/ ./trader/` ✅（含新 `GivebackGuardState` 测试）。
+- 2026-06-24（续2）：举一反三排查"重启即丢"的内存态，修复入场冷却风控漏洞。
+  - **方法**：通盘过了 `AutoTrader` 所有内存字段，按"重启丢不丢 / 丢了有无实际影响"分类。
+  - **已自愈无需动**：`drawdownAIRules`（开仓决策懒加载）、`drawdownTierAllocs`（按剩余仓量回推执行态）、`protectionState/breakEvenState/drawdownState`（dynamic protection 已恢复）、`positionFirstSeenTime`（已加交易所 createdTime 回退）、`nativeTrailingArmTime/immediateTrailingIDs`（reconciler 重建）、单周期临时态。
+  - **发现真实漏洞**：入场冷却 `cooldownManager` 纯内存，且只在"活仓→平仓"转变时设置；重启后 `positionFirstSeenTime` 为空、该转变永不再触发，刚止损的币种冷却被清零→可立即重入，绕过连亏冷却（最高 4x）风控。
+  - **修复**：新增 `restoreEntryCooldownsFromStore`，启动时从 DB 最近平仓记录重算 `until = exitTime + duration×连亏倍数`，仍在未来的重新武装；数据全来自 DB（`GetRecentTrades/GetConsecutiveLossCount/ExitTime`），无需新表。加 `RestoreCooldown` 原语 + 2 单测。每币种只看最新一笔，最新盈利即视为冷却已过期。
+  - **确认非真实风控不动**：`stopUntil`（从不赋未来值）、`dailyPnL`（非 grid 路径只重置为 0）是惰性死字段。
+  - **验证**：`go build ./...` ✅、`go test ./store/ ./trader/` ✅（含新 `RestoreCooldown` 测试）。
 
