@@ -72,4 +72,17 @@
   - **样本外验证(关键)**:claude train131→test57:优化参数 OOS PnL 39.2/DD 30.4 vs 现行% 31.3/43.6 → +25% 利润、−30% 回撤,**真实可泛化非过拟合**。GPT test 窗口对所有配置都亏,但优化仍亏最少(−12.9 vs −16.3)。
   - **跨交易员一致结构**:紧 SL(2.0–2.5 ATR)+ TP 阶梯关/最简 + 轻早 BE + DD 关或边际。现行"2 档 % TP3/6 + BE2/4"被判为过度工程化、提前切赢单。
   - **验证**:`go build ./...` ✅、`go test ./trader/backtest/` ✅。仍未改线上参数(待用户确认)。
+- 2026-06-24（续5）：全市场普适参数寻优 + 样本外验证(关键反转结论)。
+  - **目标**:不分交易员(市场统一,只币种不同),从 OKX 拉 23 币种×18 个月×combined(EMA+breakout)信号≈1.6 万 entry,找普适保护参数,严防振荡市利润折损。
+  - **新增 gbsim**:`-signal combined`(EMA∪breakout 去重,跨趋势+震荡)、`-rank`(预设稳健候选排名,无拟合即可泛化)、`-holdout` 支持 robust(按 entry_time 排序后时间切分)。backtest 新增 `candidate_rank.go`,`robust.go`/`optimize.go` 加宽 ATR 网格。
+  - **关键反转 — 贪婪寻优会过拟合**:全市场样本上 `-optimize` 选出紧 SL=1.5,样本外(train70%→test30%)直接 **−18384**,而 %baseline/ATR-wide 同窗口稳定 **+6200**。λ 加到 1.0 仍选 SL=1.5、仍崩。证明:激进逐维寻优在单一训练窗口必过拟合,任何 λ 救不了。
+  - **方法论转向**:普适参数只能靠"预设稳健候选 + 样本外排名",不能靠 in-sample 峰值。
+  - **候选样本外排名结论**:
+    - 机械样本 OOS(趋势偏置):%live 按抗回撤分胜出,ATR-wide PnL 更高但回撤过大。
+    - 真实 claude OOS:ATR-wide 全面≥%live,但仅 ~24% 优势(非寻优谎称的 13x)。
+    - 真实 claude 全样本:ATR-wide 2tp 45 vs %live 21(~2x)。
+    - 真实 GPT OOS(全亏窗口):ATR 各档亏得都比 %live 少。
+  - **稳健结论**:真实 AI 单上 ATR 模式始终≥%live、从不更差;保留完整 TP 阶梯(2tp)是振荡市利润防护的关键(chop-defensive 早 TP 反而 PnL 代价过大)。激进"紧 SL+砍 TP"是过拟合陷阱。
+  - **给 claude 的普适方案**:`atr-wide 2tp`(SL=4.5ATR,TP1=2.0@35%,TP2=7.0@25%,BE=2.0/0.3@50%,DD=arm7/gb40%@45%),跨全部样本最稳、真实单上 ~2x %live、从不更差。
+  - **验证**:`go build ./...` ✅、`go test ./trader/backtest/` ✅。仍未改线上参数(待用户确认具体落地)。
 
