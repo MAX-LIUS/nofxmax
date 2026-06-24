@@ -41,12 +41,16 @@ func main() {
 	isMonths := flag.Int("ismonths", 6, "walk-forward: in-sample months (rest = OOS)")
 	signal := flag.String("signal", "ema", "robust/walkforward entry signal: ema | breakout")
 	l1study := flag.Bool("l1study", false, "use the L1 min-peak threshold study grid (sub-3% giveback control study)")
+	liveconfig := flag.Bool("liveconfig", false, "evaluate ONLY the deployed guard config (baseline-vs-live PnL-cost decomposition)")
 	flag.Parse()
 
 	// Select the parameter grid to sweep.
 	grid := guardGrid
 	if *l1study {
 		grid = l1StudyGrid
+	}
+	if *liveconfig {
+		grid = liveConfigGrid
 	}
 
 	if *walkfwd {

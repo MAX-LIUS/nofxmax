@@ -51,6 +51,34 @@ func l1StudyGrid() []backtest.GuardParams {
 	return out
 }
 
+// liveConfigGrid emits ONLY the currently-deployed guard config so the sweep
+// prints a clean baseline-vs-live decomposition: PnLCost (profit given up),
+// DDCut (drawdown reduced), GuardTrims (how many winners were trimmed). This
+// answers "what is the guard's negative impact on profit growth" directly,
+// using the exact shipped parameters L1[gb40 mp3 cl50] + L2[gb50 mq3 cl50].
+//
+// (L2MinPeakQuote=3 mirrors the prior cross-validated winner; live uses
+// L2MinPeakEquityPct=1.0 which scales to equity at runtime — both gate L2 to
+// only meaningful portfolio peaks, so 3 is the established backtest proxy.)
+func liveConfigGrid() []backtest.GuardParams {
+	return []backtest.GuardParams{
+		{
+			Enabled:        true,
+			L1Enabled:      true,
+			L1GivebackPct:  40,
+			L1MinPeakPct:   3,
+			L1ClosePct:     50,
+			L2Enabled:      true,
+			L2GivebackPct:  50,
+			L2MinPeakQuote: 3,
+			L2ClosePct:     50,
+		},
+		// Also include each layer alone, to attribute the cost to L1 vs L2.
+		{Enabled: true, L1Enabled: true, L1GivebackPct: 40, L1MinPeakPct: 3, L1ClosePct: 50},
+		{Enabled: true, L2Enabled: true, L2GivebackPct: 50, L2MinPeakQuote: 3, L2ClosePct: 50},
+	}
+}
+
 // guardGrid enumerates the giveback-guard parameter space to sweep. This is the
 // REFINEMENT grid focused around the cross-validated winner (L2 gb50 mq3 cl50):
 //   - fine L2 around the winner (gb 40-60, mq 2-4, cl 45-65)
