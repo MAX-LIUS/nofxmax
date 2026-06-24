@@ -39,4 +39,15 @@
   - **CANCELED 疑问解答**：native_trailing 反复撤挂是设计正常（跟价移动）；full_tp/full_sl 撤挂主因是仓位数量变化后按剩余量重挂，非 bug。
   - **记忆固化**：新增 `.ai-memory/INDEX.md`（恢复主入口）+ `.ai-memory/communication-preferences.md`（中文沟通约定）；`CLAUDE.md` 顶部加"记忆与恢复协议"区块，使 compact/clear 后可从单一入口恢复原始记忆与固定开发管理方法（FUXI_WORKFLOW）。
   - **验证**：`go build ./...` ✅、`go test ./store/ ./trader/` ✅（含新守卫测试）、前端 `tsc` ✅。前端 `Ladder planned levels` 单测失败为 baseline 既有、非本次引入。
+- 2026-06-24（续）：回吐控制阈值回测研究 + GivebackGuard L2 状态持久化。
+  - **问题**：用户问"开仓不足 3% 的盈利/成本回吐是否应同样控制，控制与不控制实际表现如何"。
+  - **方法**：扩展 `cmd/gbsim`，新增 `-l1study` flag + `l1StudyGrid()`，单独扫 `L1MinPeakPct ∈ {0.5,1.0,1.5,2.0,3.0,5.0}`（其余 L1 旋钮锁定 live 值 gb40 cl50），两族：L1-only 与 L1+L2(live winner)。修了 `describe()` 的 `%.0f→%.1f`（之前 0.5/1.5 被截断）。
+  - **三套独立数据一致结论**：阈值降到 3% 以下，PnL 单调崩塌——
+    - robust-EMA 12mo/8币 1075笔：baseline 1379；mp3=1193、mp2=619、mp1.5=-5、mp1.0=-164（转负）。
+    - DB-real claude 182笔(+L2)：baseline 47.9；mp5=77.1、mp3=73.5、mp2=66.0、mp1=56.6、mp0.5=53.8（单调降）。
+    - breakout 12mo/8币 2670笔：baseline 6760；mp3=6826（略超 baseline）、mp2=5281、mp1=3078（腰斩）。
+  - **机制**：阈值越低 trim 次数越爆炸（breakout: mp3=1475→mp0.5=3247），在小浮盈处反复砍仓=churn，把还没走出来的赢单提前杀死；回撤虽降但 PnL 代价不成比例（mp0.5 降 37% DD 却砍 48% PnL）；胜率升是假象。
+  - **结论**：3% 是真实经济分界，不对 sub-3% 回吐做额外控制，维持现状。
+  - **顺带做（用户已认可）GivebackGuard L2 持久化**：此前 `gbPortfolioPeakUnreal/gbL2FiredAtPeak/gbL1FiredAtPeak` 纯内存，重启清零→可能首个反转就误触发 L2 或丢 latch 误砍赢单。新增 `giveback_guard_states` 表（每 trader 一行：组合浮盈高水位 + L2 latch + L1 各仓位 ratchet JSON）+ `SaveGivebackGuardState/LoadGivebackGuardState`；`runGivebackGuard` 每轮（默认 60s）落库一次；启动 `loadGivebackGuardStateFromStore` 恢复并按当前 OPEN 仓位裁剪 L1。加 3 个 round-trip 测试。
+  - **验证**：`go build ./...` ✅、`go test ./store/ ./trader/` ✅（含新 `GivebackGuardState` 测试）。
 

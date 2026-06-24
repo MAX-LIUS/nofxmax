@@ -65,6 +65,16 @@ func MigrateUnifiedProtection(db *sql.DB) error {
 			UNIQUE(trader_id, pos_key)
 		)`,
 
+		// 创建回吐保护(GivebackGuard)状态表（持久化 L1/L2 ratchet 状态，使其在重启后可恢复）
+		// 每个 trader 一行：组合浮盈高水位、L2 触发高水位、L1 各仓位触发高水位(JSON)。
+		`CREATE TABLE IF NOT EXISTS giveback_guard_states (
+			trader_id TEXT PRIMARY KEY,
+			portfolio_peak_unreal REAL DEFAULT 0,
+			l2_fired_at_peak REAL DEFAULT 0,
+			l1_fired_at_peak_json TEXT DEFAULT '{}',
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
 		// 添加索引
 		`CREATE INDEX IF NOT EXISTS idx_protection_configs_trader
 		 ON trader_protection_configs(trader_id)`,
@@ -240,6 +250,60 @@ func (s *Store) LoadPeakPnLForTrader(traderID string) (map[string]float64, error
 		result[posKey] = peak
 	}
 	return result, rows.Err()
+}
+
+// GivebackGuardState 是回吐保护的可持久化 ratchet 状态快照。
+type GivebackGuardState struct {
+	PortfolioPeakUnreal float64            // 组合总浮盈高水位 (quote)
+	L2FiredAtPeak       float64            // L2 触发时的组合高水位 (0=已解除/已重新武装)
+	L1FiredAtPeak       map[string]float64 // symbol_side -> L1 触发时的盈利%峰值
+}
+
+// SaveGivebackGuardState 持久化某 trader 的回吐保护 ratchet 状态。
+// 在 L1/L2 高水位推进或触发后调用，使重启后不会因状态归零而重复触发。
+func (s *Store) SaveGivebackGuardState(traderID string, state GivebackGuardState) error {
+	l1JSON := "{}"
+	if len(state.L1FiredAtPeak) > 0 {
+		b, err := json.Marshal(state.L1FiredAtPeak)
+		if err != nil {
+			return fmt.Errorf("marshal l1 fired-at-peak failed: %w", err)
+		}
+		l1JSON = string(b)
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO giveback_guard_states (trader_id, portfolio_peak_unreal, l2_fired_at_peak, l1_fired_at_peak_json, updated_at)
+		VALUES (?, ?, ?, ?, datetime('now'))
+		ON CONFLICT(trader_id) DO UPDATE SET
+			portfolio_peak_unreal = excluded.portfolio_peak_unreal,
+			l2_fired_at_peak = excluded.l2_fired_at_peak,
+			l1_fired_at_peak_json = excluded.l1_fired_at_peak_json,
+			updated_at = datetime('now')
+	`, traderID, state.PortfolioPeakUnreal, state.L2FiredAtPeak, l1JSON)
+
+	return err
+}
+
+// LoadGivebackGuardState 加载某 trader 的回吐保护 ratchet 状态，用于启动时恢复。
+// 无记录时返回零值状态（PortfolioPeakUnreal=0, 空 L1 map），等价于全新武装。
+func (s *Store) LoadGivebackGuardState(traderID string) (GivebackGuardState, error) {
+	state := GivebackGuardState{L1FiredAtPeak: make(map[string]float64)}
+	var l1JSON string
+	err := s.db.QueryRow(`
+		SELECT portfolio_peak_unreal, l2_fired_at_peak, l1_fired_at_peak_json
+		FROM giveback_guard_states WHERE trader_id = ?
+	`, traderID).Scan(&state.PortfolioPeakUnreal, &state.L2FiredAtPeak, &l1JSON)
+	if err == sql.ErrNoRows {
+		return state, nil
+	}
+	if err != nil {
+		return state, err
+	}
+	if l1JSON != "" && l1JSON != "{}" {
+		if uErr := json.Unmarshal([]byte(l1JSON), &state.L1FiredAtPeak); uErr != nil {
+			return state, fmt.Errorf("unmarshal l1 fired-at-peak failed: %w", uErr)
+		}
+	}
+	return state, nil
 }
 
 // LogTrendTransition 记录趋势转换

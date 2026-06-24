@@ -81,6 +81,10 @@ func (at *AutoTrader) runGivebackGuard() {
 	if cfg.L2Enabled {
 		at.gbApplyL2(cfg, snaps)
 	}
+
+	// Persist the ratchet state (portfolio high-water, L1/L2 latches) so it
+	// survives a restart. One write per guard cadence (default 60s) — cheap.
+	at.persistGivebackGuardState()
 }
 
 // gbApplyL1 trims a single position when it gives back >= L1GivebackPct of its
@@ -173,6 +177,31 @@ func (at *AutoTrader) gbApplyL2(cfg store.GivebackGuardConfig, snaps []gbPositio
 	at.gbGuardMutex.Lock()
 	at.gbL2FiredAtPeak = peak // latch until a new portfolio high-water
 	at.gbGuardMutex.Unlock()
+}
+
+// persistGivebackGuardState snapshots the ratchet state under the guard mutex and
+// writes it to the store, so the L1/L2 ratchets survive a process restart. The DB
+// write happens outside the lock to avoid blocking the guard's hot path. Called
+// after any meaningful state change (peak advance, latch clear, L1/L2 fire).
+func (at *AutoTrader) persistGivebackGuardState() {
+	if at.store == nil {
+		return
+	}
+	at.gbGuardMutex.Lock()
+	l1Copy := make(map[string]float64, len(at.gbL1FiredAtPeak))
+	for k, v := range at.gbL1FiredAtPeak {
+		l1Copy[k] = v
+	}
+	state := store.GivebackGuardState{
+		PortfolioPeakUnreal: at.gbPortfolioPeakUnreal,
+		L2FiredAtPeak:       at.gbL2FiredAtPeak,
+		L1FiredAtPeak:       l1Copy,
+	}
+	at.gbGuardMutex.Unlock()
+
+	if err := at.store.SaveGivebackGuardState(at.id, state); err != nil {
+		logger.Warnf("⚠️ GivebackGuard: failed to persist state: %v", err)
+	}
 }
 
 // gbTrim performs (or, in DryRun, only logs) a partial close of one position.

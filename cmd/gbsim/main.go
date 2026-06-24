@@ -40,7 +40,14 @@ func main() {
 	walkfwd := flag.Bool("walkforward", false, "walk-forward: pick params in-sample (first -ismonths), validate out-of-sample")
 	isMonths := flag.Int("ismonths", 6, "walk-forward: in-sample months (rest = OOS)")
 	signal := flag.String("signal", "ema", "robust/walkforward entry signal: ema | breakout")
+	l1study := flag.Bool("l1study", false, "use the L1 min-peak threshold study grid (sub-3% giveback control study)")
 	flag.Parse()
+
+	// Select the parameter grid to sweep.
+	grid := guardGrid
+	if *l1study {
+		grid = l1StudyGrid
+	}
 
 	if *walkfwd {
 		syms := strings.Split(*symbolsCSV, ",")
@@ -51,7 +58,7 @@ func main() {
 			len(syms), *months, *isMonths, *months-*isMonths)
 		wf, err := backtest.WalkForward(backtest.RobustConfig{
 			Symbols: syms, Timeframe: *tf, Months: *months, Signal: *signal,
-		}, guardGrid(), *isMonths, *top)
+		}, grid(), *isMonths, *top)
 		if err != nil {
 			log.Fatalf("walk-forward: %v", err)
 		}
@@ -67,7 +74,7 @@ func main() {
 		fmt.Printf("ROBUST mode: %d symbols, %d months, signal=%s\n", len(syms), *months, *signal)
 		base, rows, per, err := backtest.SweepGuardsRobust(backtest.RobustConfig{
 			Symbols: syms, Timeframe: *tf, Months: *months, Signal: *signal,
-		}, guardGrid())
+		}, grid())
 		if err != nil {
 			log.Fatalf("robust sweep: %v", err)
 		}
@@ -104,7 +111,7 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println("fetching OKX history per entry (network-bound)...")
-	base, rows, prepared, skipped := backtest.SweepGuardsFromEntries(entries, *tf, guardGrid())
+	base, rows, prepared, skipped := backtest.SweepGuardsFromEntries(entries, *tf, grid())
 	fmt.Printf("prepared %d entries (%d skipped)\n", prepared, skipped)
 	if prepared == 0 {
 		os.Exit(1)
@@ -162,7 +169,7 @@ func printWalkForward(wf backtest.WalkForwardResult) {
 func describe(g backtest.GuardParams) string {
 	s := ""
 	if g.L1Enabled {
-		s += fmt.Sprintf("L1[gb%.0f mp%.0f cl%.0f]", g.L1GivebackPct, g.L1MinPeakPct, g.L1ClosePct)
+		s += fmt.Sprintf("L1[gb%.0f mp%.1f cl%.0f]", g.L1GivebackPct, g.L1MinPeakPct, g.L1ClosePct)
 	}
 	if g.L2Enabled {
 		if g.AdaptiveClose {

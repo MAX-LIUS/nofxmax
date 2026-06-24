@@ -451,6 +451,50 @@ func (at *AutoTrader) loadPeakPnLFromStore() {
 	logger.Infof("🔁 Peak PnL: restored %d high-water mark(s), pruned %d stale", restored, len(stale))
 }
 
+// loadGivebackGuardStateFromStore restores the GivebackGuard ratchet state from
+// the DB so a restart does not reset gbPortfolioPeakUnreal / gbL2FiredAtPeak /
+// gbL1FiredAtPeak. Without this, after a restart the portfolio high-water resets
+// to 0 and the guard could either re-fire L2 on the first reversal it sees, or
+// (more dangerously) drop its latch and trim winners that already gave back once.
+// L1 per-symbol entries are pruned to positions that are still open, mirroring
+// loadPeakPnLFromStore, so a future re-open of the same symbol starts re-armed.
+func (at *AutoTrader) loadGivebackGuardStateFromStore() {
+	if at == nil || at.store == nil {
+		return
+	}
+	state, err := at.store.LoadGivebackGuardState(at.id)
+	if err != nil {
+		logger.Warnf("⚠️ GivebackGuard: failed to load persisted state: %v", err)
+		return
+	}
+
+	// Build the set of currently-open position keys to prune stale L1 entries.
+	openKeys := make(map[string]bool)
+	if openPositions, posErr := at.store.Position().GetOpenPositions(at.id); posErr == nil {
+		for _, p := range openPositions {
+			openKeys[strings.ToLower(p.Symbol+"_"+p.Side)] = true
+		}
+	} else {
+		logger.Warnf("⚠️ GivebackGuard: failed to list open positions for restore filter: %v", posErr)
+	}
+
+	prunedL1 := make(map[string]float64)
+	for posKey, peak := range state.L1FiredAtPeak {
+		if openKeys[strings.ToLower(posKey)] {
+			prunedL1[posKey] = peak
+		}
+	}
+
+	at.gbGuardMutex.Lock()
+	at.gbPortfolioPeakUnreal = state.PortfolioPeakUnreal
+	at.gbL2FiredAtPeak = state.L2FiredAtPeak
+	at.gbL1FiredAtPeak = prunedL1
+	at.gbGuardMutex.Unlock()
+
+	logger.Infof("🔁 GivebackGuard: restored portfolioPeak=%.2f l2Latch=%.2f l1Ratchets=%d (pruned %d stale)",
+		state.PortfolioPeakUnreal, state.L2FiredAtPeak, len(prunedL1), len(state.L1FiredAtPeak)-len(prunedL1))
+}
+
 func (at *AutoTrader) loadDynamicProtectionStateFromStore() {
 	if at == nil || at.store == nil {
 		return
@@ -541,6 +585,7 @@ func (at *AutoTrader) Run() error {
 	logger.Info("🚀 AI-driven automatic trading system started")
 	at.loadDynamicProtectionStateFromStore()
 	at.loadPeakPnLFromStore()
+	at.loadGivebackGuardStateFromStore()
 	logger.Infof("💰 Initial balance: %.2f USDT", at.initialBalance)
 	logger.Infof("⚙️  Scan interval: %v", at.config.ScanInterval)
 	logger.Info("🤖 AI will make full decisions on leverage, position size, stop loss/take profit, etc.")
