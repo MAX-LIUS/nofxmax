@@ -304,6 +304,7 @@ const PositionCard = memo(function PositionCard({
   )
 
   const pnlColor = currentPnlPct >= 0 ? 'text-nofx-green' : 'text-nofx-red'
+  const netPnlColor = netPnl >= 0 ? 'text-nofx-green' : 'text-nofx-red'
   const sideCls =
     side === 'LONG'
       ? 'bg-nofx-green/15 text-nofx-green border-nofx-green/30'
@@ -331,9 +332,14 @@ const PositionCard = memo(function PositionCard({
             </span>
           )}
         </div>
-        <span className={`text-base font-bold font-mono ${pnlColor}`}>
-          {formatPct(currentPnlPct)}
-        </span>
+        <div className="flex items-baseline gap-2">
+          <span className={`text-base font-bold font-mono ${netPnlColor}`}>
+            {formatUsd(netPnl)}
+          </span>
+          <span className={`text-base font-bold font-mono ${pnlColor}`}>
+            {formatPct(currentPnlPct)}
+          </span>
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-nofx-text-muted">
@@ -389,11 +395,7 @@ const PositionCard = memo(function PositionCard({
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
         <span className="text-nofx-text-muted">
           {language === 'zh' ? '净盈亏' : 'Net PnL'}{' '}
-          <span
-            className={`font-mono font-semibold ${
-              netPnl >= 0 ? 'text-nofx-green' : 'text-nofx-red'
-            }`}
-          >
+          <span className={`font-mono font-semibold ${netPnlColor}`}>
             {formatUsd(netPnl)}
           </span>
           <span className="text-nofx-text-muted ml-1">

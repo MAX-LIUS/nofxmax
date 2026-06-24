@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"nofx/logger"
+
 	"gorm.io/gorm"
 )
 
@@ -1015,15 +1017,33 @@ func (s *PositionStore) MarkOpenPositionsAbsentFromExchangeClosed(traderID strin
 	if err != nil {
 		return 0, err
 	}
-	nowMs := time.Now().UTC().UnixMilli()
-	var updated int64
+
+	// Determine which local OPEN positions are absent from the exchange snapshot.
+	absent := make([]*TraderPosition, 0, len(openPositions))
 	for _, pos := range openPositions {
 		key := positionPresenceKey(pos.Symbol, pos.Side)
 		liveQty, ok := livePositions[key]
 		if ok && quantitiesEquivalent(pos.Quantity, liveQty) {
 			continue
 		}
+		absent = append(absent, pos)
+	}
 
+	// Empty/incomplete-snapshot guard (fix 2026-06-24 mass false-close): a single
+	// transient exchange fetch that returns zero (or a severely incomplete) position
+	// set must not wipe every local OPEN row. When 2+ positions would all be closed
+	// in one pass AND that accounts for every local open position, treat the snapshot
+	// as untrustworthy (API hiccup) and skip — a genuine simultaneous close of every
+	// position is far rarer than a flaky poll. A single absent position is still
+	// reconciled, since closing the last position legitimately empties the snapshot.
+	if len(absent) >= 2 && len(absent) == len(openPositions) {
+		logger.Warnf("🛑 Position sync guard: exchange snapshot missing ALL %d open positions for trader %s; treating as transient fetch failure and skipping mass close", len(openPositions), traderID)
+		return 0, nil
+	}
+
+	nowMs := time.Now().UTC().UnixMilli()
+	var updated int64
+	for _, pos := range absent {
 		exitPrice := pos.EntryPrice
 		realizedPnl := pos.RealizedPnL
 		totalFee := pos.Fee

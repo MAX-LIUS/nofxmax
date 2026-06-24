@@ -2568,27 +2568,42 @@ func (at *AutoTrader) GetPeakPnLCache() map[string]float64 {
 // UpdatePeakPnL updates peak profit cache
 func (at *AutoTrader) UpdatePeakPnL(symbol, side string, currentPnLPct float64) {
 	at.peakPnLCacheMutex.Lock()
-	defer at.peakPnLCacheMutex.Unlock()
-
 	posKey := symbol + "_" + side
+	changed := false
 	if peak, exists := at.peakPnLCache[posKey]; exists {
 		// Update peak (if long, take larger value; if short, currentPnLPct is negative, also compare)
 		if currentPnLPct > peak {
 			at.peakPnLCache[posKey] = currentPnLPct
+			changed = true
 		}
 	} else {
 		// First time recording
 		at.peakPnLCache[posKey] = currentPnLPct
+		changed = true
+	}
+	at.peakPnLCacheMutex.Unlock()
+
+	// Persist only when the high-water mark actually moved, so the value survives
+	// a restart. Writes are infrequent (peak only ever rises) so DB load is light.
+	if changed && at.store != nil {
+		if err := at.store.SavePeakPnL(at.id, posKey, currentPnLPct); err != nil {
+			logger.Warnf("⚠️ Failed to persist peak PnL for %s: %v", posKey, err)
+		}
 	}
 }
 
 // ClearPeakPnLCache clears peak cache for specified position
 func (at *AutoTrader) ClearPeakPnLCache(symbol, side string) {
 	at.peakPnLCacheMutex.Lock()
-	defer at.peakPnLCacheMutex.Unlock()
-
 	posKey := symbol + "_" + side
 	delete(at.peakPnLCache, posKey)
+	at.peakPnLCacheMutex.Unlock()
+
+	if at.store != nil {
+		if err := at.store.DeletePeakPnL(at.id, posKey); err != nil {
+			logger.Warnf("⚠️ Failed to delete persisted peak PnL for %s: %v", posKey, err)
+		}
+	}
 }
 
 // ============================================================================

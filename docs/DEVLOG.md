@@ -30,3 +30,13 @@
   - `{"enabled":false}` → `mode=disabled,value=0`
   - 新旧结构现可并存读取；`go test ./store ./api/...` 已通过。
 - 2026-04-16：继续补 UI 解释层，避免用户把 `enabled`、`global mode`、`TP/SL value mode` 混为一谈。在 `web/src/components/strategy/ProtectionEditor.tsx` 为 Full / Ladder 增加状态摘要与提示：当出现“整体模式 = AI，但执行开关仍关闭”时，明确提示“页面保留 AI 配置，但运行时不会实际挂保护单，直到启用执行开关”。前端测试 `npm test` 已通过。
+- 2026-06-24：三交易员（claude/GPT/Claude-R）排查 + 修复 + 记忆固化，一次性提交并部署。
+  - **持仓时间不显示（GPT/OKX）根因**：`/positions` 接口数据来自交易所实时接口，`auto_trader_decision.go` 的 `entry_time` 只取 DB 的 OPEN 记录；OKX 同步漂移时 DB 查不到→`entryTimeMs=0`→前端不显示。修复：DB 查不到时回退用交易所已返回的 `createdTime`（OKX/Bybit 有，Binance 无则保持 0）。
+  - **peak 不准根因**：peak（`peakPnLCache`，key=symbol_side）纯内存、无持久化，容器重启即清零并从当前盈亏重新累计，导致已触发 ladder 的持仓 peak 显示很小。修复：新增 `peak_pnl_states` 表 + `SavePeakPnL/DeletePeakPnL/LoadPeakPnLForTrader`；`UpdatePeakPnL` 高点上移时落库、`ClearPeakPnLCache` 平仓删库；启动 `loadPeakPnLFromStore` 恢复，且只恢复当前仍 OPEN 的仓位（大小写不敏感）并清理 stale。
+  - **批量误平根因**：4 次 `sync_absent_from_exchange` 全集中在 03:24 同一时刻，疑似 OKX `GetPositions` 瞬时空响应。`MarkOpenPositionsAbsentFromExchangeClosed` 无防空保护。修复：缺失仓位 ≥2 且=全部本地 OPEN 时判瞬时故障、跳过整批并告警；单个消失仍正常平。加 2 个回归测试。
+  - **备用模型结论**：本次启动以来 endpoint fallback 0 次，三 trader 计费均只用主模型，主路无超时/重试。用户感觉“备用用得多”应发生在 04:13 重启前（日志已丢）。已替换 NovaI fallback key（写入 DB，明文 JSON 字段）。
+  - **UI**：净盈亏（红绿正负色）移到持仓卡片右上、与盈亏百分比并排。
+  - **CANCELED 疑问解答**：native_trailing 反复撤挂是设计正常（跟价移动）；full_tp/full_sl 撤挂主因是仓位数量变化后按剩余量重挂，非 bug。
+  - **记忆固化**：新增 `.ai-memory/INDEX.md`（恢复主入口）+ `.ai-memory/communication-preferences.md`（中文沟通约定）；`CLAUDE.md` 顶部加"记忆与恢复协议"区块，使 compact/clear 后可从单一入口恢复原始记忆与固定开发管理方法（FUXI_WORKFLOW）。
+  - **验证**：`go build ./...` ✅、`go test ./store/ ./trader/` ✅（含新守卫测试）、前端 `tsc` ✅。前端 `Ladder planned levels` 单测失败为 baseline 既有、非本次引入。
+

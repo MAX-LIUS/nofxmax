@@ -294,6 +294,18 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 			}
 		}
 
+		// Fallback: when the local DB has no matching OPEN row (e.g. exchange/local
+		// sync drift, manual position, or a row not yet persisted), use the open
+		// time reported by the exchange adapter so the UI still shows hold time.
+		// OKX/Bybit expose "createdTime" (ms); Binance omits it (stays 0).
+		if entryTimeMs == 0 {
+			if ct, ok := pos["createdTime"].(int64); ok && ct > 0 {
+				entryTimeMs = ct
+			} else if ctf, ok := pos["createdTime"].(float64); ok && ctf > 0 {
+				entryTimeMs = int64(ctf)
+			}
+		}
+
 		result = append(result, map[string]interface{}{
 			"symbol":                    symbol,
 			"side":                      side,

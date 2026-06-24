@@ -21,6 +21,7 @@ import (
 	"nofx/trader/lighter"
 	"nofx/trader/okx"
 	"nofx/wallet"
+	"strings"
 	"sync"
 	"time"
 )
@@ -398,6 +399,58 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 	}, nil
 }
 
+// loadPeakPnLFromStore restores the peak-PnL high-water cache from the DB so
+// that, after a restart, peak/drawdown tiers and the UI keep the highest profit
+// the position ever reached instead of resetting to the current PnL.
+func (at *AutoTrader) loadPeakPnLFromStore() {
+	if at == nil || at.store == nil {
+		return
+	}
+	peaks, err := at.store.LoadPeakPnLForTrader(at.id)
+	if err != nil {
+		logger.Warnf("⚠️ Peak PnL: failed to load persisted state: %v", err)
+		return
+	}
+	if len(peaks) == 0 {
+		return
+	}
+
+	// Only restore peaks for positions that are still OPEN. Positions closed while
+	// the process was down never fired ClearPeakPnLCache, so their persisted rows
+	// would otherwise resurrect a stale high-water mark for a future re-open.
+	openKeys := make(map[string]bool)
+	if openPositions, posErr := at.store.Position().GetOpenPositions(at.id); posErr == nil {
+		for _, p := range openPositions {
+			// Cache keys use the exchange-reported side casing (e.g. OKX "long"),
+			// while DB stores uppercase. Compare case-insensitively.
+			openKeys[strings.ToLower(p.Symbol+"_"+p.Side)] = true
+		}
+	} else {
+		logger.Warnf("⚠️ Peak PnL: failed to list open positions for restore filter: %v", posErr)
+	}
+
+	at.peakPnLCacheMutex.Lock()
+	restored := 0
+	stale := make([]string, 0)
+	for posKey, peak := range peaks {
+		if openKeys[strings.ToLower(posKey)] {
+			at.peakPnLCache[posKey] = peak
+			restored++
+		} else {
+			stale = append(stale, posKey)
+		}
+	}
+	at.peakPnLCacheMutex.Unlock()
+
+	// Clean up stale persisted rows for positions no longer open.
+	for _, posKey := range stale {
+		if delErr := at.store.DeletePeakPnL(at.id, posKey); delErr != nil {
+			logger.Warnf("⚠️ Peak PnL: failed to delete stale row %s: %v", posKey, delErr)
+		}
+	}
+	logger.Infof("🔁 Peak PnL: restored %d high-water mark(s), pruned %d stale", restored, len(stale))
+}
+
 func (at *AutoTrader) loadDynamicProtectionStateFromStore() {
 	if at == nil || at.store == nil {
 		return
@@ -487,6 +540,7 @@ func (at *AutoTrader) Run() error {
 
 	logger.Info("🚀 AI-driven automatic trading system started")
 	at.loadDynamicProtectionStateFromStore()
+	at.loadPeakPnLFromStore()
 	logger.Infof("💰 Initial balance: %.2f USDT", at.initialBalance)
 	logger.Infof("⚙️  Scan interval: %v", at.config.ScanInterval)
 	logger.Info("🤖 AI will make full decisions on leverage, position size, stop loss/take profit, etc.")
