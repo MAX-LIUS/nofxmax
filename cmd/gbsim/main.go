@@ -45,6 +45,10 @@ func main() {
 	adaptive := flag.Bool("adaptive", false, "sweep trend-adaptive L2 close ratios (ADX-gated) to recover trend-regime PnL")
 	ablation := flag.Bool("ablation", false, "ablation: measure each protection layer's (DD/BE/TP/SL) marginal PnL contribution (guard off)")
 	unitcompare := flag.Bool("unitcompare", false, "compare percent-mode vs ATR-mode protection PnL on identical entries (guard off)")
+	optimize := flag.Bool("optimize", false, "staged ATR protection optimiser: sweep SL/TP/BE/DD distances, ratios, tiers, disable unfavourable layers")
+	holdout := flag.Bool("holdout", false, "out-of-sample validation: optimise on train split, score on untouched test split")
+	trainfrac := flag.Float64("trainfrac", 0.7, "holdout: fraction of (time-ordered) entries used for training")
+	lambda := flag.Float64("lambda", 0.15, "optimiser drawdown penalty: score = PnL - lambda*MaxDD")
 	flag.Parse()
 
 	// Select the parameter grid to sweep.
@@ -68,6 +72,39 @@ func main() {
 			signal: *signal, dbPath: *dbPath, traderLike: *traderLike,
 			days: *days, limit: *limit,
 		})
+		return
+	}
+
+	if *optimize {
+		runOptimize(*lambda, analysisInputs{
+			robust: *robust, symbolsCSV: *symbolsCSV, tf: *tf, months: *months,
+			signal: *signal, dbPath: *dbPath, traderLike: *traderLike,
+			days: *days, limit: *limit,
+		})
+		return
+	}
+
+	if *holdout {
+		db, err := sql.Open("sqlite", *dbPath)
+		if err != nil {
+			log.Fatalf("open db: %v", err)
+		}
+		defer db.Close()
+		entries, err := backtest.LoadClaudeEntries(db, *traderLike)
+		if err != nil {
+			log.Fatalf("load entries: %v", err)
+		}
+		if *limit > 0 && *limit < len(entries) {
+			entries = entries[len(entries)-*limit:]
+		}
+		fmt.Printf("loaded %d closed entries for trader=%s\n", len(entries), *traderLike)
+		if len(entries) == 0 {
+			os.Exit(1)
+		}
+		fmt.Println("fetching OKX history per entry (network-bound)...")
+		h, prepared, skipped := backtest.OptimizeHoldoutFromEntries(entries, *tf, *lambda, *trainfrac)
+		fmt.Printf("prepared %d entries (%d skipped)\n", prepared, skipped)
+		fmt.Println(backtest.FormatHoldout(h))
 		return
 	}
 
@@ -295,4 +332,59 @@ func runProtectionAnalysisDB(doAblation, doUnitCompare bool, in analysisInputs) 
 		fmt.Printf("prepared %d entries (%d skipped)\n", prepared, skipped)
 		fmt.Println(backtest.FormatUnitCompare(rows))
 	}
+}
+
+func runOptimize(lambda float64, in analysisInputs) {
+	if in.robust {
+		syms := strings.Split(in.symbolsCSV, ",")
+		for i := range syms {
+			syms[i] = strings.TrimSpace(syms[i])
+		}
+		cfg := backtest.RobustConfig{
+			Symbols: syms, Timeframe: in.tf, Months: in.months, Signal: in.signal,
+		}
+		fmt.Printf("OPTIMIZE (robust): %d symbols, %d months, signal=%s, lambda=%.2f\n",
+			len(syms), in.months, in.signal, lambda)
+		stages, final, per, err := backtest.OptimizeProtectionRobust(cfg, lambda)
+		if err != nil {
+			log.Fatalf("optimize robust: %v", err)
+		}
+		fmt.Printf("per-symbol entries: %v\n", per)
+		fmt.Println(backtest.FormatOptStages(stages))
+		fmt.Printf("FINAL PARAMS: %s\n", backtest.DescribeParams(final))
+		return
+	}
+
+	db, err := sql.Open("sqlite", in.dbPath)
+	if err != nil {
+		log.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	entries, err := backtest.LoadClaudeEntries(db, in.traderLike)
+	if err != nil {
+		log.Fatalf("load entries: %v", err)
+	}
+	if in.days > 0 {
+		cutoff := msNow() - int64(in.days)*86400_000
+		f := entries[:0]
+		for _, e := range entries {
+			if e.EntryTime >= cutoff {
+				f = append(f, e)
+			}
+		}
+		entries = f
+	}
+	if in.limit > 0 && in.limit < len(entries) {
+		entries = entries[len(entries)-in.limit:]
+	}
+	fmt.Printf("loaded %d closed entries for trader=%s, lambda=%.2f\n", len(entries), in.traderLike, lambda)
+	if len(entries) == 0 {
+		os.Exit(1)
+	}
+	fmt.Println("fetching OKX history per entry (network-bound)...")
+	stages, final, prepared, skipped := backtest.OptimizeProtectionFromEntries(entries, in.tf, lambda)
+	fmt.Printf("prepared %d entries (%d skipped)\n", prepared, skipped)
+	fmt.Println(backtest.FormatOptStages(stages))
+	fmt.Printf("FINAL PARAMS: %s\n", backtest.DescribeParams(final))
 }
