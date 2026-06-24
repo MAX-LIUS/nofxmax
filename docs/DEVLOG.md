@@ -64,4 +64,12 @@
   - **DD/BE/TP 拆解**(真实 claude 187笔, guard off): FULL=15.32; -DD ΔPnL≈0(几乎惰性); -BE +7.58; -TP +14.04; SL-only=46.72(+31)。即在真实 AI 单上,TP 阶梯/BE 对利润是净抑制,DD 近乎无效;SL 是唯一关键护栏。GPT 同向:-TP +3.73、SL-only PnL 翻倍。
   - **%固定 vs ATR**(真实 claude 187笔): %=15.32 / ATR-tight=41.43(DD 还从 62→42) / ATR-wide=47.50。ATR 全面碾压百分比。GPT 上两者接近(ATR-mid/wide 略好)。结论:ATR 模式在真实 AI 单上利润显著更优,尤其 claude。
   - **验证**：`go build ./...` ✅、`go test ./trader/backtest/` ✅。所有结论为回测证据,未改任何线上参数(需用户确认)。
+- 2026-06-24（续4）：完整参数寻优 + 平仓比例/档位 + 关闭不利项 + 样本外验证。
+  - **新增 gbsim**：`-optimize`（分阶段 ATR 寻优:SL/TP/BE/DD 的距离×平仓比例×档位数×关闭不利层,按抗回撤分 PnL−λ·MaxDD 排序;每阶段锁定上阶段赢家,逐维边际可见）、`-holdout`（时间序列 train/test 切分,train 上寻优、test 上验证,抓过拟合)。backtest 新增 `optimize.go/holdout.go`。
+  - **真实 claude 188笔寻优**：%baseline 4.78 → 优化 63.70(13x),MaxDD 62→47。结构=紧 SL(2.0 ATR)+单档 TP@65%+轻 BE+边际 DD。λ=0.15/0.3/0.5 结果一致(非刀尖)。
+  - **真实 GPT 203笔寻优**：%baseline 9.44 → 16.56(1.75x)。结构=SL3.0、**TP 全关**、早 BE@65%、DD 关。
+  - **机械 EMA 1077笔**:SL5.0 only、全关保护 → 12033 但胜率 12%、MaxDD 4077(纯趋势签名,证明方向=现行 TP/BE 过激,但其"零保护"答案是 regime 特例、回撤不可接受)。
+  - **样本外验证(关键)**:claude train131→test57:优化参数 OOS PnL 39.2/DD 30.4 vs 现行% 31.3/43.6 → +25% 利润、−30% 回撤,**真实可泛化非过拟合**。GPT test 窗口对所有配置都亏,但优化仍亏最少(−12.9 vs −16.3)。
+  - **跨交易员一致结构**:紧 SL(2.0–2.5 ATR)+ TP 阶梯关/最简 + 轻早 BE + DD 关或边际。现行"2 档 % TP3/6 + BE2/4"被判为过度工程化、提前切赢单。
+  - **验证**:`go build ./...` ✅、`go test ./trader/backtest/` ✅。仍未改线上参数(待用户确认)。
 
