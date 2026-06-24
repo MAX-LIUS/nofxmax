@@ -42,6 +42,9 @@ func main() {
 	signal := flag.String("signal", "ema", "robust/walkforward entry signal: ema | breakout")
 	l1study := flag.Bool("l1study", false, "use the L1 min-peak threshold study grid (sub-3% giveback control study)")
 	liveconfig := flag.Bool("liveconfig", false, "evaluate ONLY the deployed guard config (baseline-vs-live PnL-cost decomposition)")
+	adaptive := flag.Bool("adaptive", false, "sweep trend-adaptive L2 close ratios (ADX-gated) to recover trend-regime PnL")
+	ablation := flag.Bool("ablation", false, "ablation: measure each protection layer's (DD/BE/TP/SL) marginal PnL contribution (guard off)")
+	unitcompare := flag.Bool("unitcompare", false, "compare percent-mode vs ATR-mode protection PnL on identical entries (guard off)")
 	flag.Parse()
 
 	// Select the parameter grid to sweep.
@@ -51,6 +54,21 @@ func main() {
 	}
 	if *liveconfig {
 		grid = liveConfigGrid
+	}
+	if *adaptive {
+		grid = adaptiveCloseGrid
+	}
+
+	// Protection-layer analysis modes (guard-independent). These short-circuit
+	// the guard sweep: they replay baseline protection variants on the same
+	// entries (robust mechanical or real DB) and print attribution tables.
+	if *ablation || *unitcompare {
+		runProtectionAnalysis(*ablation, *unitcompare, analysisInputs{
+			robust: *robust, symbolsCSV: *symbolsCSV, tf: *tf, months: *months,
+			signal: *signal, dbPath: *dbPath, traderLike: *traderLike,
+			days: *days, limit: *limit,
+		})
+		return
 	}
 
 	if *walkfwd {
@@ -191,4 +209,90 @@ func describe(g backtest.GuardParams) string {
 		s = "(off)"
 	}
 	return s
+}
+
+type analysisInputs struct {
+	robust     bool
+	symbolsCSV string
+	tf         string
+	months     int
+	signal     string
+	dbPath     string
+	traderLike string
+	days       int
+	limit      int
+}
+
+func runProtectionAnalysis(doAblation, doUnitCompare bool, in analysisInputs) {
+	if in.robust {
+		syms := strings.Split(in.symbolsCSV, ",")
+		for i := range syms {
+			syms[i] = strings.TrimSpace(syms[i])
+		}
+		cfg := backtest.RobustConfig{
+			Symbols: syms, Timeframe: in.tf, Months: in.months, Signal: in.signal,
+		}
+		fmt.Printf("PROTECTION ANALYSIS (robust): %d symbols, %d months, signal=%s\n",
+			len(syms), in.months, in.signal)
+		if doAblation {
+			rows, per, err := backtest.AblateProtectionRobust(cfg)
+			if err != nil {
+				log.Fatalf("ablate robust: %v", err)
+			}
+			fmt.Printf("per-symbol entries: %v\n", per)
+			fmt.Println(backtest.FormatAblation(rows))
+		}
+		if doUnitCompare {
+			rows, per, err := backtest.CompareUnitsRobust(cfg)
+			if err != nil {
+				log.Fatalf("compare units robust: %v", err)
+			}
+			fmt.Printf("per-symbol entries: %v\n", per)
+			fmt.Println(backtest.FormatUnitCompare(rows))
+		}
+		return
+	}
+	runProtectionAnalysisDB(doAblation, doUnitCompare, in)
+}
+
+func runProtectionAnalysisDB(doAblation, doUnitCompare bool, in analysisInputs) {
+	db, err := sql.Open("sqlite", in.dbPath)
+	if err != nil {
+		log.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	entries, err := backtest.LoadClaudeEntries(db, in.traderLike)
+	if err != nil {
+		log.Fatalf("load entries: %v", err)
+	}
+	if in.days > 0 {
+		cutoff := msNow() - int64(in.days)*86400_000
+		f := entries[:0]
+		for _, e := range entries {
+			if e.EntryTime >= cutoff {
+				f = append(f, e)
+			}
+		}
+		entries = f
+	}
+	if in.limit > 0 && in.limit < len(entries) {
+		entries = entries[len(entries)-in.limit:]
+	}
+	fmt.Printf("loaded %d closed entries for trader=%s\n", len(entries), in.traderLike)
+	if len(entries) == 0 {
+		os.Exit(1)
+	}
+	fmt.Println("fetching OKX history per entry (network-bound)...")
+
+	if doAblation {
+		rows, prepared, skipped := backtest.AblateProtectionFromEntries(entries, in.tf)
+		fmt.Printf("prepared %d entries (%d skipped)\n", prepared, skipped)
+		fmt.Println(backtest.FormatAblation(rows))
+	}
+	if doUnitCompare {
+		rows, prepared, skipped := backtest.CompareUnitsFromEntries(entries, in.tf)
+		fmt.Printf("prepared %d entries (%d skipped)\n", prepared, skipped)
+		fmt.Println(backtest.FormatUnitCompare(rows))
+	}
 }
