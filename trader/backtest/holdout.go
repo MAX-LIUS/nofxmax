@@ -1,6 +1,18 @@
 package backtest
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
+
+// sortLoadedByEntryTime orders prepared entries chronologically so a train/test
+// split is a genuine past→future holdout (the multi-symbol merge interleaves
+// symbols, so a raw split would leak future bars into train).
+func sortLoadedByEntryTime(loaded []loadedEntry) {
+	sort.SliceStable(loaded, func(i, j int) bool {
+		return loaded[i].entry.EntryTime < loaded[j].entry.EntryTime
+	})
+}
 
 // HoldoutResult reports out-of-sample validation: params are optimised on the
 // train split (chronologically first trainFrac of entries) then scored on the

@@ -47,6 +47,7 @@ func main() {
 	unitcompare := flag.Bool("unitcompare", false, "compare percent-mode vs ATR-mode protection PnL on identical entries (guard off)")
 	optimize := flag.Bool("optimize", false, "staged ATR protection optimiser: sweep SL/TP/BE/DD distances, ratios, tiers, disable unfavourable layers")
 	holdout := flag.Bool("holdout", false, "out-of-sample validation: optimise on train split, score on untouched test split")
+	rank := flag.Bool("rank", false, "rank curated regime-robust candidate configs (no fitting -> generalizes); use -trainfrac<1 for OOS-tail scoring")
 	trainfrac := flag.Float64("trainfrac", 0.7, "holdout: fraction of (time-ordered) entries used for training")
 	lambda := flag.Float64("lambda", 0.15, "optimiser drawdown penalty: score = PnL - lambda*MaxDD")
 	flag.Parse()
@@ -85,6 +86,23 @@ func main() {
 	}
 
 	if *holdout {
+		if *robust {
+			syms := strings.Split(*symbolsCSV, ",")
+			for i := range syms {
+				syms[i] = strings.TrimSpace(syms[i])
+			}
+			fmt.Printf("HOLDOUT (robust): %d symbols, %d months, signal=%s, trainfrac=%.2f\n",
+				len(syms), *months, *signal, *trainfrac)
+			h, per, err := backtest.OptimizeHoldoutRobust(backtest.RobustConfig{
+				Symbols: syms, Timeframe: *tf, Months: *months, Signal: *signal,
+			}, *lambda, *trainfrac)
+			if err != nil {
+				log.Fatalf("holdout robust: %v", err)
+			}
+			fmt.Printf("per-symbol entries: %v\n", per)
+			fmt.Println(backtest.FormatHoldout(h))
+			return
+		}
 		db, err := sql.Open("sqlite", *dbPath)
 		if err != nil {
 			log.Fatalf("open db: %v", err)
@@ -105,6 +123,47 @@ func main() {
 		h, prepared, skipped := backtest.OptimizeHoldoutFromEntries(entries, *tf, *lambda, *trainfrac)
 		fmt.Printf("prepared %d entries (%d skipped)\n", prepared, skipped)
 		fmt.Println(backtest.FormatHoldout(h))
+		return
+	}
+
+	if *rank {
+		if *robust {
+			syms := strings.Split(*symbolsCSV, ",")
+			for i := range syms {
+				syms[i] = strings.TrimSpace(syms[i])
+			}
+			fmt.Printf("CANDIDATE RANK (robust): %d symbols, %d months, signal=%s, trainfrac=%.2f\n",
+				len(syms), *months, *signal, *trainfrac)
+			rows, per, err := backtest.RankCandidatesRobust(backtest.RobustConfig{
+				Symbols: syms, Timeframe: *tf, Months: *months, Signal: *signal,
+			}, *lambda, *trainfrac)
+			if err != nil {
+				log.Fatalf("rank robust: %v", err)
+			}
+			fmt.Printf("per-symbol entries: %v\n", per)
+			fmt.Println(backtest.FormatCandRank(rows))
+			return
+		}
+		db, err := sql.Open("sqlite", *dbPath)
+		if err != nil {
+			log.Fatalf("open db: %v", err)
+		}
+		defer db.Close()
+		entries, err := backtest.LoadClaudeEntries(db, *traderLike)
+		if err != nil {
+			log.Fatalf("load entries: %v", err)
+		}
+		if *limit > 0 && *limit < len(entries) {
+			entries = entries[len(entries)-*limit:]
+		}
+		fmt.Printf("loaded %d closed entries for trader=%s\n", len(entries), *traderLike)
+		if len(entries) == 0 {
+			os.Exit(1)
+		}
+		fmt.Println("fetching OKX history per entry (network-bound)...")
+		rows, prepared, skipped := backtest.RankCandidatesFromEntries(entries, *tf, *lambda, *trainfrac)
+		fmt.Printf("prepared %d entries (%d skipped)\n", prepared, skipped)
+		fmt.Println(backtest.FormatCandRank(rows))
 		return
 	}
 

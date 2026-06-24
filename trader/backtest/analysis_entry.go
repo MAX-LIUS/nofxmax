@@ -48,6 +48,18 @@ func OptimizeProtectionRobust(cfg RobustConfig, lambda float64) ([]OptResult, Pr
 	return stages, final, per, nil
 }
 
+// OptimizeHoldoutRobust prepares the broad mechanical sample, time-orders it,
+// then optimises on the train split and validates on the untouched test split.
+// This is the universality/overfitting guard for the multi-coin run.
+func OptimizeHoldoutRobust(cfg RobustConfig, lambda, trainFrac float64) (HoldoutResult, map[string]int, error) {
+	merged, per, err := PrepareRobustPortfolioEntries(cfg)
+	if err != nil {
+		return HoldoutResult{}, per, err
+	}
+	sortLoadedByEntryTime(merged)
+	return OptimizeHoldout(merged, lambda, trainFrac), per, nil
+}
+
 // OptimizeProtectionFromEntries fetches OKX bars per entry then runs the optimiser.
 func OptimizeProtectionFromEntries(entries []Entry, tf string, lambda float64) ([]OptResult, ProtectionParams, int, int) {
 	loaded, skipped := PrepareEntries(entries, tf, OKXBars)
@@ -56,6 +68,24 @@ func OptimizeProtectionFromEntries(entries []Entry, tf string, lambda float64) (
 	}
 	stages, final := OptimizeProtectionATR(loaded, lambda)
 	return stages, final, len(loaded), skipped
+}
+
+// RankCandidatesRobust prepares the broad sample and ranks curated candidates.
+func RankCandidatesRobust(cfg RobustConfig, lambda, trainFrac float64) ([]CandRankRow, map[string]int, error) {
+	merged, per, err := PrepareRobustPortfolioEntries(cfg)
+	if err != nil {
+		return nil, per, err
+	}
+	return RankCandidates(merged, lambda, trainFrac), per, nil
+}
+
+// RankCandidatesFromEntries fetches bars per entry then ranks curated candidates.
+func RankCandidatesFromEntries(entries []Entry, tf string, lambda, trainFrac float64) ([]CandRankRow, int, int) {
+	loaded, skipped := PrepareEntries(entries, tf, OKXBars)
+	if len(loaded) == 0 {
+		return nil, 0, skipped
+	}
+	return RankCandidates(loaded, lambda, trainFrac), len(loaded), skipped
 }
 
 // OptimizeHoldoutFromEntries fetches bars then runs OOS train/test validation.
