@@ -65,7 +65,7 @@ func OptimizeProtectionATR(loaded []loadedEntry, lambda float64) ([]OptResult, P
 
 	// ---- S1: SL-only ----
 	bestSL, bestSLr := 0.0, OptResult{PnL: -1e18}
-	for _, sl := range []float64{2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0} {
+	for _, sl := range []float64{1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 7.0, 8.0} {
 		r := evalATR(fmt.Sprintf("S1 SL=%.1f only", sl), atrParams(sl, nil, nil, nil), loaded)
 		if scoreOf(r, lambda) > scoreOf(bestSLr, lambda) {
 			bestSLr, bestSL = r, sl
@@ -76,8 +76,8 @@ func OptimizeProtectionATR(loaded []loadedEntry, lambda float64) ([]OptResult, P
 	// ---- S2: + TP1 (distance × ratio); ratio 0 == skip ----
 	bestTP1 := []LadderLeg(nil)
 	bestS2 := bestSLr
-	for _, d := range []float64{1.0, 1.5, 2.0, 2.5, 3.0} {
-		for _, ratio := range []float64{20, 35, 50, 65} {
+	for _, d := range []float64{1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0} {
+		for _, ratio := range []float64{20, 35, 50, 65, 80} {
 			tp := []LadderLeg{{ATRMult: d, CloseRatioPct: ratio}}
 			r := evalATR(fmt.Sprintf("S2 SL=%.1f TP1=%.1f@%.0f%%", bestSL, d, ratio),
 				atrParams(bestSL, tp, nil, nil), loaded)
@@ -92,11 +92,11 @@ func OptimizeProtectionATR(loaded []loadedEntry, lambda float64) ([]OptResult, P
 	bestTP := bestTP1
 	bestS3 := bestS2
 	if len(bestTP1) == 1 {
-		for _, d := range []float64{4.0, 5.0, 6.0, 7.0, 8.0, 10.0} {
+		for _, d := range []float64{4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0} {
 			if d <= bestTP1[0].ATRMult {
 				continue
 			}
-			for _, ratio := range []float64{15, 25, 35} {
+			for _, ratio := range []float64{15, 25, 35, 50} {
 				tp := []LadderLeg{bestTP1[0], {ATRMult: d, CloseRatioPct: ratio}}
 				r := evalATR(fmt.Sprintf("S3 +TP2=%.1f@%.0f%%", d, ratio),
 					atrParams(bestSL, tp, nil, nil), loaded)

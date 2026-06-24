@@ -2,6 +2,7 @@ package backtest
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	"nofx/market"
@@ -65,6 +66,27 @@ func EvaluateCandidatesRobust(cfg RobustConfig, candidates []Candidate) ([]Candi
 // GetKlinesRangeForBacktest is the exported OKX range fetcher for cmd use.
 func GetKlinesRangeForBacktest(symbol, tf string, start, end time.Time) ([]market.Kline, error) {
 	return market.GetKlinesRangeOKX(symbol, tf, start, end)
+}
+
+// mergeEntriesDedup unions two entry lists, dropping a second-list entry whose
+// (side, entry open-time) collides with the first list (same bar, same dir).
+func mergeEntriesDedup(a, b []Entry) []Entry {
+	seen := make(map[string]struct{}, len(a))
+	key := func(e Entry) string {
+		return e.Side + ":" + strconv.FormatInt(e.EntryTime, 10)
+	}
+	out := make([]Entry, 0, len(a)+len(b))
+	for _, e := range a {
+		seen[key(e)] = struct{}{}
+		out = append(out, e)
+	}
+	for _, e := range b {
+		if _, ok := seen[key(e)]; ok {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // RobustConfig configures a long-period multi-symbol robustness run.
@@ -183,6 +205,17 @@ func PrepareRobustPortfolioEntries(cfg RobustConfig) ([]loadedEntry, map[string]
 				look = 20
 			}
 			entries = GenerateBreakoutEntries(sym, bars, look, cfg.CooldownBars, 1000.0)
+		} else if cfg.Signal == "combined" {
+			// Union of EMA-cross (trend) + breakout (chop/range breaks), deduped by
+			// entry open-time so the sample spans BOTH regimes — needed to find a
+			// universal protection config that also defends ranging markets.
+			look := cfg.BreakoutLook
+			if look <= 0 {
+				look = 20
+			}
+			ema := GenerateEMACrossEntries(sym, bars, cfg.EMAFast, cfg.EMASlow, cfg.CooldownBars, 1000.0)
+			brk := GenerateBreakoutEntries(sym, bars, look, cfg.CooldownBars, 1000.0)
+			entries = mergeEntriesDedup(ema, brk)
 		} else {
 			entries = GenerateEMACrossEntries(sym, bars, cfg.EMAFast, cfg.EMASlow, cfg.CooldownBars, 1000.0)
 		}
