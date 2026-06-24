@@ -53,6 +53,19 @@ func (m *entryCooldownManager) SetCooldownWithMultiplier(symbol string, multipli
 	m.cooldowns[symbol] = time.Now().Add(m.duration * time.Duration(multiplier))
 }
 
+// RestoreCooldown re-arms a cooldown to an explicit absolute expiry, used at
+// startup to rebuild post-loss cooldowns from persisted closed trades. Ignores
+// expiries already in the past. Returns true if a cooldown was (re)armed.
+func (m *entryCooldownManager) RestoreCooldown(symbol string, until time.Time) bool {
+	if time.Until(until) <= 0 {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cooldowns[symbol] = until
+	return true
+}
+
 func (m *entryCooldownManager) IsCoolingDown(symbol string) (bool, time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

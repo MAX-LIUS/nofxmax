@@ -117,6 +117,10 @@ func (at *AutoTrader) getDrawdownMonitorInterval() time.Duration {
 
 // checkPositionDrawdown checks position drawdown situation
 func (at *AutoTrader) checkPositionDrawdown() {
+	// Portfolio giveback guard (L1 per-symbol + L2 portfolio circuit breaker).
+	// Runs first because L2 is portfolio-level. No-op unless explicitly enabled.
+	at.runGivebackGuard()
+
 	// Get current positions
 	positions, err := at.trader.GetPositions()
 	if err != nil {
@@ -155,6 +159,28 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			continue
 		}
 
+		// Max-hold stop: clears long-held non-runners (flat grinders, break-even/dust tails)
+		// that the time-stop's loss condition never catches. Profitable runners are spared.
+		if at.maybeMaxHoldClose(symbol, side, entryPrice, markPrice, quantity, posCreatedTime) {
+			continue
+		}
+
+		// Config trailing take-profit. Done BEFORE the AI-drawdown-rules early-return so it
+		// works even when no drawdown rules are configured. Gated on the feature flag so when
+		// disabled this block is a complete no-op (zero behavior change vs. prior versions):
+		// the peak cache is only touched here when trailing TP is actually enabled.
+		if at.config.StrategyConfig != nil && at.config.StrategyConfig.RiskControl.TrailingTakeProfitEnabled {
+			currentPnLPctEarly := calculatePositionPnLPct(side, entryPrice, markPrice)
+			at.UpdatePeakPnL(symbol, side, currentPnLPctEarly)
+			earlyPosKey := symbol + "_" + side
+			at.peakPnLCacheMutex.RLock()
+			earlyPeak := at.peakPnLCache[earlyPosKey]
+			at.peakPnLCacheMutex.RUnlock()
+			if at.maybeTrailingTPClose(symbol, side, entryPrice, markPrice, quantity, earlyPeak) {
+				continue
+			}
+		}
+
 		rules := at.getActiveDrawdownRulesForPosition(symbol, side)
 		if len(rules) == 0 {
 			continue
@@ -180,7 +206,9 @@ func (at *AutoTrader) checkPositionDrawdown() {
 		}
 
 		// Break-even: apply exchange-side BE stops when profit thresholds are met.
-		matchedBreakEvenRules := at.getActiveBreakEvenRules()
+		// ATR-aware: when ATR protection is on, BE triggers are ATR-scaled to match
+		// the distances used at open (no percent/ATR mismatch).
+		matchedBreakEvenRules := at.getActiveBreakEvenRulesATR(symbol, entryPrice)
 		if len(matchedBreakEvenRules) > 0 {
 			if at.isBreakEvenSuppressedByRunner(symbol, side) {
 				logger.Infof("🟠 Break-even monitor: %s %s suppressed by runner semantics, skipping mechanical BE apply", symbol, side)
@@ -2540,27 +2568,42 @@ func (at *AutoTrader) GetPeakPnLCache() map[string]float64 {
 // UpdatePeakPnL updates peak profit cache
 func (at *AutoTrader) UpdatePeakPnL(symbol, side string, currentPnLPct float64) {
 	at.peakPnLCacheMutex.Lock()
-	defer at.peakPnLCacheMutex.Unlock()
-
 	posKey := symbol + "_" + side
+	changed := false
 	if peak, exists := at.peakPnLCache[posKey]; exists {
 		// Update peak (if long, take larger value; if short, currentPnLPct is negative, also compare)
 		if currentPnLPct > peak {
 			at.peakPnLCache[posKey] = currentPnLPct
+			changed = true
 		}
 	} else {
 		// First time recording
 		at.peakPnLCache[posKey] = currentPnLPct
+		changed = true
+	}
+	at.peakPnLCacheMutex.Unlock()
+
+	// Persist only when the high-water mark actually moved, so the value survives
+	// a restart. Writes are infrequent (peak only ever rises) so DB load is light.
+	if changed && at.store != nil {
+		if err := at.store.SavePeakPnL(at.id, posKey, currentPnLPct); err != nil {
+			logger.Warnf("⚠️ Failed to persist peak PnL for %s: %v", posKey, err)
+		}
 	}
 }
 
 // ClearPeakPnLCache clears peak cache for specified position
 func (at *AutoTrader) ClearPeakPnLCache(symbol, side string) {
 	at.peakPnLCacheMutex.Lock()
-	defer at.peakPnLCacheMutex.Unlock()
-
 	posKey := symbol + "_" + side
 	delete(at.peakPnLCache, posKey)
+	at.peakPnLCacheMutex.Unlock()
+
+	if at.store != nil {
+		if err := at.store.DeletePeakPnL(at.id, posKey); err != nil {
+			logger.Warnf("⚠️ Failed to delete persisted peak PnL for %s: %v", posKey, err)
+		}
+	}
 }
 
 // ============================================================================

@@ -646,3 +646,89 @@ func getSideFromAction(action string) string {
 		return "BUY"
 	}
 }
+
+// handleResetEquityCurve resets equity curve history (clears all equity snapshots)
+func (s *Server) handleResetEquityCurve(c *gin.Context) {
+	userID := c.GetString("user_id")
+	traderID := c.Param("id")
+
+	logger.Infof("🔄 User %s requested equity curve reset for trader %s", userID, traderID)
+
+	// Verify trader ownership
+	fullConfig, err := s.store.Trader().GetFullConfig(userID, traderID)
+	if err != nil || fullConfig == nil || fullConfig.Trader == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Trader does not exist or no access permission"})
+		return
+	}
+
+	// Delete all equity snapshots
+	deletedCount, err := s.store.Equity().DeleteAll(traderID)
+	if err != nil {
+		logger.Infof("❌ Failed to delete equity snapshots: %v", err)
+		SafeInternalError(c, "Delete equity snapshots", err)
+		return
+	}
+
+	logger.Infof("✅ Deleted %d equity snapshots for trader %s", deletedCount, traderID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "Equity curve reset successfully",
+		"deleted_count": deletedCount,
+	})
+}
+
+// handleResetTotalPnL resets total PnL by setting initial_balance to current total_equity
+func (s *Server) handleResetTotalPnL(c *gin.Context) {
+	userID := c.GetString("user_id")
+	traderID := c.Param("id")
+
+	logger.Infof("🔄 User %s requested total PnL reset for trader %s", userID, traderID)
+
+	// Get trader from manager (must be running to get current equity)
+	autoTrader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Trader not found or not running"})
+		return
+	}
+
+	// Verify ownership
+	fullConfig, err := s.store.Trader().GetFullConfig(userID, traderID)
+	if err != nil || fullConfig == nil || fullConfig.Trader == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Trader does not exist or no access permission"})
+		return
+	}
+
+	// Get current account info
+	accountInfo, err := autoTrader.GetAccountInfo()
+	if err != nil {
+		logger.Infof("❌ Failed to get account info: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get current account balance"})
+		return
+	}
+
+	// Extract total_equity from the map
+	currentEquity, ok := accountInfo["total_equity"].(float64)
+	if !ok || currentEquity <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid current equity value"})
+		return
+	}
+
+	// Update initial_balance to current equity
+	err = s.store.Trader().UpdateInitialBalance(userID, traderID, currentEquity)
+	if err != nil {
+		logger.Infof("❌ Failed to update initial balance: %v", err)
+		SafeInternalError(c, "Update initial balance", err)
+		return
+	}
+
+	// Note: The trader in memory will pick up the new initial_balance on next GetAccountInfo call
+	// No need to manually update in-memory value as it's recalculated from DB config
+
+	logger.Infof("✅ Reset total PnL for trader %s: new initial_balance = %.2f", traderID, currentEquity)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":         "Total PnL reset successfully",
+		"initial_balance": currentEquity,
+		"trader_id":       traderID,
+	})
+}

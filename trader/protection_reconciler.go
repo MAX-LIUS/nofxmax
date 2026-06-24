@@ -170,7 +170,7 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 	// re-applied on top of it. But stop-loss protection must still be preserved and repaired.
 	nativeTrailingArmed := currentProtectionState == "native_trailing_armed" || currentProtectionState == "native_partial_trailing_armed" || currentProtectionState == "native_trailing_arming" || currentProtectionState == "native_partial_trailing_arming"
 
-	plan, err := at.BuildConfiguredProtectionPlan(entryPrice, actionFromPositionSide(side))
+	plan, err := at.BuildConfiguredProtectionPlanForSymbol(entryPrice, actionFromPositionSide(side), symbol)
 	if err != nil {
 		return result, fmt.Errorf("build configured plan: %w", err)
 	}
@@ -180,7 +180,10 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 		} else if at.config.StrategyConfig != nil {
 			// Fallback: when ladder mode is "ai" but no AI plan exists (manual position),
 			// use the configured ladder values as a safety net.
-			ladderCfg := at.config.StrategyConfig.Protection.LadderTPSL
+			// Use ATR-resolved protection so the fallback ladder matches open-time
+			// distances when ATR protection is enabled (no percent/ATR mismatch).
+			resolvedProt, _ := at.resolveATRProtection(entryPrice, symbol)
+			ladderCfg := resolvedProt.LadderTPSL
 			if ladderCfg.Enabled && ladderCfg.Mode == store.ProtectionModeAI {
 				if fallbackPlan, fbErr := buildManualLadderProtectionPlan(entryPrice, actionFromPositionSide(side), ladderCfg); fbErr == nil && fallbackPlan != nil {
 					plan = mergeProtectionPlans(plan, fallbackPlan)
@@ -245,6 +248,25 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 		}
 	}
 
+	// Align the reconcile plan with what can ACTUALLY be placed on the exchange
+	// before computing missing/unexpected ownership (fix 2026-06-22 churn form-2).
+	//
+	// The place path (validateProtectionPlanExecution) silently drops ladder tiers
+	// whose size is below the exchange minimum-contract floor (e.g. a 0.08-contract
+	// TP under a 1-contract minimum) or whose price is already breached vs mark. But
+	// detectMissingProtection used the RAW plan, so it kept demanding that dropped
+	// tier, the place path kept dropping it, and the reconciler re-placed forever
+	// (missingTP=true with the surviving tier churning as unexpected). Filtering the
+	// plan through the same executability gate makes "expected" == "placeable", so a
+	// permanently non-executable tier no longer registers as missing. When a viable
+	// subset remains the plan is narrowed to it; the all-dropped case keeps the raw
+	// plan so existing collapse/fallback handling still applies.
+	if plan != nil {
+		if executablePlan, vErr := at.validateProtectionPlanExecution(symbol, positionSide, quantity, plan); vErr == nil && executablePlan != nil {
+			plan = executablePlan
+		}
+	}
+
 	if plan == nil {
 		result = reconcileResultForUnmaterializedPlan(openOrders, positionSide, protectionConfigured)
 	}
@@ -279,9 +301,42 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 			}
 		}
 		if unexpectedStops > 0 || unexpectedTPs > 0 {
+			unexpectedIDs := collectUnexpectedProtectionOrderIDs(openOrders, positionSide, plan, breakEvenArmed, nativeTrailingArmed)
+			// Coverage-complete fast path (fix 2026-06-22 churn): when every required
+			// protection tier is already visible (no missing SL/TP) and the unexpected
+			// orders are pure stale bot duplicates, the position is fully protected and
+			// the extras are leftovers (e.g. an entry-qty stop left behind after a TP
+			// fill shrank the position and a smaller remaining-qty stop was placed at the
+			// same price). Re-placing the plan here would add ANOTHER same-price /
+			// different-qty order that hasExistingEquivalentProtection rejects as
+			// non-equivalent (>5% qty gap), so the duplicate count never converges and
+			// the reconciler churns. Cancel the stale duplicates directly instead — no
+			// re-place — which removes the extras without creating new ones.
+			if !missingSL && !missingTP && len(unexpectedIDs) > 0 &&
+				unexpectedSummary.ManualOrForeign == 0 &&
+				(unexpectedSummary.StaleBotDuplicate+unexpectedSummary.OrphanForInactive) == (unexpectedStops+unexpectedTPs) {
+				logger.Infof("🧹 Protection reconciler: %s %s coverage complete; canceling %d stale duplicate protection orders directly (unexpectedSL=%d unexpectedTP=%d, no re-place)",
+					symbol, positionSide, len(unexpectedIDs), unexpectedStops, unexpectedTPs)
+				if !at.verifyLivePositionForProtection(symbol, side, "stale duplicate cleanup") {
+					result.Summary = "inactive position before stale duplicate cleanup; protection state cleaned"
+					return result, nil
+				}
+				at.cancelUnexpectedProtectionOrdersByID(symbol, unexpectedIDs)
+				at.setReconcileCooldown(positionKey(symbol, side))
+				remainingOrders, cleanErr := at.trader.GetOpenOrders(symbol)
+				if cleanErr != nil {
+					return result, fmt.Errorf("verify stale duplicate cleanup open orders: %w", cleanErr)
+				}
+				remStops, remTPs := detectUnexpectedProtectionOrders(remainingOrders, positionSide, plan, breakEvenArmed, nativeTrailingArmed)
+				if remStops > 0 || remTPs > 0 {
+					return result, fmt.Errorf("stale duplicate cleanup incomplete (unexpectedSL=%d unexpectedTP=%d)", remStops, remTPs)
+				}
+				result.ExchangeVerified = true
+				result.Summary = "canceled stale duplicate protection orders (coverage complete)"
+				return result, nil
+			}
 			logger.Warnf("🧹 Protection reconciler: %s %s found unexpected exchange protection orders (unexpectedSL=%d unexpectedTP=%d, planned=%d), staging replacement before cleanup",
 				symbol, positionSide, unexpectedStops, unexpectedTPs, planOrderCount)
-			unexpectedIDs := collectUnexpectedProtectionOrderIDs(openOrders, positionSide, plan, breakEvenArmed, nativeTrailingArmed)
 			if !at.verifyLivePositionForProtection(symbol, side, "unexpected protection replacement") {
 				result.Summary = "inactive position before unexpected protection replacement; protection state cleaned"
 				return result, nil

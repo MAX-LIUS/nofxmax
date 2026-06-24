@@ -31,8 +31,13 @@ func (t *GateTrader) GetBalance() (map[string]interface{}, error) {
 	available, _ := strconv.ParseFloat(accounts.Available, 64)
 	unrealizedPnl, _ := strconv.ParseFloat(accounts.UnrealisedPnl, 64)
 
+	// Gate.io 'Total' is total equity (including unrealized PnL)
+	// Calculate wallet balance to maintain consistency with other exchanges
+	walletBalance := total - unrealizedPnl
+
 	result := map[string]interface{}{
-		"totalWalletBalance":    total,
+		"totalEquity":           total,           // Total equity INCLUDING unrealized PnL
+		"totalWalletBalance":    walletBalance,   // Wallet balance EXCLUDING unrealized PnL
 		"availableBalance":      available,
 		"totalUnrealizedProfit": unrealizedPnl,
 	}

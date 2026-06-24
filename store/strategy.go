@@ -56,6 +56,8 @@ type StrategyConfig struct {
 	RiskControl RiskControlConfig `json:"risk_control"`
 	// unified protection / profit-control configuration
 	Protection ProtectionConfig `json:"protection,omitempty"`
+	// OPT-IN ATR-driven protection distances (off by default = no-op)
+	ATRProtection ATRProtectionConfig `json:"atr_protection,omitempty"`
 	// structural entry contract configuration
 	EntryStructure EntryStructureConfig `json:"entry_structure,omitempty"`
 	// editable sections of System Prompt
@@ -81,9 +83,9 @@ type StrategyConfig struct {
 // BreakoutEntryConfig controls the code-level breakout entry engine.
 type BreakoutEntryConfig struct {
 	Enabled   bool   `json:"enabled,omitempty"`
-	Timeframe string `json:"timeframe,omitempty"`  // which timeframe series to use, e.g. "1h","15m". Default primary.
-	Lookback  int    `json:"lookback,omitempty"`   // prior-bar window for high/low break. Default 20.
-	Leverage  int    `json:"leverage,omitempty"`   // leverage for breakout entries. Default altcoin leverage.
+	Timeframe string `json:"timeframe,omitempty"` // which timeframe series to use, e.g. "1h","15m". Default primary.
+	Lookback  int    `json:"lookback,omitempty"`  // prior-bar window for high/low break. Default 20.
+	Leverage  int    `json:"leverage,omitempty"`  // leverage for breakout entries. Default altcoin leverage.
 	// Position size as a fraction of equity (e.g. 0.5 = 50% of equity notional).
 	// 0/unset → fall back to a conservative default.
 	SizeEquityFrac float64 `json:"size_equity_frac,omitempty"`
@@ -240,6 +242,44 @@ type ProtectionConfig struct {
 	DrawdownTakeProfit DrawdownTakeProfitConfig `json:"drawdown_take_profit,omitempty"`
 	BreakEvenStop      BreakEvenStopConfig      `json:"break_even_stop,omitempty"`
 	RegimeFilter       RegimeFilterConfig       `json:"regime_filter,omitempty"`
+	GivebackGuard      GivebackGuardConfig      `json:"giveback_guard,omitempty"`
+}
+
+// GivebackGuardConfig configures the portfolio giveback guard (L1 per-symbol +
+// L2 portfolio circuit breaker), validated by the gbsim backtest (L1+L2 was the
+// strongest config across short-sample, 12mo, walk-forward, and 18mo tests).
+//
+// Zero value = disabled = complete no-op (existing traders unaffected). When
+// DryRun is true the guard only logs the intended trim ("would close X%")
+// without placing any order — used to observe trigger timing before going live.
+//
+// Mechanism (per drawdown-monitor tick):
+//
+//	L2: track portfolio total-unrealized high-water (quote). When the book
+//	    gives back >= L2GivebackPct of that peak AND peak >= L2MinPeakEquityPct
+//	    of account equity, trim L2ClosePct of EACH currently-winning position.
+//	    Ratcheted: fires once per episode, re-arms on a new portfolio high.
+//	L1: per-symbol — when a position gives back >= L1GivebackPct of its own
+//	    peak profit% (after peaking >= L1MinPeakPct), trim L1ClosePct. Ratchet
+//	    re-arms on a new per-position profit peak.
+type GivebackGuardConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+	DryRun  bool `json:"dry_run,omitempty"`
+
+	// L2 portfolio circuit breaker.
+	L2Enabled          bool    `json:"l2_enabled,omitempty"`
+	L2GivebackPct      float64 `json:"l2_giveback_pct,omitempty"`        // e.g. 50
+	L2MinPeakEquityPct float64 `json:"l2_min_peak_equity_pct,omitempty"` // e.g. 1.0 = peak unreal >= 1% of equity
+	L2ClosePct         float64 `json:"l2_close_pct,omitempty"`           // e.g. 50
+
+	// L1 per-symbol velocity guard.
+	L1Enabled     bool    `json:"l1_enabled,omitempty"`
+	L1GivebackPct float64 `json:"l1_giveback_pct,omitempty"` // e.g. 40
+	L1MinPeakPct  float64 `json:"l1_min_peak_pct,omitempty"` // e.g. 3 (position profit %)
+	L1ClosePct    float64 `json:"l1_close_pct,omitempty"`    // e.g. 50
+
+	// Monitor cadence floor (seconds); 0 => reuse drawdown monitor cadence.
+	PollIntervalSeconds int `json:"poll_interval_seconds,omitempty"`
 }
 
 type ProtectionMode string
@@ -420,9 +460,9 @@ type DrawdownTakeProfitRule struct {
 
 	// Per-field AI/manual control: each dimension can independently choose AI or manual value.
 	// When mode is "ai", AI decides the value; when "manual", the configured value is used.
-	CloseRatioMode    ProtectionValueMode `json:"close_ratio_mode,omitempty"`
-	MinProfitMode     ProtectionValueMode `json:"min_profit_mode,omitempty"`
-	MaxDrawdownMode   ProtectionValueMode `json:"max_drawdown_mode,omitempty"`
+	CloseRatioMode  ProtectionValueMode `json:"close_ratio_mode,omitempty"`
+	MinProfitMode   ProtectionValueMode `json:"min_profit_mode,omitempty"`
+	MaxDrawdownMode ProtectionValueMode `json:"max_drawdown_mode,omitempty"`
 }
 
 type BreakEvenTriggerMode string
@@ -471,7 +511,7 @@ const (
 
 type RegimeFilterConfig struct {
 	Enabled               bool                     `json:"enabled"`
-	AuditOnly             bool                     `json:"audit_only,omitempty"`              // Log rejections but don't block (observation mode)
+	AuditOnly             bool                     `json:"audit_only,omitempty"` // Log rejections but don't block (observation mode)
 	AllowedRegimes        []string                 `json:"allowed_regimes,omitempty"`
 	BlockHighFunding      bool                     `json:"block_high_funding"`
 	MaxFundingRateAbs     float64                  `json:"max_funding_rate_abs,omitempty"`
@@ -547,13 +587,13 @@ type PromptSectionsConfig struct {
 
 // EvolutionConfig controls the self-evolution engine behavior.
 type EvolutionConfig struct {
-	Enabled            bool    `json:"enabled"`                         // Master switch
-	HalfLifeDays       int     `json:"half_life_days,omitempty"`        // Time decay half-life (default 14)
-	MinSampleSize      int     `json:"min_sample_size,omitempty"`       // Min trades before generating adaptations (default 5)
-	AdaptationTTLDays  int     `json:"adaptation_ttl_days,omitempty"`   // Adaptation expiry (default 30)
-	ScoreThresholdLow  float64 `json:"score_threshold_low,omitempty"`   // Below this triggers adaptation (default 35)
-	ScoreThresholdHigh float64 `json:"score_threshold_high,omitempty"`  // Above this is positive signal (default 65)
-	InjectToPrompt     bool    `json:"inject_to_prompt,omitempty"`      // Whether to inject profiles into AI prompt
+	Enabled            bool    `json:"enabled"`                        // Master switch
+	HalfLifeDays       int     `json:"half_life_days,omitempty"`       // Time decay half-life (default 14)
+	MinSampleSize      int     `json:"min_sample_size,omitempty"`      // Min trades before generating adaptations (default 5)
+	AdaptationTTLDays  int     `json:"adaptation_ttl_days,omitempty"`  // Adaptation expiry (default 30)
+	ScoreThresholdLow  float64 `json:"score_threshold_low,omitempty"`  // Below this triggers adaptation (default 35)
+	ScoreThresholdHigh float64 `json:"score_threshold_high,omitempty"` // Above this is positive signal (default 65)
+	InjectToPrompt     bool    `json:"inject_to_prompt,omitempty"`     // Whether to inject profiles into AI prompt
 }
 
 // CoinSourceConfig coin source configuration
@@ -716,8 +756,63 @@ type RiskControlConfig struct {
 	// TimeStopHours AND is still in loss worse than TimeStopLossPct. Cuts the
 	// "directionally-wrong trade bled slowly over 20-37h" loss pattern without touching
 	// winners (loss condition is required). 0/unset = disabled.
-	TimeStopHours   float64 `json:"time_stop_hours,omitempty"`   // e.g. 24
+	TimeStopHours   float64 `json:"time_stop_hours,omitempty"`    // e.g. 24
 	TimeStopLossPct float64 `json:"time_stop_loss_pct,omitempty"` // negative, e.g. -1.5
+
+	// Max-hold stop (CODE ENFORCED): force-close any position held longer than
+	// MaxHoldHours UNLESS it is a profitable runner (unrealized pnl >= MaxHoldProfitExemptPct).
+	// Unlike TimeStop (which only triggers on a loss worse than a threshold), this also clears
+	// break-even / dust tails that grind sideways and occupy a position slot. Profitable runners
+	// are explicitly spared so trends are not cut short. 0/unset = disabled.
+	// Backtest (claude, 2026-05/06): MaxHoldHours=18, ProfitExemptPct=2.0 cut net loss by ~1/3.
+	MaxHoldHours           float64 `json:"max_hold_hours,omitempty"`             // e.g. 18
+	MaxHoldProfitExemptPct float64 `json:"max_hold_profit_exempt_pct,omitempty"` // positive, e.g. 2.0
+
+	// Trailing take-profit (CODE ENFORCED): once unrealized pnl reaches TrailingActivatePct,
+	// track the peak; if pnl gives back TrailingGivebackPct of that peak, close the remaining
+	// position. This converts the "cut winners short / let losers run" payoff (claude 0.67) into
+	// a let-winners-run structure. A separate, simpler mechanism from the multi-tier
+	// DrawdownTakeProfit (which requires AI rules); this one is pure config and always available.
+	// Disabled when TrailingTakeProfitEnabled is false or TrailingActivatePct <= 0.
+	TrailingTakeProfitEnabled bool    `json:"trailing_take_profit_enabled,omitempty"`
+	TrailingActivatePct       float64 `json:"trailing_activate_pct,omitempty"` // e.g. 3.0 (arm once pnl >= +3%)
+	TrailingGivebackPct       float64 `json:"trailing_giveback_pct,omitempty"` // e.g. 35 (close if pnl falls 35% below peak)
+	TrailingMinLockPct        float64 `json:"trailing_min_lock_pct,omitempty"` // e.g. 0.5 (only fire if locked pnl still >= this)
+
+	// Volatility-targeted position sizing (CODE ENFORCED): scale the AI-proposed position size
+	// inversely to the symbol's current ATR14 as a % of price. size *= clamp(VolTargetPct / atr14Pct,
+	// VolSizeMinMult, VolSizeMaxMult). High-volatility coins (e.g. HYPE, ZEC) get smaller size;
+	// low-volatility coins get up to VolSizeMaxMult. Defends against single-symbol blowups.
+	// Disabled when VolSizingEnabled is false or VolTargetPct <= 0.
+	VolSizingEnabled bool    `json:"vol_sizing_enabled,omitempty"`
+	VolTargetPct     float64 `json:"vol_target_pct,omitempty"`    // target ATR14% reference, e.g. 1.5
+	VolSizeMinMult   float64 `json:"vol_size_min_mult,omitempty"` // floor multiplier, e.g. 0.4
+	VolSizeMaxMult   float64 `json:"vol_size_max_mult,omitempty"` // cap multiplier, e.g. 1.5
+
+	// Maker-only entry (CODE ENFORCED): place entries as post-only limit orders at the near touch
+	// to earn the maker fee (OKX taker 0.05% -> maker 0.02%) instead of crossing the spread.
+	// Poll up to MakerEntryTimeoutSec for a fill; if unfilled (or post-only rejected), optionally
+	// fall back to a market order when MakerEntryFallbackMarket is true. For high-churn traders
+	// (OKX91: 301 trades, fees = 1.5x gross loss) this is the most certain cost saving.
+	// Disabled when MakerEntryEnabled is false.
+	MakerEntryEnabled        bool `json:"maker_entry_enabled,omitempty"`
+	MakerEntryTimeoutSec     int  `json:"maker_entry_timeout_sec,omitempty"`     // e.g. 15
+	MakerEntryOffsetTicks    int  `json:"maker_entry_offset_ticks,omitempty"`    // ticks inside best bid/ask, default 0 (at touch)
+	MakerEntryFallbackMarket bool `json:"maker_entry_fallback_market,omitempty"` // if unfilled, cross with market
+
+	// Strong-signal position replacement (CODE ENFORCED): when at MaxPositions and a new
+	// high-conviction entry arrives, close the weakest existing position to free a slot instead
+	// of dropping the signal. Victims are ranked by (smaller notional + longer hold + weaker pnl);
+	// strong winners and freshly-opened positions are protected. The cut runs only AFTER cheap,
+	// balance-independent prechecks (signal-strength floor + entry price deviation) pass, so the
+	// "cut a position but then fail to open" window is minimized. After the cut the position list
+	// is re-fetched and the max-positions guard is re-enforced before the open proceeds.
+	// Disabled when ReplaceWeakestEnabled is false.
+	ReplaceWeakestEnabled      bool    `json:"replace_weakest_enabled,omitempty"`
+	ReplaceMinConfidence       int     `json:"replace_min_confidence,omitempty"`        // new-signal absolute confidence floor, e.g. 80
+	ReplaceMinHoldMinutes      int     `json:"replace_min_hold_minutes,omitempty"`      // victim must be held at least this long, e.g. 30
+	ReplaceMaxVictimProfitPct  float64 `json:"replace_max_victim_profit_pct,omitempty"` // never cut a winner above this pnl%, e.g. 1.0
+	ReplaceMinConfidenceMargin int     `json:"replace_min_confidence_margin,omitempty"` // new conf must beat victim entry conf by this, e.g. 5
 }
 
 // NewStrategyStore creates a new StrategyStore

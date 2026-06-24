@@ -722,15 +722,13 @@ func (tm *TraderManager) addTraderFromStore(traderCfg *store.Trader, aiModelCfg 
 		return fmt.Errorf("failed to create trader: %w", err)
 	}
 
-	// Set custom prompt (if exists)
-	if traderCfg.CustomPrompt != "" {
-		at.SetCustomPrompt(traderCfg.CustomPrompt)
-		at.SetOverrideBasePrompt(traderCfg.OverrideBasePrompt)
-		if traderCfg.OverrideBasePrompt {
-			logger.Infof("✓ Set custom trading strategy prompt (overriding base prompt)")
-		} else {
-			logger.Infof("✓ Set custom trading strategy prompt (supplementing base prompt)")
-		}
+	// Configure fallback endpoints if available
+	fallbackEndpoints, err := aiModelCfg.GetFallbackEndpoints()
+	if err != nil {
+		logger.Warnf("⚠️ Failed to parse fallback endpoints for trader %s: %v", traderCfg.Name, err)
+	} else if len(fallbackEndpoints) > 0 {
+		at.SetFallbackEndpoints(fallbackEndpoints)
+		logger.Infof("✓ Configured %d fallback endpoint(s) for trader %s", len(fallbackEndpoints), traderCfg.Name)
 	}
 
 	tm.traders[traderCfg.ID] = at

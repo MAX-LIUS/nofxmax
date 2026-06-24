@@ -125,3 +125,9 @@ dmypy.json
 # Pyre type checker
 .pyre/
 PR_DESCRIPTION.md
+
+# compiled backtest binary (build artifact)
+btrobust_bin
+
+# Local deploy backups (contain live config + secrets — never commit)
+.deploy-backup/

@@ -129,12 +129,33 @@ func (s *Server) handleEquityHistory(c *gin.Context) {
 		return
 	}
 
-	// Get equity historical data from new equity table
-	// Every 3 minutes per cycle: 10000 records = about 20 days of data
-	snapshots, err := s.store.Equity().GetLatest(traderID, 10000)
-	if err != nil {
-		SafeInternalError(c, "Get historical data", err)
-		return
+	// Get time range parameter (in days, optional)
+	daysStr := c.Query("days")
+	var snapshots []*store.EquitySnapshot
+
+	if daysStr != "" {
+		days, err := strconv.Atoi(daysStr)
+		if err != nil || days <= 0 {
+			SafeBadRequest(c, "Invalid days parameter")
+			return
+		}
+
+		// Get data for specified time range
+		end := time.Now()
+		start := end.AddDate(0, 0, -days)
+		snapshots, err = s.store.Equity().GetByTimeRange(traderID, start, end)
+		if err != nil {
+			SafeInternalError(c, "Get historical data", err)
+			return
+		}
+	} else {
+		// Get equity historical data from new equity table (default: all data, max 10000)
+		// Every 3 minutes per cycle: 10000 records = about 20 days of data
+		snapshots, err = s.store.Equity().GetLatest(traderID, 10000)
+		if err != nil {
+			SafeInternalError(c, "Get historical data", err)
+			return
+		}
 	}
 
 	if len(snapshots) == 0 {

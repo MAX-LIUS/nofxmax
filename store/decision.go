@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 
 	"gorm.io/gorm"
@@ -143,17 +144,17 @@ type DecisionActionSelectedLevel struct {
 // shadow rollout this does not block orders; it lets us measure how often AI
 // decisions would fail stricter reliability rules before hard enforcement.
 type DecisionActionQualityGate struct {
-	ShadowMode      bool                   `json:"shadow_mode,omitempty"`
-	Decision        string                 `json:"decision,omitempty"`
-	Passed          bool                   `json:"passed"`
-	FailedChecks    []string               `json:"failed_checks,omitempty"`
-	Regime          string                 `json:"regime,omitempty"`
-	SetupType       string                 `json:"setup_type,omitempty"`
-	Confidence      int                    `json:"confidence,omitempty"`
-	QualityTotal    int                    `json:"quality_total,omitempty"`
-	NetRR           float64                `json:"net_rr,omitempty"`
-	BlockedStage    string                 `json:"blocked_stage,omitempty"`
-	GateChecks      []EntryGateCheckRecord `json:"gate_checks,omitempty"`
+	ShadowMode   bool                   `json:"shadow_mode,omitempty"`
+	Decision     string                 `json:"decision,omitempty"`
+	Passed       bool                   `json:"passed"`
+	FailedChecks []string               `json:"failed_checks,omitempty"`
+	Regime       string                 `json:"regime,omitempty"`
+	SetupType    string                 `json:"setup_type,omitempty"`
+	Confidence   int                    `json:"confidence,omitempty"`
+	QualityTotal int                    `json:"quality_total,omitempty"`
+	NetRR        float64                `json:"net_rr,omitempty"`
+	BlockedStage string                 `json:"blocked_stage,omitempty"`
+	GateChecks   []EntryGateCheckRecord `json:"gate_checks,omitempty"`
 }
 
 // EntryGateCheckRecord stores one check result with full attribution detail.
@@ -355,6 +356,22 @@ type Statistics struct {
 	FailedCycles        int `json:"failed_cycles"`
 	TotalOpenPositions  int `json:"total_open_positions"`
 	TotalClosePositions int `json:"total_close_positions"`
+
+	// Expectancy metrics (computed from closed trader_positions). These quantify whether the
+	// strategy has a positive edge. ExpectancyUSD < 0 means the strategy loses money per trade
+	// on average — the single most important health signal.
+	ClosedTrades  int     `json:"closed_trades"`  // closed positions with a recorded exit
+	NetWins       int     `json:"net_wins"`       // closed trades with (realized_pnl - fee) > 0
+	NetWinRate    float64 `json:"net_win_rate"`   // net_wins / closed_trades (0..1)
+	AvgWinUSD     float64 `json:"avg_win_usd"`    // average net profit on winning trades
+	AvgLossUSD    float64 `json:"avg_loss_usd"`   // average net loss on losing trades (negative)
+	PayoffRatio   float64 `json:"payoff_ratio"`   // avg_win / |avg_loss|; >1 means winners bigger
+	ExpectancyUSD float64 `json:"expectancy_usd"` // net pnl per trade = (grossPnl - fees) / closedTrades
+	GrossPnLUSD   float64 `json:"gross_pnl_usd"`  // sum of realized_pnl (no fees)
+	TotalFeesUSD  float64 `json:"total_fees_usd"` // sum of fees
+	NetPnLUSD     float64 `json:"net_pnl_usd"`    // grossPnl - fees
+	FeeDragRatio  float64 `json:"fee_drag_ratio"` // fees / |grossPnl|; >1 means fees exceed gross result
+	HealthFlag    string  `json:"health_flag"`    // "positive" | "marginal" | "negative"
 }
 
 // NewDecisionStore creates a new DecisionStore
@@ -592,7 +609,73 @@ func (s *DecisionStore) GetStatistics(traderID string) (*Statistics, error) {
 	s.db.Raw("SELECT COUNT(*) FROM trader_positions WHERE trader_id = ?", traderID).Scan(&stats.TotalOpenPositions)
 	s.db.Raw("SELECT COUNT(*) FROM trader_positions WHERE trader_id = ? AND status = 'CLOSED'", traderID).Scan(&stats.TotalClosePositions)
 
+	s.fillExpectancyMetrics(stats, "trader_id = ?", traderID)
+
 	return stats, nil
+}
+
+// fillExpectancyMetrics computes net win-rate, payoff ratio, expectancy and fee-drag from
+// CLOSED trader_positions matching the given where clause. Net = realized_pnl - fee per trade.
+func (s *DecisionStore) fillExpectancyMetrics(stats *Statistics, where string, args ...interface{}) {
+	type row struct {
+		RealizedPnl float64
+		Fee         float64
+	}
+	var rows []row
+	q := "SELECT realized_pnl AS realized_pnl, fee AS fee FROM trader_positions WHERE status = 'CLOSED'"
+	if where != "" {
+		q += " AND " + where
+	}
+	if err := s.db.Raw(q, args...).Scan(&rows).Error; err != nil || len(rows) == 0 {
+		return
+	}
+
+	var grossSum, feeSum, winSum, lossSum float64
+	var winCount, lossCount int
+	for _, r := range rows {
+		grossSum += r.RealizedPnl
+		feeSum += r.Fee
+		net := r.RealizedPnl - r.Fee
+		if net > 0 {
+			winCount++
+			winSum += net
+		} else if net < 0 {
+			lossCount++
+			lossSum += net // negative
+		}
+	}
+
+	n := len(rows)
+	stats.ClosedTrades = n
+	stats.NetWins = winCount
+	stats.GrossPnLUSD = grossSum
+	stats.TotalFeesUSD = feeSum
+	stats.NetPnLUSD = grossSum - feeSum
+	if n > 0 {
+		stats.NetWinRate = float64(winCount) / float64(n)
+		stats.ExpectancyUSD = stats.NetPnLUSD / float64(n)
+	}
+	if winCount > 0 {
+		stats.AvgWinUSD = winSum / float64(winCount)
+	}
+	if lossCount > 0 {
+		stats.AvgLossUSD = lossSum / float64(lossCount)
+	}
+	if stats.AvgLossUSD < 0 {
+		stats.PayoffRatio = stats.AvgWinUSD / (-stats.AvgLossUSD)
+	}
+	if grossSum != 0 {
+		stats.FeeDragRatio = feeSum / math.Abs(grossSum)
+	}
+
+	switch {
+	case stats.ExpectancyUSD > 0:
+		stats.HealthFlag = "positive"
+	case stats.ExpectancyUSD == 0:
+		stats.HealthFlag = "marginal"
+	default:
+		stats.HealthFlag = "negative"
+	}
 }
 
 // GetAllStatistics gets statistics information for all traders

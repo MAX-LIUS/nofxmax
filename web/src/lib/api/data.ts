@@ -9,6 +9,7 @@ import type {
   OpenOrder,
   EvolutionProfile,
   GateBlockEntry,
+  CloseAttributionResponse,
 } from '../../types'
 import { API_BASE, httpClient } from './helpers'
 
@@ -75,10 +76,12 @@ export const dataApi = {
     return result.data!
   },
 
-  async getEquityHistory(traderId?: string): Promise<any[]> {
-    const url = traderId
-      ? `${API_BASE}/equity-history?trader_id=${traderId}`
-      : `${API_BASE}/equity-history`
+  async getEquityHistory(traderId?: string, days?: number): Promise<any[]> {
+    const params = new URLSearchParams()
+    if (traderId) params.append('trader_id', traderId)
+    if (days) params.append('days', days.toString())
+
+    const url = `${API_BASE}/equity-history${params.toString() ? '?' + params.toString() : ''}`
     const result = await httpClient.get<any[]>(url)
     if (!result.success) throw new Error('Failed to fetch equity history')
     return result.data!
@@ -135,6 +138,17 @@ export const dataApi = {
       `${API_BASE}/open-orders?${params}`
     )
     if (!result.success) throw new Error('Failed to fetch open orders')
+    return result.data!
+  },
+
+  async getCloseAttribution(
+    traderId: string,
+    days: number = 30
+  ): Promise<CloseAttributionResponse> {
+    const result = await httpClient.get<CloseAttributionResponse>(
+      `${API_BASE}/positions/attribution?trader_id=${traderId}&days=${days}`
+    )
+    if (!result.success) throw new Error('Failed to fetch close attribution')
     return result.data!
   },
 

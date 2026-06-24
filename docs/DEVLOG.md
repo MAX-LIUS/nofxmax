@@ -30,3 +30,31 @@
   - `{"enabled":false}` → `mode=disabled,value=0`
   - 新旧结构现可并存读取；`go test ./store ./api/...` 已通过。
 - 2026-04-16：继续补 UI 解释层，避免用户把 `enabled`、`global mode`、`TP/SL value mode` 混为一谈。在 `web/src/components/strategy/ProtectionEditor.tsx` 为 Full / Ladder 增加状态摘要与提示：当出现“整体模式 = AI，但执行开关仍关闭”时，明确提示“页面保留 AI 配置，但运行时不会实际挂保护单，直到启用执行开关”。前端测试 `npm test` 已通过。
+- 2026-06-24：三交易员（claude/GPT/Claude-R）排查 + 修复 + 记忆固化，一次性提交并部署。
+  - **持仓时间不显示（GPT/OKX）根因**：`/positions` 接口数据来自交易所实时接口，`auto_trader_decision.go` 的 `entry_time` 只取 DB 的 OPEN 记录；OKX 同步漂移时 DB 查不到→`entryTimeMs=0`→前端不显示。修复：DB 查不到时回退用交易所已返回的 `createdTime`（OKX/Bybit 有，Binance 无则保持 0）。
+  - **peak 不准根因**：peak（`peakPnLCache`，key=symbol_side）纯内存、无持久化，容器重启即清零并从当前盈亏重新累计，导致已触发 ladder 的持仓 peak 显示很小。修复：新增 `peak_pnl_states` 表 + `SavePeakPnL/DeletePeakPnL/LoadPeakPnLForTrader`；`UpdatePeakPnL` 高点上移时落库、`ClearPeakPnLCache` 平仓删库；启动 `loadPeakPnLFromStore` 恢复，且只恢复当前仍 OPEN 的仓位（大小写不敏感）并清理 stale。
+  - **批量误平根因**：4 次 `sync_absent_from_exchange` 全集中在 03:24 同一时刻，疑似 OKX `GetPositions` 瞬时空响应。`MarkOpenPositionsAbsentFromExchangeClosed` 无防空保护。修复：缺失仓位 ≥2 且=全部本地 OPEN 时判瞬时故障、跳过整批并告警；单个消失仍正常平。加 2 个回归测试。
+  - **备用模型结论**：本次启动以来 endpoint fallback 0 次，三 trader 计费均只用主模型，主路无超时/重试。用户感觉“备用用得多”应发生在 04:13 重启前（日志已丢）。已替换 NovaI fallback key（写入 DB，明文 JSON 字段）。
+  - **UI**：净盈亏（红绿正负色）移到持仓卡片右上、与盈亏百分比并排。
+  - **CANCELED 疑问解答**：native_trailing 反复撤挂是设计正常（跟价移动）；full_tp/full_sl 撤挂主因是仓位数量变化后按剩余量重挂，非 bug。
+  - **记忆固化**：新增 `.ai-memory/INDEX.md`（恢复主入口）+ `.ai-memory/communication-preferences.md`（中文沟通约定）；`CLAUDE.md` 顶部加"记忆与恢复协议"区块，使 compact/clear 后可从单一入口恢复原始记忆与固定开发管理方法（FUXI_WORKFLOW）。
+  - **验证**：`go build ./...` ✅、`go test ./store/ ./trader/` ✅（含新守卫测试）、前端 `tsc` ✅。前端 `Ladder planned levels` 单测失败为 baseline 既有、非本次引入。
+- 2026-06-24（续）：回吐控制阈值回测研究 + GivebackGuard L2 状态持久化。
+  - **问题**：用户问"开仓不足 3% 的盈利/成本回吐是否应同样控制，控制与不控制实际表现如何"。
+  - **方法**：扩展 `cmd/gbsim`，新增 `-l1study` flag + `l1StudyGrid()`，单独扫 `L1MinPeakPct ∈ {0.5,1.0,1.5,2.0,3.0,5.0}`（其余 L1 旋钮锁定 live 值 gb40 cl50），两族：L1-only 与 L1+L2(live winner)。修了 `describe()` 的 `%.0f→%.1f`（之前 0.5/1.5 被截断）。
+  - **三套独立数据一致结论**：阈值降到 3% 以下，PnL 单调崩塌——
+    - robust-EMA 12mo/8币 1075笔：baseline 1379；mp3=1193、mp2=619、mp1.5=-5、mp1.0=-164（转负）。
+    - DB-real claude 182笔(+L2)：baseline 47.9；mp5=77.1、mp3=73.5、mp2=66.0、mp1=56.6、mp0.5=53.8（单调降）。
+    - breakout 12mo/8币 2670笔：baseline 6760；mp3=6826（略超 baseline）、mp2=5281、mp1=3078（腰斩）。
+  - **机制**：阈值越低 trim 次数越爆炸（breakout: mp3=1475→mp0.5=3247），在小浮盈处反复砍仓=churn，把还没走出来的赢单提前杀死；回撤虽降但 PnL 代价不成比例（mp0.5 降 37% DD 却砍 48% PnL）；胜率升是假象。
+  - **结论**：3% 是真实经济分界，不对 sub-3% 回吐做额外控制，维持现状。
+  - **顺带做（用户已认可）GivebackGuard L2 持久化**：此前 `gbPortfolioPeakUnreal/gbL2FiredAtPeak/gbL1FiredAtPeak` 纯内存，重启清零→可能首个反转就误触发 L2 或丢 latch 误砍赢单。新增 `giveback_guard_states` 表（每 trader 一行：组合浮盈高水位 + L2 latch + L1 各仓位 ratchet JSON）+ `SaveGivebackGuardState/LoadGivebackGuardState`；`runGivebackGuard` 每轮（默认 60s）落库一次；启动 `loadGivebackGuardStateFromStore` 恢复并按当前 OPEN 仓位裁剪 L1。加 3 个 round-trip 测试。
+  - **验证**：`go build ./...` ✅、`go test ./store/ ./trader/` ✅（含新 `GivebackGuardState` 测试）。
+- 2026-06-24（续2）：举一反三排查"重启即丢"的内存态，修复入场冷却风控漏洞。
+  - **方法**：通盘过了 `AutoTrader` 所有内存字段，按"重启丢不丢 / 丢了有无实际影响"分类。
+  - **已自愈无需动**：`drawdownAIRules`（开仓决策懒加载）、`drawdownTierAllocs`（按剩余仓量回推执行态）、`protectionState/breakEvenState/drawdownState`（dynamic protection 已恢复）、`positionFirstSeenTime`（已加交易所 createdTime 回退）、`nativeTrailingArmTime/immediateTrailingIDs`（reconciler 重建）、单周期临时态。
+  - **发现真实漏洞**：入场冷却 `cooldownManager` 纯内存，且只在"活仓→平仓"转变时设置；重启后 `positionFirstSeenTime` 为空、该转变永不再触发，刚止损的币种冷却被清零→可立即重入，绕过连亏冷却（最高 4x）风控。
+  - **修复**：新增 `restoreEntryCooldownsFromStore`，启动时从 DB 最近平仓记录重算 `until = exitTime + duration×连亏倍数`，仍在未来的重新武装；数据全来自 DB（`GetRecentTrades/GetConsecutiveLossCount/ExitTime`），无需新表。加 `RestoreCooldown` 原语 + 2 单测。每币种只看最新一笔，最新盈利即视为冷却已过期。
+  - **确认非真实风控不动**：`stopUntil`（从不赋未来值）、`dailyPnL`（非 grid 路径只重置为 0）是惰性死字段。
+  - **验证**：`go build ./...` ✅、`go test ./store/ ./trader/` ✅（含新 `RestoreCooldown` 测试）。
+

@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // OKX API endpoints
@@ -72,6 +74,12 @@ type OKXTrader struct {
 	// invalidate the symbol entry (fix 2026-06-10).
 	cachedOpenOrders     map[string]cachedOpenOrderEntry
 	openOrdersCacheMutex sync.RWMutex
+	// Collapses concurrent GetOpenOrders calls for the same symbol into one OKX
+	// fetch. Multiple monitor subsystems (protection reconciler, drawdown monitor,
+	// risk arming) poll the same symbol within the same tick; without this they all
+	// miss the short cache simultaneously and each fans out 3-4 algo-pending GETs,
+	// saturating the per-key OKX rate limit (fix 2026-06-23).
+	openOrdersSF singleflight.Group
 
 	// Instrument info cache
 	instrumentsCache      map[string]*OKXInstrument

@@ -21,6 +21,7 @@ import (
 	"nofx/trader/lighter"
 	"nofx/trader/okx"
 	"nofx/wallet"
+	"strings"
 	"sync"
 	"time"
 )
@@ -129,6 +130,7 @@ type AutoTrader struct {
 	aiModel               string  // AI model name
 	exchange              string  // Trading platform type (binance/bybit/etc)
 	exchangeID            string  // Exchange account UUID
+	ownsAccountProtection bool    // Whether this instance owns its account's protection lifecycle (account exclusivity)
 	showInCompetition     bool    // Whether to show in competition page
 	allowAIOpen           bool    // Whether AI can actively open positions
 	allowAIClose          bool    // Whether AI can actively close positions
@@ -144,8 +146,6 @@ type AutoTrader struct {
 	cycleNumber           int                    // Current cycle number
 	initialBalance        float64
 	dailyPnL              float64
-	customPrompt          string // Custom trading strategy prompt
-	overrideBasePrompt    bool   // Whether to override base prompt
 	lastResetTime         time.Time
 	stopUntil             time.Time
 	isRunning             bool
@@ -157,6 +157,10 @@ type AutoTrader struct {
 	monitorWg             sync.WaitGroup                            // Used to wait for monitoring goroutine to finish
 	peakPnLCache          map[string]float64                        // Peak profit cache (symbol -> peak P&L percentage)
 	peakPnLCacheMutex     sync.RWMutex                              // Cache read-write lock
+	gbGuardMutex          sync.Mutex                                // Protects giveback-guard portfolio state below
+	gbPortfolioPeakUnreal float64                                   // Giveback guard: portfolio total-unrealized high-water (quote)
+	gbL2FiredAtPeak       float64                                   // Giveback guard L2 ratchet: portfolio peak at last fire (0 = armed)
+	gbL1FiredAtPeak       map[string]float64                        // Giveback guard L1 ratchet: symbol_side -> position profit% peak at last fire
 	protectionStateMutex  sync.RWMutex                              // Protects last protection reconcile state
 	protectionState       map[string]string                         // symbol_side -> last known protection status
 	breakEvenStateMutex   sync.RWMutex                              // Protects break-even armed state per position
@@ -375,6 +379,7 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		monitorWg:             sync.WaitGroup{},
 		peakPnLCache:          make(map[string]float64),
 		peakPnLCacheMutex:     sync.RWMutex{},
+		gbL1FiredAtPeak:       make(map[string]float64),
 		protectionStateMutex:  sync.RWMutex{},
 		protectionState:       make(map[string]string),
 		breakEvenStateMutex:   sync.RWMutex{},
@@ -392,6 +397,156 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		lastBalanceSyncTime:   time.Now(),
 		userID:                userID,
 	}, nil
+}
+
+// loadPeakPnLFromStore restores the peak-PnL high-water cache from the DB so
+// that, after a restart, peak/drawdown tiers and the UI keep the highest profit
+// the position ever reached instead of resetting to the current PnL.
+func (at *AutoTrader) loadPeakPnLFromStore() {
+	if at == nil || at.store == nil {
+		return
+	}
+	peaks, err := at.store.LoadPeakPnLForTrader(at.id)
+	if err != nil {
+		logger.Warnf("⚠️ Peak PnL: failed to load persisted state: %v", err)
+		return
+	}
+	if len(peaks) == 0 {
+		return
+	}
+
+	// Only restore peaks for positions that are still OPEN. Positions closed while
+	// the process was down never fired ClearPeakPnLCache, so their persisted rows
+	// would otherwise resurrect a stale high-water mark for a future re-open.
+	openKeys := make(map[string]bool)
+	if openPositions, posErr := at.store.Position().GetOpenPositions(at.id); posErr == nil {
+		for _, p := range openPositions {
+			// Cache keys use the exchange-reported side casing (e.g. OKX "long"),
+			// while DB stores uppercase. Compare case-insensitively.
+			openKeys[strings.ToLower(p.Symbol+"_"+p.Side)] = true
+		}
+	} else {
+		logger.Warnf("⚠️ Peak PnL: failed to list open positions for restore filter: %v", posErr)
+	}
+
+	at.peakPnLCacheMutex.Lock()
+	restored := 0
+	stale := make([]string, 0)
+	for posKey, peak := range peaks {
+		if openKeys[strings.ToLower(posKey)] {
+			at.peakPnLCache[posKey] = peak
+			restored++
+		} else {
+			stale = append(stale, posKey)
+		}
+	}
+	at.peakPnLCacheMutex.Unlock()
+
+	// Clean up stale persisted rows for positions no longer open.
+	for _, posKey := range stale {
+		if delErr := at.store.DeletePeakPnL(at.id, posKey); delErr != nil {
+			logger.Warnf("⚠️ Peak PnL: failed to delete stale row %s: %v", posKey, delErr)
+		}
+	}
+	logger.Infof("🔁 Peak PnL: restored %d high-water mark(s), pruned %d stale", restored, len(stale))
+}
+
+// loadGivebackGuardStateFromStore restores the GivebackGuard ratchet state from
+// the DB so a restart does not reset gbPortfolioPeakUnreal / gbL2FiredAtPeak /
+// gbL1FiredAtPeak. Without this, after a restart the portfolio high-water resets
+// to 0 and the guard could either re-fire L2 on the first reversal it sees, or
+// (more dangerously) drop its latch and trim winners that already gave back once.
+// L1 per-symbol entries are pruned to positions that are still open, mirroring
+// loadPeakPnLFromStore, so a future re-open of the same symbol starts re-armed.
+func (at *AutoTrader) loadGivebackGuardStateFromStore() {
+	if at == nil || at.store == nil {
+		return
+	}
+	state, err := at.store.LoadGivebackGuardState(at.id)
+	if err != nil {
+		logger.Warnf("⚠️ GivebackGuard: failed to load persisted state: %v", err)
+		return
+	}
+
+	// Build the set of currently-open position keys to prune stale L1 entries.
+	openKeys := make(map[string]bool)
+	if openPositions, posErr := at.store.Position().GetOpenPositions(at.id); posErr == nil {
+		for _, p := range openPositions {
+			openKeys[strings.ToLower(p.Symbol+"_"+p.Side)] = true
+		}
+	} else {
+		logger.Warnf("⚠️ GivebackGuard: failed to list open positions for restore filter: %v", posErr)
+	}
+
+	prunedL1 := make(map[string]float64)
+	for posKey, peak := range state.L1FiredAtPeak {
+		if openKeys[strings.ToLower(posKey)] {
+			prunedL1[posKey] = peak
+		}
+	}
+
+	at.gbGuardMutex.Lock()
+	at.gbPortfolioPeakUnreal = state.PortfolioPeakUnreal
+	at.gbL2FiredAtPeak = state.L2FiredAtPeak
+	at.gbL1FiredAtPeak = prunedL1
+	at.gbGuardMutex.Unlock()
+
+	logger.Infof("🔁 GivebackGuard: restored portfolioPeak=%.2f l2Latch=%.2f l1Ratchets=%d (pruned %d stale)",
+		state.PortfolioPeakUnreal, state.L2FiredAtPeak, len(prunedL1), len(state.L1FiredAtPeak)-len(prunedL1))
+}
+
+// restoreEntryCooldownsFromStore rebuilds post-loss entry cooldowns after a
+// restart. The cooldown map is memory-only and is normally set when a live
+// position transitions to closed; on restart that transition is never observed,
+// so a symbol just stopped out at a loss would be immediately re-tradable,
+// bypassing the consecutive-loss cooldown (a real risk control). We recompute
+// each symbol's cooldown deadline from its last closed trade: deadline =
+// exitTime + duration*consecutiveLosses, and re-arm any still in the future.
+func (at *AutoTrader) restoreEntryCooldownsFromStore() {
+	if at == nil || at.store == nil || at.cooldownManager == nil {
+		return
+	}
+	// Look back over recent closed trades; cooldown maxes at 4x duration, so any
+	// loss older than 4*duration cannot still be cooling. Scan a generous window.
+	trades, err := at.store.Position().GetRecentTrades(at.id, 50)
+	if err != nil {
+		logger.Warnf("⚠️ Entry cooldown: failed to load recent trades for restore: %v", err)
+		return
+	}
+	// Only the latest trade per symbol matters. Cooldown blocks entry, so a win
+	// on a symbol can only happen after any prior loss-cooldown already expired —
+	// meaning if the most recent trade is a win, there is no active cooldown. We
+	// therefore consider just the first (latest) trade seen per symbol and arm a
+	// cooldown only when that latest trade is a loss. GetRecentTrades is exit_time
+	// DESC, so the first trade seen per symbol is the latest.
+	seen := make(map[string]bool)
+	restored := 0
+	for _, t := range trades {
+		if seen[t.Symbol] || t.ExitTime <= 0 {
+			continue
+		}
+		seen[t.Symbol] = true // latest trade for this symbol decided; ignore older ones
+		if t.RealizedPnL >= 0 {
+			continue // latest trade was a win → no active cooldown
+		}
+		consecutiveLosses := at.store.Position().GetConsecutiveLossCount(at.id, t.Symbol, t.Side)
+		if consecutiveLosses < 1 {
+			consecutiveLosses = 1
+		}
+		if consecutiveLosses > 4 {
+			consecutiveLosses = 4
+		}
+		// t.ExitTime is in seconds (GetRecentTrades divides ms by 1000).
+		until := time.Unix(t.ExitTime, 0).Add(at.cooldownManager.duration * time.Duration(consecutiveLosses))
+		if at.cooldownManager.RestoreCooldown(t.Symbol, until) {
+			restored++
+			logger.Infof("⏳ [%s] Entry cooldown restored for %s (%dx, until %s)",
+				at.name, t.Symbol, consecutiveLosses, until.Format("15:04:05"))
+		}
+	}
+	if restored > 0 {
+		logger.Infof("🔁 Entry cooldown: restored %d active post-loss cooldown(s)", restored)
+	}
 }
 
 func (at *AutoTrader) loadDynamicProtectionStateFromStore() {
@@ -483,6 +638,9 @@ func (at *AutoTrader) Run() error {
 
 	logger.Info("🚀 AI-driven automatic trading system started")
 	at.loadDynamicProtectionStateFromStore()
+	at.loadPeakPnLFromStore()
+	at.loadGivebackGuardStateFromStore()
+	at.restoreEntryCooldownsFromStore()
 	logger.Infof("💰 Initial balance: %.2f USDT", at.initialBalance)
 	logger.Infof("⚙️  Scan interval: %v", at.config.ScanInterval)
 	logger.Info("🤖 AI will make full decisions on leverage, position size, stop loss/take profit, etc.")
@@ -493,8 +651,16 @@ func (at *AutoTrader) Run() error {
 	defer at.monitorWg.Done()
 
 	// Start drawdown monitoring
-	at.startDrawdownMonitor()
-	at.startProtectionReconciler()
+	// Account exclusivity: only the sole protection owner of this exchange account
+	// may run the reconciler/drawdown monitor. A second instance sharing the same
+	// account would fight over the shared net position's protection orders.
+	at.ownsAccountProtection = claimAccountProtectionOwnership(at.exchangeID, at.id)
+	if at.ownsAccountProtection {
+		at.startDrawdownMonitor()
+		at.startProtectionReconciler()
+	} else {
+		logger.Warnf("⚠️ [%s] Protection reconciler/drawdown monitor DISABLED: exchange account %s is already owned by another active trader instance (shared-account conflict prevented)", at.name, at.exchangeID)
+	}
 
 	// Start Lighter order sync if using Lighter exchange
 	if at.exchange == "lighter" {
@@ -619,6 +785,12 @@ func (at *AutoTrader) Stop() {
 
 	close(at.stopMonitorCh) // Notify monitoring goroutine to stop
 	at.monitorWg.Wait()     // Wait for monitoring goroutine to finish
+	// Release account protection ownership so a future instance on the same
+	// exchange account can take over after this one stops.
+	if at.ownsAccountProtection {
+		releaseAccountProtectionOwnership(at.exchangeID, at.id)
+		at.ownsAccountProtection = false
+	}
 	logger.Info("⏹ Automatic trading system stopped")
 }
 
@@ -755,14 +927,23 @@ func (at *AutoTrader) SetShowInCompetition(show bool) {
 	at.showInCompetition = show
 }
 
-// SetCustomPrompt sets custom trading strategy prompt
-func (at *AutoTrader) SetCustomPrompt(prompt string) {
-	at.customPrompt = prompt
-}
-
-// SetOverrideBasePrompt sets whether to override base prompt
-func (at *AutoTrader) SetOverrideBasePrompt(override bool) {
-	at.overrideBasePrompt = override
+// SetFallbackEndpoints configures fallback endpoints for the AI client
+func (at *AutoTrader) SetFallbackEndpoints(endpoints []store.FallbackEndpoint) {
+	if at.mcpClient == nil {
+		return
+	}
+	// Convert store.FallbackEndpoint to mcp.FallbackEndpoint
+	mcpEndpoints := make([]mcp.FallbackEndpoint, len(endpoints))
+	for i, ep := range endpoints {
+		mcpEndpoints[i] = mcp.FallbackEndpoint{
+			Name:     ep.Name,
+			BaseURL:  ep.BaseURL,
+			APIKey:   ep.APIKey,
+			Model:    ep.Model,
+			Priority: ep.Priority,
+		}
+	}
+	at.mcpClient.SetFallbackEndpoints(mcpEndpoints)
 }
 
 // GetSystemPromptTemplate gets current system prompt template name (from strategy config)

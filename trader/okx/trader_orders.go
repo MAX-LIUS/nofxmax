@@ -999,15 +999,17 @@ func (t *OKXTrader) GetOrderStatus(symbol string, orderID string) (map[string]in
 	}
 
 	var orders []struct {
-		OrdId     string `json:"ordId"`
-		State     string `json:"state"`
-		AvgPx     string `json:"avgPx"`
-		AccFillSz string `json:"accFillSz"`
-		Fee       string `json:"fee"`
-		Side      string `json:"side"`
-		OrdType   string `json:"ordType"`
-		CTime     string `json:"cTime"`
-		UTime     string `json:"uTime"`
+		OrdId       string `json:"ordId"`
+		State       string `json:"state"`
+		AvgPx       string `json:"avgPx"`
+		AccFillSz   string `json:"accFillSz"`
+		Fee         string `json:"fee"`
+		Side        string `json:"side"`
+		OrdType     string `json:"ordType"`
+		CTime       string `json:"cTime"`
+		UTime       string `json:"uTime"`
+		AlgoId      string `json:"algoId"`      // set when this order was spawned by an algo (TP/SL/trailing)
+		AlgoClOrdId string `json:"algoClOrdId"` // client algo id, if provided at algo placement
 	}
 
 	if err := json.Unmarshal(data, &orders); err != nil {
@@ -1058,7 +1060,28 @@ func (t *OKXTrader) GetOrderStatus(symbol string, orderID string) (map[string]in
 		"time":        cTime,
 		"updateTime":  uTime,
 		"commission":  -fee, // OKX returns negative value
+		"algoId":      order.AlgoId,
+		"algoClOrdId": order.AlgoClOrdId,
 	}, nil
+}
+
+// GetOrderLinkedAlgoID returns the algoId that spawned the given order, or "".
+// When an OKX TP/SL/trailing algo triggers, it creates a regular order whose
+// detail carries the originating algoId. This is the deterministic link from a
+// close fill back to the protection order that caused it (the fill's ordId is a
+// fresh id, not the stored algoId). Returns "" when the order was not algo-spawned.
+func (t *OKXTrader) GetOrderLinkedAlgoID(symbol, orderID string) (string, error) {
+	if orderID == "" {
+		return "", nil
+	}
+	st, err := t.GetOrderStatus(symbol, orderID)
+	if err != nil {
+		return "", err
+	}
+	if algoID, ok := st["algoId"].(string); ok && algoID != "" {
+		return algoID, nil
+	}
+	return "", nil
 }
 
 // GetOpenOrders gets all open/pending orders for a symbol
@@ -1066,16 +1089,52 @@ func (t *OKXTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
 	// Short-lived per-symbol cache: each call below does 3 serial OKX GETs, and the
 	// dashboard loads protection orders per position. Serve a fresh-enough cached
 	// copy to collapse N*3 round-trips during a dashboard load (fix 2026-06-10).
-	const openOrdersCacheTTL = 4 * time.Second
-	t.openOrdersCacheMutex.RLock()
-	if ent, ok := t.cachedOpenOrders[symbol]; ok && time.Since(ent.at) < openOrdersCacheTTL {
-		cached := make([]types.OpenOrder, len(ent.orders))
-		copy(cached, ent.orders)
-		t.openOrdersCacheMutex.RUnlock()
+	// TTL bumped 4s->8s (2026-06-23): accounts holding ~10 symbols issue 3-4
+	// algo-pending sub-queries each per monitor pass, saturating the per-key OKX
+	// rate limit (orders-algo-pending) and dragging /api/positions to ~4.5s. Any
+	// order mutation busts this cache via invalidateOpenOrdersCache, so a longer
+	// read TTL cannot serve stale state after a place/cancel/amend.
+	const openOrdersCacheTTL = 8 * time.Second
+	if cached, ok := t.readOpenOrdersCache(symbol, openOrdersCacheTTL); ok {
 		return cached, nil
 	}
-	t.openOrdersCacheMutex.RUnlock()
 
+	// singleflight collapses concurrent misses for the same symbol into one fetch;
+	// the waiters share the leader's result, so we hand each caller its own copy.
+	v, err, _ := t.openOrdersSF.Do(symbol, func() (interface{}, error) {
+		// Re-check the cache: a concurrent leader may have populated it while we
+		// queued behind singleflight.
+		if cached, ok := t.readOpenOrdersCache(symbol, openOrdersCacheTTL); ok {
+			return cached, nil
+		}
+		return t.fetchOpenOrders(symbol)
+	})
+	if err != nil {
+		return nil, err
+	}
+	orders, _ := v.([]types.OpenOrder)
+	out := make([]types.OpenOrder, len(orders))
+	copy(out, orders)
+	return out, nil
+}
+
+// readOpenOrdersCache returns a copy of the cached open orders for symbol when a
+// fresh entry exists.
+func (t *OKXTrader) readOpenOrdersCache(symbol string, ttl time.Duration) ([]types.OpenOrder, bool) {
+	t.openOrdersCacheMutex.RLock()
+	defer t.openOrdersCacheMutex.RUnlock()
+	if ent, ok := t.cachedOpenOrders[symbol]; ok && time.Since(ent.at) < ttl {
+		cached := make([]types.OpenOrder, len(ent.orders))
+		copy(cached, ent.orders)
+		return cached, true
+	}
+	return nil, false
+}
+
+// fetchOpenOrders performs the actual OKX round-trips (limit + conditional algo +
+// trailing) and populates the per-symbol cache. Callers reach it through
+// GetOpenOrders, which guards it with the cache and singleflight.
+func (t *OKXTrader) fetchOpenOrders(symbol string) ([]types.OpenOrder, error) {
 	instId := t.convertSymbol(symbol)
 	var result []types.OpenOrder
 
@@ -1346,12 +1405,17 @@ func (t *OKXTrader) PlaceLimitOrder(req *types.LimitOrderRequest) (*types.LimitO
 		posSide = "short"
 	}
 
+	ordType := "limit"
+	if req.PostOnly {
+		ordType = "post_only"
+	}
+
 	body := map[string]interface{}{
 		"instId":  instId,
 		"tdMode":  "cross",
 		"side":    side,
 		"posSide": posSide,
-		"ordType": "limit",
+		"ordType": ordType,
 		"sz":      szStr,
 		"px":      fmt.Sprintf("%.8f", req.Price),
 		"clOrdId": genOkxClOrdID(),

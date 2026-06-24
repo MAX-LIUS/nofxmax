@@ -136,6 +136,15 @@ func (s *EquityStore) GetCount(traderID string) (int, error) {
 	return int(count), err
 }
 
+// DeleteAll deletes all equity snapshots for specified trader
+func (s *EquityStore) DeleteAll(traderID string) (int64, error) {
+	result := s.db.Where("trader_id = ?", traderID).Delete(&EquitySnapshot{})
+	if result.Error != nil {
+		return 0, fmt.Errorf("failed to delete equity snapshots: %w", result.Error)
+	}
+	return result.RowsAffected, nil
+}
+
 // MigrateFromDecision migrates data from old decision_account_snapshots table
 func (s *EquityStore) MigrateFromDecision() (int64, error) {
 	// Check if migration is needed (whether new table is empty)

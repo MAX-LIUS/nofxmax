@@ -19,6 +19,7 @@ import type {
   ProtectionMode,
   ProtectionValueSource,
 } from '../../types'
+import { ProtectionArbitrationBanner } from './ProtectionArbitrationBanner'
 
 interface ProtectionEditorProps {
   config: ProtectionConfig
@@ -531,6 +532,8 @@ export function ProtectionEditor({
           </div>
         </div>
       </div>
+
+      <ProtectionArbitrationBanner config={config} language={language} />
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         {protectionLayerCards.map((item) => (

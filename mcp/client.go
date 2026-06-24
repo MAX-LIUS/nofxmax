@@ -67,6 +67,15 @@ func (u TokenUsage) Channel() string {
 	}
 }
 
+// FallbackEndpoint represents a backup API endpoint configuration
+type FallbackEndpoint struct {
+	Name     string `json:"name"`
+	BaseURL  string `json:"base_url"`
+	APIKey   string `json:"api_key"`
+	Model    string `json:"model"`
+	Priority int    `json:"priority"`
+}
+
 // Client AI API configuration
 type Client struct {
 	Provider   string
@@ -84,6 +93,18 @@ type Client struct {
 	// When provider.DeepSeekClient embeds Client, Hooks point to DeepSeekClient
 	// This way methods called in Call() are automatically dispatched to the overridden version
 	Hooks ClientHooks
+
+	// Fallback endpoints for automatic failover
+	FallbackEndpoints    []FallbackEndpoint
+	currentEndpointIndex int // Track which endpoint we're currently using
+
+	// Primary endpoint snapshot, captured when fallbacks are configured.
+	// Used to restore the primary connection params at the start of every call,
+	// so each call begins from the primary and only falls back on failure.
+	primaryBaseURL     string
+	primaryAPIKey      string
+	primaryModel       string
+	primarySnapshotted bool
 }
 
 // New creates default client (backward compatible)
@@ -164,6 +185,64 @@ func (client *Client) SetAPIKey(apiKey, apiURL, customModel string) {
 	client.Model = customModel
 }
 
+// SetFallbackEndpoints sets the fallback endpoints for automatic failover
+func (client *Client) SetFallbackEndpoints(endpoints []FallbackEndpoint) {
+	client.FallbackEndpoints = endpoints
+	client.currentEndpointIndex = -1 // -1 means using primary endpoint
+	// Snapshot the current (primary) connection params so we can always restore
+	// to the primary at the start of each call. SetAPIKey runs before this, so
+	// the client currently holds the primary endpoint's values.
+	client.primaryBaseURL = client.BaseURL
+	client.primaryAPIKey = client.APIKey
+	client.primaryModel = client.Model
+	client.primarySnapshotted = true
+	if len(endpoints) > 0 {
+		client.Log.Infof("🔄 [MCP] Configured %d fallback endpoint(s)", len(endpoints))
+	}
+}
+
+// restoreToPrimary restores the primary endpoint connection params and resets
+// the endpoint index. Safe to call repeatedly; no-op if no snapshot exists.
+func (client *Client) restoreToPrimary() {
+	if !client.primarySnapshotted {
+		return
+	}
+	client.BaseURL = client.primaryBaseURL
+	client.APIKey = client.primaryAPIKey
+	client.Model = client.primaryModel
+	client.currentEndpointIndex = -1
+}
+
+// switchToNextEndpoint switches to the next available fallback endpoint
+// Returns true if switched successfully, false if no more fallbacks available
+func (client *Client) switchToNextEndpoint() bool {
+	if len(client.FallbackEndpoints) == 0 {
+		return false
+	}
+
+	// Find next available endpoint with higher priority (lower priority number)
+	nextIndex := client.currentEndpointIndex + 1
+	if nextIndex >= len(client.FallbackEndpoints) {
+		return false // No more fallbacks
+	}
+
+	endpoint := client.FallbackEndpoints[nextIndex]
+	client.currentEndpointIndex = nextIndex
+
+	// Switch to fallback endpoint
+	client.BaseURL = endpoint.BaseURL
+	if endpoint.APIKey != "" {
+		client.APIKey = endpoint.APIKey
+	}
+	if endpoint.Model != "" {
+		client.Model = endpoint.Model
+	}
+
+	client.Log.Warnf("🔁 [MCP] Switched to fallback endpoint: %s (BaseURL: %s, Model: %s)",
+		endpoint.Name, endpoint.BaseURL, endpoint.Model)
+	return true
+}
+
 func (client *Client) SetTimeout(timeout time.Duration) {
 	client.HTTPClient.Timeout = timeout
 }
@@ -174,21 +253,65 @@ func (client *Client) CallWithMessages(systemPrompt, userPrompt string) (string,
 		return "", fmt.Errorf("AI API key not set, please call SetAPIKey first")
 	}
 
-	// Fixed retry flow
+	// New failover logic: try primary first, then fallback endpoints
 	var lastErr error
 	maxRetries := client.Cfg.MaxRetries
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if attempt > 1 {
-			client.Log.Warnf("⚠️  AI API call failed, retrying (%d/%d)...", attempt, maxRetries)
+	// Always start each call from the primary endpoint. Even if a previous call
+	// ended on a fallback, restore primary params here so we re-try primary first.
+	// This makes failover per-call: primary preferred, fallback only on failure,
+	// next call back to primary.
+	if len(client.FallbackEndpoints) > 0 {
+		client.restoreToPrimary()
+	}
+
+	// Try primary endpoint first
+	result, err := client.Hooks.Call(systemPrompt, userPrompt)
+	if err == nil {
+		return result, nil
+	}
+
+	lastErr = err
+	client.Log.Warnf("⚠️ Primary endpoint failed: %v", err)
+
+	// If we have fallback endpoints, try them instead of retrying the primary
+	if len(client.FallbackEndpoints) > 0 {
+		// Try each fallback endpoint once
+		for client.switchToNextEndpoint() {
+			client.Log.Infof("🔄 Trying fallback endpoint...")
+			result, err := client.Hooks.Call(systemPrompt, userPrompt)
+			if err == nil {
+				client.Log.Infof("✓ Fallback endpoint succeeded (will retry primary first next call)")
+				// Restore primary params immediately so the next call starts from
+				// the primary endpoint again, not this fallback.
+				client.restoreToPrimary()
+				return result, nil
+			}
+			lastErr = err
+			client.Log.Warnf("⚠️ Fallback endpoint failed: %v", err)
 		}
+		// All fallbacks exhausted — restore primary for the next call.
+		client.restoreToPrimary()
+		return "", fmt.Errorf("all endpoints failed (primary + %d fallbacks): %w", len(client.FallbackEndpoints), lastErr)
+	}
+
+	// No fallbacks configured - use traditional retry logic
+	if !client.Hooks.IsRetryableError(lastErr) {
+		return "", lastErr
+	}
+
+	for attempt := 2; attempt <= maxRetries; attempt++ {
+		client.Log.Warnf("⚠️ AI API call failed, retrying (%d/%d)...", attempt, maxRetries)
+
+		// Wait before retry
+		waitTime := client.Cfg.RetryWaitBase * time.Duration(attempt-1)
+		client.Log.Infof("⏳ Waiting %v before retry...", waitTime)
+		time.Sleep(waitTime)
 
 		// Call the fixed single-call flow
 		result, err := client.Hooks.Call(systemPrompt, userPrompt)
 		if err == nil {
-			if attempt > 1 {
-				client.Log.Infof("✓ AI API retry succeeded")
-			}
+			client.Log.Infof("✓ AI API retry succeeded")
 			return result, nil
 		}
 
@@ -196,13 +319,6 @@ func (client *Client) CallWithMessages(systemPrompt, userPrompt string) (string,
 		// Check if error is retryable via hooks (supports custom retry strategy)
 		if !client.Hooks.IsRetryableError(err) {
 			return "", err
-		}
-
-		// Wait before retry
-		if attempt < maxRetries {
-			waitTime := client.Cfg.RetryWaitBase * time.Duration(attempt)
-			client.Log.Infof("⏳ Waiting %v before retry...", waitTime)
-			time.Sleep(waitTime)
 		}
 	}
 
@@ -616,21 +732,66 @@ func (client *Client) CallWithRequest(req *Request) (string, error) {
 		req.Model = client.Model
 	}
 
-	// Fixed retry flow
+	// New failover logic: try primary first, then fallback endpoints
 	var lastErr error
 	maxRetries := client.Cfg.MaxRetries
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if attempt > 1 {
-			client.Log.Warnf("⚠️  AI API call failed, retrying (%d/%d)...", attempt, maxRetries)
+	// Always start each call from the primary endpoint (per-call failover).
+	if len(client.FallbackEndpoints) > 0 {
+		client.restoreToPrimary()
+		if req.Model == "" {
+			req.Model = client.Model
 		}
+	}
+
+	// Try primary endpoint first
+	result, err := client.callWithRequest(req)
+	if err == nil {
+		return result, nil
+	}
+
+	lastErr = err
+	client.Log.Warnf("⚠️ Primary endpoint failed: %v", err)
+
+	// If we have fallback endpoints, try them instead of retrying the primary
+	if len(client.FallbackEndpoints) > 0 {
+		// Try each fallback endpoint once
+		for client.switchToNextEndpoint() {
+			client.Log.Infof("🔄 Trying fallback endpoint...")
+			// Use the fallback endpoint's model for this request.
+			fbReq := *req
+			fbReq.Model = client.Model
+			result, err := client.callWithRequest(&fbReq)
+			if err == nil {
+				client.Log.Infof("✓ Fallback endpoint succeeded (will retry primary first next call)")
+				client.restoreToPrimary()
+				return result, nil
+			}
+			lastErr = err
+			client.Log.Warnf("⚠️ Fallback endpoint failed: %v", err)
+		}
+		// All fallbacks exhausted — restore primary for the next call.
+		client.restoreToPrimary()
+		return "", fmt.Errorf("all endpoints failed (primary + %d fallbacks): %w", len(client.FallbackEndpoints), lastErr)
+	}
+
+	// No fallbacks configured - use traditional retry logic
+	if !client.Hooks.IsRetryableError(lastErr) {
+		return "", lastErr
+	}
+
+	for attempt := 2; attempt <= maxRetries; attempt++ {
+		client.Log.Warnf("⚠️ AI API call failed, retrying (%d/%d)...", attempt, maxRetries)
+
+		// Wait before retry
+		waitTime := client.Cfg.RetryWaitBase * time.Duration(attempt-1)
+		client.Log.Infof("⏳ Waiting %v before retry...", waitTime)
+		time.Sleep(waitTime)
 
 		// Call single request
 		result, err := client.callWithRequest(req)
 		if err == nil {
-			if attempt > 1 {
-				client.Log.Infof("✓ AI API retry succeeded")
-			}
+			client.Log.Infof("✓ AI API retry succeeded")
 			return result, nil
 		}
 
@@ -638,13 +799,6 @@ func (client *Client) CallWithRequest(req *Request) (string, error) {
 		// Check if error is retryable
 		if !client.Hooks.IsRetryableError(err) {
 			return "", err
-		}
-
-		// Wait before retry
-		if attempt < maxRetries {
-			waitTime := client.Cfg.RetryWaitBase * time.Duration(attempt)
-			client.Log.Infof("⏳ Waiting %v before retry...", waitTime)
-			time.Sleep(waitTime)
 		}
 	}
 
@@ -662,10 +816,55 @@ func (client *Client) CallWithRequestFull(req *Request) (*LLMResponse, error) {
 
 	var lastErr error
 	maxRetries := client.Cfg.MaxRetries
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if attempt > 1 {
-			client.Log.Warnf("⚠️  AI API call failed, retrying (%d/%d)...", attempt, maxRetries)
+
+	// Always start each call from the primary endpoint (per-call failover).
+	if len(client.FallbackEndpoints) > 0 {
+		client.restoreToPrimary()
+		req.Model = client.Model
+	}
+
+	// Try primary endpoint first
+	result, err := client.callWithRequestFull(req)
+	if err == nil {
+		return result, nil
+	}
+
+	lastErr = err
+	client.Log.Warnf("⚠️ Primary endpoint failed: %v", err)
+
+	// If we have fallback endpoints, try them instead of retrying the primary
+	if len(client.FallbackEndpoints) > 0 {
+		// Try each fallback endpoint once
+		for client.switchToNextEndpoint() {
+			client.Log.Infof("🔄 Trying fallback endpoint...")
+			fbReq := *req
+			fbReq.Model = client.Model
+			result, err := client.callWithRequestFull(&fbReq)
+			if err == nil {
+				client.Log.Infof("✓ Fallback endpoint succeeded (will retry primary first next call)")
+				client.restoreToPrimary()
+				return result, nil
+			}
+			lastErr = err
+			client.Log.Warnf("⚠️ Fallback endpoint failed: %v", err)
 		}
+		// All fallbacks exhausted — restore primary for the next call.
+		client.restoreToPrimary()
+		return nil, fmt.Errorf("all endpoints failed (primary + %d fallbacks): %w", len(client.FallbackEndpoints), lastErr)
+	}
+
+	// No fallbacks configured - use traditional retry logic
+	if !client.Hooks.IsRetryableError(lastErr) {
+		return nil, lastErr
+	}
+
+	for attempt := 2; attempt <= maxRetries; attempt++ {
+		client.Log.Warnf("⚠️ AI API call failed, retrying (%d/%d)...", attempt, maxRetries)
+
+		// Wait before retry
+		waitTime := client.Cfg.RetryWaitBase * time.Duration(attempt-1)
+		time.Sleep(waitTime)
+
 		result, err := client.callWithRequestFull(req)
 		if err == nil {
 			return result, nil
@@ -673,10 +872,6 @@ func (client *Client) CallWithRequestFull(req *Request) (*LLMResponse, error) {
 		lastErr = err
 		if !client.Hooks.IsRetryableError(err) {
 			return nil, err
-		}
-		if attempt < maxRetries {
-			waitTime := client.Cfg.RetryWaitBase * time.Duration(attempt)
-			time.Sleep(waitTime)
 		}
 	}
 	return nil, fmt.Errorf("still failed after %d retries: %w", maxRetries, lastErr)

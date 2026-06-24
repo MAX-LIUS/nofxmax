@@ -8,6 +8,8 @@ const ChartTabs = lazy(() =>
 )
 import { DecisionCard } from '../components/trader/DecisionCard'
 import { PositionProtectionPanel } from '../components/trader/PositionProtectionPanel'
+import { ExpectancyPanel } from '../components/trader/ExpectancyPanel'
+import { CloseAttributionPanel } from '../components/trader/CloseAttributionPanel'
 import { EvolutionProfilePanel } from '../components/trader/EvolutionProfilePanel'
 import { InsightPanel } from '../components/trader/InsightPanel'
 const PositionHistory = lazy(() =>
@@ -147,6 +149,7 @@ export function TraderDashboardPage({
   decisions,
   decisionsLimit,
   onDecisionsLimitChange,
+  stats,
   lastUpdate,
   language,
   traders,
@@ -1315,6 +1318,44 @@ export function TraderDashboardPage({
             })()}
           </div>
         </div>
+
+        {/* Advanced Analytics - Collapsible */}
+        <details
+          className="nofx-glass mb-4 animate-slide-in"
+          style={{ animationDelay: '0.25s' }}
+        >
+          <summary className="cursor-pointer p-4 flex items-center gap-3 hover:bg-white/5 transition-colors rounded-lg">
+            <div
+              className="w-8 h-8 rounded-lg flex items-center justify-center text-base shadow-sm"
+              style={{
+                background: 'linear-gradient(135deg, #10B981 0%, #059669 100%)',
+              }}
+            >
+              📊
+            </div>
+            <div className="flex-1">
+              <h3 className="text-lg font-bold text-nofx-text-main">
+                {language === 'zh' ? '高级分析' : 'Advanced Analytics'}
+              </h3>
+              <p className="text-xs text-nofx-text-muted">
+                {language === 'zh'
+                  ? '策略期望值与平仓归因详情'
+                  : 'Strategy expectancy & close attribution details'}
+              </p>
+            </div>
+            <span className="text-nofx-text-muted text-sm">▼</span>
+          </summary>
+          <div className="p-4 pt-0 space-y-4">
+            {/* Strategy expectancy (net-of-fees edge) */}
+            <ExpectancyPanel stats={stats} language={language} />
+
+            {/* Close attribution: every exit traced to AI/protection/manual/exchange */}
+            <CloseAttributionPanel
+              traderId={selectedTraderId}
+              language={language}
+            />
+          </div>
+        </details>
 
         {/* Smart Insights Panel */}
         {selectedTraderId && decisions && (

@@ -195,3 +195,69 @@ func TestSyncOrdersFromOKXWithFullCloseHandler_UsesAnchoredParentOrderOwner(t *t
 		t.Fatalf("expected no position under sync trader, got %+v", syncPositions)
 	}
 }
+
+func TestMatchProtectionReasonByPrice(t *testing.T) {
+	cands := []protectionCandidate{
+		{OrderAction: "full_sl", StopPrice: 61882.1, Quantity: 0.0007},
+		{OrderAction: "managed_drawdown_runner_exit", StopPrice: 69045.4, Quantity: 0.0002},
+		{OrderAction: "full_tp", StopPrice: 67093.3, Quantity: 0.0003},
+	}
+
+	// Fill near the runner trailing trigger -> attributed to runner exit.
+	if got := matchProtectionReasonByPrice(69050.0, cands, 0.6); got != "managed_drawdown_runner_exit" {
+		t.Errorf("near-trailing fill: got %q want managed_drawdown_runner_exit", got)
+	}
+
+	// Fill near the stop -> full_sl.
+	if got := matchProtectionReasonByPrice(61870.0, cands, 0.6); got != "full_sl" {
+		t.Errorf("near-stop fill: got %q want full_sl", got)
+	}
+
+	// Fill far from every trigger (>0.6%) -> no attribution.
+	if got := matchProtectionReasonByPrice(65000.0, cands, 0.6); got != "" {
+		t.Errorf("far fill: got %q want empty", got)
+	}
+
+	// Guard: zero fill price returns empty.
+	if got := matchProtectionReasonByPrice(0, cands, 0.6); got != "" {
+		t.Errorf("zero fill price: got %q want empty", got)
+	}
+
+	// Guard: candidate with no stop price is skipped.
+	noStop := []protectionCandidate{{OrderAction: "ladder_tp", StopPrice: 0, Quantity: 1}}
+	if got := matchProtectionReasonByPrice(100.0, noStop, 0.6); got != "" {
+		t.Errorf("zero-stop candidate: got %q want empty", got)
+	}
+}
+
+func TestGetOrderLinkedAlgoID(t *testing.T) {
+	// Order detail returns algoId when the order was spawned by an algo trigger.
+	tr := &OKXTrader{
+		apiKey: "k", secretKey: "s", passphrase: "p",
+		httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body := `{"code":"0","msg":"","data":[]}`
+			switch {
+			case strings.HasPrefix(req.URL.Path, "/api/v5/trade/order"):
+				body = `{"code":"0","msg":"","data":[{"ordId":"order-close","state":"filled","avgPx":"100","accFillSz":"1","fee":"-0.01","side":"buy","ordType":"market","cTime":"1","uTime":"2","algoId":"algo-xyz","algoClOrdId":"cl-1"}]}`
+			case strings.HasPrefix(req.URL.Path, "/api/v5/public/instruments"):
+				body = `{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","ctVal":"0.0001","ctMult":"1","lotSz":"1","minSz":"1","maxMktSz":"1000000","tickSz":"0.1","ctType":"linear"}]}`
+			default:
+				t.Fatalf("unexpected path: %s", req.URL.Path)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		})},
+		instrumentsCache: make(map[string]*OKXInstrument),
+	}
+	algoID, err := tr.GetOrderLinkedAlgoID("BTCUSDT", "order-close")
+	if err != nil {
+		t.Fatalf("GetOrderLinkedAlgoID: %v", err)
+	}
+	if algoID != "algo-xyz" {
+		t.Errorf("algoID=%q want algo-xyz", algoID)
+	}
+
+	// Empty orderID short-circuits.
+	if id, _ := tr.GetOrderLinkedAlgoID("BTCUSDT", ""); id != "" {
+		t.Errorf("empty orderID should return empty, got %q", id)
+	}
+}

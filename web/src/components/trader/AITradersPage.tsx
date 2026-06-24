@@ -7,6 +7,7 @@ import type {
   CreateTraderRequest,
   AIModel,
   Exchange,
+  FallbackEndpoint,
 } from '../../types'
 import { useLanguage } from '../../contexts/LanguageContext'
 import { t } from '../../i18n/translations'
@@ -18,11 +19,7 @@ import { TelegramConfigModal } from './TelegramConfigModal'
 import { ModelConfigModal } from './ModelConfigModal'
 import { ConfigStatusGrid } from './ConfigStatusGrid'
 import { TradersList } from './TradersList'
-import {
-  Bot,
-  Plus,
-  MessageCircle,
-} from 'lucide-react'
+import { Bot, Plus, MessageCircle } from 'lucide-react'
 import { confirmToast } from '../../lib/notify'
 import { toast } from 'sonner'
 
@@ -45,13 +42,17 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
   const [allModels, setAllModels] = useState<AIModel[]>([])
   const [allExchanges, setAllExchanges] = useState<Exchange[]>([])
   const [supportedModels, setSupportedModels] = useState<AIModel[]>([])
-  const [visibleTraderAddresses, setVisibleTraderAddresses] = useState<Set<string>>(new Set())
-  const [visibleExchangeAddresses, setVisibleExchangeAddresses] = useState<Set<string>>(new Set())
+  const [visibleTraderAddresses, setVisibleTraderAddresses] = useState<
+    Set<string>
+  >(new Set())
+  const [visibleExchangeAddresses, setVisibleExchangeAddresses] = useState<
+    Set<string>
+  >(new Set())
   const [copiedId, setCopiedId] = useState<string | null>(null)
 
   // Toggle wallet address visibility for a trader
   const toggleTraderAddressVisibility = (traderId: string) => {
-    setVisibleTraderAddresses(prev => {
+    setVisibleTraderAddresses((prev) => {
       const next = new Set(prev)
       if (next.has(traderId)) {
         next.delete(traderId)
@@ -64,7 +65,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
 
   // Toggle wallet address visibility for an exchange
   const toggleExchangeAddressVisibility = (exchangeId: string) => {
-    setVisibleExchangeAddresses(prev => {
+    setVisibleExchangeAddresses((prev) => {
       const next = new Set(prev)
       if (next.has(exchangeId)) {
         next.delete(exchangeId)
@@ -86,11 +87,13 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     }
   }
 
-  const { data: traders, mutate: mutateTraders, isLoading: isTradersLoading } = useSWR<TraderInfo[]>(
-    user && token ? 'traders' : null,
-    api.getTraders,
-    { refreshInterval: 5000 }
-  )
+  const {
+    data: traders,
+    mutate: mutateTraders,
+    isLoading: isTradersLoading,
+  } = useSWR<TraderInfo[]>(user && token ? 'traders' : null, api.getTraders, {
+    refreshInterval: 5000,
+  })
 
   useEffect(() => {
     const loadConfigs = async () => {
@@ -105,11 +108,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
       }
 
       try {
-        const [
-          modelConfigs,
-          exchangeConfigs,
-          models,
-        ] = await Promise.all([
+        const [modelConfigs, exchangeConfigs, models] = await Promise.all([
           api.getModelConfigs(),
           api.getExchangeConfigs(),
           api.getSupportedModels(),
@@ -174,7 +173,8 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
   }
 
   const getExchangeUsageInfo = (exchangeId: string) => {
-    const usingTraders = traders?.filter((tr) => tr.exchange_id === exchangeId) || []
+    const usingTraders =
+      traders?.filter((tr) => tr.exchange_id === exchangeId) || []
     const runningCount = usingTraders.filter((tr) => tr.is_running).length
     const totalCount = usingTraders.length
     return { runningCount, totalCount, usingTraders }
@@ -262,7 +262,10 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
       }
 
       console.log('🔥 handleSaveEditTrader - data:', data)
-      console.log('🔥 handleSaveEditTrader - data.strategy_id:', data.strategy_id)
+      console.log(
+        '🔥 handleSaveEditTrader - data.strategy_id:',
+        data.strategy_id
+      )
       console.log('🔥 handleSaveEditTrader - request:', request)
 
       await api.updateTrader(editingTrader.trader_id, request)
@@ -297,10 +300,10 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     try {
       if (running) {
         await api.stopTrader(traderId)
-      toast.success(t('aiTradersToast.stopped', language))
+        toast.success(t('aiTradersToast.stopped', language))
       } else {
         await api.startTrader(traderId)
-      toast.success(t('aiTradersToast.started', language))
+        toast.success(t('aiTradersToast.started', language))
       }
 
       await mutateTraders()
@@ -310,11 +313,18 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     }
   }
 
-  const handleToggleCompetition = async (traderId: string, currentShowInCompetition: boolean) => {
+  const handleToggleCompetition = async (
+    traderId: string,
+    currentShowInCompetition: boolean
+  ) => {
     try {
       const newValue = !currentShowInCompetition
       await api.toggleCompetition(traderId, newValue)
-      toast.success(newValue ? t('aiTradersToast.showInCompetition', language) : t('aiTradersToast.hideInCompetition', language))
+      toast.success(
+        newValue
+          ? t('aiTradersToast.showInCompetition', language)
+          : t('aiTradersToast.hideInCompetition', language)
+      )
 
       await mutateTraders()
     } catch (error) {
@@ -433,7 +443,8 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     modelId: string,
     apiKey: string,
     customApiUrl?: string,
-    customModelName?: string
+    customModelName?: string,
+    fallbackEndpoints?: FallbackEndpoint[]
   ) => {
     try {
       const existingModel = allModels?.find((m) => m.id === modelId)
@@ -451,12 +462,13 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
           allModels?.map((m) =>
             m.id === modelId
               ? {
-                ...m,
-                apiKey,
-                customApiUrl: customApiUrl || '',
-                customModelName: customModelName || '',
-                enabled: true,
-              }
+                  ...m,
+                  apiKey,
+                  customApiUrl: customApiUrl || '',
+                  customModelName: customModelName || '',
+                  fallbackEndpoints: fallbackEndpoints || [],
+                  enabled: true,
+                }
               : m
           ) || []
       } else {
@@ -465,6 +477,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
           apiKey,
           customApiUrl: customApiUrl || '',
           customModelName: customModelName || '',
+          fallbackEndpoints: fallbackEndpoints || [],
           enabled: true,
         }
         updatedModels = [...(allModels || []), newModel]
@@ -479,6 +492,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
               api_key: model.apiKey || '',
               custom_api_url: model.customApiUrl || '',
               custom_model_name: model.customModelName || '',
+              fallback_endpoints: model.fallbackEndpoints || [],
             },
           ])
         ),
@@ -571,7 +585,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
         }
 
         await api.updateExchangeConfigsEncrypted(request)
-      toast.success(t('aiTradersToast.exchangeConfigUpdated', language))
+        toast.success(t('aiTradersToast.exchangeConfigUpdated', language))
       } else {
         const createRequest = {
           exchange_type: exchangeType,
@@ -592,7 +606,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
         }
 
         await api.createExchangeEncrypted(createRequest)
-      toast.success(t('aiTradersToast.exchangeCreated', language))
+        toast.success(t('aiTradersToast.exchangeCreated', language))
       }
 
       const refreshedExchanges = await api.getExchangeConfigs()
@@ -675,7 +689,10 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
 
             <button
               onClick={() => setShowCreateModal(true)}
-              disabled={configuredModels.length === 0 || configuredExchanges.length === 0}
+              disabled={
+                configuredModels.length === 0 ||
+                configuredExchanges.length === 0
+              }
               className="group relative px-6 py-2 rounded text-xs font-bold font-mono uppercase tracking-wider transition-all disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap overflow-hidden bg-nofx-gold text-black hover:bg-yellow-400 shadow-[0_0_20px_rgba(240,185,11,0.2)] hover:shadow-[0_0_30px_rgba(240,185,11,0.4)]"
             >
               <span className="relative z-10 flex items-center gap-2">

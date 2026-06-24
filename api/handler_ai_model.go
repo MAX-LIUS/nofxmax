@@ -10,6 +10,7 @@ import (
 	"nofx/crypto"
 	"nofx/logger"
 	"nofx/security"
+	"nofx/store"
 
 	"github.com/gin-gonic/gin"
 )
@@ -25,20 +26,31 @@ type ModelConfig struct {
 
 // SafeModelConfig Safe model configuration structure (does not contain sensitive information)
 type SafeModelConfig struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	Provider        string `json:"provider"`
-	Enabled         bool   `json:"enabled"`
-	CustomAPIURL    string `json:"customApiUrl"`    // Custom API URL (usually not sensitive)
-	CustomModelName string `json:"customModelName"` // Custom model name (not sensitive)
+	ID                string                     `json:"id"`
+	Name              string                     `json:"name"`
+	Provider          string                     `json:"provider"`
+	Enabled           bool                       `json:"enabled"`
+	CustomAPIURL      string                     `json:"customApiUrl"`    // Custom API URL (usually not sensitive)
+	CustomModelName   string                     `json:"customModelName"` // Custom model name (not sensitive)
+	FallbackEndpoints []SafeFallbackEndpoint     `json:"fallbackEndpoints,omitempty"` // Fallback endpoints (without API keys)
+}
+
+// SafeFallbackEndpoint represents a fallback endpoint without sensitive information
+type SafeFallbackEndpoint struct {
+	Name     string `json:"name"`
+	BaseURL  string `json:"base_url"`
+	Model    string `json:"model"`
+	Priority int    `json:"priority"`
+	HasAPIKey bool  `json:"has_api_key"` // Whether API key is configured (don't expose the key itself)
 }
 
 type UpdateModelConfigRequest struct {
 	Models map[string]struct {
-		Enabled         bool   `json:"enabled"`
-		APIKey          string `json:"api_key"`
-		CustomAPIURL    string `json:"custom_api_url"`
-		CustomModelName string `json:"custom_model_name"`
+		Enabled           bool                       `json:"enabled"`
+		APIKey            string                     `json:"api_key"`
+		CustomAPIURL      string                     `json:"custom_api_url"`
+		CustomModelName   string                     `json:"custom_model_name"`
+		FallbackEndpoints []store.FallbackEndpoint   `json:"fallback_endpoints"`
 	} `json:"models"`
 }
 
@@ -75,13 +87,27 @@ func (s *Server) handleGetModelConfigs(c *gin.Context) {
 	// Convert to safe response structure, remove sensitive information
 	safeModels := make([]SafeModelConfig, len(models))
 	for i, model := range models {
+		// Parse fallback endpoints
+		fallbacks, _ := model.GetFallbackEndpoints()
+		safeFallbacks := make([]SafeFallbackEndpoint, len(fallbacks))
+		for j, fb := range fallbacks {
+			safeFallbacks[j] = SafeFallbackEndpoint{
+				Name:      fb.Name,
+				BaseURL:   fb.BaseURL,
+				Model:     fb.Model,
+				Priority:  fb.Priority,
+				HasAPIKey: fb.APIKey != "",
+			}
+		}
+
 		safeModels[i] = SafeModelConfig{
-			ID:              model.ID,
-			Name:            model.Name,
-			Provider:        model.Provider,
-			Enabled:         model.Enabled,
-			CustomAPIURL:    model.CustomAPIURL,
-			CustomModelName: model.CustomModelName,
+			ID:                model.ID,
+			Name:              model.Name,
+			Provider:          model.Provider,
+			Enabled:           model.Enabled,
+			CustomAPIURL:      model.CustomAPIURL,
+			CustomModelName:   model.CustomModelName,
+			FallbackEndpoints: safeFallbacks,
 		}
 	}
 
@@ -157,7 +183,7 @@ func (s *Server) handleUpdateModelConfigs(c *gin.Context) {
 			tradersToReload[t.ID] = true
 		}
 
-		err := s.store.AIModel().Update(userID, modelID, modelData.Enabled, modelData.APIKey, modelData.CustomAPIURL, modelData.CustomModelName)
+		err := s.store.AIModel().UpdateWithFallbacks(userID, modelID, modelData.Enabled, modelData.APIKey, modelData.CustomAPIURL, modelData.CustomModelName, modelData.FallbackEndpoints)
 		if err != nil {
 			SafeInternalError(c, fmt.Sprintf("Update model %s", modelID), err)
 			return

@@ -118,11 +118,6 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 		return fmt.Errorf("failed to get positions: %w", err)
 	}
 
-	// [CODE ENFORCED] Check max positions limit
-	if err := at.enforceMaxPositions(len(positions)); err != nil {
-		return err
-	}
-
 	// Check if there's already a position in the same symbol and direction
 	for _, pos := range positions {
 		if pos["symbol"] == decision.Symbol && pos["side"] == "long" {
@@ -132,6 +127,15 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 
 	// Get current price
 	marketData, err := at.getExecutionMarketData(decision.Symbol)
+	if err != nil {
+		return err
+	}
+
+	// [CODE ENFORCED] Capacity check with optional strong-signal replacement. When at capacity and
+	// replacement is enabled, this cuts the weakest eligible position to free a slot (after the
+	// entry-price deviation precheck passes), then re-fetches positions and re-enforces the limit.
+	// The cut runs BEFORE the balance fetch below so freed margin is reflected downstream.
+	positions, err = at.enforceCapacityWithReplacement(decision, "long", positions, marketData.CurrentPrice)
 	if err != nil {
 		return err
 	}
@@ -154,6 +158,12 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 		equity = eq
 	} else {
 		equity = availableBalance
+	}
+
+	// [CODE ENFORCED] Volatility-targeted sizing: shrink size on high-ATR symbols before
+	// any downstream caps so all checks see the volatility-adjusted size. No-op when disabled.
+	if adj, mult := at.applyVolatilitySizing(decision.Symbol, decision.PositionSizeUSD, at.extractExecutionATR14(marketData), marketData.CurrentPrice); mult != 1.0 {
+		decision.PositionSizeUSD = adj
 	}
 
 	// [CODE ENFORCED] Position Value Ratio Check: position_value <= equity × ratio
@@ -204,8 +214,21 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 		// Continue execution, doesn't affect trading
 	}
 
-	// Open position
-	order, err := at.trader.OpenLong(decision.Symbol, quantity, decision.Leverage)
+	// Open position. Try a post-only maker entry first (earns maker fee); fall back to
+	// a market order when unfilled (if configured) or when maker is disabled/unsupported.
+	var order map[string]interface{}
+	if makerResult, filled, attempted := at.tryMakerEntry(decision.Symbol, "long", quantity, decision.Leverage); attempted {
+		if filled {
+			order = makerResult
+		} else if at.makerEntryShouldFallback() {
+			logger.Infof("  ↩️ Maker entry unfilled for %s LONG, crossing with market order", decision.Symbol)
+			order, err = at.trader.OpenLong(decision.Symbol, quantity, decision.Leverage)
+		} else {
+			return fmt.Errorf("maker entry unfilled for %s long and market fallback disabled", decision.Symbol)
+		}
+	} else {
+		order, err = at.trader.OpenLong(decision.Symbol, quantity, decision.Leverage)
+	}
 	if err != nil {
 		return err
 	}
@@ -259,11 +282,6 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 		return fmt.Errorf("failed to get positions: %w", err)
 	}
 
-	// [CODE ENFORCED] Check max positions limit
-	if err := at.enforceMaxPositions(len(positions)); err != nil {
-		return err
-	}
-
 	// Check if there's already a position in the same symbol and direction
 	for _, pos := range positions {
 		if pos["symbol"] == decision.Symbol && pos["side"] == "short" {
@@ -273,6 +291,15 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 
 	// Get current price
 	marketData, err := at.getExecutionMarketData(decision.Symbol)
+	if err != nil {
+		return err
+	}
+
+	// [CODE ENFORCED] Capacity check with optional strong-signal replacement. When at capacity and
+	// replacement is enabled, this cuts the weakest eligible position to free a slot (after the
+	// entry-price deviation precheck passes), then re-fetches positions and re-enforces the limit.
+	// The cut runs BEFORE the balance fetch below so freed margin is reflected downstream.
+	positions, err = at.enforceCapacityWithReplacement(decision, "short", positions, marketData.CurrentPrice)
 	if err != nil {
 		return err
 	}
@@ -295,6 +322,12 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 		equity = eq
 	} else {
 		equity = availableBalance
+	}
+
+	// [CODE ENFORCED] Volatility-targeted sizing: shrink size on high-ATR symbols before
+	// any downstream caps so all checks see the volatility-adjusted size. No-op when disabled.
+	if adj, mult := at.applyVolatilitySizing(decision.Symbol, decision.PositionSizeUSD, at.extractExecutionATR14(marketData), marketData.CurrentPrice); mult != 1.0 {
+		decision.PositionSizeUSD = adj
 	}
 
 	// [CODE ENFORCED] Position Value Ratio Check: position_value <= equity × ratio
@@ -345,8 +378,21 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 		// Continue execution, doesn't affect trading
 	}
 
-	// Open position
-	order, err := at.trader.OpenShort(decision.Symbol, quantity, decision.Leverage)
+	// Open position. Try a post-only maker entry first (earns maker fee); fall back to
+	// a market order when unfilled (if configured) or when maker is disabled/unsupported.
+	var order map[string]interface{}
+	if makerResult, filled, attempted := at.tryMakerEntry(decision.Symbol, "short", quantity, decision.Leverage); attempted {
+		if filled {
+			order = makerResult
+		} else if at.makerEntryShouldFallback() {
+			logger.Infof("  ↩️ Maker entry unfilled for %s SHORT, crossing with market order", decision.Symbol)
+			order, err = at.trader.OpenShort(decision.Symbol, quantity, decision.Leverage)
+		} else {
+			return fmt.Errorf("maker entry unfilled for %s short and market fallback disabled", decision.Symbol)
+		}
+	} else {
+		order, err = at.trader.OpenShort(decision.Symbol, quantity, decision.Leverage)
+	}
 	if err != nil {
 		return err
 	}

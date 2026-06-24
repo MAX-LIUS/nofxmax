@@ -55,7 +55,7 @@ func (t *BitgetTrader) GetBalance() (map[string]interface{}, error) {
 		"totalWalletBalance":    totalEquity - unrealizedPnL,
 		"availableBalance":      availableBalance,
 		"totalUnrealizedProfit": unrealizedPnL,
-		"total_equity":          totalEquity,
+		"totalEquity":           totalEquity,
 	}
 
 	// Update cache

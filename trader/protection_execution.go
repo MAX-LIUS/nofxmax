@@ -34,7 +34,7 @@ func (at *AutoTrader) applyPostOpenProtection(req *protectionExecutionRequest) e
 		return nil
 	}
 
-	configuredPlan, err := at.BuildConfiguredProtectionPlan(req.EntryPrice, req.Action)
+	configuredPlan, err := at.BuildConfiguredProtectionPlanForSymbol(req.EntryPrice, req.Action, req.Symbol)
 	if err != nil {
 		return err
 	}

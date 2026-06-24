@@ -98,7 +98,7 @@ func (t *LighterTraderV2) GetBalance() (map[string]interface{}, error) {
 		"totalUnrealizedProfit": balance.UnrealizedPnL,   // Unrealized PnL
 		"availableBalance":      balance.AvailableBalance, // Available balance
 		// Keep additional fields for reference
-		"total_equity":       balance.TotalEquity,
+		"totalEquity":           balance.TotalEquity,
 		"margin_used":        balance.MarginUsed,
 		"maintenance_margin": balance.MaintenanceMargin,
 	}, nil

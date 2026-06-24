@@ -50,10 +50,10 @@ func TestConfig_MaxRetries_IsUsed(t *testing.T) {
 	expectedWarningCount := 4 // Warnings will be printed on 2nd, 3rd, 4th, 5th retry
 	actualWarningCount := 0
 	for _, log := range logs {
-		if log.Message == "⚠️  AI API call failed, retrying (2/5)..." ||
-			log.Message == "⚠️  AI API call failed, retrying (3/5)..." ||
-			log.Message == "⚠️  AI API call failed, retrying (4/5)..." ||
-			log.Message == "⚠️  AI API call failed, retrying (5/5)..." {
+		if log.Message == "⚠️ AI API call failed, retrying (2/5)..." ||
+			log.Message == "⚠️ AI API call failed, retrying (3/5)..." ||
+			log.Message == "⚠️ AI API call failed, retrying (4/5)..." ||
+			log.Message == "⚠️ AI API call failed, retrying (5/5)..." {
 			actualWarningCount++
 		}
 	}

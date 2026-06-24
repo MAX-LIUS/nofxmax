@@ -98,6 +98,7 @@ func GetFullDecisionWithStrategy(ctx *Context, mcpClient mcp.AIClient, engine *S
 		riskConfig.AltcoinMaxLeverage,
 		riskConfig.BTCETHMaxPositionValueRatio,
 		riskConfig.AltcoinMaxPositionValueRatio,
+		ctx.Positions,
 	)
 
 	if decision != nil {
@@ -236,7 +237,7 @@ func fetchMarketDataWithStrategy(ctx *Context, engine *StrategyEngine) error {
 // AI Response Parsing
 // ============================================================================
 
-func parseFullDecisionResponse(aiResponse string, accountEquity float64, btcEthLeverage, altcoinLeverage int, btcEthPosRatio, altcoinPosRatio float64) (*FullDecision, error) {
+func parseFullDecisionResponse(aiResponse string, accountEquity float64, btcEthLeverage, altcoinLeverage int, btcEthPosRatio, altcoinPosRatio float64, positions []PositionInfo) (*FullDecision, error) {
 	cotTrace := extractCoTTrace(aiResponse)
 
 	decisions, fallbackReason, err := extractDecisions(aiResponse)
@@ -247,7 +248,7 @@ func parseFullDecisionResponse(aiResponse string, accountEquity float64, btcEthL
 		}, fmt.Errorf("failed to extract decisions: %w", err)
 	}
 
-	normalizeAndRepairOpenDecisions(decisions)
+	normalizeAndRepairDecisions(decisions, positions)
 
 	if err := validateDecisions(decisions, accountEquity, btcEthLeverage, altcoinLeverage, btcEthPosRatio, altcoinPosRatio); err != nil {
 		return &FullDecision{
@@ -1771,11 +1772,34 @@ func ParseAndValidateAIDecisionsWithStrategy(response string, config *store.Stra
 	return decisions, nil
 }
 
-func normalizeAndRepairOpenDecisions(decisions []Decision) {
+func normalizeAndRepairDecisions(decisions []Decision, positions []PositionInfo) {
+	// Build position direction map for close action normalization
+	positionSideMap := make(map[string]string)
+	for _, pos := range positions {
+		positionSideMap[pos.Symbol] = strings.ToLower(pos.Side) // "long" or "short"
+	}
+
 	for i := range decisions {
 		d := &decisions[i]
 		d.Action = strings.ToLower(strings.TrimSpace(d.Action))
 		d.Symbol = strings.ToUpper(strings.TrimSpace(d.Symbol))
+
+		// Normalize invalid "close" action to "close_long" or "close_short" based on held position
+		if d.Action == "close" {
+			if side, exists := positionSideMap[d.Symbol]; exists {
+				if side == "long" {
+					d.Action = "close_long"
+					logger.Infof("🔧 Normalized invalid action 'close' → 'close_long' for %s (held position: LONG)", d.Symbol)
+				} else if side == "short" {
+					d.Action = "close_short"
+					logger.Infof("🔧 Normalized invalid action 'close' → 'close_short' for %s (held position: SHORT)", d.Symbol)
+				}
+			} else {
+				logger.Warnf("⚠️  Invalid action 'close' for %s but no held position found; cannot auto-repair", d.Symbol)
+			}
+		}
+
+		// Continue with existing open decision repair
 		if d.Action != "open_long" && d.Action != "open_short" {
 			continue
 		}
@@ -1790,6 +1814,11 @@ func normalizeAndRepairOpenDecisions(decisions []Decision) {
 			alignLadderPlanToStructure(d.Action, d.EntryProtection, d.ProtectionPlan)
 		}
 	}
+}
+
+// normalizeAndRepairOpenDecisions is a backward-compatible wrapper for contexts where positions are unavailable
+func normalizeAndRepairOpenDecisions(decisions []Decision) {
+	normalizeAndRepairDecisions(decisions, nil)
 }
 
 func normalizeEntryProtectionRationale(ep *AIEntryProtectionRationale) {

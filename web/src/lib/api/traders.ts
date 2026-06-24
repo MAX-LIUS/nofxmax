@@ -44,32 +44,29 @@ export const traderApi = {
     if (!result.success) throw new Error('Failed to stop trader')
   },
 
-  async toggleCompetition(traderId: string, showInCompetition: boolean): Promise<void> {
+  async toggleCompetition(
+    traderId: string,
+    showInCompetition: boolean
+  ): Promise<void> {
     const result = await httpClient.put(
       `${API_BASE}/traders/${traderId}/competition`,
       { show_in_competition: showInCompetition }
     )
-    if (!result.success) throw new Error('Failed to update competition visibility')
+    if (!result.success)
+      throw new Error('Failed to update competition visibility')
   },
 
-  async closePosition(traderId: string, symbol: string, side: string): Promise<{ message: string }> {
+  async closePosition(
+    traderId: string,
+    symbol: string,
+    side: string
+  ): Promise<{ message: string }> {
     const result = await httpClient.post<{ message: string }>(
       `${API_BASE}/traders/${traderId}/close-position`,
       { symbol, side }
     )
     if (!result.success) throw new Error('Failed to close position')
     return result.data!
-  },
-
-  async updateTraderPrompt(
-    traderId: string,
-    customPrompt: string
-  ): Promise<void> {
-    const result = await httpClient.put(
-      `${API_BASE}/traders/${traderId}/prompt`,
-      { custom_prompt: customPrompt }
-    )
-    if (!result.success) throw new Error('Failed to update custom prompt')
   },
 
   async getTraderConfig(traderId: string): Promise<TraderConfigData> {
@@ -101,6 +98,28 @@ export const traderApi = {
       request
     )
     if (!result.success) throw new Error('Failed to update trader')
+    return result.data!
+  },
+
+  async resetEquityCurve(
+    traderId: string
+  ): Promise<{ message: string; deleted_count: number }> {
+    const result = await httpClient.post<{
+      message: string
+      deleted_count: number
+    }>(`${API_BASE}/traders/${traderId}/reset-equity-curve`)
+    if (!result.success) throw new Error('Failed to reset equity curve')
+    return result.data!
+  },
+
+  async resetTotalPnL(
+    traderId: string
+  ): Promise<{ message: string; initial_balance: number }> {
+    const result = await httpClient.post<{
+      message: string
+      initial_balance: number
+    }>(`${API_BASE}/traders/${traderId}/reset-total-pnl`)
+    if (!result.success) throw new Error('Failed to reset total PnL')
     return result.data!
   },
 }

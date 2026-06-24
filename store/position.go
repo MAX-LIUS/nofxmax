@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"nofx/logger"
+
 	"gorm.io/gorm"
 )
 
@@ -247,6 +249,16 @@ func (s *PositionStore) logCloseEvent(pos *TraderPosition, closeReason, executio
 	if s.db == nil || pos == nil || closeQty <= 0 {
 		return nil
 	}
+	// Canonical attribution: prefer the most specific reason available. closeReason
+	// carries the resolved mechanism (e.g. managed_drawdown_runner_exit); fall back
+	// to executionSource when closeReason is a bare action.
+	attrInput := closeReason
+	if ClassifyClose(attrInput).Mechanism == MechSyncExternal && executionSource != "" {
+		if alt := ClassifyClose(executionSource); alt.Mechanism != MechSyncExternal && alt.Mechanism != MechUnknownClose {
+			attrInput = executionSource
+		}
+	}
+	attr := ClassifyClose(attrInput)
 	closeRatioPct := 0.0
 	baseQty := pos.EntryQuantity
 	if baseQty <= 0 {
@@ -279,6 +291,8 @@ func (s *PositionStore) logCloseEvent(pos *TraderPosition, closeReason, executio
 		CloseReason:      closeReason,
 		ExecutionSource:  executionSource,
 		ExecutionType:    executionType,
+		Category:         attr.Category,
+		Mechanism:        attr.Mechanism,
 		DecisionCycle:    decisionCycle,
 		ExchangeOrderID:  exchangeOrderID,
 		ParentOrderID:    parentOrderID,
@@ -840,6 +854,14 @@ func (s *PositionStore) ApplyLateCloseFillToClosedPosition(id int64, closeQty fl
 		"exit_price":   newExitPrice,
 		"updated_at":   nowMs,
 	}
+	// Attribution fix: when the original row reason is generic/sync, upgrade it to
+	// the specific protection reason derived from the late fill's order tag.
+	if reason != "" && reason != "unknown" && reason != "close_long" && reason != "close_short" {
+		switch pos.CloseReason {
+		case "", "unknown", "close_long", "close_short", "sync_absent_from_exchange", "sync_external":
+			updates["close_reason"] = reason
+		}
+	}
 	if pos.ExitTime == 0 || eventTimeMs > pos.ExitTime {
 		updates["exit_time"] = eventTimeMs
 	}
@@ -924,6 +946,23 @@ func (s *PositionStore) CreateOpenPosition(pos *TraderPosition) error {
 		}
 	}
 
+	// Net-position guard (fix 2026-06-22): the exchange runs one-way (net) mode, so
+	// there must be at most ONE OPEN row per (trader, symbol, side). A sync race can
+	// reach here with a fresh exchange_position_id even though an OPEN net row already
+	// exists (e.g. the prior row was briefly marked sync-absent). Creating a second row
+	// makes GetOpenPositionBySymbol return only the newest leg, which mis-sizes ladder
+	// protection and makes the reconciler churn forever. Merge into the existing net
+	// row instead of inserting a duplicate.
+	if pos.TraderID != "" && pos.Symbol != "" && pos.Side != "" && pos.Quantity > 0 {
+		netPos, err := s.GetOpenPositionBySymbol(pos.TraderID, pos.Symbol, pos.Side)
+		if err != nil {
+			return err
+		}
+		if netPos != nil {
+			return s.UpdatePositionQuantityAndPrice(netPos.ID, pos.Quantity, pos.EntryPrice, pos.Fee)
+		}
+	}
+
 	if pos.Status == "" {
 		pos.Status = "OPEN"
 	}
@@ -978,15 +1017,33 @@ func (s *PositionStore) MarkOpenPositionsAbsentFromExchangeClosed(traderID strin
 	if err != nil {
 		return 0, err
 	}
-	nowMs := time.Now().UTC().UnixMilli()
-	var updated int64
+
+	// Determine which local OPEN positions are absent from the exchange snapshot.
+	absent := make([]*TraderPosition, 0, len(openPositions))
 	for _, pos := range openPositions {
 		key := positionPresenceKey(pos.Symbol, pos.Side)
 		liveQty, ok := livePositions[key]
 		if ok && quantitiesEquivalent(pos.Quantity, liveQty) {
 			continue
 		}
+		absent = append(absent, pos)
+	}
 
+	// Empty/incomplete-snapshot guard (fix 2026-06-24 mass false-close): a single
+	// transient exchange fetch that returns zero (or a severely incomplete) position
+	// set must not wipe every local OPEN row. When 2+ positions would all be closed
+	// in one pass AND that accounts for every local open position, treat the snapshot
+	// as untrustworthy (API hiccup) and skip — a genuine simultaneous close of every
+	// position is far rarer than a flaky poll. A single absent position is still
+	// reconciled, since closing the last position legitimately empties the snapshot.
+	if len(absent) >= 2 && len(absent) == len(openPositions) {
+		logger.Warnf("🛑 Position sync guard: exchange snapshot missing ALL %d open positions for trader %s; treating as transient fetch failure and skipping mass close", len(openPositions), traderID)
+		return 0, nil
+	}
+
+	nowMs := time.Now().UTC().UnixMilli()
+	var updated int64
+	for _, pos := range absent {
 		exitPrice := pos.EntryPrice
 		realizedPnl := pos.RealizedPnL
 		totalFee := pos.Fee
@@ -998,6 +1055,18 @@ func (s *PositionStore) MarkOpenPositionsAbsentFromExchangeClosed(traderID strin
 			totalFee = pos.Fee + compFee
 		}
 
+		// Attribution fix: if a linked closing order exists, derive the real close
+		// reason from its protection tag instead of the generic sync_absent label.
+		// This recovers protection attribution (SL/TP/BE/trailing) for positions the
+		// exchange closed via a resting order that our next poll detected as absent.
+		rowCloseReason := closeReason
+		if closeOrderID := s.dominantCloseOrderID(pos); closeOrderID != "" {
+			if derived, _, _ := s.deriveCloseReason(pos, closeOrderID, "", pos.Quantity, exitPrice); derived != "" &&
+				derived != "close_long" && derived != "close_short" && derived != "unknown" {
+				rowCloseReason = derived
+			}
+		}
+
 		res := s.db.Model(&TraderPosition{}).Where("id = ? AND status = ?", pos.ID, "OPEN").Updates(map[string]interface{}{
 			"quantity":     0,
 			"exit_price":   exitPrice,
@@ -1005,7 +1074,7 @@ func (s *PositionStore) MarkOpenPositionsAbsentFromExchangeClosed(traderID strin
 			"realized_pnl": realizedPnl,
 			"fee":          totalFee,
 			"status":       "CLOSED",
-			"close_reason": closeReason,
+			"close_reason": rowCloseReason,
 			"updated_at":   nowMs,
 		})
 		if res.Error != nil {
@@ -1080,6 +1149,41 @@ func (s *PositionStore) computePnlFromFills(pos *TraderPosition) (float64, float
 	}
 
 	return pnl, totalCloseFee, avgExit, true
+}
+
+// dominantCloseOrderID returns the exchange_order_id of the closing order that
+// filled the largest quantity for this position. Used to attribute a real close
+// reason (protection tag) when a position is detected absent via exchange sync.
+// Returns "" if no linked closing order is found.
+func (s *PositionStore) dominantCloseOrderID(pos *TraderPosition) string {
+	if pos == nil || pos.ID == 0 {
+		return ""
+	}
+	closeSide := "SELL"
+	if strings.EqualFold(pos.Side, "SHORT") {
+		closeSide = "BUY"
+	}
+	var orders []TraderOrder
+	err := s.db.Where("related_position_id = ? AND side = ? AND status = ? AND filled_quantity > 0",
+		pos.ID, closeSide, "FILLED").Find(&orders).Error
+	if err != nil || len(orders) == 0 {
+		windowStart := pos.EntryTime
+		err = s.db.Where("trader_id = ? AND symbol = ? AND side = ? AND status = ? AND filled_quantity > 0 AND created_at > ?",
+			pos.TraderID, pos.Symbol, closeSide, "FILLED", windowStart).
+			Order("created_at ASC").Find(&orders).Error
+		if err != nil || len(orders) == 0 {
+			return ""
+		}
+	}
+	bestID := ""
+	bestQty := 0.0
+	for _, o := range orders {
+		if o.FilledQuantity > bestQty && o.ExchangeOrderID != "" {
+			bestQty = o.FilledQuantity
+			bestID = o.ExchangeOrderID
+		}
+	}
+	return bestID
 }
 
 func positionPresenceKey(symbol, side string) string {

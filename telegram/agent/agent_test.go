@@ -23,6 +23,8 @@ type mockLLM struct {
 func (m *mockLLM) SetAPIKey(_, _, _ string)   {}
 func (m *mockLLM) SetTimeout(_ time.Duration) {}
 
+func (m *mockLLM) SetFallbackEndpoints(_ []mcp.FallbackEndpoint) {}
+
 func (m *mockLLM) CallWithMessages(_, _ string) (string, error) { return "", nil }
 
 func (m *mockLLM) CallWithRequest(req *mcp.Request) (string, error) {

@@ -124,10 +124,12 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 	}
 
 	// Use totalEquity directly if provided by trader (more accurate)
+	// This is already the total account value (wallet + unrealized PnL)
 	if eq, ok := balance["totalEquity"].(float64); ok && eq > 0 {
 		totalEquity = eq
 	} else {
 		// Fallback: Total Equity = Wallet balance + Unrealized profit
+		// This works for exchanges like Binance where totalWalletBalance excludes unrealized PnL
 		totalEquity = totalWalletBalance + totalUnrealizedProfit
 	}
 
@@ -164,12 +166,26 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 			totalUnrealizedProfit, totalUnrealizedPnLCalculated, diff)
 	}
 
-	totalPnL := totalEquity - at.initialBalance
+	// Calculate total PnL excluding fund transfers (deposits/withdrawals)
+	// Total PnL = current equity - (initial balance + total adjustments)
+	totalAdjustments := 0.0
+	if at.store != nil {
+		adjustments, err := at.store.EquityAdjustment().GetTotalAdjustments(at.id)
+		if err != nil {
+			logger.Infof("⚠️ Failed to get equity adjustments, assuming 0: %v", err)
+		} else {
+			totalAdjustments = adjustments
+		}
+	}
+
+	adjustedInitialBalance := at.initialBalance + totalAdjustments
+	totalPnL := totalEquity - adjustedInitialBalance
 	totalPnLPct := 0.0
-	if at.initialBalance > 0 {
-		totalPnLPct = (totalPnL / at.initialBalance) * 100
+	if adjustedInitialBalance > 0 {
+		totalPnLPct = (totalPnL / adjustedInitialBalance) * 100
 	} else {
-		logger.Infof("⚠️ Initial Balance abnormal: %.2f, cannot calculate P&L percentage", at.initialBalance)
+		logger.Infof("⚠️ Adjusted initial balance abnormal: %.2f (initial=%.2f, adjustments=%.2f), cannot calculate P&L percentage",
+			adjustedInitialBalance, at.initialBalance, totalAdjustments)
 	}
 
 	marginUsedPct := 0.0
@@ -236,9 +252,15 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 		entryQuantity := quantity
 		var entryReviewSummary map[string]interface{}
 		var entryStructureAudit map[string]interface{}
+		var entryTimeMs int64
+		var realizedPnl float64
+		var accumulatedFee float64
 		if at.store != nil {
 			if openPos, err := at.store.Position().GetOpenPositionBySymbol(at.id, symbol, positionSideUpper); err == nil && openPos != nil {
 				entryDecisionCycle = openPos.EntryDecisionCycle
+				entryTimeMs = openPos.EntryTime
+				realizedPnl = openPos.RealizedPnL
+				accumulatedFee = openPos.Fee
 				if openPos.EntryQuantity > 0 {
 					entryQuantity = openPos.EntryQuantity
 				}
@@ -272,6 +294,18 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 			}
 		}
 
+		// Fallback: when the local DB has no matching OPEN row (e.g. exchange/local
+		// sync drift, manual position, or a row not yet persisted), use the open
+		// time reported by the exchange adapter so the UI still shows hold time.
+		// OKX/Bybit expose "createdTime" (ms); Binance omits it (stays 0).
+		if entryTimeMs == 0 {
+			if ct, ok := pos["createdTime"].(int64); ok && ct > 0 {
+				entryTimeMs = ct
+			} else if ctf, ok := pos["createdTime"].(float64); ok && ctf > 0 {
+				entryTimeMs = int64(ctf)
+			}
+		}
+
 		result = append(result, map[string]interface{}{
 			"symbol":                    symbol,
 			"side":                      side,
@@ -293,6 +327,13 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 			"entry_decision_cycle":      entryDecisionCycle,
 			"entry_review_summary":      entryReviewSummary,
 			"entry_structure_audit":     entryStructureAudit,
+			"entry_time":                entryTimeMs,
+			"realized_pnl":              realizedPnl,
+			"fee":                       accumulatedFee,
+			// net_pnl = accumulated realized (gross) + current unrealized (gross) - total fees.
+			// This is the true overall result of the position including partially-closed
+			// portions and all fees, which the exchange's unrealized_pnl alone omits.
+			"net_pnl": realizedPnl + unrealizedPnl - accumulatedFee,
 		})
 	}
 
@@ -433,6 +474,13 @@ func (at *AutoTrader) recordPositionChange(orderID, symbol, side, action string,
 	case "open_long", "open_short":
 		// Open position: create new position record
 		nowMs := time.Now().UTC().UnixMilli()
+		// Entry source attribution: breakout strategy vs normal AI decision. Both
+		// are model/strategy initiated; the sync path uses "sync" for exchange-side
+		// discoveries. ClassifyOpen maps these to canonical category/mechanism.
+		entrySource := "ai_open"
+		if at.lastTriggerTypes != nil && strings.Contains(strings.ToLower(at.lastTriggerTypes[symbol]), "breakout") {
+			entrySource = "breakout"
+		}
 		pos := &store.TraderPosition{
 			TraderID:           at.id,
 			ExchangeID:         at.exchangeID, // Exchange account UUID
@@ -446,6 +494,7 @@ func (at *AutoTrader) recordPositionChange(orderID, symbol, side, action string,
 			EntryTime:          nowMs,
 			Leverage:           leverage,
 			Status:             "OPEN",
+			Source:             entrySource,
 			EntrySceneTags:     at.buildEntrySceneTags(symbol),
 			CreatedAt:          nowMs,
 			UpdatedAt:          nowMs,

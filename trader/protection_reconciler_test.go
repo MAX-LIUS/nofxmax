@@ -279,6 +279,17 @@ func TestIsExecutableHeldTakeProfitPrice(t *testing.T) {
 }
 
 func TestProtectionReconciler_DoesNotReapplyBreakEvenWhenAlreadyArmedAndFingerprintStable(t *testing.T) {
+	// The reconcile cooldown map is a package global; clear this test's key so it
+	// neither inherits nor is blocked by cooldown state left by other tests.
+	reconcileCooldownMutex.Lock()
+	delete(reconcileCooldowns, "BTCUSDT_long")
+	reconcileCooldownMutex.Unlock()
+	defer func() {
+		reconcileCooldownMutex.Lock()
+		delete(reconcileCooldowns, "BTCUSDT_long")
+		reconcileCooldownMutex.Unlock()
+	}()
+
 	ft := &fakeReconcileTrader{
 		fakeOrderProtectionTrader: fakeOrderProtectionTrader{
 			openOrders: []tradertypes.OpenOrder{},
