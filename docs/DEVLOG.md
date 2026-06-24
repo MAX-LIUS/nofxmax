@@ -57,4 +57,11 @@
   - **修复**：新增 `restoreEntryCooldownsFromStore`，启动时从 DB 最近平仓记录重算 `until = exitTime + duration×连亏倍数`，仍在未来的重新武装；数据全来自 DB（`GetRecentTrades/GetConsecutiveLossCount/ExitTime`），无需新表。加 `RestoreCooldown` 原语 + 2 单测。每币种只看最新一笔，最新盈利即视为冷却已过期。
   - **确认非真实风控不动**：`stopUntil`（从不赋未来值）、`dailyPnL`（非 grid 路径只重置为 0）是惰性死字段。
   - **验证**：`go build ./...` ✅、`go test ./store/ ./trader/` ✅（含新 `RestoreCooldown` 测试）。
+- 2026-06-24（续3）：保护系统对利润影响的系统回测——回吐控制负面影响 + DD/BE/TP 拆解 + 趋势自适应平仓 + %vs ATR。
+  - **新增 gbsim 三模式**（commit 已落）：`-liveconfig`（线上配置 PnL 代价拆解）、`-adaptive`（ADX 门控趋势自适应平仓，trend×chop 双向）、`-ablation`（DD/BE/TP/SL 逐层敲除）、`-unitcompare`（%固定 vs ATR）。backtest 包新增 `ablation.go/unit_compare.go/analysis_entry.go`。
+  - **回吐控制(GivebackGuard)负面影响**：机械趋势 regime 损利明显——robust-EMA baseline≈1800、flat 守卫≈1096（损 ~39%）；breakout 损 7%。真实 AI 交易员(claude 185笔 48→74、GPT 203笔 +8.7%)上守卫反而净增利。负面影响与"标的趋势延续强度"正相关。
+  - **趋势自适应平仓**：方向验证为"让趋势跑"——强趋势(ADX≥thr)少砍(cT25)、震荡多砍(cC70)最优。robust-EMA 同 run 内 flat 1096→自适应 best 1252(+14%)、MaxDD 仅 +3%。但真实 claude 上 flat(74) > 自适应 best(64)。结论：自适应只在机械趋势有用,线上 AI 不开。
+  - **DD/BE/TP 拆解**(真实 claude 187笔, guard off): FULL=15.32; -DD ΔPnL≈0(几乎惰性); -BE +7.58; -TP +14.04; SL-only=46.72(+31)。即在真实 AI 单上,TP 阶梯/BE 对利润是净抑制,DD 近乎无效;SL 是唯一关键护栏。GPT 同向:-TP +3.73、SL-only PnL 翻倍。
+  - **%固定 vs ATR**(真实 claude 187笔): %=15.32 / ATR-tight=41.43(DD 还从 62→42) / ATR-wide=47.50。ATR 全面碾压百分比。GPT 上两者接近(ATR-mid/wide 略好)。结论:ATR 模式在真实 AI 单上利润显著更优,尤其 claude。
+  - **验证**：`go build ./...` ✅、`go test ./trader/backtest/` ✅。所有结论为回测证据,未改任何线上参数(需用户确认)。
 
