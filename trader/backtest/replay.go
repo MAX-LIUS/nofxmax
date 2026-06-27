@@ -43,8 +43,28 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 	}
 
 	// Resolve protective price levels (percent-of-entry distances).
-	slDist := p.slDistancePct(e.EntryPrice, atr)
-	slPrice := priceAtDistance(e.EntryPrice, slDist, isLong, false /*adverse*/)
+	// Structural mode reads absolute SL/TP prices from the per-entry plan;
+	// percent/ATR modes derive distances uniformly.
+	var slPrice float64
+	if p.Unit == UnitStructural {
+		if p.StructUseATRSL && p.StopLossATR > 0 && atr > 0 {
+			// Hybrid: ATR-wide SL, structural TP (set below).
+			slDist := p.StopLossATR * atr / e.EntryPrice * 100
+			slPrice = priceAtDistance(e.EntryPrice, slDist, isLong, false /*adverse*/)
+		} else {
+			sl, ok := resolveStructuralSLPrice(p, e, atr)
+			if !ok {
+				// No usable structural stop — fall back to a wide percent stop so the
+				// trade still replays (marked via a sentinel distance).
+				slPrice = priceAtDistance(e.EntryPrice, 8.0, isLong, false /*adverse*/)
+			} else {
+				slPrice = sl
+			}
+		}
+	} else {
+		slDist := p.slDistancePct(e.EntryPrice, atr)
+		slPrice = priceAtDistance(e.EntryPrice, slDist, isLong, false /*adverse*/)
+	}
 
 	type tpLevel struct {
 		price float64
@@ -52,12 +72,21 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 		fired bool
 	}
 	tps := make([]tpLevel, 0, len(p.TPLegs))
-	for _, leg := range p.TPLegs {
-		d := legDistancePct(leg, p.Unit, e.EntryPrice, atr)
-		tps = append(tps, tpLevel{
-			price: priceAtDistance(e.EntryPrice, d, isLong, true /*favorable*/),
-			frac:  leg.CloseRatioPct / 100.0,
-		})
+	if p.Unit == UnitStructural && e.Structural != nil && len(e.Structural.TPLegs) > 0 {
+		for _, leg := range e.Structural.TPLegs {
+			if leg.Price <= 0 {
+				continue
+			}
+			tps = append(tps, tpLevel{price: leg.Price, frac: leg.CloseRatioPct / 100.0})
+		}
+	} else {
+		for _, leg := range p.TPLegs {
+			d := legDistancePct(leg, p.Unit, e.EntryPrice, atr)
+			tps = append(tps, tpLevel{
+				price: priceAtDistance(e.EntryPrice, d, isLong, true /*favorable*/),
+				frac:  leg.CloseRatioPct / 100.0,
+			})
+		}
 	}
 
 	remaining := 1.0

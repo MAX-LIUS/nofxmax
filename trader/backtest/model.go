@@ -25,9 +25,30 @@ func ClaudeBaselineParams() ProtectionParams {
 type ValueUnit string
 
 const (
-	UnitPercent ValueUnit = "percent"      // fixed % of entry price (Claude baseline)
-	UnitATRMult ValueUnit = "atr_multiple" // multiple of ATR (Claude-R)
+	UnitPercent    ValueUnit = "percent"      // fixed % of entry price (Claude baseline)
+	UnitATRMult    ValueUnit = "atr_multiple" // multiple of ATR (Claude-R)
+	UnitStructural ValueUnit = "structural"   // per-entry AI structural levels (support/resistance/Fib)
 )
+
+// StructuralTPLeg is one tier of an AI structural take-profit ladder, expressed
+// as an absolute price (the structural target) plus the close ratio.
+type StructuralTPLeg struct {
+	Price         float64
+	CloseRatioPct float64
+}
+
+// StructuralPlan holds the AI-computed structural protection levels for one
+// entry, extracted from the decision record's protection_plan. All prices are
+// absolute. Two stop variants are supported:
+//   - SLPrice: the AI's stop price with its OWN volatility buffer baked in
+//     (Variant A — "AI 自带缓冲").
+//   - SLAnchor: the bare structural level (no buffer), used to re-derive the
+//     stop as anchor ± k×ATR during the config-buffer sweep (Variant B).
+type StructuralPlan struct {
+	SLPrice  float64           // AI structural stop (buffer included) — Variant A
+	SLAnchor float64           // bare structural level (no buffer)     — Variant B base
+	TPLegs   []StructuralTPLeg // AI structural TP ladder (absolute prices)
+}
 
 // LadderLeg is one tier of the ladder TP/SL.
 type LadderLeg struct {
@@ -68,6 +89,21 @@ type ProtectionParams struct {
 
 	// Drawdown tiers
 	DDRules []DDRule
+
+	// Structural mode (UnitStructural): per-entry SL/TP come from Entry.Structural.
+	// StructBufferATR, when > 0, re-derives the stop from the bare structural
+	// anchor as anchor ± StructBufferATR×ATR (Variant B). When 0, the AI's own
+	// buffered SLPrice is used as-is (Variant A).
+	StructBufferATR float64
+	// StructMinSLPct / StructMaxSLPct clamp the structural stop distance (percent
+	// of entry) to guard against degenerate AI levels (0 = no clamp).
+	StructMinSLPct float64
+	StructMaxSLPct float64
+	// StructUseATRSL, when true in structural mode, overrides the structural SL
+	// with an ATR-wide stop (StopLossATR×ATR) while KEEPING the structural TP
+	// ladder. This is the "structural TP + wide ATR SL" hybrid: capture profit at
+	// AI structural targets, but stop wide enough to avoid wick-outs.
+	StructUseATRSL bool
 }
 
 // Entry is one historical trade entry to replay protection over.
@@ -81,6 +117,9 @@ type Entry struct {
 	// RealizedPnL is Claude's actual realized P&L for this trade, used for
 	// engine-fidelity validation (percent baseline should approximate it).
 	RealizedPnL float64
+	// Structural carries the AI's per-entry structural SL/TP, populated only for
+	// entries loaded with structural plans (UnitStructural mode). Nil otherwise.
+	Structural *StructuralPlan
 }
 
 // TradeResult is the outcome of replaying one entry under a ProtectionParams.

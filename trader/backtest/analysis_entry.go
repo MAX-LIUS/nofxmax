@@ -96,3 +96,20 @@ func OptimizeHoldoutFromEntries(entries []Entry, tf string, lambda, trainFrac fl
 	}
 	return OptimizeHoldout(loaded, lambda, trainFrac), len(loaded), skipped
 }
+
+// CompareStructuralFromEntries fetches bars per entry, then compares percent/ATR
+// vs AI structural protection (Variant A), a config-buffer sweep (Variant B), and
+// structural-TP+ATR-SL hybrids on the structurally-matched subset. The BE/DD base
+// is held constant (Claude baseline) so only SL/TP placement differs. testTailFrac
+// in (0,1) restricts scoring to the most recent fraction (out-of-sample tail).
+// Returns (rows, usedMatched, skipped).
+func CompareStructuralFromEntries(entries []Entry, tf string, bufferSweep []float64, testTailFrac float64) ([]StructCompareRow, int, int) {
+	loaded, skipped := PrepareEntries(entries, tf, OKXBars)
+	if len(loaded) == 0 {
+		return nil, 0, skipped
+	}
+	base := ClaudeBaselineParams() // supplies BE/DD tiers, held constant
+	rows, used := CompareStructural(loaded, base, bufferSweep, testTailFrac)
+	return rows, used, skipped
+}
+
