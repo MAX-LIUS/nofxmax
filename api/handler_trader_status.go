@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"nofx/logger"
+	"nofx/market"
 	"nofx/store"
 	"nofx/trader"
 	"nofx/trader/aster"
@@ -347,6 +348,14 @@ func (s *Server) handleClosePosition(c *gin.Context) {
 	} else if closeReason != "" && exitOrderID != "" {
 		_ = s.store.Position().UpdateCloseReasonByExitOrderID(traderID, exitOrderID, closeReason)
 		_ = s.store.PositionClose().UpdateReasonByOrderID(traderID, exitOrderID, closeReason, closeReason)
+		// Durable intent so the async fill-sync attributes this dashboard close as a
+		// manual close even if it authors the event later (race-proof, consistent
+		// with the system-initiated close paths).
+		if s.store.CloseIntent() != nil {
+			if err := s.store.CloseIntent().Record(traderID, exchangeCfg.ID, market.Normalize(req.Symbol), req.Side, closeReason, posQty, 0, exitOrderID); err != nil {
+				logger.Infof("⚠️ Failed to record manual close intent: %v", err)
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -403,7 +412,7 @@ func (s *Server) recordManualClosePosition(traderID, exchangeID, exchangeType, s
 		Side:            getSideFromAction(closeAction),
 		PositionSide:    positionSide,
 		Type:            "MARKET",
-		OrderAction:     closeAction,
+		OrderAction:     closeReason,
 		Quantity:        quantity,
 		Price:           price,
 		Status:          "FILLED",

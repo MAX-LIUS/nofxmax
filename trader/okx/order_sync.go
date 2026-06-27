@@ -491,6 +491,22 @@ func (t *OKXTrader) SyncOrdersFromOKXWithFullCloseHandler(traderID string, excha
 					}
 				}
 			}
+			// Deterministic system-close attribution: a system-initiated market close
+			// (AI exit, breadth breaker, managed drawdown, time stop, trailing TP,
+			// manual, replacement) records a CloseIntent keyed by the close order id.
+			// The resulting fill carries that same order id, so this match is exact.
+			// Runs before price-match because it is system intent, not an exchange
+			// resting order. Only applies while still unresolved.
+			if requestedReason == canonicalAction && parentOrderID != "" {
+				if ci := st.CloseIntent(); ci != nil {
+					if intent, ierr := ci.MatchByOrderIDAndConsume(ownerTraderID, parentOrderID); ierr == nil && intent != nil && intent.Reason != "" {
+						requestedReason = intent.Reason
+						logger.Infof("  🎯 Close fill %s %s attributed to reason=%s via close-intent (order-id exact, intentID=%d)", symbol, canonicalAction, requestedReason, intent.ID)
+					} else if ierr != nil {
+						logger.Infof("  ⚠️ close-intent order-id match failed for %s: %v", symbol, ierr)
+					}
+				}
+			}
 			// Fallback: tag and algoId both unresolved. Attribute the fill to the
 			// live protection order whose trigger price is closest to the fill
 			// price. Purely additive; only applies when still unresolved.
@@ -510,6 +526,17 @@ func (t *OKXTrader) SyncOrdersFromOKXWithFullCloseHandler(traderID string, excha
 					if matched := matchProtectionReasonByPrice(trade.FillPrice, cands, 0.6); matched != "" {
 						requestedReason = matched
 						logger.Infof("  🔖 Close fill %s %s attributed to protection reason=%s by price match (fill=%.6f)", symbol, canonicalAction, matched, trade.FillPrice)
+					}
+				}
+			}
+			// Last-resort fallback: a system close whose order id was not recorded on
+			// the intent (e.g. order result lacked orderId). Match the newest
+			// unconsumed intent for trader+symbol+side within a tight time window.
+			if requestedReason == canonicalAction {
+				if ci := st.CloseIntent(); ci != nil {
+					if intent, ierr := ci.MatchByWindowAndConsume(ownerTraderID, symbol, positionSide, execTimeMs, 5*60*1000); ierr == nil && intent != nil && intent.Reason != "" {
+						requestedReason = intent.Reason
+						logger.Infof("  🎯 Close fill %s %s attributed to reason=%s via close-intent (time-window, intentID=%d)", symbol, canonicalAction, requestedReason, intent.ID)
 					}
 				}
 			}

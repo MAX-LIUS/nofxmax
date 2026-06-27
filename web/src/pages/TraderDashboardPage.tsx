@@ -10,6 +10,7 @@ import { DecisionCard } from '../components/trader/DecisionCard'
 import { PositionProtectionPanel } from '../components/trader/PositionProtectionPanel'
 import { ExpectancyPanel } from '../components/trader/ExpectancyPanel'
 import { CloseAttributionPanel } from '../components/trader/CloseAttributionPanel'
+import { FlipObservationsPanel } from '../components/trader/FlipObservationsPanel'
 import { EvolutionProfilePanel } from '../components/trader/EvolutionProfilePanel'
 import { InsightPanel } from '../components/trader/InsightPanel'
 const PositionHistory = lazy(() =>
@@ -1351,6 +1352,12 @@ export function TraderDashboardPage({
 
             {/* Close attribution: every exit traced to AI/protection/manual/exchange */}
             <CloseAttributionPanel
+              traderId={selectedTraderId}
+              language={language}
+            />
+
+            {/* Trend-reversal flip observations (dry-run + live) */}
+            <FlipObservationsPanel
               traderId={selectedTraderId}
               language={language}
             />

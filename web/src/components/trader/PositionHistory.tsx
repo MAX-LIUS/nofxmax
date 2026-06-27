@@ -1833,156 +1833,180 @@ function PositionRow({
                   }
                 })()}
 
-              {position.close_events && position.close_events.length > 0 && (
-                <div>
-                  <div className="text-xs mb-2" style={{ color: '#848E9C' }}>
-                    {'分段平仓事件 / Close Event Flow'}
-                  </div>
-                  <div className="space-y-2">
-                    {position.close_events.map((event) => {
-                      const eventPresentation = summarizeCloseSource(
-                        event.execution_source,
-                        event.close_reason,
-                        event.execution_type,
-                        Boolean(event.decision_cycle),
-                        Boolean(event.decision_review?.review_context)
-                      )
-                      return (
-                        <div
-                          key={event.id}
-                          className="rounded-lg border border-white/10 bg-white/5 p-3 grid grid-cols-1 md:grid-cols-6 gap-3 text-xs"
+              {position.close_events &&
+                position.close_events.length > 0 &&
+                (() => {
+                  const events = position.close_events
+                  return (
+                    <div>
+                      <div
+                        className="text-xs mb-2"
+                        style={{ color: '#848E9C' }}
+                      >
+                        分段平仓事件 / Close Event Flow ({events.length})
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table
+                          className="w-full text-xs"
+                          style={{
+                            borderCollapse: 'separate',
+                            borderSpacing: 0,
+                          }}
                         >
-                          <div>
-                            <div style={{ color: '#848E9C' }}>
-                              {'原因 / Reason'}
-                            </div>
-                            <div
-                              className="px-2 py-1 rounded text-[11px] font-semibold inline-flex"
-                              style={getCloseSourceBadgeStyle(
-                                eventPresentation
-                              )}
-                            >
-                              {eventPresentation.label}
-                            </div>
-                            <div
-                              className="mt-1 text-[11px]"
-                              style={{ color: '#848E9C' }}
-                            >
-                              {`raw=${event.execution_source || event.close_reason || 'unknown'} | confidence=${eventPresentation.confidence}`}
-                            </div>
-                            {event.protection_status ? (
-                              <div className="mt-2">
-                                <span
-                                  className="px-2 py-1 rounded text-[11px] font-medium"
+                          <thead>
+                            <tr style={{ borderBottom: '1px solid #2B3139' }}>
+                              <th
+                                className="text-left py-2 px-3"
+                                style={{ color: '#848E9C', fontWeight: 500 }}
+                              >
+                                时间
+                              </th>
+                              <th
+                                className="text-left py-2 px-3"
+                                style={{ color: '#848E9C', fontWeight: 500 }}
+                              >
+                                数量/比例
+                              </th>
+                              <th
+                                className="text-left py-2 px-3"
+                                style={{ color: '#848E9C', fontWeight: 500 }}
+                              >
+                                价格
+                              </th>
+                              <th
+                                className="text-left py-2 px-3"
+                                style={{ color: '#848E9C', fontWeight: 500 }}
+                              >
+                                原因/归因
+                              </th>
+                              <th
+                                className="text-right py-2 px-3"
+                                style={{ color: '#848E9C', fontWeight: 500 }}
+                              >
+                                PnL
+                              </th>
+                              <th
+                                className="text-right py-2 px-3"
+                                style={{ color: '#848E9C', fontWeight: 500 }}
+                              >
+                                决策
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {events.map((event, idx) => {
+                              const eventPresentation = summarizeCloseSource(
+                                event.execution_source,
+                                event.close_reason,
+                                event.execution_type,
+                                Boolean(event.decision_cycle),
+                                Boolean(event.decision_review?.review_context)
+                              )
+                              const pnl = event.realized_pnl_delta || 0
+                              const pnlColor = pnl >= 0 ? '#0ECB81' : '#F6465D'
+                              return (
+                                <tr
+                                  key={`${event.parent_order_id}-${event.event_time}-${idx}`}
+                                  className="hover:bg-white/5 transition-colors"
                                   style={{
-                                    background: 'rgba(255,255,255,0.06)',
-                                    color: '#C9D1D9',
-                                    border: '1px solid rgba(255,255,255,0.08)',
+                                    borderBottom:
+                                      idx < events.length - 1
+                                        ? '1px solid #2B313922'
+                                        : 'none',
                                   }}
                                 >
-                                  {`Protection: ${event.protection_status}`}
-                                </span>
-                              </div>
-                            ) : null}
-                          </div>
-                          <div>
-                            <div style={{ color: '#848E9C' }}>
-                              {'类型 / Type'}
-                            </div>
-                            <div
-                              className="font-mono"
-                              style={{ color: '#EAECEF' }}
-                            >
-                              {event.execution_type || 'unknown'}
-                            </div>
-                            <div
-                              className="mt-1 text-[11px] font-mono"
-                              style={{ color: '#848E9C' }}
-                            >
-                              {`trade=${event.exchange_order_id || '—'}`}
-                            </div>
-                            <div
-                              className="mt-1 text-[11px] font-mono"
-                              style={{ color: '#848E9C' }}
-                            >
-                              {`parent=${event.parent_order_id || '—'}`}
-                            </div>
-                          </div>
-                          <div>
-                            <div style={{ color: '#848E9C' }}>
-                              {'数量 / Ratio'}
-                            </div>
-                            <div
-                              className="font-mono"
-                              style={{ color: '#EAECEF' }}
-                            >{`${formatQuantity(event.close_quantity)} / ${event.close_ratio_pct.toFixed(2)}%`}</div>
-                          </div>
-                          <div>
-                            <div style={{ color: '#848E9C' }}>
-                              {'价格 / Value'}
-                            </div>
-                            <div
-                              className="font-mono"
-                              style={{ color: '#EAECEF' }}
-                            >{`${formatPrice(event.execution_price)} / ${formatNumber(event.close_value_usdt)}`}</div>
-                          </div>
-                          <div>
-                            <div style={{ color: '#848E9C' }}>
-                              {'决策周期 / Cycle'}
-                            </div>
-                            <div
-                              className="font-mono"
-                              style={{ color: '#EAECEF' }}
-                            >
-                              {event.decision_cycle || '—'}
-                            </div>
-                          </div>
-                          <div>
-                            <div style={{ color: '#848E9C' }}>
-                              {'复盘上下文 / Review'}
-                            </div>
-                            <div
-                              className="text-[11px] leading-5"
-                              style={{ color: '#EAECEF' }}
-                            >
-                              {formatReviewContextSummary(
-                                event.decision_review?.review_context
-                              )}
-                            </div>
-                            <div className="mt-2 flex flex-wrap gap-1.5">
-                              {formatProtectionSummary(
-                                event.decision_review?.protection_snapshot
-                              ).map((item, idx) => (
-                                <span
-                                  key={idx}
-                                  className="px-2 py-1 rounded text-[11px] font-medium"
-                                  style={item.style}
-                                >
-                                  {item.label}
-                                </span>
-                              ))}
-                            </div>
-                            <div className="mt-2">
-                              <DecisionAuditPanel
-                                review={event.decision_review}
-                              />
-                            </div>
-                          </div>
-                          <div>
-                            <div style={{ color: '#848E9C' }}>
-                              {'PnL / Time'}
-                            </div>
-                            <div
-                              className="font-mono"
-                              style={{ color: '#EAECEF' }}
-                            >{`${event.realized_pnl_delta >= 0 ? '+' : ''}${formatNumber(event.realized_pnl_delta)} / ${formatDate(event.event_time)}`}</div>
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
+                                  <td
+                                    className="py-2 px-3 font-mono"
+                                    style={{
+                                      color: '#EAECEF',
+                                      fontSize: '11px',
+                                    }}
+                                  >
+                                    {formatDate(event.event_time)}
+                                    {(event.fill_count ?? 0) > 1 && (
+                                      <span
+                                        className="ml-1 px-1 rounded text-[10px]"
+                                        style={{
+                                          background: '#ffffff11',
+                                          color: '#848E9C',
+                                        }}
+                                      >
+                                        ×{event.fill_count}
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td
+                                    className="py-2 px-3 font-mono"
+                                    style={{
+                                      color: '#EAECEF',
+                                      fontSize: '11px',
+                                    }}
+                                  >
+                                    {formatQuantity(event.close_quantity)}
+                                    <span
+                                      className="ml-1"
+                                      style={{ color: '#848E9C' }}
+                                    >
+                                      ({event.close_ratio_pct.toFixed(1)}%)
+                                    </span>
+                                  </td>
+                                  <td
+                                    className="py-2 px-3 font-mono"
+                                    style={{
+                                      color: '#EAECEF',
+                                      fontSize: '11px',
+                                    }}
+                                  >
+                                    {formatPrice(event.execution_price)}
+                                  </td>
+                                  <td className="py-2 px-3">
+                                    <div
+                                      className="inline-flex px-2 py-0.5 rounded text-[10px] font-medium"
+                                      style={getCloseSourceBadgeStyle(
+                                        eventPresentation
+                                      )}
+                                    >
+                                      {eventPresentation.label}
+                                    </div>
+                                    {event.mechanism &&
+                                      event.mechanism !==
+                                        event.close_reason && (
+                                        <div
+                                          className="mt-0.5 font-mono text-[10px]"
+                                          style={{ color: '#848E9C' }}
+                                        >
+                                          {event.mechanism}
+                                        </div>
+                                      )}
+                                  </td>
+                                  <td
+                                    className="py-2 px-3 text-right font-mono font-semibold"
+                                    style={{
+                                      color: pnlColor,
+                                      fontSize: '11px',
+                                    }}
+                                  >
+                                    {pnl >= 0 ? '+' : ''}
+                                    {pnl.toFixed(2)}
+                                  </td>
+                                  <td
+                                    className="py-2 px-3 text-right font-mono"
+                                    style={{
+                                      color: '#848E9C',
+                                      fontSize: '11px',
+                                    }}
+                                  >
+                                    {event.decision_cycle || '—'}
+                                  </td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )
+                })()}
             </div>
           </td>
         </tr>

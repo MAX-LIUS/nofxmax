@@ -131,3 +131,5 @@ btrobust_bin
 
 # Local deploy backups (contain live config + secrets — never commit)
 .deploy-backup/
+/gbsim
+/closeeventbackfill

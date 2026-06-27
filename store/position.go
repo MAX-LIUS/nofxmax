@@ -235,6 +235,18 @@ func (s *PositionStore) deriveCloseReason(pos *TraderPosition, exchangeOrderID s
 				source = ord.OrderAction
 			}
 		}
+		// Final adoption: the synced order's OrderAction may already carry a fully
+		// resolved mechanism that the switches above do not enumerate (e.g.
+		// ai_close_long, time_stop, max_hold, trailing_take_profit, managed_drawdown_*,
+		// breadth_breaker). When the requested reason is still bare/empty, prefer the
+		// order's resolved action so the close event is attributed, not dumped into
+		// sync_external. Never override an already-specific reason.
+		if (reason == "" || reason == "close_long" || reason == "close_short" || reason == "unknown") &&
+			ord.OrderAction != "" && ord.OrderAction != "close_long" && ord.OrderAction != "close_short" &&
+			!strings.HasPrefix(strings.ToLower(ord.OrderAction), "open_") {
+			reason = ord.OrderAction
+			source = ord.OrderAction
+		}
 	}
 	if reason == "" {
 		reason = "unknown"

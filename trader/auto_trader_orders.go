@@ -123,6 +123,26 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 		if pos["symbol"] == decision.Symbol && pos["side"] == "long" {
 			return fmt.Errorf("❌ %s already has long position, close it first", decision.Symbol)
 		}
+		// Opposite (short) position on the same symbol: a high-conviction long
+		// signal may FLIP it (close short + open long) when trend-reversal is
+		// enabled and the position is aged enough. Otherwise fall through to the
+		// normal capacity path (which still rejects/handles as before).
+		if pos["symbol"] == decision.Symbol && pos["side"] == "short" {
+			if fd := at.evaluateFlip(decision, "long", pos); fd.ShouldFlip {
+				executed, err := at.executeFlipClose(decision, "long", fd)
+				if err != nil {
+					return fmt.Errorf("trend-reversal flip (close short) failed for %s: %w", decision.Symbol, err)
+				}
+				if !executed {
+					// DryRun: observed only, keep the original short intact.
+					return fmt.Errorf("🔄 %s flip observed (dry_run): would close short + open long", decision.Symbol)
+				}
+				// Live close done; re-fetch positions before opening the reverse.
+				if refreshed, rerr := at.trader.GetPositions(); rerr == nil {
+					positions = refreshed
+				}
+			}
+		}
 	}
 
 	// Get current price
@@ -286,6 +306,23 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 	for _, pos := range positions {
 		if pos["symbol"] == decision.Symbol && pos["side"] == "short" {
 			return fmt.Errorf("❌ %s already has short position, close it first", decision.Symbol)
+		}
+		// Opposite (long) position on the same symbol: a high-conviction short
+		// signal may FLIP it (close long + open short) when trend-reversal is
+		// enabled and the position is aged enough.
+		if pos["symbol"] == decision.Symbol && pos["side"] == "long" {
+			if fd := at.evaluateFlip(decision, "short", pos); fd.ShouldFlip {
+				executed, err := at.executeFlipClose(decision, "short", fd)
+				if err != nil {
+					return fmt.Errorf("trend-reversal flip (close long) failed for %s: %w", decision.Symbol, err)
+				}
+				if !executed {
+					return fmt.Errorf("🔄 %s flip observed (dry_run): would close long + open short", decision.Symbol)
+				}
+				if refreshed, rerr := at.trader.GetPositions(); rerr == nil {
+					positions = refreshed
+				}
+			}
 		}
 	}
 
@@ -488,6 +525,12 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *kernel.Decision, acti
 		actionRecord.OrderID = orderID
 	}
 
+	// Durable intent FIRST: the async OKX fill-sync can detect the fill during the
+	// recordAndConfirmOrder polling window below. Recording the intent before that
+	// poll closes the race that would otherwise mis-attribute the close as
+	// sync_external instead of ai_close_long.
+	at.recordCloseIntentFromOrderResult(order, decision.Symbol, "LONG", "ai_close_long", quantity)
+
 	// Record order to database and poll for confirmation
 	at.recordAndConfirmOrder(order, decision.Symbol, "close_long", quantity, marketData.CurrentPrice, 0, entryPrice)
 
@@ -551,6 +594,11 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *kernel.Decision, act
 	if orderID, ok := order["orderId"].(int64); ok {
 		actionRecord.OrderID = orderID
 	}
+
+	// Durable intent FIRST: see executeCloseLongWithRecord — recording before the
+	// recordAndConfirmOrder poll closes the fill-sync race that would otherwise
+	// mis-attribute this close as sync_external instead of ai_close_short.
+	at.recordCloseIntentFromOrderResult(order, decision.Symbol, "SHORT", "ai_close_short", quantity)
 
 	// Record order to database and poll for confirmation
 	at.recordAndConfirmOrder(order, decision.Symbol, "close_short", quantity, marketData.CurrentPrice, 0, entryPrice)

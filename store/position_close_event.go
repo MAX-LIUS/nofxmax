@@ -95,6 +95,99 @@ func (s *PositionCloseEventStore) ListByPositionID(positionID int64) ([]*Positio
 	return events, nil
 }
 
+// AggregatedCloseAction groups fills of the same close action into one row.
+type AggregatedCloseAction struct {
+	PositionID       int64
+	TraderID         string
+	ExchangeID       string
+	Symbol           string
+	Side             string
+	CloseReason      string
+	ExecutionSource  string
+	ExecutionType    string
+	Category         string
+	Mechanism        string
+	ProtectionStatus string
+	DecisionCycle    int
+	ParentOrderID    string
+	EventTime        int64
+	CloseQuantity    float64
+	CloseRatioPct    float64
+	AvgExecutionPrice float64
+	CloseValueUSDT   float64
+	RealizedPnLDelta float64
+	FeeDelta         float64
+	FillCount        int
+}
+
+// ListByPositionIDAggregated returns close actions (groups fills of same parent order + time + reason).
+func (s *PositionCloseEventStore) ListByPositionIDAggregated(positionID int64) ([]*AggregatedCloseAction, error) {
+	raw, err := s.ListByPositionID(positionID)
+	if err != nil {
+		return nil, err
+	}
+	type key struct {
+		parentOrderID string
+		eventTime     int64
+		closeReason   string
+		decisionCycle int
+	}
+	grouped := make(map[key]*AggregatedCloseAction)
+	for _, ev := range raw {
+		k := key{ev.ParentOrderID, ev.EventTime, ev.CloseReason, ev.DecisionCycle}
+		if agg, ok := grouped[k]; ok {
+			// Weighted average price: (sum of value) / (sum of quantity)
+			agg.CloseQuantity += ev.CloseQuantity
+			agg.CloseRatioPct += ev.CloseRatioPct
+			agg.CloseValueUSDT += ev.CloseValueUSDT
+			agg.RealizedPnLDelta += ev.RealizedPnLDelta
+			agg.FeeDelta += ev.FeeDelta
+			agg.FillCount++
+			if agg.CloseQuantity > 0 {
+				agg.AvgExecutionPrice = agg.CloseValueUSDT / agg.CloseQuantity
+			}
+		} else {
+			grouped[k] = &AggregatedCloseAction{
+				PositionID:       ev.PositionID,
+				TraderID:         ev.TraderID,
+				ExchangeID:       ev.ExchangeID,
+				Symbol:           ev.Symbol,
+				Side:             ev.Side,
+				CloseReason:      ev.CloseReason,
+				ExecutionSource:  ev.ExecutionSource,
+				ExecutionType:    ev.ExecutionType,
+				Category:         ev.Category,
+				Mechanism:        ev.Mechanism,
+				ProtectionStatus: ev.ProtectionStatus,
+				DecisionCycle:    ev.DecisionCycle,
+				ParentOrderID:    ev.ParentOrderID,
+				EventTime:        ev.EventTime,
+				CloseQuantity:    ev.CloseQuantity,
+				CloseRatioPct:    ev.CloseRatioPct,
+				AvgExecutionPrice: ev.ExecutionPrice,
+				CloseValueUSDT:   ev.CloseValueUSDT,
+				RealizedPnLDelta: ev.RealizedPnLDelta,
+				FeeDelta:         ev.FeeDelta,
+				FillCount:        1,
+			}
+		}
+	}
+	// Sort by event time.
+	result := make([]*AggregatedCloseAction, 0, len(grouped))
+	for _, agg := range grouped {
+		result = append(result, agg)
+	}
+	// Simple bubble sort by EventTime (small list).
+	for i := 0; i < len(result); i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].EventTime < result[i].EventTime {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+	return result, nil
+}
+
 func (s *PositionCloseEventStore) UpdateReasonByOrderID(traderID, exchangeOrderID, closeReason, executionSource string) error {
 	if exchangeOrderID == "" {
 		return nil

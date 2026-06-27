@@ -122,60 +122,13 @@ func absFloat(v float64) float64 {
 	return v
 }
 
-// effectiveATRMultiples returns the ATR config with per-dimension multiples
-// resolved. If ANY dimension is in "ai" mode it queries (cached) AI multiples
-// for the symbol and overrides ONLY the AI-mode dimensions' multiples; fixed
-// and percent dimensions keep their configured values. On AI failure all
-// dimensions fall back to their configured fixed multiples.
-func (at *AutoTrader) effectiveATRMultiples(symbol string, acfg store.ATRProtectionConfig, atr, entryPrice float64) store.ATRProtectionConfig {
-	c := acfg.WithDefaults()
-	if entryPrice <= 0 || atr <= 0 {
-		return c
-	}
-	// Determine which dimensions want AI multiples.
-	aiSL := c.DimMode(store.ATRDimSL) == "ai"
-	aiTP1 := c.DimMode(store.ATRDimTP1) == "ai"
-	aiTP2 := c.DimMode(store.ATRDimTP2) == "ai"
-	aiBE1 := c.DimMode(store.ATRDimBE1) == "ai"
-	aiBE2 := c.DimMode(store.ATRDimBE2) == "ai"
-	aiDD := c.DimMode(store.ATRDimDD) == "ai"
-	if !(aiSL || aiTP1 || aiTP2 || aiBE1 || aiBE2 || aiDD) {
-		return c // no AI dimensions; use fixed multiples as-is
-	}
-	atrPct := atr / entryPrice * 100.0
-	m, ok := at.resolveAIMultiples(symbol, c, atr, atrPct, entryPrice)
-	if !ok {
-		return c // fall back to fixed multiples
-	}
-	if aiSL {
-		c.StopLossATR = m.StopLossATR
-	}
-	if aiTP1 {
-		c.TakeProfit1ATR = m.TakeProfit1ATR
-	}
-	if aiTP2 {
-		c.TakeProfit2ATR = m.TakeProfit2ATR
-	}
-	if aiBE1 {
-		c.BreakEven1ATR = m.BreakEven1ATR
-	}
-	if aiBE2 {
-		c.BreakEven2ATR = m.BreakEven2ATR
-	}
-	if aiDD {
-		// Reuse the TP2-scale AI multiple for DD min-profit if not separately modeled.
-		c.DrawdownMinProfitATR = m.TakeProfit1ATR
-	}
-	return c
-}
-
 // resolveATRProtection returns a copy of the strategy's ProtectionConfig with
-// percent distances overwritten by ATR-derived percents, when ATRProtection is
-// enabled for this trader. Returns (adjustedProtection, true) when ATR sizing
-// was applied; (original, false) otherwise (no-op for non-ATR traders).
-//
-// Only dimensions with a positive ATR multiple are overwritten; others keep
-// their configured percent. Mirrors the resolve-at-placement pattern.
+// each ATR-UNIT field (per-rule TakeProfitUnit/StopLossUnit/TriggerUnit/
+// MinProfitUnit == "atr") converted to an effective percent using the frozen
+// ATR. Percent-unit fields are left untouched. Returns (adjusted, true) when at
+// least one field was ATR-resolved; (original, false) otherwise. This replaces
+// the former global per-dimension overlay: the unit now lives on each rule, so
+// the UI manages everything in the original TP/SL/BE/DD panels.
 func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol string) (store.ProtectionConfig, bool) {
 	if at.config.StrategyConfig == nil {
 		return store.ProtectionConfig{}, false
@@ -185,44 +138,32 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol string) (s
 	if !acfg.Enabled || entryPrice <= 0 {
 		return base, false
 	}
+	// Only fetch ATR if some field actually opts into ATR units.
+	if !protectionUsesATR(base) {
+		return base, false
+	}
 	atr, ok := at.frozenATRForPosition(symbol, entryPrice, acfg)
 	if !ok {
 		logger.Warnf("  ⚠️ ATR-protection: no ATR for %s; falling back to configured percents", symbol)
 		return base, false
 	}
-	// Resolve multiples (fixed config or per-coin AI) before applying.
-	acfg = at.effectiveATRMultiples(symbol, acfg, atr, entryPrice)
 
-	adj := base // value copy; nested slices are copied below before mutation
+	adj := base // value copy; nested slices copied below before mutation
 	applied := false
 
-	// Ladder TP/SL: overwrite TP1/TP2 distance and SL distance per rule index,
-	// only for dimensions whose mode is fixed/ai (percent = leave untouched).
+	// Ladder TP/SL: resolve each rule's TP and SL distance when its unit is "atr".
 	if len(base.LadderTPSL.Rules) > 0 {
 		rules := make([]store.LadderTPSLRule, len(base.LadderTPSL.Rules))
 		copy(rules, base.LadderTPSL.Rules)
-		slActive := acfg.DimMode(store.ATRDimSL) != "percent"
 		for i := range rules {
-			// SL distance (applies to whichever rule carries the SL).
-			if slActive && acfg.StopLossATR > 0 && rules[i].StopLossPct > 0 {
-				if pct, ok := acfg.EffectivePercent(acfg.StopLossATR, atr, entryPrice); ok {
+			if rules[i].StopLossUnit == store.ProtectionUnitATR && rules[i].StopLossPct > 0 {
+				if pct, ok := acfg.EffectivePercent(rules[i].StopLossPct, atr, entryPrice); ok {
 					rules[i].StopLossPct = pct
 					applied = true
 				}
 			}
-			// TP distances by ladder tier.
-			var tpMult float64
-			var tpActive bool
-			switch i {
-			case 0:
-				tpMult = acfg.TakeProfit1ATR
-				tpActive = acfg.DimMode(store.ATRDimTP1) != "percent"
-			case 1:
-				tpMult = acfg.TakeProfit2ATR
-				tpActive = acfg.DimMode(store.ATRDimTP2) != "percent"
-			}
-			if tpActive && tpMult > 0 && rules[i].TakeProfitPct > 0 {
-				if pct, ok := acfg.EffectivePercent(tpMult, atr, entryPrice); ok {
+			if rules[i].TakeProfitUnit == store.ProtectionUnitATR && rules[i].TakeProfitPct > 0 {
+				if pct, ok := acfg.EffectivePercent(rules[i].TakeProfitPct, atr, entryPrice); ok {
 					rules[i].TakeProfitPct = pct
 					applied = true
 				}
@@ -231,24 +172,22 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol string) (s
 		adj.LadderTPSL.Rules = rules
 	}
 
-	// Break-even tiers: overwrite trigger values by tier, per-dimension mode.
+	// Break-even tiers: resolve trigger when its unit is "atr" (profit_pct mode).
 	if len(base.BreakEvenStop.Rules) > 0 {
 		beRules := make([]store.BreakEvenStopRule, len(base.BreakEvenStop.Rules))
 		copy(beRules, base.BreakEvenStop.Rules)
 		for i := range beRules {
-			var beMult float64
-			var beActive bool
-			switch i {
-			case 0:
-				beMult = acfg.BreakEven1ATR
-				beActive = acfg.DimMode(store.ATRDimBE1) != "percent"
-			case 1:
-				beMult = acfg.BreakEven2ATR
-				beActive = acfg.DimMode(store.ATRDimBE2) != "percent"
-			}
-			if beActive && beMult > 0 && beRules[i].TriggerMode == store.BreakEvenTriggerProfitPct && beRules[i].TriggerValue > 0 {
-				if pct, ok := acfg.EffectivePercent(beMult, atr, entryPrice); ok {
+			if beRules[i].TriggerUnit == store.ProtectionUnitATR &&
+				beRules[i].TriggerMode == store.BreakEvenTriggerProfitPct && beRules[i].TriggerValue > 0 {
+				if pct, ok := acfg.EffectivePercent(beRules[i].TriggerValue, atr, entryPrice); ok {
 					beRules[i].TriggerValue = pct
+					applied = true
+				}
+			}
+			// Offset shares the rule's TriggerUnit (sign preserved for losing-side BE).
+			if beRules[i].TriggerUnit == store.ProtectionUnitATR && beRules[i].OffsetPct != 0 {
+				if pct, ok := atrOffsetEffectivePercent(acfg, beRules[i].OffsetPct, atr, entryPrice); ok {
+					beRules[i].OffsetPct = pct
 					applied = true
 				}
 			}
@@ -256,39 +195,97 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol string) (s
 		adj.BreakEvenStop.Rules = beRules
 	}
 
-	// Drawdown: ATR-ize the min-profit ARM threshold (price distance) when the
-	// DD dimension is in fixed/ai mode. Max-drawdown give-back stays % of peak.
-	if acfg.DimMode(store.ATRDimDD) != "percent" && acfg.DrawdownMinProfitATR > 0 && len(base.DrawdownTakeProfit.Rules) > 0 {
+	// Drawdown: resolve each rule's min-profit ARM threshold when its unit is
+	// "atr". Max-drawdown give-back stays a % of peak (a ratio, not a distance).
+	if len(base.DrawdownTakeProfit.Rules) > 0 {
 		ddRules := make([]store.DrawdownTakeProfitRule, len(base.DrawdownTakeProfit.Rules))
 		copy(ddRules, base.DrawdownTakeProfit.Rules)
-		if pct, ok := acfg.EffectivePercent(acfg.DrawdownMinProfitATR, atr, entryPrice); ok {
-			// Apply to the primary (runner_exit) rule = highest min-profit tier.
-			best := -1
-			for i := range ddRules {
-				if ddRules[i].MinProfitPct > 0 && (best < 0 || ddRules[i].MinProfitPct > ddRules[best].MinProfitPct) {
-					best = i
+		for i := range ddRules {
+			if ddRules[i].MinProfitUnit == store.ProtectionUnitATR && ddRules[i].MinProfitPct > 0 {
+				if pct, ok := acfg.EffectivePercent(ddRules[i].MinProfitPct, atr, entryPrice); ok {
+					ddRules[i].MinProfitPct = pct
+					applied = true
 				}
-			}
-			if best >= 0 {
-				ddRules[best].MinProfitPct = pct
-				applied = true
 			}
 		}
 		adj.DrawdownTakeProfit.Rules = ddRules
 	}
 
 	if applied {
-		logger.Infof("  🎯 ATR-protection applied for %s: ATR(%s)=%.6f entry=%.6f → per-dimension ATR-scaled (SL/TP/BE/DD)",
+		logger.Infof("  🎯 ATR-units resolved for %s: ATR(%s)=%.6f entry=%.6f → per-field ATR→%% (SL/TP/BE/DD)",
 			symbol, acfg.WithDefaults().Timeframe, atr, entryPrice)
 	}
 	return adj, applied
 }
 
-// getActiveBreakEvenRulesATR returns the active break-even rules with trigger
-// values ATR-adjusted when ATR protection is enabled for this trader/symbol.
-// Falls back to the raw configured rules when ATR is off or unavailable, so the
-// runtime BE monitor arms at the SAME trigger distance the orders were placed
-// with at open (no percent/ATR mismatch).
+// protectionUsesATR reports whether any TP/SL/BE/DD field opts into ATR units,
+// so we skip the ATR fetch entirely for pure-percent strategies.
+func protectionUsesATR(p store.ProtectionConfig) bool {
+	for _, r := range p.LadderTPSL.Rules {
+		if r.StopLossUnit == store.ProtectionUnitATR || r.TakeProfitUnit == store.ProtectionUnitATR {
+			return true
+		}
+	}
+	for _, r := range p.BreakEvenStop.Rules {
+		if r.TriggerUnit == store.ProtectionUnitATR {
+			return true
+		}
+	}
+	for _, r := range p.DrawdownTakeProfit.Rules {
+		if r.MinProfitUnit == store.ProtectionUnitATR || r.MaxDrawdownUnit == store.ProtectionUnitATR {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveDrawdownRulesATR resolves each drawdown rule's MinProfitPct to a
+// percent when its MinProfitUnit is "atr", so the runtime DD arm threshold
+// matches the open-time distance (fixes the prior bug where DD armed on the raw
+// percent while open-time ATR-ized it). Percent-unit rules pass through.
+func (at *AutoTrader) resolveDrawdownRulesATR(rules []store.DrawdownTakeProfitRule, symbol string, entryPrice float64) []store.DrawdownTakeProfitRule {
+	if len(rules) == 0 || at.config.StrategyConfig == nil {
+		return rules
+	}
+	acfg := at.config.StrategyConfig.ATRProtection
+	if !acfg.Enabled || entryPrice <= 0 {
+		return rules
+	}
+	anyATR := false
+	for _, r := range rules {
+		if r.MinProfitUnit == store.ProtectionUnitATR || r.MaxDrawdownUnit == store.ProtectionUnitATR {
+			anyATR = true
+			break
+		}
+	}
+	if !anyATR {
+		return rules
+	}
+	atr, ok := at.frozenATRForPosition(symbol, entryPrice, acfg)
+	if !ok {
+		return rules
+	}
+	out := make([]store.DrawdownTakeProfitRule, len(rules))
+	copy(out, rules)
+	for i := range out {
+		if out[i].MinProfitUnit == store.ProtectionUnitATR && out[i].MinProfitPct > 0 {
+			if pct, ok := acfg.EffectivePercent(out[i].MinProfitPct, atr, entryPrice); ok {
+				out[i].MinProfitPct = pct
+			}
+		}
+		if out[i].MaxDrawdownUnit == store.ProtectionUnitATR && out[i].MaxDrawdownPct > 0 {
+			if pct, ok := acfg.EffectivePercent(out[i].MaxDrawdownPct, atr, entryPrice); ok {
+				out[i].MaxDrawdownPct = pct
+			}
+		}
+	}
+	return out
+}
+
+// getActiveBreakEvenRulesATR returns the active break-even rules with each
+// rule's trigger value resolved to a percent when its TriggerUnit is "atr", so
+// the runtime BE monitor arms at the SAME distance the orders were placed with
+// at open (no percent/ATR mismatch). Percent-unit rules pass through unchanged.
 func (at *AutoTrader) getActiveBreakEvenRulesATR(symbol string, entryPrice float64) []store.BreakEvenStopRule {
 	rules := at.getActiveBreakEvenRules()
 	if len(rules) == 0 {
@@ -301,32 +298,58 @@ func (at *AutoTrader) getActiveBreakEvenRulesATR(symbol string, entryPrice float
 	if !acfg.Enabled || entryPrice <= 0 {
 		return rules
 	}
+	// Skip the ATR fetch unless at least one rule uses ATR units.
+	anyATR := false
+	for _, r := range rules {
+		if r.TriggerUnit == store.ProtectionUnitATR {
+			anyATR = true
+			break
+		}
+	}
+	if !anyATR {
+		return rules
+	}
 	atr, ok := at.frozenATRForPosition(symbol, entryPrice, acfg)
 	if !ok {
 		return rules
 	}
-	// Resolve multiples (fixed or per-coin AI) so BE arms at the same triggers
-	// the orders were placed with at open.
-	acfg = at.effectiveATRMultiples(symbol, acfg, atr, entryPrice)
 	out := make([]store.BreakEvenStopRule, len(rules))
 	copy(out, rules)
 	for i := range out {
-		var beMult float64
-		var active bool
-		switch i {
-		case 0:
-			beMult = acfg.BreakEven1ATR
-			active = acfg.DimMode(store.ATRDimBE1) != "percent"
-		case 1:
-			beMult = acfg.BreakEven2ATR
-			active = acfg.DimMode(store.ATRDimBE2) != "percent"
-		}
-		if active && beMult > 0 && out[i].TriggerMode == store.BreakEvenTriggerProfitPct && out[i].TriggerValue > 0 {
-			if pct, ok := acfg.EffectivePercent(beMult, atr, entryPrice); ok {
+		if out[i].TriggerUnit == store.ProtectionUnitATR &&
+			out[i].TriggerMode == store.BreakEvenTriggerProfitPct && out[i].TriggerValue > 0 {
+			if pct, ok := acfg.EffectivePercent(out[i].TriggerValue, atr, entryPrice); ok {
 				out[i].TriggerValue = pct
+			}
+		}
+		// OffsetPct shares the rule's TriggerUnit: when the trigger is in ATR units
+		// so is the offset (an ATR multiple of entry). Sign is preserved so a
+		// negative offset (park the stop slightly losing-side) stays negative.
+		if out[i].TriggerUnit == store.ProtectionUnitATR && out[i].OffsetPct != 0 {
+			if pct, ok := atrOffsetEffectivePercent(acfg, out[i].OffsetPct, atr, entryPrice); ok {
+				out[i].OffsetPct = pct
 			}
 		}
 	}
 	return out
+}
+
+// atrOffsetEffectivePercent resolves a signed ATR-multiple offset to an effective
+// percent. EffectivePercent only accepts a positive multiple (and clamps to the
+// configured min/max effective percent), so the sign is stripped, the magnitude
+// resolved, and the sign reattached — preserving negative offsets (which park a
+// break-even stop slightly on the losing side: cover fees + a noise buffer).
+func atrOffsetEffectivePercent(acfg store.ATRProtectionConfig, atrMultiple, atrValue, entryPrice float64) (float64, bool) {
+	sign := 1.0
+	mag := atrMultiple
+	if mag < 0 {
+		sign = -1.0
+		mag = -mag
+	}
+	pct, ok := acfg.EffectivePercent(mag, atrValue, entryPrice)
+	if !ok {
+		return 0, false
+	}
+	return sign * pct, true
 }
 

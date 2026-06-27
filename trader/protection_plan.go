@@ -256,9 +256,8 @@ func buildConfiguredBreakEvenPlan(be store.BreakEvenStopConfig) *ProtectionPlan 
 		return nil
 	}
 	cfg := be
-	if cfg.OffsetPct < 0 {
-		cfg.OffsetPct = 0
-	}
+	// Negative OffsetPct is allowed: parks the break-even stop slightly on the
+	// losing side (cover fees + noise buffer) rather than at exact break-even.
 	return &ProtectionPlan{Mode: string(store.ProtectionModeManual), BreakEvenConfig: &cfg}
 }
 

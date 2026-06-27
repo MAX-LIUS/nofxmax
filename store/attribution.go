@@ -35,11 +35,14 @@ const (
 	MechTimeStop        = "time_stop"
 	MechMaxHold         = "max_hold"
 	MechTrailingTP      = "trailing_take_profit"
+	MechBreadthBreaker  = "breadth_breaker" // portfolio-level breadth circuit breaker
+	MechTrendReversal   = "trend_reversal_flip" // AI high-conviction reversal: close + open reverse
 	MechAIClose         = "ai_close"
 	MechManualClose     = "manual_close"
 	MechLiquidation     = "liquidation"
 	MechEmergency       = "emergency_protection_close"
 	MechSyncExternal    = "sync_external" // closed on exchange, mechanism unknown
+	MechLegacyUnknown   = "legacy_unknown" // historical close, origin never recorded (pre-intent-ledger)
 	MechUnknownClose    = "unknown_close"
 )
 
@@ -72,6 +75,11 @@ func ClassifyClose(rawReason string) Attribution {
 		return Attribution{CategoryExchange, MechLiquidation}
 
 	// Protection mechanisms (code/exchange protection orders).
+	case strings.Contains(r, "giveback_guard") || strings.Contains(r, "breadth_breaker") || strings.Contains(r, "breadth"):
+		// Portfolio-level breadth circuit breaker (the sole portfolio guard). A
+		// distinct protection mechanism so breaker exits are never confused with
+		// per-position SL/TP or AI closes during review.
+		return Attribution{CategoryProtection, MechBreadthBreaker}
 	case strings.Contains(r, "managed_drawdown"):
 		return Attribution{CategoryProtection, MechManagedDrawdown}
 	case strings.Contains(r, "native_trailing") || r == "trailing":
@@ -103,6 +111,11 @@ func ClassifyClose(rawReason string) Attribution {
 		return Attribution{CategorySystem, MechUnknownClose}
 
 	// AI proactive close.
+	case strings.Contains(r, "trend_reversal_flip") || strings.Contains(r, "trend_reversal"):
+		// AI high-conviction reversal: the original was closed to open the reverse
+		// direction. Categorized as AI (the AI signal initiated it) but with a
+		// distinct mechanism so flips are reviewable separately from plain closes.
+		return Attribution{CategoryAI, MechTrendReversal}
 	case strings.HasPrefix(r, "ai_close"):
 		return Attribution{CategoryAI, MechAIClose}
 

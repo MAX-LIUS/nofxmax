@@ -679,7 +679,7 @@ export interface EntryStructureAuditConfig {
 }
 
 export interface PositionCloseEvent {
-  id: number
+  id?: number
   position_id: number
   trader_id: string
   exchange_id: string
@@ -688,10 +688,12 @@ export interface PositionCloseEvent {
   close_reason: string
   execution_source: string
   execution_type: string
+  category?: string
+  mechanism?: string
   protection_status?: string
   decision_cycle?: number
   decision_review?: DecisionReviewRef
-  exchange_order_id: string
+  exchange_order_id?: string
   parent_order_id?: string
   order_id?: number
   related_position_id?: number
@@ -809,6 +811,27 @@ export interface CloseAttributionResponse {
   total_pnl: number
   by_category: AttributionCategoryRow[]
   by_mechanism: AttributionMechanismRow[]
+}
+
+export interface FlipObservation {
+  symbol: string
+  from_side: string
+  to_side: string
+  confidence: number
+  age_hours: number
+  quantity: number
+  decision_cycle: number
+  executed: boolean
+  reasoning: string
+  reverse_realized_pnl: number
+  observed_at: string
+}
+
+export interface FlipObservationsResponse {
+  flips: FlipObservation[]
+  total: number
+  executed_count: number
+  dry_run_count: number
 }
 
 // Grid Risk Information for frontend display

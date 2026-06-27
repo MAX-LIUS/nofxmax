@@ -25,6 +25,8 @@ type Store struct {
 	decision       *DecisionStore
 	position       *PositionStore
 	positionClose  *PositionCloseEventStore
+	closeIntent    *CloseIntentStore
+	flipObs        *FlipObservationStore
 	strategy       *StrategyStore
 	equity           *EquityStore
 	equityAdjustment *EquityAdjustmentStore
@@ -152,6 +154,12 @@ func (s *Store) initTables() error {
 	if err := s.PositionClose().InitTables(); err != nil {
 		return fmt.Errorf("failed to initialize position close event tables: %w", err)
 	}
+	if err := s.CloseIntent().InitTables(); err != nil {
+		return fmt.Errorf("failed to initialize close intent tables: %w", err)
+	}
+	if err := s.FlipObservation().InitTables(); err != nil {
+		return fmt.Errorf("failed to initialize flip observation tables: %w", err)
+	}
 	if err := s.Strategy().initTables(); err != nil {
 		return fmt.Errorf("failed to initialize strategy tables: %w", err)
 	}
@@ -271,6 +279,29 @@ func (s *Store) PositionClose() *PositionCloseEventStore {
 		s.positionClose = NewPositionCloseEventStore(s.gdb)
 	}
 	return s.positionClose
+}
+
+// CloseIntent gets the close-intent ledger storage. The ledger records every
+// system-initiated close decision so the asynchronous fill-sync can attribute
+// the resulting close fill to the real mechanism instead of a bare close action.
+func (s *Store) CloseIntent() *CloseIntentStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closeIntent == nil {
+		s.closeIntent = NewCloseIntentStore(s.gdb)
+	}
+	return s.closeIntent
+}
+
+// FlipObservation gets the trend-reversal flip observation storage. Records every
+// flip decision (dry-run or live) so live AI reversal-signal quality is reviewable.
+func (s *Store) FlipObservation() *FlipObservationStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.flipObs == nil {
+		s.flipObs = NewFlipObservationStore(s.gdb)
+	}
+	return s.flipObs
 }
 
 // Evolution gets evolution engine storage

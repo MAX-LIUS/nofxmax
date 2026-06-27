@@ -7,6 +7,7 @@ import (
 	"math"
 	"nofx/kernel"
 	"nofx/logger"
+	"nofx/market"
 	"nofx/store"
 	"sort"
 	"strconv"
@@ -185,6 +186,9 @@ func (at *AutoTrader) checkPositionDrawdown() {
 		if len(rules) == 0 {
 			continue
 		}
+		// Resolve ATR-unit min-profit / max-drawdown thresholds to percent so the
+		// arm gate uses the same distance as the open-time placement (no mismatch).
+		rules = at.resolveDrawdownRulesATR(rules, symbol, entryPrice)
 
 		currentPnLPct := calculatePositionPnLPct(side, entryPrice, markPrice)
 
@@ -301,6 +305,21 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			closeQty := triggered.Quantity
 			if closeQty <= 0 {
 				continue
+			}
+
+			// Fallback gate: the code side only SUPPLEMENTS the exchange side. If a
+			// live trailing order already covers this tier on the exchange, suppress
+			// the code-side close so the same tier never executes twice (one on the
+			// exchange, one here). The code side fires only when the exchange side is
+			// genuinely absent (no matching trailing order). The "armed/pending/
+			// activated" status shown to the user reflects the EXCHANGE order, not
+			// this monitor — so suppressing here keeps display and execution aligned.
+			if matchingRule := findRuleForTier(rules, triggered); matchingRule != nil {
+				if at.exchangeSideCoversDrawdownTier(symbol, side, normalizeDrawdownRule(*matchingRule), entryPrice) {
+					// Exchange owns this tier; keep tier state as-is (do not mark
+					// executed — the exchange fill detector handles that) and move on.
+					continue
+				}
 			}
 
 			logger.Infof("🚨 Drawdown %s triggered: %s %s | qty=%.6f | pnl=%.2f%% | tier_peak=%.2f%%",
@@ -1472,6 +1491,41 @@ func (at *AutoTrader) findExistingFullTrailingOrder(side string, openOrders []Op
 	return nil
 }
 
+// exchangeSideCoversDrawdownTier reports whether the exchange already carries a
+// live trailing order that protects this drawdown tier — i.e. the exchange side
+// is the active protection and the code side must NOT also fire (avoid double
+// execution). It is the gate for "code side only supplements when the exchange
+// side did not actually execute".
+//
+// Returns true (exchange covers it, suppress code-side close) when a trailing
+// order matching this tier's planned activation + callback + quantity exists on
+// the exchange in any non-terminal state. Returns false only when no such order
+// is found (exchange side genuinely absent), in which case the code-side managed
+// close is allowed to supplement.
+func (at *AutoTrader) exchangeSideCoversDrawdownTier(symbol, side string, rule store.DrawdownTakeProfitRule, entryPrice float64) bool {
+	if !at.supportsNativeTrailingStop() {
+		// Exchange cannot carry native trailing at all → code side is the sole
+		// protection and must execute (no double-fire risk).
+		return false
+	}
+	openOrders, err := at.GetOpenOrders(symbol)
+	if err != nil {
+		// Cannot confirm exchange state. Be conservative: do NOT suppress the code
+		// side, so protection still fires (a possible duplicate is safer than an
+		// unprotected position). Duplicate close is reduce-only and bounded by the
+		// remaining position size, so the worst case is a no-op second close.
+		logger.Warnf("⚠️ Drawdown fallback gate: cannot fetch open orders (%s %s): %v — allowing code-side close", symbol, side, err)
+		return false
+	}
+	existing, _, _, _ := at.findEquivalentPartialTrailingOrder(symbol, side, rule, entryPrice, openOrders)
+	if existing != nil {
+		logger.Infof("🛡 Exchange side covers drawdown tier (%s %s close=%.1f%% status=%s) — suppressing code-side close to avoid double execution",
+			symbol, side, rule.CloseRatioPct, existing.ActivationStatus)
+		return true
+	}
+	return false
+}
+
 func (at *AutoTrader) findEquivalentPartialTrailingOrder(symbol, side string, rule store.DrawdownTakeProfitRule, entryPrice float64, openOrders []OpenOrder) (*nativeTrailingOrder, float64, float64, float64) {
 	plannedActivationPrice := calculateProfitBasedTrailingTriggerPrice(entryPrice, side, rule.MinProfitPct)
 	plannedCallbackRate := calculateDrawdownRuleCallbackRatio(entryPrice, side, rule)
@@ -2190,9 +2244,7 @@ func (at *AutoTrader) getActiveBreakEvenConfigForPlan(plan *ProtectionPlan) *sto
 		if plan != nil && plan.BreakEvenConfig != nil {
 			cfg := *plan.BreakEvenConfig
 			if cfg.Enabled && cfg.TriggerValue > 0 {
-				if cfg.OffsetPct < 0 {
-					cfg.OffsetPct = 0
-				}
+				// Negative OffsetPct is allowed (park the stop slightly losing-side).
 				return &cfg
 			}
 		}
@@ -2236,9 +2288,9 @@ func (at *AutoTrader) getActiveBreakEvenRules() []store.BreakEvenStopRule {
 		if rule.TriggerMode != store.BreakEvenTriggerProfitPct && rule.TriggerMode != store.BreakEvenTriggerRMultiple {
 			continue
 		}
-		if rule.OffsetPct < 0 {
-			rule.OffsetPct = 0
-		}
+		// Negative OffsetPct is allowed: it parks the break-even stop slightly on
+		// the losing side (e.g. cover fees + a noise buffer) instead of at exact
+		// break-even, so the stop isn't repeatedly swept at the entry price.
 		if rule.CloseRatioPct <= 0 {
 			rule.CloseRatioPct = 100
 		}
@@ -2481,6 +2533,23 @@ func (at *AutoTrader) closePositionBySide(symbol, side string, quantity float64)
 	return at.closePositionByReason(symbol, side, quantity, "close_by_side")
 }
 
+// closeOrderSkipped reports whether a close-order result map represents a
+// non-execution (no order was actually sent) rather than a filled order. This
+// covers NO_POSITION, SKIPPED and POSITION_DUST statuses returned by the
+// exchange close paths, so callers can avoid logging a false "succeeded" line
+// and avoid pointless retries.
+func closeOrderSkipped(order map[string]interface{}) (bool, string) {
+	if order == nil {
+		return false, ""
+	}
+	status, _ := order["status"].(string)
+	switch status {
+	case "NO_POSITION", "SKIPPED", "POSITION_DUST":
+		return true, status
+	}
+	return false, ""
+}
+
 func (at *AutoTrader) closePositionByReason(symbol, side string, quantity float64, closeReason string) error {
 	type taggedCloser interface {
 		CloseLongTagged(symbol string, quantity float64, reasonTag string) (map[string]interface{}, error)
@@ -2501,8 +2570,13 @@ func (at *AutoTrader) closePositionByReason(symbol, side string, quantity float6
 		if err != nil {
 			return err
 		}
+		if skipped, reason := closeOrderSkipped(order); skipped {
+			logger.Warnf("⚠️ Close long not executed (%s): %s — %v", symbol, reason, order["message"])
+			return nil
+		}
 		logger.Infof("✅ Close long position succeeded, order ID: %v", order["orderId"])
 		at.persistCloseReasonFromOrderResult(order, closeReason)
+		at.recordCloseIntentFromOrderResult(order, symbol, "LONG", closeReason, quantity)
 	case "short":
 		var (
 			order map[string]interface{}
@@ -2516,8 +2590,13 @@ func (at *AutoTrader) closePositionByReason(symbol, side string, quantity float6
 		if err != nil {
 			return err
 		}
+		if skipped, reason := closeOrderSkipped(order); skipped {
+			logger.Warnf("⚠️ Close short not executed (%s): %s — %v", symbol, reason, order["message"])
+			return nil
+		}
 		logger.Infof("✅ Close short position succeeded, order ID: %v", order["orderId"])
 		at.persistCloseReasonFromOrderResult(order, closeReason)
+		at.recordCloseIntentFromOrderResult(order, symbol, "SHORT", closeReason, quantity)
 	default:
 		return fmt.Errorf("unknown position direction: %s", side)
 	}
@@ -2545,6 +2624,38 @@ func (at *AutoTrader) persistCloseReasonFromOrderResult(order map[string]interfa
 	}
 	_ = at.store.Position().UpdateCloseReasonByExitOrderID(at.id, orderID, closeReason)
 	_ = at.store.PositionClose().UpdateReasonByOrderID(at.id, orderID, closeReason, closeReason)
+}
+
+// recordCloseIntentFromOrderResult writes a durable close-intent ledger row so the
+// asynchronous OKX fill-sync can attribute the resulting close fill to the real
+// mechanism (the reason) instead of the bare close_long/close_short action. The
+// exchange order id from the order result is the deterministic match key; the
+// sync path also falls back to a trader+symbol+side time-window match.
+func (at *AutoTrader) recordCloseIntentFromOrderResult(order map[string]interface{}, symbol, side, closeReason string, quantity float64) {
+	if at.store == nil || closeReason == "" {
+		return
+	}
+	orderID := ""
+	if order != nil {
+		switch v := order["orderId"].(type) {
+		case int64:
+			orderID = fmt.Sprintf("%d", v)
+		case float64:
+			orderID = fmt.Sprintf("%.0f", v)
+		case string:
+			orderID = v
+		default:
+			if v != nil {
+				orderID = fmt.Sprintf("%v", v)
+			}
+		}
+	}
+	if orderID == "<nil>" {
+		orderID = ""
+	}
+	if err := at.store.CloseIntent().Record(at.id, at.exchangeID, market.Normalize(symbol), side, closeReason, quantity, at.cycleNumber, orderID); err != nil {
+		logger.Warnf("⚠️ Failed to record close intent for %s %s (%s): %v", symbol, side, closeReason, err)
+	}
 }
 
 // emergencyClosePosition emergency close position function

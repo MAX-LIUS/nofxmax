@@ -157,10 +157,10 @@ type AutoTrader struct {
 	monitorWg             sync.WaitGroup                            // Used to wait for monitoring goroutine to finish
 	peakPnLCache          map[string]float64                        // Peak profit cache (symbol -> peak P&L percentage)
 	peakPnLCacheMutex     sync.RWMutex                              // Cache read-write lock
-	gbGuardMutex          sync.Mutex                                // Protects giveback-guard portfolio state below
-	gbPortfolioPeakUnreal float64                                   // Giveback guard: portfolio total-unrealized high-water (quote)
-	gbL2FiredAtPeak       float64                                   // Giveback guard L2 ratchet: portfolio peak at last fire (0 = armed)
-	gbL1FiredAtPeak       map[string]float64                        // Giveback guard L1 ratchet: symbol_side -> position profit% peak at last fire
+	gbGuardMutex          sync.Mutex                                // Protects giveback-guard breadth state below
+	gbPnlHist             map[string][]float64                      // Giveback guard breadth: symbol_side -> recent profit% samples (velocity)
+	gbBreadthBarsSinceFire int                                      // Giveback guard breadth: ticks since last breadth fire (cooldown)
+	gbLastBreadthBarMs    int64                                     // Giveback guard breadth: ms timestamp of last advanced velocity "bar"
 	protectionStateMutex  sync.RWMutex                              // Protects last protection reconcile state
 	protectionState       map[string]string                         // symbol_side -> last known protection status
 	breakEvenStateMutex   sync.RWMutex                              // Protects break-even armed state per position
@@ -379,7 +379,7 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		monitorWg:             sync.WaitGroup{},
 		peakPnLCache:          make(map[string]float64),
 		peakPnLCacheMutex:     sync.RWMutex{},
-		gbL1FiredAtPeak:       make(map[string]float64),
+		gbPnlHist:             make(map[string][]float64),
 		protectionStateMutex:  sync.RWMutex{},
 		protectionState:       make(map[string]string),
 		breakEvenStateMutex:   sync.RWMutex{},
@@ -451,48 +451,54 @@ func (at *AutoTrader) loadPeakPnLFromStore() {
 	logger.Infof("🔁 Peak PnL: restored %d high-water mark(s), pruned %d stale", restored, len(stale))
 }
 
-// loadGivebackGuardStateFromStore restores the GivebackGuard ratchet state from
-// the DB so a restart does not reset gbPortfolioPeakUnreal / gbL2FiredAtPeak /
-// gbL1FiredAtPeak. Without this, after a restart the portfolio high-water resets
-// to 0 and the guard could either re-fire L2 on the first reversal it sees, or
-// (more dangerously) drop its latch and trim winners that already gave back once.
-// L1 per-symbol entries are pruned to positions that are still open, mirroring
-// loadPeakPnLFromStore, so a future re-open of the same symbol starts re-armed.
-func (at *AutoTrader) loadGivebackGuardStateFromStore() {
+// loadBreadthVelocityStateFromStore restores the breadth breaker's velocity
+// history + bar clock so the velocity path does not need a 2–6h warm-up after a
+// restart. Staleness guard: if the persisted snapshot is older than 2 bars (2h),
+// it is discarded and the guard starts from an empty history — this prevents
+// computing a velocity across a downtime gap, which would otherwise produce a
+// bogus slope on the first post-restart bar and could misfire. Only history for
+// still-open positions is restored.
+func (at *AutoTrader) loadBreadthVelocityStateFromStore() {
 	if at == nil || at.store == nil {
 		return
 	}
-	state, err := at.store.LoadGivebackGuardState(at.id)
+	st, err := at.store.LoadBreadthVelocityState(at.id)
 	if err != nil {
-		logger.Warnf("⚠️ GivebackGuard: failed to load persisted state: %v", err)
+		logger.Warnf("⚠️ GivebackGuard Breadth: failed to load velocity state: %v", err)
+		return
+	}
+	if len(st.PnlHist) == 0 {
+		return // nothing persisted yet — normal cold start
+	}
+
+	const breadthBarMs int64 = 3600_000
+	ageMs := time.Now().UnixMilli() - st.LastBarMs
+	if st.LastBarMs <= 0 || ageMs > 2*breadthBarMs {
+		// Stale: gap too large. Fail-safe to empty history (cold warm-up) and drop
+		// the bar clock so the next tick starts a fresh bar.
+		logger.Infof("🔁 GivebackGuard Breadth: persisted velocity state stale (age=%.1fh > 2h), starting fresh", float64(ageMs)/3600000.0)
 		return
 	}
 
-	// Build the set of currently-open position keys to prune stale L1 entries.
+	// Prune to still-open positions (same rationale as peak-PnL restore).
 	openKeys := make(map[string]bool)
 	if openPositions, posErr := at.store.Position().GetOpenPositions(at.id); posErr == nil {
 		for _, p := range openPositions {
 			openKeys[strings.ToLower(p.Symbol+"_"+p.Side)] = true
 		}
-	} else {
-		logger.Warnf("⚠️ GivebackGuard: failed to list open positions for restore filter: %v", posErr)
 	}
-
-	prunedL1 := make(map[string]float64)
-	for posKey, peak := range state.L1FiredAtPeak {
-		if openKeys[strings.ToLower(posKey)] {
-			prunedL1[posKey] = peak
+	at.gbGuardMutex.Lock()
+	restored := 0
+	for posKey, hist := range st.PnlHist {
+		if len(openKeys) == 0 || openKeys[strings.ToLower(posKey)] {
+			at.gbPnlHist[posKey] = hist
+			restored++
 		}
 	}
-
-	at.gbGuardMutex.Lock()
-	at.gbPortfolioPeakUnreal = state.PortfolioPeakUnreal
-	at.gbL2FiredAtPeak = state.L2FiredAtPeak
-	at.gbL1FiredAtPeak = prunedL1
+	at.gbLastBreadthBarMs = st.LastBarMs
+	at.gbBreadthBarsSinceFire = st.BarsSinceFire
 	at.gbGuardMutex.Unlock()
-
-	logger.Infof("🔁 GivebackGuard: restored portfolioPeak=%.2f l2Latch=%.2f l1Ratchets=%d (pruned %d stale)",
-		state.PortfolioPeakUnreal, state.L2FiredAtPeak, len(prunedL1), len(state.L1FiredAtPeak)-len(prunedL1))
+	logger.Infof("🔁 GivebackGuard Breadth: restored velocity history for %d position(s) (age=%.1fh, barsSinceFire=%d)", restored, float64(ageMs)/3600000.0, st.BarsSinceFire)
 }
 
 // restoreEntryCooldownsFromStore rebuilds post-loss entry cooldowns after a
@@ -639,7 +645,7 @@ func (at *AutoTrader) Run() error {
 	logger.Info("🚀 AI-driven automatic trading system started")
 	at.loadDynamicProtectionStateFromStore()
 	at.loadPeakPnLFromStore()
-	at.loadGivebackGuardStateFromStore()
+	at.loadBreadthVelocityStateFromStore()
 	at.restoreEntryCooldownsFromStore()
 	logger.Infof("💰 Initial balance: %.2f USDT", at.initialBalance)
 	logger.Infof("⚙️  Scan interval: %v", at.config.ScanInterval)

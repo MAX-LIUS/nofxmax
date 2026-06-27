@@ -2,6 +2,7 @@ package trader
 
 import (
 	"fmt"
+	"time"
 
 	"nofx/logger"
 	"nofx/store"
@@ -19,11 +20,13 @@ type gbPosition struct {
 	peakPct   float64 // peak profit% from peakPnLCache (high-water)
 }
 
-// runGivebackGuard is the live portfolio giveback guard. It mirrors the
-// backtested applyGuards() (trader/backtest/portfolio_sim.go): an L1 per-symbol
-// velocity trim plus an L2 portfolio circuit breaker, both ratcheted to fire
-// once per reversal episode. Validated config (L1+L2) was strongest across
-// short-sample, 12mo, walk-forward, and 18mo OKX backtests.
+// runGivebackGuard is the live portfolio giveback guard. The sole portfolio
+// breaker is the breadth circuit breaker (gbApplyBreadth): it monitors every
+// open position per-symbol and fires only when a MAJORITY retrace together (a
+// correlated reversal), cutting only the losing positions while winners ride
+// their break-even stop. The old L1/L2/L3 account-equity breakers were removed
+// because they measured leverage-contaminated equity drawdown — a 0.5% wiggle
+// at 10x looked like a 5% account hit and knocked the whole book out.
 //
 // Safety: disabled config => immediate no-op. DryRun => logs the intended trim
 // without placing any order. Called at the top of checkPositionDrawdown so it
@@ -75,133 +78,223 @@ func (at *AutoTrader) runGivebackGuard() {
 		return
 	}
 
-	if cfg.L1Enabled {
-		at.gbApplyL1(cfg, snaps)
+	// Breadth breaker is the sole portfolio guard: per-symbol monitoring +
+	// majority-retrace gate + cut losers only (winners ride break-even). The old
+	// L1/L2/L3 account-equity breakers were removed (leverage-contaminated).
+	if cfg.BreadthEnabled {
+		at.gbApplyBreadth(cfg, snaps)
 	}
-	if cfg.L2Enabled {
-		at.gbApplyL2(cfg, snaps)
-	}
-
-	// Persist the ratchet state (portfolio high-water, L1/L2 latches) so it
-	// survives a restart. One write per guard cadence (default 60s) — cheap.
-	at.persistGivebackGuardState()
 }
 
-// gbApplyL1 trims a single position when it gives back >= L1GivebackPct of its
-// own peak profit% (after peaking >= L1MinPeakPct). Ratcheted per symbol_side:
-// re-arms only when a new profit peak is set above the peak at last fire.
-func (at *AutoTrader) gbApplyL1(cfg store.GivebackGuardConfig, snaps []gbPosition) {
-	for _, s := range snaps {
-		if s.peakPct < cfg.L1MinPeakPct || s.peakPct <= 0 {
-			continue
+// gbApplyBreadth is the live breadth circuit breaker — the redesign that
+// supersedes the L1/L2/L3 account-equity breakers. It monitors every open
+// position and fires only when a MAJORITY retrace together (a correlated
+// reversal, not single-symbol noise): retracingCount/total >= BreadthFrac AND
+// total >= BreadthMinPos. When it fires it cuts only the LOSING (profit% < 0)
+// retracing positions in full (BreadthLoserCutPct); winning positions are left
+// alone to ride their break-even stop. This mirrors the backtested
+// applyBreadthBreaker() in trader/backtest/portfolio_sim.go.
+//
+// Leverage-free trigger: retracement is measured per-symbol (ATR-from-peak or
+// peak-giveback%), never on account equity — so a 0.5% wiggle at 10x leverage
+// can't knock the book out the way the equity-5% breaker did.
+func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPosition) {
+	if cfg.BreadthFrac <= 0 || cfg.BreadthMinPos <= 0 || len(snaps) == 0 {
+		return
+	}
+	window := cfg.BreadthVelWindow
+	if window <= 0 {
+		window = 6
+	}
+	const gbVelHistCap = 64
+	const gbBreadthBarMs int64 = 3600_000
+
+	at.gbGuardMutex.Lock()
+	nowMs := time.Now().UnixMilli()
+	newBar := nowMs-at.gbLastBreadthBarMs >= gbBreadthBarMs
+	if at.gbPnlHist == nil {
+		at.gbPnlHist = make(map[string][]float64)
+	}
+	// Sample per-position pnl velocity once per 1h bar; prune closed positions;
+	// advance the breadth cooldown counter on the bar-clock.
+	if newBar {
+		liveKeys := make(map[string]bool, len(snaps))
+		for _, s := range snaps {
+			key := s.symbol + "_" + s.side
+			liveKeys[key] = true
+			h := append(at.gbPnlHist[key], s.profitPct)
+			if len(h) > gbVelHistCap {
+				h = h[len(h)-gbVelHistCap:]
+			}
+			at.gbPnlHist[key] = h
 		}
+		for key := range at.gbPnlHist {
+			if !liveKeys[key] {
+				delete(at.gbPnlHist, key)
+			}
+		}
+		at.gbBreadthBarsSinceFire++
+		at.gbLastBreadthBarMs = nowMs
+	}
+	persistNeeded := newBar // bar advance changed hist + bar clock; persist below
+
+	// Resolve ATR% per symbol once (ATR mode only). atrForProtection fetches
+	// klines, so cache per call to avoid duplicate fetches across same-symbol legs.
+	atrPctCache := make(map[string]float64)
+	acfg := at.config.StrategyConfig.ATRProtection
+	atrPctOf := func(symbol string, entry float64) float64 {
+		if v, ok := atrPctCache[symbol]; ok {
+			return v
+		}
+		v := 0.0
+		if entry > 0 {
+			if atr, ok := at.atrForProtection(symbol, acfg); ok && atr > 0 {
+				v = atr / entry * 100
+			}
+		}
+		atrPctCache[symbol] = v
+		return v
+	}
+
+	// retracing classifies a position as pulling back from its own peak. Both the
+	// velocity path and the from-peak path are ATR-normalized, so BreadthVelEps and
+	// BreadthATRMult mean the same thing across low- and high-volatility symbols.
+	retracing := func(s gbPosition) bool {
 		key := s.symbol + "_" + s.side
+		hist := at.gbPnlHist[key]
+		atrPct := 0.0
+		if cfg.BreadthUseATR {
+			atrPct = atrPctOf(s.symbol, s.entry)
+		}
+		// Velocity path: profit%/bar normalized by ATR% => "ATR-units lost per bar".
+		// A symbol giving back faster than BreadthVelEps ATRs/bar counts as retracing.
+		if len(hist) >= 2 {
+			vel := gbPnlVelocity(hist, window)
+			if atrPct > 0 {
+				vel = vel / atrPct // raw %/bar -> ATR-units/bar
+			}
+			if vel < -cfg.BreadthVelEps {
+				return true
+			}
+		}
+		if cfg.BreadthUseATR {
+			if atrPct <= 0 {
+				return false
+			}
+			return (s.peakPct-s.profitPct)/atrPct >= cfg.BreadthATRMult
+		}
+		return (s.peakPct - s.profitPct) >= cfg.BreadthGivebackPct
+	}
+
+	total := 0
+	retr := 0
+	for _, s := range snaps {
+		total++
+		if retracing(s) {
+			retr++
+		}
+	}
+	barsSinceFire := at.gbBreadthBarsSinceFire
+	at.gbGuardMutex.Unlock()
+
+	if total < cfg.BreadthMinPos {
+		return // no quorum: "majority" is meaningless with too few positions
+	}
+	if float64(retr)/float64(total) < cfg.BreadthFrac {
+		return // not a majority reversal: leave each symbol to its own SL/BE
+	}
+	if cfg.BreadthCooldownBars > 0 && barsSinceFire < cfg.BreadthCooldownBars {
+		return
+	}
+
+	cutPct := cfg.BreadthLoserCutPct / 100.0
+	if cutPct <= 0 {
+		cutPct = 1.0 // default: full cut of losers
+	}
+	if cutPct > 1 {
+		cutPct = 1
+	}
+
+	scope := "losers only (winners ride BE)"
+	if cfg.BreadthCutWinners {
+		scope = "ALL retracing (winners too — full deleverage)"
+	}
+	logger.Infof("🌐 [GivebackGuard Breadth] gate FIRED: %d/%d positions retracing (>=%.0f%%), cutting %s at %.0f%%",
+		retr, total, cfg.BreadthFrac*100, scope, cutPct*100)
+
+	fired := 0
+	for _, s := range snaps {
+		// Default surgical mode: cut only LOSING positions that are retracing;
+		// winners ride their break-even stop. When BreadthCutWinners is set this
+		// becomes a full deleveraging breaker: retracing winners are cut too.
+		if s.profitPct >= 0 && !cfg.BreadthCutWinners {
+			continue
+		}
 		at.gbGuardMutex.Lock()
-		firedAt := at.gbL1FiredAtPeak[key]
+		isRetr := retracing(s)
 		at.gbGuardMutex.Unlock()
-		// Re-arm gate: skip if no new profit peak since last fire on this position.
-		if firedAt > 0 && s.peakPct <= firedAt {
+		if !isRetr {
 			continue
 		}
-		giveback := (s.peakPct - s.profitPct) / s.peakPct * 100
-		if giveback < cfg.L1GivebackPct {
-			continue
-		}
-		closeQty := s.quantity * cfg.L1ClosePct / 100.0
+		closeQty := s.quantity * cutPct
 		if closeQty <= 0 {
 			continue
 		}
-		at.gbTrim(cfg, "giveback_guard_l1", s, closeQty,
-			fmt.Sprintf("L1 %s %s peak=%.2f%% cur=%.2f%% giveback=%.0f%%>=%.0f%%",
-				s.symbol, s.side, s.peakPct, s.profitPct, giveback, cfg.L1GivebackPct))
+		at.gbTrim(cfg, "giveback_guard_breadth", s, closeQty,
+			fmt.Sprintf("breadth %s %s pnl=%.2f%% peak=%.2f%% (%d/%d retracing)",
+				s.symbol, s.side, s.profitPct, s.peakPct, retr, total))
+		fired++
+	}
+	if fired > 0 {
 		at.gbGuardMutex.Lock()
-		at.gbL1FiredAtPeak[key] = s.peakPct
+		at.gbBreadthBarsSinceFire = 0
 		at.gbGuardMutex.Unlock()
+		persistNeeded = true // fire reset the cooldown counter
+	}
+
+	// Persist velocity history + bar clock outside the hot path, but only on a
+	// meaningful change (bar advance or fire). Snapshot under the lock, write
+	// after release so the DB write never blocks the guard.
+	if persistNeeded && at.store != nil {
+		at.gbGuardMutex.Lock()
+		histCopy := make(map[string][]float64, len(at.gbPnlHist))
+		for k, v := range at.gbPnlHist {
+			cp := make([]float64, len(v))
+			copy(cp, v)
+			histCopy[k] = cp
+		}
+		st := store.BreadthVelocityState{
+			PnlHist:       histCopy,
+			LastBarMs:     at.gbLastBreadthBarMs,
+			BarsSinceFire: at.gbBreadthBarsSinceFire,
+		}
+		at.gbGuardMutex.Unlock()
+		if err := at.store.SaveBreadthVelocityState(at.id, st); err != nil {
+			logger.Warnf("⚠️ GivebackGuard Breadth: failed to persist velocity state: %v", err)
+		}
 	}
 }
 
-// gbApplyL2 is the portfolio circuit breaker: track total-unrealized high-water;
-// when the book gives back >= L2GivebackPct of that peak AND peak >=
-// L2MinPeakEquityPct of account equity, trim L2ClosePct of EACH winning
-// position. Ratcheted: fires once per episode, re-arms on a new portfolio high.
-func (at *AutoTrader) gbApplyL2(cfg store.GivebackGuardConfig, snaps []gbPosition) {
-	var totalUnreal float64
-	for _, s := range snaps {
-		totalUnreal += s.unreal
+// gbPnlVelocity returns the profit%-change per bar over the last `window`
+// samples of a position's pnl history. >0 = improving (trend-aligned), <0 =
+// deteriorating (counter-trend). Mirrors simPos.pnlVelocity.
+func gbPnlVelocity(hist []float64, window int) float64 {
+	if window < 1 {
+		window = 1
 	}
-
-	at.gbGuardMutex.Lock()
-	if totalUnreal > at.gbPortfolioPeakUnreal {
-		at.gbPortfolioPeakUnreal = totalUnreal
+	n := len(hist)
+	if n < 2 {
+		return 0
 	}
-	peak := at.gbPortfolioPeakUnreal
-	// Re-arm: portfolio set a new high-water above last fire -> clear latch.
-	if at.gbL2FiredAtPeak > 0 && peak > at.gbL2FiredAtPeak {
-		at.gbL2FiredAtPeak = 0
+	lo := n - 1 - window
+	if lo < 0 {
+		lo = 0
 	}
-	armed := at.gbL2FiredAtPeak == 0
-	at.gbGuardMutex.Unlock()
-
-	if peak <= 0 || !armed {
-		return
+	span := (n - 1) - lo
+	if span <= 0 {
+		return 0
 	}
-	// Min-peak gate scaled to account equity (backtest used absolute USD).
-	equity := at.fetchEquityForSizing()
-	minPeak := 0.0
-	if equity > 0 && cfg.L2MinPeakEquityPct > 0 {
-		minPeak = equity * cfg.L2MinPeakEquityPct / 100.0
-	}
-	if peak < minPeak {
-		return
-	}
-	giveback := (peak - totalUnreal) / peak * 100
-	if giveback < cfg.L2GivebackPct {
-		return
-	}
-
-	logger.Infof("🟠 [GivebackGuard L2] portfolio giveback %.0f%%>=%.0f%% (peakUnreal=%.2f cur=%.2f equity=%.0f) — trimming winners %.0f%%",
-		giveback, cfg.L2GivebackPct, peak, totalUnreal, equity, cfg.L2ClosePct)
-
-	for _, s := range snaps {
-		if s.unreal <= 0 { // only de-risk winners; never realize losers
-			continue
-		}
-		closeQty := s.quantity * cfg.L2ClosePct / 100.0
-		if closeQty <= 0 {
-			continue
-		}
-		at.gbTrim(cfg, "giveback_guard_l2", s, closeQty,
-			fmt.Sprintf("L2 %s %s unreal=%.2f", s.symbol, s.side, s.unreal))
-	}
-
-	at.gbGuardMutex.Lock()
-	at.gbL2FiredAtPeak = peak // latch until a new portfolio high-water
-	at.gbGuardMutex.Unlock()
-}
-
-// persistGivebackGuardState snapshots the ratchet state under the guard mutex and
-// writes it to the store, so the L1/L2 ratchets survive a process restart. The DB
-// write happens outside the lock to avoid blocking the guard's hot path. Called
-// after any meaningful state change (peak advance, latch clear, L1/L2 fire).
-func (at *AutoTrader) persistGivebackGuardState() {
-	if at.store == nil {
-		return
-	}
-	at.gbGuardMutex.Lock()
-	l1Copy := make(map[string]float64, len(at.gbL1FiredAtPeak))
-	for k, v := range at.gbL1FiredAtPeak {
-		l1Copy[k] = v
-	}
-	state := store.GivebackGuardState{
-		PortfolioPeakUnreal: at.gbPortfolioPeakUnreal,
-		L2FiredAtPeak:       at.gbL2FiredAtPeak,
-		L1FiredAtPeak:       l1Copy,
-	}
-	at.gbGuardMutex.Unlock()
-
-	if err := at.store.SaveGivebackGuardState(at.id, state); err != nil {
-		logger.Warnf("⚠️ GivebackGuard: failed to persist state: %v", err)
-	}
+	return (hist[n-1] - hist[lo]) / float64(span)
 }
 
 // gbTrim performs (or, in DryRun, only logs) a partial close of one position.

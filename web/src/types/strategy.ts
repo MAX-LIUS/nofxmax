@@ -169,6 +169,9 @@ export interface LadderTPSLRule {
   take_profit_close_ratio_pct?: number
   stop_loss_pct?: number
   stop_loss_close_ratio_pct?: number
+  // Per-field unit: 'percent' (value is %) | 'atr' (value is an ATR multiple).
+  take_profit_unit?: ProtectionDistanceUnit
+  stop_loss_unit?: ProtectionDistanceUnit
 }
 
 export interface LadderTPSLConfig {
@@ -199,6 +202,9 @@ export interface DrawdownTakeProfitRule {
   close_ratio_mode?: ProtectionValueMode
   min_profit_mode?: ProtectionValueMode
   max_drawdown_mode?: ProtectionValueMode
+  // Per-field unit: 'percent' (value is %) | 'atr' (value is an ATR multiple).
+  min_profit_unit?: ProtectionDistanceUnit
+  max_drawdown_unit?: ProtectionDistanceUnit
 }
 
 export interface DrawdownTakeProfitConfig {
@@ -222,6 +228,8 @@ export interface BreakEvenStopRule {
   offset_pct: number
   close_ratio_pct?: number
   stage_name?: string
+  // Per-field unit: 'percent' (value is %) | 'atr' (value is an ATR multiple).
+  trigger_unit?: ProtectionDistanceUnit
 }
 
 export interface BreakEvenStopConfig {
@@ -263,34 +271,18 @@ export interface RegimeFilterConfig {
   entry_structure?: EntryStructureConfig
 }
 
-// ATRProtectionConfig: opt-in ATR-driven protection distances. When enabled,
-// the TP/SL ladder + break-even trigger distances are computed as multiples of
-// the symbol's ATR (timeframe below) instead of fixed percentages. A multiple
-// of 0 leaves that dimension on its configured percent. Disabled = no-op.
-export type ATRDimMode = 'percent' | 'fixed' | 'ai'
+// ATRProtectionConfig: global ATR settings. Individual TP/SL/DD/BE fields opt
+// into ATR via their own per-field unit toggle (percent | atr); when a field is
+// in ATR mode its value is an ATR MULTIPLE resolved at use time to an effective
+// percent (value × ATR(period) / entryPrice × 100), clamped to min/max_eff_pct.
+export type ProtectionDistanceUnit = 'percent' | 'atr'
 
 export interface ATRProtectionConfig {
   enabled: boolean
   timeframe?: string
   atr_period?: number
-  multiple_mode?: 'fixed' | 'ai'
-  // Per-dimension mode: percent (keep %), fixed (ATR×manual), ai (ATR×AI)
-  sl_mode?: ATRDimMode
-  tp1_mode?: ATRDimMode
-  tp2_mode?: ATRDimMode
-  be1_mode?: ATRDimMode
-  be2_mode?: ATRDimMode
-  dd_mode?: ATRDimMode
-  stop_loss_atr?: number
-  take_profit_1_atr?: number
-  take_profit_2_atr?: number
-  break_even_1_atr?: number
-  break_even_2_atr?: number
-  drawdown_min_profit_atr?: number
   min_eff_pct?: number
   max_eff_pct?: number
-  ai_min_mult?: number
-  ai_max_mult?: number
 }
 
 export interface ProtectionConfig {
@@ -299,6 +291,53 @@ export interface ProtectionConfig {
   drawdown_take_profit: DrawdownTakeProfitConfig
   break_even_stop: BreakEvenStopConfig
   regime_filter: RegimeFilterConfig
+  giveback_guard?: GivebackGuardConfig
+  trend_reversal?: TrendReversalConfig
+}
+
+// Trend-reversal position flip. Fleet default is ENABLED + LIVE for every trader
+// (including newly created ones). These fields are per-trader OVERRIDES on top of
+// that fleet default — an empty object means "use fleet defaults" (enabled, live,
+// min_confidence 75, min_position_age_hours 6).
+export interface TrendReversalConfig {
+  // disabled hard-disables the fleet-default feature for THIS trader.
+  disabled?: boolean
+  // force_dry_run pins THIS trader to observe-only even though the fleet is live —
+  // used to quarantine a single trader without fully disabling the feature.
+  force_dry_run?: boolean
+  // live_execution explicitly opts into live (forward-compat; fleet is already live).
+  live_execution?: boolean
+  // min_confidence is the AI-decision confidence floor (0-100) the opposite signal
+  // must clear to flip an existing position. Default 75.
+  min_confidence?: number
+  // min_position_age_hours is the minimum hold age before a position may be flipped
+  // (prevents noise flips inside the first trend leg). Backtest optimum: 6h.
+  min_position_age_hours?: number
+}
+
+// Portfolio giveback guard: the breadth circuit breaker (per-symbol monitoring +
+// majority-retrace gate). Cuts only losing retracing positions; winners ride
+// break-even. Leverage-free. Replaced the old L1/L2/L3 account-equity breakers.
+export interface GivebackGuardConfig {
+  enabled?: boolean
+  dry_run?: boolean
+
+  // Breadth breaker. Per-symbol monitoring + majority-retrace gate: fire when
+  // retracingCount/total >= breadth_frac AND total >= breadth_min_pos, then cut
+  // only LOSING retracing positions (winners ride break-even).
+  breadth_enabled?: boolean
+  breadth_min_pos?: number // quorum: min open positions before the gate can fire
+  breadth_frac?: number // fraction (0..1) of positions retracing that fires the gate
+  breadth_loser_cut_pct?: number // % of each losing+retracing position to cut (default 100)
+  breadth_use_atr?: boolean // true => retrace measured in ATR-from-peak units
+  breadth_atr_mult?: number // adverse-from-peak in ATR units that counts as retracing
+  breadth_giveback_pct?: number // peak-to-current giveback% that counts as retracing (pnl% mode)
+  breadth_vel_eps?: number // velocity threshold in ATR-units/bar (ATR-normalized); below -eps counts as retracing
+  breadth_vel_window?: number // bars of look-back for pnl-velocity (0 => default 6)
+  breadth_cooldown_bars?: number // min bars between fires (0 => disabled)
+  breadth_cut_winners?: boolean // true => full deleverage: cut retracing winners too (default false = losers only)
+
+  poll_interval_seconds?: number
 }
 
 // Grid trading specific configuration

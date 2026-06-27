@@ -75,6 +75,17 @@ func MigrateUnifiedProtection(db *sql.DB) error {
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 
+		// 广度熔断速度历史：持久化 gbPnlHist 与 bar 时钟，使重启后速度路不必再
+		// 经历 2~6h 的 warm-up。加载时带过期保护：超过 N 根 bar 的快照直接丢弃，
+		// 回到空历史(fail-safe)，避免跨越宕机时间空洞计算出错误速度。
+		`CREATE TABLE IF NOT EXISTS breadth_velocity_states (
+			trader_id TEXT PRIMARY KEY,
+			pnl_hist_json TEXT DEFAULT '{}',
+			last_bar_ms INTEGER DEFAULT 0,
+			bars_since_fire INTEGER DEFAULT 0,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
 		// 添加索引
 		`CREATE INDEX IF NOT EXISTS idx_protection_configs_trader
 		 ON trader_protection_configs(trader_id)`,
@@ -98,7 +109,53 @@ func MigrateUnifiedProtection(db *sql.DB) error {
 		}
 	}
 
+	// L3 equity circuit-breaker ratchet columns. SQLite has no ADD COLUMN IF NOT
+	// EXISTS, so add each column only when PRAGMA table_info shows it missing —
+	// idempotent across restarts and safe on older DBs that predate L3.
+	for _, col := range []struct{ name, ddl string }{
+		{"equity_peak", "ALTER TABLE giveback_guard_states ADD COLUMN equity_peak REAL DEFAULT 0"},
+		{"l3_fired_at_peak", "ALTER TABLE giveback_guard_states ADD COLUMN l3_fired_at_peak REAL DEFAULT 0"},
+		{"l3_tier_fired_json", "ALTER TABLE giveback_guard_states ADD COLUMN l3_tier_fired_json TEXT DEFAULT '[]'"},
+		// Rolling-baseline mode persistence: the rolling reference equity and the
+		// post-cut re-arm floor must survive restarts, or a restart mid-drawdown
+		// would reset protection to the (already-depressed) current equity.
+		{"roll_ref", "ALTER TABLE giveback_guard_states ADD COLUMN roll_ref REAL DEFAULT 0"},
+		{"roll_arm_floor", "ALTER TABLE giveback_guard_states ADD COLUMN roll_arm_floor REAL DEFAULT 0"},
+	} {
+		if !columnExists(db, "giveback_guard_states", col.name) {
+			if _, err := db.Exec(col.ddl); err != nil {
+				return fmt.Errorf("add column %s failed: %w", col.name, err)
+			}
+		}
+	}
+
 	return nil
+}
+
+// columnExists reports whether table has a column with the given name, via
+// PRAGMA table_info. Used to make ALTER TABLE ADD COLUMN idempotent on SQLite.
+func columnExists(db *sql.DB, table, column string) bool {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid       int
+			name, typ string
+			notnull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &pk); err != nil {
+			return false
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
 }
 
 // SaveUnifiedProtectionConfig 保存统一保护配置
@@ -252,55 +309,54 @@ func (s *Store) LoadPeakPnLForTrader(traderID string) (map[string]float64, error
 	return result, rows.Err()
 }
 
-// GivebackGuardState 是回吐保护的可持久化 ratchet 状态快照。
-type GivebackGuardState struct {
-	PortfolioPeakUnreal float64            // 组合总浮盈高水位 (quote)
-	L2FiredAtPeak       float64            // L2 触发时的组合高水位 (0=已解除/已重新武装)
-	L1FiredAtPeak       map[string]float64 // symbol_side -> L1 触发时的盈利%峰值
+// BreadthVelocityState 是广度熔断速度路的可持久化快照。
+type BreadthVelocityState struct {
+	PnlHist       map[string][]float64 // symbol_side -> 最近的 profit% 采样序列
+	LastBarMs     int64                // 上次推进速度 bar 的毫秒时间戳
+	BarsSinceFire int                  // 距上次熔断触发的 bar 数（冷却计数）
 }
 
-// SaveGivebackGuardState 持久化某 trader 的回吐保护 ratchet 状态。
-// 在 L1/L2 高水位推进或触发后调用，使重启后不会因状态归零而重复触发。
-func (s *Store) SaveGivebackGuardState(traderID string, state GivebackGuardState) error {
-	l1JSON := "{}"
-	if len(state.L1FiredAtPeak) > 0 {
-		b, err := json.Marshal(state.L1FiredAtPeak)
+// SaveBreadthVelocityState 持久化广度熔断的速度历史与 bar 时钟。每次 bar 推进后
+// 调用，使速度路在重启后无需重新经历 warm-up。
+func (s *Store) SaveBreadthVelocityState(traderID string, state BreadthVelocityState) error {
+	histJSON := "{}"
+	if len(state.PnlHist) > 0 {
+		b, err := json.Marshal(state.PnlHist)
 		if err != nil {
-			return fmt.Errorf("marshal l1 fired-at-peak failed: %w", err)
+			return fmt.Errorf("marshal breadth pnl-hist failed: %w", err)
 		}
-		l1JSON = string(b)
+		histJSON = string(b)
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO giveback_guard_states (trader_id, portfolio_peak_unreal, l2_fired_at_peak, l1_fired_at_peak_json, updated_at)
+		INSERT INTO breadth_velocity_states (trader_id, pnl_hist_json, last_bar_ms, bars_since_fire, updated_at)
 		VALUES (?, ?, ?, ?, datetime('now'))
 		ON CONFLICT(trader_id) DO UPDATE SET
-			portfolio_peak_unreal = excluded.portfolio_peak_unreal,
-			l2_fired_at_peak = excluded.l2_fired_at_peak,
-			l1_fired_at_peak_json = excluded.l1_fired_at_peak_json,
+			pnl_hist_json = excluded.pnl_hist_json,
+			last_bar_ms = excluded.last_bar_ms,
+			bars_since_fire = excluded.bars_since_fire,
 			updated_at = datetime('now')
-	`, traderID, state.PortfolioPeakUnreal, state.L2FiredAtPeak, l1JSON)
-
+	`, traderID, histJSON, state.LastBarMs, state.BarsSinceFire)
 	return err
 }
 
-// LoadGivebackGuardState 加载某 trader 的回吐保护 ratchet 状态，用于启动时恢复。
-// 无记录时返回零值状态（PortfolioPeakUnreal=0, 空 L1 map），等价于全新武装。
-func (s *Store) LoadGivebackGuardState(traderID string) (GivebackGuardState, error) {
-	state := GivebackGuardState{L1FiredAtPeak: make(map[string]float64)}
-	var l1JSON string
+// LoadBreadthVelocityState 加载广度熔断速度状态。无记录时返回空状态（空 hist），
+// 等价于全新 warm-up。过期判定由调用方按 last_bar_ms 决定（见 trader 层）。
+func (s *Store) LoadBreadthVelocityState(traderID string) (BreadthVelocityState, error) {
+	state := BreadthVelocityState{PnlHist: make(map[string][]float64)}
+	var histJSON string
 	err := s.db.QueryRow(`
-		SELECT portfolio_peak_unreal, l2_fired_at_peak, l1_fired_at_peak_json
-		FROM giveback_guard_states WHERE trader_id = ?
-	`, traderID).Scan(&state.PortfolioPeakUnreal, &state.L2FiredAtPeak, &l1JSON)
+		SELECT pnl_hist_json, last_bar_ms, bars_since_fire
+		FROM breadth_velocity_states WHERE trader_id = ?
+	`, traderID).Scan(&histJSON, &state.LastBarMs, &state.BarsSinceFire)
 	if err == sql.ErrNoRows {
 		return state, nil
 	}
 	if err != nil {
 		return state, err
 	}
-	if l1JSON != "" && l1JSON != "{}" {
-		if uErr := json.Unmarshal([]byte(l1JSON), &state.L1FiredAtPeak); uErr != nil {
-			return state, fmt.Errorf("unmarshal l1 fired-at-peak failed: %w", uErr)
+	if histJSON != "" && histJSON != "{}" {
+		if uErr := json.Unmarshal([]byte(histJSON), &state.PnlHist); uErr != nil {
+			return state, fmt.Errorf("unmarshal breadth pnl-hist failed: %w", uErr)
 		}
 	}
 	return state, nil

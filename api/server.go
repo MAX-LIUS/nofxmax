@@ -354,6 +354,9 @@ Returns: [{"symbol":"<string>","side":"long|short","size":<float>,"entry_price":
 				`Query: ?trader_id=<EXACT trader_id from GET /api/my-traders>&days=<int, default 30, max 365>
 Returns: {total_events, total_pnl, by_category:[{category,count,realized_pnl,fees}], by_mechanism:[{category,mechanism,count,realized_pnl,fees,close_value_usdt}]}`,
 				s.handleCloseAttribution)
+				s.routeWithSchema(protected, "GET", "/positions/flips", "Trend-reversal flip observations (dry-run + live) for review",
+					`Query: ?trader_id=<EXACT trader_id from GET /api/my-traders>&limit=<int, default 100, max 500>`,
+					s.handleFlipObservations)
 			s.routeWithSchema(protected, "GET", "/trades", "Trade records",
 				`Query: ?trader_id=<EXACT trader_id from GET /api/my-traders>&limit=<int, default 20>`,
 				s.handleTrades)
