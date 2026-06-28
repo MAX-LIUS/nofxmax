@@ -1,6 +1,7 @@
 package trader
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -138,23 +139,52 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 	}
 	persistNeeded := newBar // bar advance changed hist + bar clock; persist below
 
-	// Resolve ATR% per symbol once (ATR mode only). atrForProtection fetches
-	// klines, so cache per call to avoid duplicate fetches across same-symbol legs.
+	// Resolve ATR% per symbol once (ATR mode only). We use the FROZEN open-time
+	// ATR (frozenATRForPosition) rather than a fresh live fetch: the live fetch
+	// could fail transiently (kline gap / API hiccup) and silently drop a symbol
+	// from the retracing set, weakening the breaker exactly when markets are
+	// disorderly. The frozen value is computed once at open and persisted, so it
+	// survives restarts and is always available after the first successful resolve.
+	// atrResolve returns (atrPct, frozen, ok): ok=false means ATR is genuinely
+	// unavailable for this symbol this cycle (recorded as an ATR failure, never a
+	// silent drop — see fail-safe handling in retracing()).
 	atrPctCache := make(map[string]float64)
+	atrOkCache := make(map[string]bool)
+	atrFrozenCache := make(map[string]bool)
 	acfg := at.config.StrategyConfig.ATRProtection
-	atrPctOf := func(symbol string, entry float64) float64 {
+	atrResolve := func(symbol string, entry float64) (float64, bool, bool) {
 		if v, ok := atrPctCache[symbol]; ok {
-			return v
+			return v, atrFrozenCache[symbol], atrOkCache[symbol]
 		}
 		v := 0.0
+		ok := false
+		frozen := false
 		if entry > 0 {
-			if atr, ok := at.atrForProtection(symbol, acfg); ok && atr > 0 {
+			// Frozen open-time ATR first (stable, restart-safe, never silently 0).
+			if atr, fok := at.frozenATRForPosition(symbol, entry, acfg); fok && atr > 0 {
 				v = atr / entry * 100
+				ok = true
+				frozen = true
+			} else if atr, lok := at.atrForProtection(symbol, acfg); lok && atr > 0 {
+				// Fallback to a live fetch only if the frozen path is unavailable
+				// (e.g. position predates frozen-ATR persistence).
+				v = atr / entry * 100
+				ok = true
 			}
 		}
 		atrPctCache[symbol] = v
-		return v
+		atrOkCache[symbol] = ok
+		atrFrozenCache[symbol] = frozen
+		return v, frozen, ok
 	}
+
+	// atrFailures counts symbols whose ATR could not be resolved this cycle (ATR
+	// mode only). Recorded into the event for later diagnosis; classification
+	// fail-safe treats an unresolved ATR symbol as NON-retracing (so a data gap
+	// can never manufacture a false breaker fire), but the failure is always
+	// logged so it is visible rather than silent.
+	atrFailures := 0
+	atrFailSyms := make(map[string]bool)
 
 	// retracing classifies a position as pulling back from its own peak. Both the
 	// velocity path and the from-peak path are ATR-normalized, so BreadthVelEps and
@@ -164,7 +194,13 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 		hist := at.gbPnlHist[key]
 		atrPct := 0.0
 		if cfg.BreadthUseATR {
-			atrPct = atrPctOf(s.symbol, s.entry)
+			var ok bool
+			atrPct, _, ok = atrResolve(s.symbol, s.entry)
+			if !ok && !atrFailSyms[s.symbol] {
+				atrFailSyms[s.symbol] = true
+				atrFailures++
+				logger.Warnf("⚠️ [GivebackGuard Breadth] ATR unavailable for %s (frozen+live both failed) — treated as non-retracing this cycle (fail-safe)", s.symbol)
+			}
 		}
 		// Velocity path: profit%/bar normalized by ATR% => "ATR-units lost per bar".
 		// A symbol giving back faster than BreadthVelEps ATRs/bar counts as retracing.
@@ -179,31 +215,108 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 		}
 		if cfg.BreadthUseATR {
 			if atrPct <= 0 {
-				return false
+				return false // fail-safe: unresolved ATR never counts as retracing
 			}
 			return (s.peakPct-s.profitPct)/atrPct >= cfg.BreadthATRMult
 		}
 		return (s.peakPct - s.profitPct) >= cfg.BreadthGivebackPct
 	}
 
+	// Classify every position once and capture the full per-leg picture so the
+	// decision is fully reconstructable from the recorded event (task: "把整个
+	// 事件全貌细节都记录下来"). retracing() is evaluated exactly once per leg here.
 	total := 0
 	retr := 0
-	for _, s := range snaps {
+	legs := make([]store.BreadthEventLeg, 0, len(snaps))
+	legRetr := make([]bool, len(snaps))
+	for i, s := range snaps {
 		total++
-		if retracing(s) {
+		isRetr := retracing(s)
+		legRetr[i] = isRetr
+		if isRetr {
 			retr++
 		}
+		atrPct := 0.0
+		atrFailed := false
+		frozen := false
+		if cfg.BreadthUseATR {
+			var ok bool
+			atrPct, frozen, ok = atrResolve(s.symbol, s.entry)
+			atrFailed = !ok
+		}
+		legs = append(legs, store.BreadthEventLeg{
+			Symbol:    s.symbol,
+			Side:      s.side,
+			Entry:     s.entry,
+			Mark:      s.mark,
+			ProfitPct: s.profitPct,
+			PeakPct:   s.peakPct,
+			Retracing: isRetr,
+			ATRPct:    atrPct,
+			ATRFailed: atrFailed,
+			Frozen:    frozen,
+		})
 	}
 	barsSinceFire := at.gbBreadthBarsSinceFire
 	at.gbGuardMutex.Unlock()
 
+	frac := 0.0
+	if total > 0 {
+		frac = float64(retr) / float64(total)
+	}
+
+	// recordEvent persists a full snapshot of this evaluation. Best-effort; never
+	// blocks the guard. cut legs are marked by the caller before invoking on fire.
+	recordEvent := func(outcome string, cutCount int) {
+		if at.store == nil {
+			return
+		}
+		legsJSON := "[]"
+		if b, err := json.Marshal(legs); err == nil {
+			legsJSON = string(b)
+		}
+		nowMs := time.Now().UnixMilli()
+		evt := &store.BreadthEvent{
+			TraderID:      at.id,
+			ExchangeID:    at.exchangeID,
+			Outcome:       outcome,
+			Total:         total,
+			Retracing:     retr,
+			RetracingFrac: frac,
+			ThresholdFrac: cfg.BreadthFrac,
+			MinPos:        cfg.BreadthMinPos,
+			CutCount:      cutCount,
+			ATRFailCount:  atrFailures,
+			BarsSinceFire: barsSinceFire,
+			CooldownBars:  cfg.BreadthCooldownBars,
+			CutWinners:    cfg.BreadthCutWinners,
+			UseATR:        cfg.BreadthUseATR,
+			LegsJSON:      legsJSON,
+			ObservedAt:    nowMs,
+			CreatedAt:     nowMs,
+		}
+		if err := at.store.BreadthEvent().Record(evt); err != nil {
+			logger.Warnf("⚠️ [GivebackGuard Breadth] failed to record event: %v", err)
+		}
+	}
+
 	if total < cfg.BreadthMinPos {
+		// Below quorum. Only worth recording when something was retracing (so we
+		// capture "near-misses that never reached quorum") or an ATR fetch failed
+		// (so silent data gaps are visible). Quiet cycles are not persisted.
+		if retr > 0 || atrFailures > 0 {
+			recordEvent("no_quorum", 0)
+		}
 		return // no quorum: "majority" is meaningless with too few positions
 	}
-	if float64(retr)/float64(total) < cfg.BreadthFrac {
+	if frac < cfg.BreadthFrac {
+		// Quorum reached but the majority threshold was not — a genuine near-miss.
+		// Always recorded so over/under-sensitivity of BreadthFrac is tunable.
+		recordEvent("near_miss", 0)
 		return // not a majority reversal: leave each symbol to its own SL/BE
 	}
 	if cfg.BreadthCooldownBars > 0 && barsSinceFire < cfg.BreadthCooldownBars {
+		recordEvent("cooldown", 0)
 		return
 	}
 
@@ -219,21 +332,18 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 	if cfg.BreadthCutWinners {
 		scope = "ALL retracing (winners too — full deleverage)"
 	}
-	logger.Infof("🌐 [GivebackGuard Breadth] gate FIRED: %d/%d positions retracing (>=%.0f%%), cutting %s at %.0f%%",
-		retr, total, cfg.BreadthFrac*100, scope, cutPct*100)
+	logger.Infof("🌐 [GivebackGuard Breadth] gate FIRED: %d/%d positions retracing (>=%.0f%%), cutting %s at %.0f%% (atr_fail=%d)",
+		retr, total, cfg.BreadthFrac*100, scope, cutPct*100, atrFailures)
 
 	fired := 0
-	for _, s := range snaps {
+	for i, s := range snaps {
 		// Default surgical mode: cut only LOSING positions that are retracing;
 		// winners ride their break-even stop. When BreadthCutWinners is set this
 		// becomes a full deleveraging breaker: retracing winners are cut too.
 		if s.profitPct >= 0 && !cfg.BreadthCutWinners {
 			continue
 		}
-		at.gbGuardMutex.Lock()
-		isRetr := retracing(s)
-		at.gbGuardMutex.Unlock()
-		if !isRetr {
+		if !legRetr[i] {
 			continue
 		}
 		closeQty := s.quantity * cutPct
@@ -243,8 +353,10 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 		at.gbTrim(cfg, "giveback_guard_breadth", s, closeQty,
 			fmt.Sprintf("breadth %s %s pnl=%.2f%% peak=%.2f%% (%d/%d retracing)",
 				s.symbol, s.side, s.profitPct, s.peakPct, retr, total))
+		legs[i].Cut = true
 		fired++
 	}
+	recordEvent("fired", fired)
 	if fired > 0 {
 		at.gbGuardMutex.Lock()
 		at.gbBreadthBarsSinceFire = 0

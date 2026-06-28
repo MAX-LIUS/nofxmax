@@ -128,7 +128,8 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 		// enabled and the position is aged enough. Otherwise fall through to the
 		// normal capacity path (which still rejects/handles as before).
 		if pos["symbol"] == decision.Symbol && pos["side"] == "short" {
-			if fd := at.evaluateFlip(decision, "long", pos); fd.ShouldFlip {
+			fd := at.evaluateFlip(decision, "long", pos)
+			if fd.ShouldFlip {
 				executed, err := at.executeFlipClose(decision, "long", fd)
 				if err != nil {
 					return fmt.Errorf("trend-reversal flip (close short) failed for %s: %w", decision.Symbol, err)
@@ -141,6 +142,11 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 				if refreshed, rerr := at.trader.GetPositions(); rerr == nil {
 					positions = refreshed
 				}
+			} else if fd.IsCandidate {
+				// Genuine opposite-on-held reversal that did NOT flip (conf/age/
+				// disabled). Record the near-miss so it is reviewable, then let the
+				// normal capacity path reject the same-symbol entry as before.
+				at.recordFlipObservation(decision, "long", fd, false)
 			}
 		}
 	}
@@ -311,7 +317,8 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 		// signal may FLIP it (close long + open short) when trend-reversal is
 		// enabled and the position is aged enough.
 		if pos["symbol"] == decision.Symbol && pos["side"] == "long" {
-			if fd := at.evaluateFlip(decision, "short", pos); fd.ShouldFlip {
+			fd := at.evaluateFlip(decision, "short", pos)
+			if fd.ShouldFlip {
 				executed, err := at.executeFlipClose(decision, "short", fd)
 				if err != nil {
 					return fmt.Errorf("trend-reversal flip (close long) failed for %s: %w", decision.Symbol, err)
@@ -322,6 +329,10 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 				if refreshed, rerr := at.trader.GetPositions(); rerr == nil {
 					positions = refreshed
 				}
+			} else if fd.IsCandidate {
+				// Genuine opposite-on-held reversal that did NOT flip — record the
+				// near-miss before falling through to the normal capacity reject.
+				at.recordFlipObservation(decision, "short", fd, false)
 			}
 		}
 	}

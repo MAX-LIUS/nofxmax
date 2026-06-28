@@ -18,23 +18,24 @@ type Store struct {
 	driver *DBDriver // Database driver for abstraction (legacy)
 
 	// Sub-stores (lazy initialization)
-	user           *UserStore
-	aiModel        *AIModelStore
-	exchange       *ExchangeStore
-	trader         *TraderStore
-	decision       *DecisionStore
-	position       *PositionStore
-	positionClose  *PositionCloseEventStore
-	closeIntent    *CloseIntentStore
-	flipObs        *FlipObservationStore
-	strategy       *StrategyStore
+	user             *UserStore
+	aiModel          *AIModelStore
+	exchange         *ExchangeStore
+	trader           *TraderStore
+	decision         *DecisionStore
+	position         *PositionStore
+	positionClose    *PositionCloseEventStore
+	closeIntent      *CloseIntentStore
+	flipObs          *FlipObservationStore
+	breadthEvt       *BreadthEventStore
+	strategy         *StrategyStore
 	equity           *EquityStore
 	equityAdjustment *EquityAdjustmentStore
 	order            *OrderStore
-	grid           *GridStore
-	aiCharge       *AIChargeStore
-	evolution      *EvolutionStore
-	telegramConfig TelegramConfigStore
+	grid             *GridStore
+	aiCharge         *AIChargeStore
+	evolution        *EvolutionStore
+	telegramConfig   TelegramConfigStore
 
 	mu sync.RWMutex
 }
@@ -159,6 +160,9 @@ func (s *Store) initTables() error {
 	}
 	if err := s.FlipObservation().InitTables(); err != nil {
 		return fmt.Errorf("failed to initialize flip observation tables: %w", err)
+	}
+	if err := s.BreadthEvent().InitTables(); err != nil {
+		return fmt.Errorf("failed to initialize breadth event tables: %w", err)
 	}
 	if err := s.Strategy().initTables(); err != nil {
 		return fmt.Errorf("failed to initialize strategy tables: %w", err)
@@ -302,6 +306,18 @@ func (s *Store) FlipObservation() *FlipObservationStore {
 		s.flipObs = NewFlipObservationStore(s.gdb)
 	}
 	return s.flipObs
+}
+
+// BreadthEvent gets the breadth circuit-breaker event storage. Records a full
+// per-cycle snapshot every time the breaker reaches quorum (fire / near-miss /
+// cooldown-blocked) so the breaker's behaviour is reconstructable for tuning.
+func (s *Store) BreadthEvent() *BreadthEventStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.breadthEvt == nil {
+		s.breadthEvt = NewBreadthEventStore(s.gdb)
+	}
+	return s.breadthEvt
 }
 
 // Evolution gets evolution engine storage

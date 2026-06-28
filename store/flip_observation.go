@@ -16,14 +16,25 @@ type FlipObservation struct {
 	TraderID      string  `gorm:"column:trader_id;not null;index:idx_flip_obs_trader,sort:desc" json:"trader_id"`
 	ExchangeID    string  `gorm:"column:exchange_id;default:''" json:"exchange_id"`
 	Symbol        string  `gorm:"column:symbol;not null" json:"symbol"`
-	FromSide      string  `gorm:"column:from_side;not null" json:"from_side"`   // side being closed (long/short)
-	ToSide        string  `gorm:"column:to_side;not null" json:"to_side"`       // reverse side opened (long/short)
+	FromSide      string  `gorm:"column:from_side;not null" json:"from_side"`    // side being closed (long/short)
+	ToSide        string  `gorm:"column:to_side;not null" json:"to_side"`        // reverse side opened (long/short)
 	Confidence    int     `gorm:"column:confidence;default:0" json:"confidence"` // AI confidence on the reversal
 	AgeHours      float64 `gorm:"column:age_hours;default:0" json:"age_hours"`   // hold age at flip time
 	Quantity      float64 `gorm:"column:quantity;default:0" json:"quantity"`
 	DecisionCycle int     `gorm:"column:decision_cycle;default:0" json:"decision_cycle"`
 	Executed      bool    `gorm:"column:executed;default:false" json:"executed"` // false = dry_run observation
-	Reasoning     string  `gorm:"column:reasoning;default:''" json:"reasoning"`  // AI reasoning snapshot
+	// Outcome records why the flip evaluation ended the way it did, so EVERY
+	// opposite-on-held-symbol case is reviewable — not just the ones that flipped.
+	//   "executed"           — live flip performed
+	//   "dry_run"            — would-flip, observed only (DryRun)
+	//   "blocked_confidence" — opposite signal but conf < MinConfidence
+	//   "blocked_age"        — opposite signal but position younger than MinPositionAgeHours
+	//   "blocked_disabled"   — opposite signal but flip feature disabled for this trader
+	//   "blocked_no_qty"     — opposite signal but no resolvable quantity
+	Outcome   string  `gorm:"column:outcome;default:''" json:"outcome"`
+	MinConf   int     `gorm:"column:min_conf;default:0" json:"min_conf"`    // active confidence floor at eval time
+	MinAge    float64 `gorm:"column:min_age;default:0" json:"min_age"`      // active age floor (hours) at eval time
+	Reasoning string  `gorm:"column:reasoning;default:''" json:"reasoning"` // AI reasoning snapshot
 	// Outcome backfill (filled later by review tooling): PnL of the reverse position
 	// vs what holding the original would have produced. 0 until evaluated.
 	ReverseRealizedPnL float64 `gorm:"column:reverse_realized_pnl;default:0" json:"reverse_realized_pnl"`
@@ -46,6 +57,17 @@ func (s *FlipObservationStore) InitTables() error {
 		var exists int64
 		s.db.Raw(`SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'flip_observations'`).Scan(&exists)
 		if exists > 0 {
+			// Table predates the near-miss columns; add them idempotently so
+			// existing deployments record blocked/near-miss flip cases too.
+			for _, ddl := range []string{
+				`ALTER TABLE flip_observations ADD COLUMN IF NOT EXISTS outcome TEXT DEFAULT ''`,
+				`ALTER TABLE flip_observations ADD COLUMN IF NOT EXISTS min_conf INTEGER DEFAULT 0`,
+				`ALTER TABLE flip_observations ADD COLUMN IF NOT EXISTS min_age DOUBLE PRECISION DEFAULT 0`,
+			} {
+				if err := s.db.Exec(ddl).Error; err != nil {
+					return fmt.Errorf("failed to add flip_observations column: %w", err)
+				}
+			}
 			return nil
 		}
 	}

@@ -123,3 +123,65 @@ func TestEvaluateFlipNegativeAmt(t *testing.T) {
 		t.Fatalf("negative amt must normalize to 3.0, got flip=%v qty=%v", fd.ShouldFlip, fd.Quantity)
 	}
 }
+
+// A genuine opposite-on-held signal blocked by the confidence floor must still
+// be flagged as a candidate (so it gets recorded) with the right outcome.
+func TestEvaluateFlipBlockedConfidenceIsCandidate(t *testing.T) {
+	at := newFlipTestTrader(store.TrendReversalConfig{})
+	now := time.Now().UnixMilli()
+	at.positionFirstSeenTime["ETHUSDT_short"] = now - 10*60*60*1000
+	fd := at.evaluateFlip(decisionFor("ETHUSDT", 70), "long", flipPos("ETHUSDT", "short", 1.0))
+	if fd.ShouldFlip {
+		t.Fatal("conf 70 must not flip")
+	}
+	if !fd.IsCandidate {
+		t.Fatal("blocked-by-confidence reversal must still be a candidate for recording")
+	}
+	if fd.Outcome != "blocked_confidence" {
+		t.Fatalf("Outcome = %q, want blocked_confidence", fd.Outcome)
+	}
+	if fd.MinConf != 75 {
+		t.Errorf("MinConf = %d, want 75", fd.MinConf)
+	}
+}
+
+// Blocked by age => candidate + blocked_age, and AgeHours captured.
+func TestEvaluateFlipBlockedAgeIsCandidate(t *testing.T) {
+	at := newFlipTestTrader(store.TrendReversalConfig{})
+	now := time.Now().UnixMilli()
+	at.positionFirstSeenTime["ETHUSDT_short"] = now - 2*60*60*1000 // 2h < 6h
+	fd := at.evaluateFlip(decisionFor("ETHUSDT", 90), "long", flipPos("ETHUSDT", "short", 1.0))
+	if fd.ShouldFlip || !fd.IsCandidate {
+		t.Fatalf("2h reversal must be a blocked candidate, flip=%v cand=%v", fd.ShouldFlip, fd.IsCandidate)
+	}
+	if fd.Outcome != "blocked_age" {
+		t.Fatalf("Outcome = %q, want blocked_age", fd.Outcome)
+	}
+	if fd.AgeHours <= 0 || fd.AgeHours > 6 {
+		t.Errorf("AgeHours = %v, want (0,6)", fd.AgeHours)
+	}
+}
+
+// Disabled feature on a genuine reversal => candidate + blocked_disabled (so the
+// near-miss is still recorded even when flipping is turned off for the trader).
+func TestEvaluateFlipDisabledIsCandidate(t *testing.T) {
+	at := newFlipTestTrader(store.TrendReversalConfig{Disabled: true})
+	now := time.Now().UnixMilli()
+	at.positionFirstSeenTime["ETHUSDT_short"] = now - 10*60*60*1000
+	fd := at.evaluateFlip(decisionFor("ETHUSDT", 90), "long", flipPos("ETHUSDT", "short", 1.0))
+	if fd.ShouldFlip {
+		t.Fatal("disabled feature must not flip")
+	}
+	if !fd.IsCandidate || fd.Outcome != "blocked_disabled" {
+		t.Fatalf("disabled reversal must be candidate/blocked_disabled, got cand=%v outcome=%q", fd.IsCandidate, fd.Outcome)
+	}
+}
+
+// Same-side (not a reversal) is never a candidate.
+func TestEvaluateFlipSameSideNotCandidate(t *testing.T) {
+	at := newFlipTestTrader(store.TrendReversalConfig{})
+	fd := at.evaluateFlip(decisionFor("ETHUSDT", 90), "long", flipPos("ETHUSDT", "long", 1.0))
+	if fd.IsCandidate {
+		t.Fatal("same-side signal must not be a flip candidate")
+	}
+}

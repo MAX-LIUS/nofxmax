@@ -19,6 +19,17 @@ type flipDecision struct {
 	ExistingSide string  // "long" or "short" — the side being closed
 	Quantity     float64 // absolute size of the existing position
 	AgeHours     float64 // current hold age
+	// Outcome is the machine-readable verdict for the flip_observations audit, set
+	// on EVERY genuine opposite-on-held evaluation (not just successful flips):
+	// executed / dry_run / blocked_confidence / blocked_age / blocked_disabled /
+	// blocked_no_qty. Empty means "not a flip candidate" (same-side / no held pos).
+	Outcome string
+	MinConf int     // active confidence floor at eval time
+	MinAge  float64 // active age floor (hours) at eval time
+	// IsCandidate is true when the incoming signal is a genuine reversal against a
+	// held opposite position on this symbol — i.e. worth recording regardless of
+	// whether it ultimately flipped. Distinguishes "blocked flip" from "not a flip".
+	IsCandidate bool
 }
 
 // resolvedFlipConfig is the effective per-trader flip configuration after merging
@@ -86,51 +97,68 @@ func (at *AutoTrader) trendReversalConfig() resolvedFlipConfig {
 func (at *AutoTrader) evaluateFlip(decision *kernel.Decision, newSide string, existingPos map[string]interface{}) flipDecision {
 	cfg := at.trendReversalConfig()
 	res := flipDecision{}
-	if !cfg.Enabled {
-		return res
-	}
 
 	existingSide, _ := existingPos["side"].(string)
 	existingSide = strings.ToLower(existingSide)
 	res.ExistingSide = existingSide
 
-	// Must be a genuine reversal: incoming side opposite the held side.
-	if existingSide == strings.ToLower(newSide) {
+	// Must be a genuine reversal: incoming side opposite the held side. Same-side
+	// (or unresolved side) is not a flip candidate and is never recorded.
+	if existingSide == "" || existingSide == strings.ToLower(newSide) {
 		return res
 	}
 
-	// Rule 1: AI conviction floor.
+	// From here on this IS a genuine opposite-on-held candidate: every branch is
+	// recorded to flip_observations so blocked/near-miss cases are reviewable
+	// (task: 新的分析认为可开仓但同时已经持有该币种的反向仓的情况都拿出来记录).
+	res.IsCandidate = true
+
 	minConf := cfg.MinConfidence
 	if minConf <= 0 {
 		minConf = 75
 	}
+	minAgeHours := cfg.MinPositionAgeHours
+	if minAgeHours <= 0 {
+		minAgeHours = 6
+	}
+	res.MinConf = minConf
+	res.MinAge = minAgeHours
+
+	// Capture age + quantity up front so blocked observations carry full context.
+	ageMinutes := at.positionHoldMinutes(decision.Symbol, existingSide)
+	res.AgeHours = ageMinutes / 60.0
+	qty, _ := existingPos["positionAmt"].(float64)
+	if qty < 0 {
+		qty = -qty
+	}
+	res.Quantity = qty
+
+	// Feature disabled for this trader: still a candidate, still recorded.
+	if !cfg.Enabled {
+		res.Outcome = "blocked_disabled"
+		res.Reason = "trend-reversal flip disabled for trader"
+		return res
+	}
+
+	// Rule 1: AI conviction floor.
 	if decision.Confidence < minConf {
+		res.Outcome = "blocked_confidence"
 		res.Reason = "confidence below flip floor"
 		return res
 	}
 
 	// Rule 3: minimum hold age.
-	minAgeHours := cfg.MinPositionAgeHours
-	if minAgeHours <= 0 {
-		minAgeHours = 6
-	}
-	ageMinutes := at.positionHoldMinutes(decision.Symbol, existingSide)
-	res.AgeHours = ageMinutes / 60.0
 	if res.AgeHours < minAgeHours {
+		res.Outcome = "blocked_age"
 		res.Reason = "position too young to flip"
 		return res
 	}
 
-	// Resolve the absolute quantity to close.
-	qty, _ := existingPos["positionAmt"].(float64)
-	if qty < 0 {
-		qty = -qty
-	}
 	if qty <= 0 {
+		res.Outcome = "blocked_no_qty"
 		res.Reason = "no resolvable quantity"
 		return res
 	}
-	res.Quantity = qty
 
 	res.ShouldFlip = true
 	res.Reason = "AI high-conviction reversal on aged position"
@@ -177,9 +205,15 @@ func (at *AutoTrader) recordFlipObservation(decision *kernel.Decision, newSide s
 	if !executed {
 		mode = "dry_run"
 	}
-	logger.Infof("  📋 flip-audit symbol=%s from=%s to=%s conf=%d age=%.1fh qty=%.6f mode=%s",
+	// Outcome: prefer the explicit verdict set by evaluateFlip for blocked cases;
+	// for a flip that proceeded it is executed/dry_run depending on live vs DryRun.
+	outcome := fd.Outcome
+	if fd.ShouldFlip {
+		outcome = mode
+	}
+	logger.Infof("  📋 flip-audit symbol=%s from=%s to=%s conf=%d(min%d) age=%.1fh(min%.1f) qty=%.6f outcome=%s",
 		market.Normalize(decision.Symbol), fd.ExistingSide, newSide,
-		decision.Confidence, fd.AgeHours, fd.Quantity, mode)
+		decision.Confidence, fd.MinConf, fd.AgeHours, fd.MinAge, fd.Quantity, outcome)
 
 	if at.store == nil {
 		return
@@ -196,6 +230,9 @@ func (at *AutoTrader) recordFlipObservation(decision *kernel.Decision, newSide s
 		Quantity:      fd.Quantity,
 		DecisionCycle: at.cycleNumber,
 		Executed:      executed,
+		Outcome:       outcome,
+		MinConf:       fd.MinConf,
+		MinAge:        fd.MinAge,
 		Reasoning:     decision.Reasoning,
 		ObservedAt:    nowMs,
 		CreatedAt:     nowMs,
