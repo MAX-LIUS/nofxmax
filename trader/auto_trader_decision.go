@@ -819,6 +819,25 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 	peakPnLPct := 0.0
 	drawdownPct := 0.0
 	markPrice, _ := at.getPositionMarkPrice(symbol, side)
+
+	// ATR context for the UI: frozen value at entry (used to convert ATR-multiple
+	// thresholds to prices) and the current live ATR (shows volatility drift).
+	atrAtEntry := 0.0
+	currentATR := 0.0
+	atrTimeframe := ""
+	if at.config.StrategyConfig != nil {
+		acfg := at.config.StrategyConfig.ATRProtection
+		if acfg.Enabled {
+			atrTimeframe = acfg.WithDefaults().Timeframe
+			if v, ok := at.frozenATRForPosition(symbol, entryPrice, acfg); ok {
+				atrAtEntry = v
+			}
+			if v, ok := at.atrForProtection(symbol, acfg); ok {
+				currentATR = v
+			}
+		}
+	}
+
 	if entryPrice > 0 && markPrice > 0 {
 		currentPnLPct = calculatePositionPnLPct(side, entryPrice, markPrice)
 		peakPnLPct = currentPnLPct
@@ -1402,6 +1421,9 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 		"current_pnl_pct":                     currentPnLPct,
 		"drawdown_peak_pnl_pct":               peakPnLPct,
 		"current_drawdown_pct":                drawdownPct,
+		"atr_at_entry":                        atrAtEntry,
+		"current_atr":                         currentATR,
+		"atr_timeframe":                       atrTimeframe,
 		"current_break_even_trigger_pct":      breakEvenTrigger,
 		"break_even_offset_pct":               breakEvenOffset,
 		"next_break_even_gap_pct":             nextBreakEvenGap,

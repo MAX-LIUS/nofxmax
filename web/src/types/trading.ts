@@ -121,6 +121,9 @@ export interface ProtectionRuntime {
   current_pnl_pct?: number
   drawdown_peak_pnl_pct?: number
   current_drawdown_pct?: number
+  atr_at_entry?: number
+  current_atr?: number
+  atr_timeframe?: string
   current_break_even_trigger_pct?: number
   break_even_offset_pct?: number
   next_break_even_gap_pct?: number
@@ -832,6 +835,34 @@ export interface FlipObservationsResponse {
   total: number
   executed_count: number
   dry_run_count: number
+}
+
+export interface SidePnLBucket {
+  bucket_ms: number
+  long_notion: number
+  short_notion: number
+}
+
+export interface SidePnLSeriesResponse {
+  series: SidePnLBucket[]
+  hours: number
+}
+
+export interface BreakerEvent {
+  symbol: string
+  side: string
+  mechanism: string
+  close_reason: string
+  close_ratio_pct: number
+  realized_pnl: number
+  event_time: string
+}
+
+export interface BreakerHistoryResponse {
+  events: BreakerEvent[]
+  total: number
+  total_pnl: number
+  days: number
 }
 
 // Grid Risk Information for frontend display

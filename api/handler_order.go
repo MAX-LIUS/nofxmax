@@ -894,3 +894,106 @@ func (s *Server) handleFlipObservations(c *gin.Context) {
 		"dry_run_count":  dryRunCount,
 	})
 }
+
+// handleSidePnLSeries returns hourly long/short NOTIONAL EXPOSURE (USDT) over the
+// recent window (default 12h) so the header can render the long/short ratio
+// curve (each side's share of total exposure, bounded 0..100%).
+func (s *Server) handleSidePnLSeries(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		SafeBadRequest(c, "Invalid trader ID")
+		return
+	}
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		SafeNotFound(c, "Trader")
+		return
+	}
+	traderStore := trader.GetStore()
+	if traderStore == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Store not available"})
+		return
+	}
+
+	hours := 12
+	if h, perr := strconv.Atoi(c.DefaultQuery("hours", "12")); perr == nil && h > 0 && h <= 168 {
+		hours = h
+	}
+	sinceMs := time.Now().UTC().Add(-time.Duration(hours) * time.Hour).UnixMilli()
+
+	buckets, err := traderStore.Position().GetSideExposureSeries(trader.GetID(), sinceMs, 3600000)
+	if err != nil {
+		SafeInternalError(c, "Side exposure series", err)
+		return
+	}
+
+	series := make([]map[string]interface{}, 0, len(buckets))
+	for _, b := range buckets {
+		series = append(series, map[string]interface{}{
+			"bucket_ms":    b.BucketMs,
+			"long_notion":  b.LongNotion,
+			"short_notion": b.ShortNotion,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"series": series,
+		"hours":  hours,
+	})
+}
+
+// handleBreakerHistory returns recent circuit-breaker / breadth-guard close
+// events for the advanced panel.
+func (s *Server) handleBreakerHistory(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		SafeBadRequest(c, "Invalid trader ID")
+		return
+	}
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		SafeNotFound(c, "Trader")
+		return
+	}
+	traderStore := trader.GetStore()
+	if traderStore == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Store not available"})
+		return
+	}
+
+	days := 7
+	if d, perr := strconv.Atoi(c.DefaultQuery("days", "7")); perr == nil && d > 0 && d <= 90 {
+		days = d
+	}
+	limit := 200
+	if l, perr := strconv.Atoi(c.DefaultQuery("limit", "200")); perr == nil && l > 0 && l <= 500 {
+		limit = l
+	}
+	sinceMs := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
+
+	events, err := traderStore.PositionClose().ListBreakerEvents(trader.GetID(), sinceMs, limit)
+	if err != nil {
+		SafeInternalError(c, "Breaker history", err)
+		return
+	}
+
+	out := make([]map[string]interface{}, 0, len(events))
+	var totalPnL float64
+	for _, ev := range events {
+		totalPnL += ev.RealizedPnL
+		out = append(out, map[string]interface{}{
+			"symbol":          ev.Symbol,
+			"side":            ev.Side,
+			"mechanism":       ev.Mechanism,
+			"close_reason":    ev.CloseReason,
+			"close_ratio_pct": ev.CloseRatioPct,
+			"realized_pnl":    ev.RealizedPnL,
+			"event_time":      time.UnixMilli(ev.EventTime).UTC().Format(time.RFC3339),
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"events":    out,
+		"total":     len(out),
+		"total_pnl": totalPnL,
+		"days":      days,
+	})
+}

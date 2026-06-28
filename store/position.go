@@ -294,6 +294,28 @@ func (s *PositionStore) logCloseEvent(pos *TraderPosition, closeReason, executio
 			parentOrderID = ord.ParentOrderID
 		}
 	}
+	// Close-intent fallback: when attribution still resolves to sync_external, the
+	// trader_order's OrderAction has not yet been stamped by the async fill-sync
+	// (logCloseEvent can run 1-2s ahead of order_sync). The close-intent ledger is
+	// written at decision time — well before the fill — so it is immune to that
+	// race. Look it up by the close order id (parent, then the fill's own id) and
+	// adopt its reason. Read-only: order_sync remains the sole intent consumer.
+	if attr.Mechanism == MechSyncExternal && s.db != nil {
+		intentStore := NewCloseIntentStore(s.db)
+		for _, oid := range []string{parentOrderID, exchangeOrderID} {
+			if oid == "" {
+				continue
+			}
+			if intent, ierr := intentStore.LookupByOrderID(pos.TraderID, oid); ierr == nil && intent != nil && intent.Reason != "" {
+				if alt := ClassifyClose(intent.Reason); alt.Mechanism != MechSyncExternal && alt.Mechanism != MechUnknownClose {
+					closeReason = intent.Reason
+					executionSource = intent.Reason
+					attr = alt
+					break
+				}
+			}
+		}
+	}
 	event := &PositionCloseEvent{
 		PositionID:       pos.ID,
 		TraderID:         pos.TraderID,
@@ -1232,4 +1254,70 @@ func (s *PositionStore) GetClosedTradesForEvolution(traderID, symbol, side strin
 		return nil, fmt.Errorf("failed to query evolution trades: %w", err)
 	}
 	return positions, nil
+}
+
+// SideExposureBucket is one hourly snapshot of long vs short notional exposure
+// (entry_price * quantity in USDT) used for the dashboard long/short ratio curve.
+type SideExposureBucket struct {
+	BucketMs    int64   `json:"bucket_ms"`
+	LongNotion  float64 `json:"long_notion"`
+	ShortNotion float64 `json:"short_notion"`
+}
+
+// GetSideExposureSeries reconstructs hourly long/short notional exposure over
+// [sinceMs, now]. A position contributes entry_price*entry_quantity to its side
+// in every bucket where it was open (entry_time <= bucket_end AND (still open OR
+// exit_time >= bucket_start)). Entry notional is used because historical mark
+// prices are not stored; this yields a stable exposure-ratio curve without
+// external kline fetches. Buckets with no open positions are emitted as zeros so
+// the frontend can render a continuous line.
+func (s *PositionStore) GetSideExposureSeries(traderID string, sinceMs, bucketMs int64) ([]SideExposureBucket, error) {
+	if bucketMs <= 0 {
+		bucketMs = 3600000
+	}
+	nowMs := time.Now().UTC().UnixMilli()
+	// Fetch positions overlapping the window: entry before now, and either still
+	// open or closed at/after sinceMs.
+	var positions []TraderPosition
+	err := s.db.Model(&TraderPosition{}).
+		Where("trader_id = ? AND entry_time <= ?", traderID, nowMs).
+		Where("status = 'OPEN' OR exit_time = 0 OR exit_time >= ?", sinceMs).
+		Find(&positions).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to query positions for exposure series: %w", err)
+	}
+
+	startBucket := (sinceMs / bucketMs) * bucketMs
+	endBucket := (nowMs / bucketMs) * bucketMs
+	out := make([]SideExposureBucket, 0, (endBucket-startBucket)/bucketMs+1)
+	for b := startBucket; b <= endBucket; b += bucketMs {
+		bucketEnd := b + bucketMs
+		bucket := SideExposureBucket{BucketMs: b}
+		for i := range positions {
+			p := &positions[i]
+			openByThen := p.EntryTime < bucketEnd
+			if !openByThen {
+				continue
+			}
+			closedBeforeBucket := p.Status != "OPEN" && p.ExitTime > 0 && p.ExitTime < b
+			if closedBeforeBucket {
+				continue
+			}
+			qty := p.EntryQuantity
+			if qty <= 0 {
+				qty = p.Quantity
+			}
+			notion := p.EntryPrice * qty
+			if notion <= 0 {
+				continue
+			}
+			if strings.EqualFold(p.Side, "LONG") {
+				bucket.LongNotion += notion
+			} else {
+				bucket.ShortNotion += notion
+			}
+		}
+		out = append(out, bucket)
+	}
+	return out, nil
 }

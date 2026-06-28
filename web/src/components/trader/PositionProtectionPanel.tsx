@@ -17,7 +17,9 @@ type ProtectionRow = {
   price: number
   sortPrice: number
   deltaPct: number
+  atrMult: number
   ratioPct: number
+  usdValue: number
   status: string
   statusCls: string
   detail?: string
@@ -124,6 +126,12 @@ function buildProtectionRows(
   const rt = position.protection_runtime
   const peakPnlPct = Number(rt?.drawdown_peak_pnl_pct ?? 0)
   const scheduledTiers = (rt?.scheduled_tiers || []) as ScheduledTier[]
+  const atrAtEntry = Number(rt?.atr_at_entry ?? 0)
+  const atrEntryPct =
+    entryPrice > 0 && atrAtEntry > 0 ? (atrAtEntry / entryPrice) * 100 : 0
+  // toAtrMult converts a delta% distance into ATR multiples using entry-frozen ATR.
+  const toAtrMult = (deltaPct: number) =>
+    atrEntryPct > 0 ? deltaPct / atrEntryPct : 0
 
   // Build DD rows from scheduled_tiers (authoritative source)
   for (const tier of scheduledTiers) {
@@ -158,6 +166,9 @@ function buildProtectionRows(
         : 0
     const deltaPct = rawDelta * dirMul
     const ratioPct = tier.close_ratio_pct || 0
+    const tierQty = tier.planned_quantity || (entryQty * ratioPct) / 100
+    const usdValue =
+      tierQty > 0 && triggerPrice > 0 ? tierQty * triggerPrice : 0
 
     let status: string
     let statusCls: string
@@ -184,7 +195,9 @@ function buildProtectionRows(
       price: triggerPrice,
       sortPrice: triggerPrice > 0 ? triggerPrice : markPrice,
       deltaPct,
+      atrMult: toAtrMult(deltaPct),
       ratioPct,
+      usdValue,
       status,
       statusCls,
       detail,
@@ -222,7 +235,9 @@ function buildProtectionRows(
       price: triggerPrice,
       sortPrice: triggerPrice,
       deltaPct,
+      atrMult: toAtrMult(deltaPct),
       ratioPct,
+      usdValue: order.quantity > 0 ? order.quantity * triggerPrice : 0,
       status,
       statusCls,
     })
@@ -239,7 +254,9 @@ function buildProtectionRows(
       price: markPrice,
       sortPrice: markPrice,
       deltaPct: markDelta,
+      atrMult: toAtrMult(markDelta),
       ratioPct: 0,
+      usdValue: 0,
       status: '',
       statusCls: '',
       isCurrentPrice: true,
@@ -279,6 +296,15 @@ const PositionCard = memo(function PositionCard({
   )
   const peakPnlPct = Number(rt?.drawdown_peak_pnl_pct ?? currentPnlPct)
   const currentDrawdownPct = Number(rt?.current_drawdown_pct ?? 0)
+  const atrAtEntry = Number(rt?.atr_at_entry ?? 0)
+  const currentATR = Number(rt?.current_atr ?? 0)
+  const atrTimeframe = String(rt?.atr_timeframe ?? '')
+  const atrEntryPct =
+    entryPrice > 0 && atrAtEntry > 0 ? (atrAtEntry / entryPrice) * 100 : 0
+  const atrDriftPct =
+    atrAtEntry > 0 && currentATR > 0
+      ? ((currentATR - atrAtEntry) / atrAtEntry) * 100
+      : 0
 
   // Real overall result of the position: accumulated realized (from partial closes)
   // + current unrealized - total fees. Falls back to raw unrealized when net_pnl absent.
@@ -390,6 +416,45 @@ const PositionCard = memo(function PositionCard({
             </span>
           </span>
         )}
+        {atrAtEntry > 0 && (
+          <span>
+            ATR{atrTimeframe ? ` ${atrTimeframe}` : ''}{' '}
+            <span className="text-nofx-text-muted">
+              {language === 'zh' ? '开仓' : 'entry'}
+            </span>{' '}
+            <span className="font-mono text-nofx-text-main">
+              {formatPrice(atrAtEntry)}
+            </span>
+            {atrEntryPct > 0 && (
+              <span className="text-nofx-text-muted">
+                {' '}
+                ({atrEntryPct.toFixed(2)}%)
+              </span>
+            )}
+            {currentATR > 0 && (
+              <>
+                <span className="text-nofx-text-muted mx-0.5">→</span>
+                <span className="text-nofx-text-muted">
+                  {language === 'zh' ? '当前' : 'now'}
+                </span>{' '}
+                <span className="font-mono text-nofx-text-main">
+                  {formatPrice(currentATR)}
+                </span>
+                {Math.abs(atrDriftPct) >= 1 && (
+                  <span
+                    className={`font-mono ${
+                      atrDriftPct > 0 ? 'text-nofx-red' : 'text-nofx-green'
+                    }`}
+                  >
+                    {' '}
+                    {atrDriftPct > 0 ? '+' : ''}
+                    {atrDriftPct.toFixed(0)}%
+                  </span>
+                )}
+              </>
+            )}
+          </span>
+        )}
       </div>
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
@@ -436,109 +501,94 @@ const PositionCard = memo(function PositionCard({
       </div>
 
       {rows.length > 0 ? (
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="text-nofx-text-muted border-b border-white/10">
-                <th className="text-left py-1 pr-2 font-medium">
-                  {language === 'zh' ? '层级' : 'Zone'}
-                </th>
-                <th className="text-right py-1 px-2 font-medium">
-                  {language === 'zh' ? '触发价' : 'Trigger'}
-                </th>
-                <th className="text-right py-1 px-2 font-medium">Δ%</th>
-                <th className="text-right py-1 px-2 font-medium">
-                  {language === 'zh' ? '仓位' : 'Ratio'}
-                </th>
-                <th className="text-center py-1 px-2 font-medium">
-                  {language === 'zh' ? '状态' : 'Status'}
-                </th>
-                <th className="text-left py-1 pl-2 font-medium">
-                  {language === 'zh' ? '参数' : 'Detail'}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, ri) => {
-                if (row.isCurrentPrice) {
-                  return (
-                    <tr
-                      key={`price-line-${ri}`}
-                      className="border-y border-cyan-500/40"
-                    >
-                      <td colSpan={6} className="py-0.5">
-                        <div className="flex items-center gap-2">
-                          <div className="flex-1 h-px bg-cyan-500/40" />
-                          <span className="text-[10px] font-mono text-cyan-300 whitespace-nowrap">
-                            ▸ {formatPrice(row.price)} (
-                            {formatPct(row.deltaPct)})
-                          </span>
-                          <div className="flex-1 h-px bg-cyan-500/40" />
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                }
-
-                const deltaColor =
-                  row.deltaPct > 0
-                    ? 'text-nofx-green'
-                    : row.deltaPct < 0
-                      ? 'text-nofx-red'
-                      : 'text-nofx-text-muted'
-                const zoneCls = row.zone.startsWith('DD')
-                  ? 'text-purple-300'
-                  : row.zone.startsWith('BE')
-                    ? 'text-amber-300'
-                    : 'text-blue-300'
-
+        <div className="overflow-x-auto pb-1">
+          <div className="flex items-stretch gap-1.5 min-w-min">
+            {rows.map((row, ri) => {
+              if (row.isCurrentPrice) {
                 return (
-                  <tr
-                    key={`row-${ri}`}
-                    className="border-b border-white/5 hover:bg-white/5"
+                  <div
+                    key={`price-line-${ri}`}
+                    className="flex flex-col items-center justify-center px-2 rounded border border-cyan-500/40 bg-cyan-500/5 shrink-0"
                   >
-                    <td className="py-1 pr-2">
-                      <span className={`font-medium ${zoneCls}`}>
-                        {row.zone}
-                      </span>
-                    </td>
-                    <td className="py-1 px-2 text-right font-mono text-nofx-text-main">
-                      {row.price > 0 ? formatPrice(row.price) : '—'}
-                    </td>
-                    <td
-                      className={`py-1 px-2 text-right font-mono ${deltaColor}`}
-                    >
-                      {row.price > 0 ? formatPct(row.deltaPct) : '—'}
-                    </td>
-                    <td className="py-1 px-2 text-right font-mono text-nofx-text-main">
-                      {row.ratioPct > 0 ? `${row.ratioPct.toFixed(0)}%` : '—'}
-                    </td>
-                    <td className="py-1 px-2 text-center">
-                      <span
-                        className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium border ${row.statusCls} ${
-                          row.statusCls.includes('emerald')
-                            ? 'bg-emerald-500/10 border-emerald-500/20'
-                            : row.statusCls.includes('amber')
-                              ? 'bg-amber-500/10 border-amber-500/20'
-                              : row.statusCls.includes('red')
-                                ? 'bg-red-500/10 border-red-500/20'
-                                : 'bg-white/5 border-white/10'
-                        }`}
-                      >
-                        {row.status}
-                      </span>
-                    </td>
-                    <td
-                      className="py-1 pl-2 text-nofx-text-muted truncate max-w-[180px]"
-                      title={row.detail || ''}
-                    >
-                      {row.detail || '—'}
-                    </td>
-                  </tr>
+                    <span className="text-[9px] text-cyan-300/70 uppercase tracking-wider">
+                      {language === 'zh' ? '现价' : 'Now'}
+                    </span>
+                    <span className="text-[11px] font-mono font-bold text-cyan-300 whitespace-nowrap">
+                      {formatPrice(row.price)}
+                    </span>
+                    <span className="text-[10px] font-mono text-cyan-300/80 whitespace-nowrap">
+                      {formatPct(row.deltaPct)}
+                      {row.atrMult !== 0
+                        ? ` / ${row.atrMult >= 0 ? '+' : ''}${row.atrMult.toFixed(1)}×`
+                        : ''}
+                    </span>
+                  </div>
                 )
-              })}
-            </tbody>
-          </table>
+              }
+
+              const deltaColor =
+                row.deltaPct > 0
+                  ? 'text-nofx-green'
+                  : row.deltaPct < 0
+                    ? 'text-nofx-red'
+                    : 'text-nofx-text-muted'
+              const zoneCls = row.zone.startsWith('DD')
+                ? 'text-purple-300 border-purple-400/30'
+                : row.zone.startsWith('BE')
+                  ? 'text-amber-300 border-amber-400/30'
+                  : 'text-blue-300 border-blue-400/30'
+              const statusDot = row.statusCls.includes('emerald')
+                ? 'bg-emerald-400'
+                : row.statusCls.includes('amber')
+                  ? 'bg-amber-400'
+                  : row.statusCls.includes('red')
+                    ? 'bg-red-400'
+                    : 'bg-white/30'
+
+              return (
+                <div
+                  key={`row-${ri}`}
+                  className={`flex flex-col px-2 py-1 rounded border bg-black/20 hover:bg-white/5 shrink-0 min-w-[78px] ${zoneCls}`}
+                  title={row.detail || ''}
+                >
+                  <div className="flex items-center justify-between gap-1">
+                    <span
+                      className={`text-[10px] font-bold ${zoneCls.split(' ')[0]}`}
+                    >
+                      {row.zone}
+                    </span>
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${statusDot}`}
+                      title={row.status}
+                    />
+                  </div>
+                  <span className="text-[11px] font-mono font-semibold text-nofx-text-main whitespace-nowrap">
+                    {row.price > 0 ? formatPrice(row.price) : '—'}
+                  </span>
+                  <span
+                    className={`text-[10px] font-mono whitespace-nowrap ${deltaColor}`}
+                  >
+                    {row.price > 0 ? formatPct(row.deltaPct) : '—'}
+                    {row.price > 0 && row.atrMult !== 0
+                      ? ` / ${row.atrMult >= 0 ? '+' : ''}${row.atrMult.toFixed(1)}×`
+                      : ''}
+                  </span>
+                  <span className="text-[10px] font-mono text-nofx-text-muted whitespace-nowrap">
+                    {row.ratioPct > 0 ? (
+                      <>
+                        {row.ratioPct.toFixed(0)}%
+                        {row.usdValue > 0
+                          ? ` ${formatUsd(row.usdValue).replace('+', '')}`
+                          : ''}
+                      </>
+                    ) : (
+                      '—'
+                    )}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
         </div>
       ) : (
         <div className="text-xs text-nofx-text-muted border border-white/10 rounded px-3 py-2">

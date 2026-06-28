@@ -304,3 +304,46 @@ func (s *PositionCloseEventStore) BackfillAttribution(traderID string) (int64, e
 	}
 	return updated, nil
 }
+
+// BreakerEvent is one circuit-breaker close action for the history view.
+type BreakerEvent struct {
+	Symbol       string  `json:"symbol"`
+	Side         string  `json:"side"`
+	Mechanism    string  `json:"mechanism"`
+	CloseReason  string  `json:"close_reason"`
+	CloseRatioPct float64 `json:"close_ratio_pct"`
+	RealizedPnL  float64 `json:"realized_pnl"`
+	EventTime    int64   `json:"event_time"`
+}
+
+// ListBreakerEvents returns recent circuit-breaker / breadth-guard close events
+// (mechanism or reason mentioning breadth/breaker) since sinceMs, newest first.
+func (s *PositionCloseEventStore) ListBreakerEvents(traderID string, sinceMs int64, limit int) ([]BreakerEvent, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	var events []PositionCloseEvent
+	err := s.db.Model(&PositionCloseEvent{}).
+		Where("trader_id = ? AND event_time >= ?", traderID, sinceMs).
+		Where("mechanism LIKE ? OR mechanism LIKE ? OR close_reason LIKE ? OR close_reason LIKE ?",
+			"%breadth%", "%breaker%", "%breadth%", "%breaker%").
+		Order("event_time DESC").
+		Limit(limit).
+		Find(&events).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to query breaker events: %w", err)
+	}
+	out := make([]BreakerEvent, 0, len(events))
+	for _, ev := range events {
+		out = append(out, BreakerEvent{
+			Symbol:        ev.Symbol,
+			Side:          ev.Side,
+			Mechanism:     ev.Mechanism,
+			CloseReason:   ev.CloseReason,
+			CloseRatioPct: ev.CloseRatioPct,
+			RealizedPnL:   ev.RealizedPnLDelta,
+			EventTime:     ev.EventTime,
+		})
+	}
+	return out, nil
+}

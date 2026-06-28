@@ -147,6 +147,30 @@ func (s *CloseIntentStore) MatchByWindowAndConsume(traderID, symbol, side string
 	return &intent, nil
 }
 
+// LookupByOrderID returns the intent whose exchange order id matches, WITHOUT
+// consuming it. Used by the close-event logger (PositionStore.logCloseEvent) to
+// resolve attribution when the trader_order's OrderAction has not yet been
+// stamped by the async fill-sync — logCloseEvent can run 1-2s before order_sync
+// finishes, so the OrderAction-based backfill there may still see a bare
+// close_long. order_sync remains the sole CONSUMER of intents; this read-only
+// lookup never flips the consumed flag, so it cannot interfere with the
+// dedup/pruning the consume path relies on. Returns nil when no intent matches.
+func (s *CloseIntentStore) LookupByOrderID(traderID, exchangeOrderID string) (*CloseIntent, error) {
+	if s.db == nil || traderID == "" || strings.TrimSpace(exchangeOrderID) == "" {
+		return nil, nil
+	}
+	var intent CloseIntent
+	err := s.db.Where("trader_id = ? AND exchange_order_id = ?", traderID, strings.TrimSpace(exchangeOrderID)).
+		Order("intent_time DESC").First(&intent).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &intent, nil
+}
+
 // PruneConsumed deletes consumed intents older than the cutoff to keep the table
 // bounded. Returns rows deleted.
 func (s *CloseIntentStore) PruneConsumed(olderThanMs int64) (int64, error) {
