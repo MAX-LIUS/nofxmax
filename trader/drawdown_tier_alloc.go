@@ -169,10 +169,14 @@ func (at *AutoTrader) evaluateDrawdownTiers(symbol, side string, currentPnLPct, 
 			tier.PeakPnLPct = currentPnLPct
 		}
 
-		// Calculate drawdown from THIS tier's peak (not global peak)
+		// Price retracement from THIS tier's peak (not global peak). Under the
+		// unified trailing semantics MaxDrawdownPct is a PRICE retracement from
+		// peak, matching the exchange-native callback ratio. PnL percentages are
+		// price-move percentages from entry, so converting to a price fraction:
+		//   priceRetracePct = (peakPnL - curPnL) / (100 + peakPnL) * 100
 		drawdownFromPeak := 0.0
-		if tier.PeakPnLPct > 0 && currentPnLPct < tier.PeakPnLPct {
-			drawdownFromPeak = ((tier.PeakPnLPct - currentPnLPct) / tier.PeakPnLPct) * 100
+		if tier.PeakPnLPct > currentPnLPct && (100+tier.PeakPnLPct) > 0 {
+			drawdownFromPeak = ((tier.PeakPnLPct - currentPnLPct) / (100 + tier.PeakPnLPct)) * 100
 		}
 
 		if drawdownFromPeak >= tier.MaxDrawdownPct {
@@ -181,7 +185,7 @@ func (at *AutoTrader) evaluateDrawdownTiers(symbol, side string, currentPnLPct, 
 			tierCopy := *tier
 			triggered = &tierCopy
 			tier.Status = "executed"
-			logger.Infof("🚨 Drawdown %s triggered: %s %s | peak=%.2f%% current=%.2f%% drawdown=%.2f%% >= threshold=%.2f%%",
+			logger.Infof("🚨 Drawdown %s triggered: %s %s | peak=%.2f%% current=%.2f%% priceRetrace=%.2f%% >= threshold=%.2f%%",
 				tier.StageName, symbol, side, tier.PeakPnLPct, currentPnLPct, drawdownFromPeak, tier.MaxDrawdownPct)
 			break
 		}

@@ -2,6 +2,7 @@ package trader
 
 import (
 	"sync"
+	"time"
 
 	"nofx/logger"
 	"nofx/market"
@@ -25,8 +26,12 @@ var (
 // First call (at open) computes fresh ATR and freezes it against the entry
 // price; subsequent calls (reconcile cycles) reuse the frozen value. When the
 // entry price changes (a new position on the same symbol) it recomputes and
-// re-freezes. After a restart the cache is empty, so the first reconcile
-// re-freezes at the then-current ATR (a one-time small shift, then stable).
+// re-freezes.
+//
+// The frozen value is persisted to the store so a process restart reuses the
+// open-time ATR instead of re-freezing at the then-current (drifted) ATR. This
+// keeps ATR-mode activation/callback stable for the life of the position; the
+// in-memory cache is a fast path in front of the persisted record.
 func (at *AutoTrader) frozenATRForPosition(symbol string, entryPrice float64, cfg store.ATRProtectionConfig) (float64, bool) {
 	key := at.id + "|" + symbol
 	frozenATRMu.Lock()
@@ -35,6 +40,20 @@ func (at *AutoTrader) frozenATRForPosition(symbol string, entryPrice float64, cf
 	if ok && entryPrice > 0 && entrySamePosition(ent.entryPrice, entryPrice) && ent.atr > 0 {
 		return ent.atr, true
 	}
+
+	// Cache miss (cold start / restart): try the persisted record before
+	// recomputing, so a restart does not re-freeze against today's ATR.
+	if entryPrice > 0 && at.store != nil {
+		if state, err := at.store.LoadFrozenATRState(); err == nil {
+			if rec, found := state.Records[key]; found && rec.ATR > 0 && entrySamePosition(rec.EntryPrice, entryPrice) {
+				frozenATRMu.Lock()
+				frozenATRCache[key] = frozenATREntry{entryPrice: rec.EntryPrice, atr: rec.ATR}
+				frozenATRMu.Unlock()
+				return rec.ATR, true
+			}
+		}
+	}
+
 	atr, ok := at.atrForProtection(symbol, cfg)
 	if !ok {
 		return 0, false
@@ -42,6 +61,13 @@ func (at *AutoTrader) frozenATRForPosition(symbol string, entryPrice float64, cf
 	frozenATRMu.Lock()
 	frozenATRCache[key] = frozenATREntry{entryPrice: entryPrice, atr: atr}
 	frozenATRMu.Unlock()
+	// Persist the freshly frozen ATR so it survives a restart.
+	if entryPrice > 0 && at.store != nil {
+		rec := store.FrozenATRRecord{TraderID: at.id, Symbol: symbol, EntryPrice: entryPrice, ATR: atr, UpdatedAt: time.Now().Unix()}
+		if err := at.store.SaveFrozenATRRecord(key, rec); err != nil {
+			logger.Warnf("⚠️ Frozen ATR: failed to persist %s: %v", key, err)
+		}
+	}
 	return atr, true
 }
 

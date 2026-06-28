@@ -203,7 +203,7 @@ func TestCheckPositionDrawdownSkipsDuplicateManagedPartialCloseForSameRule(t *te
 		config: AutoTraderConfig{
 			StrategyConfig: &store.StrategyConfig{
 				Protection: store.ProtectionConfig{
-					DrawdownTakeProfit: store.DrawdownTakeProfitConfig{Enabled: true, Rules: []store.DrawdownTakeProfitRule{{MinProfitPct: 0.7, MaxDrawdownPct: 55, CloseRatioPct: 70}}},
+					DrawdownTakeProfit: store.DrawdownTakeProfitConfig{Enabled: true, Rules: []store.DrawdownTakeProfitRule{{MinProfitPct: 0.7, MaxDrawdownPct: 1.5, CloseRatioPct: 70}}},
 				},
 			},
 		},
@@ -242,7 +242,7 @@ func TestCheckPositionDrawdownSkipsSameStageAfterPositionQuantityChanges(t *test
 		config: AutoTraderConfig{
 			StrategyConfig: &store.StrategyConfig{
 				Protection: store.ProtectionConfig{
-					DrawdownTakeProfit: store.DrawdownTakeProfitConfig{Enabled: true, Rules: []store.DrawdownTakeProfitRule{{MinProfitPct: 0.7, MaxDrawdownPct: 55, CloseRatioPct: 70}}},
+					DrawdownTakeProfit: store.DrawdownTakeProfitConfig{Enabled: true, Rules: []store.DrawdownTakeProfitRule{{MinProfitPct: 0.7, MaxDrawdownPct: 1.5, CloseRatioPct: 70}}},
 				},
 			},
 		},
@@ -326,7 +326,7 @@ func TestApplyNativeTrailingDrawdownForBinance(t *testing.T) {
 
 	rule := store.DrawdownTakeProfitRule{
 		MinProfitPct:   5,
-		MaxDrawdownPct: 40,
+		MaxDrawdownPct: 1.9048,
 		CloseRatioPct:  100,
 	}
 
@@ -375,7 +375,8 @@ func TestApplyNativeTrailingDrawdownSkipsDuplicateWhenEquivalentFullTrailingAlre
 		protectionState: map[string]string{"BTCUSDT_long": "native_trailing_armed"},
 	}
 
-	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 40, CloseRatioPct: 100}
+	// Unified trailing: callback = MaxDrawdownPct/100 = 0.019048 matches the existing full order.
+	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 1.9048, CloseRatioPct: 100}
 	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "long", 100, 0, rule)
 	if !ok {
 		t.Fatal("expected equivalent full trailing order to satisfy duplicate-arm guard")
@@ -509,7 +510,7 @@ func TestApplyNativeTrailingDrawdownSkipsDuplicateWhenEquivalentPartialTierAlrea
 		protectionState: map[string]string{"BTCUSDT_short": "native_partial_trailing_armed"},
 	}
 
-	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 40, CloseRatioPct: 50}
+	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 2.1053, CloseRatioPct: 50} // callback=MaxDrawdownPct/100=0.021053
 	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 100, 0, rule)
 	if !ok {
 		t.Fatal("expected equivalent partial trailing tier to satisfy duplicate-arm guard")
@@ -549,7 +550,7 @@ func TestApplyNativeTrailingDrawdownReplacesPartialTierWhenQuantityDrifts(t *tes
 		protectionState: map[string]string{"BTCUSDT_short": "native_partial_trailing_armed"},
 	}
 
-	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 40, CloseRatioPct: 50}
+	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 2.1053, CloseRatioPct: 50} // callback=MaxDrawdownPct/100=0.021053
 	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 100, 0, rule)
 	if !ok {
 		t.Fatal("expected stale partial tier with qty drift to be replaced")
@@ -585,7 +586,7 @@ func TestApplyNativeTrailingDrawdownConcurrentPartialArmingPlacesOnlyOneOrder(t 
 		protectionState: make(map[string]string),
 	}
 
-	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 40, CloseRatioPct: 50}
+	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 2.1053, CloseRatioPct: 50} // callback=MaxDrawdownPct/100=0.021053
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	results := make(chan bool, 2)
@@ -652,7 +653,7 @@ func TestApplyNativeTrailingDrawdownReplacementPrefersBestMatchingPartialTierAmo
 		protectionState: map[string]string{"BTCUSDT_short": "native_partial_trailing_armed"},
 	}
 
-	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 40, CloseRatioPct: 50}
+	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 2.1053, CloseRatioPct: 50} // callback=MaxDrawdownPct/100=0.021053
 	ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 100, 0, rule)
 	if !ok {
 		t.Fatal("expected multi-tier stale partial replacement to succeed")
@@ -702,7 +703,7 @@ func TestApplyNativeTrailingDrawdownPersistsPartialTrailingOrderID(t *testing.T)
 		protectionState: make(map[string]string),
 	}
 
-	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 40, CloseRatioPct: 50}
+	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 2.1053, CloseRatioPct: 50} // callback=MaxDrawdownPct/100=0.021053
 	if ok := at.applyNativeTrailingDrawdown("BTCUSDT", "short", 100, 0, rule); !ok {
 		t.Fatal("expected native partial trailing drawdown to be applied")
 	}
@@ -856,7 +857,7 @@ func TestCheckPositionDrawdownActivatesRunnerAndSuppressesBreakEvenAfterPartialC
 				Protection: store.ProtectionConfig{
 					DrawdownTakeProfit: store.DrawdownTakeProfitConfig{Enabled: true, Mode: store.ProtectionModeManual, EngineMode: store.DrawdownEngineModeAI, RunnerEnabled: true, MinRunnerKeepPct: 20, MaxFirstReducePct: 60, BreakEvenRunnerPolicy: store.DrawdownBreakEvenRunnerFallbackOnly, Rules: []store.DrawdownTakeProfitRule{{
 						MinProfitPct:     0.7,
-						MaxDrawdownPct:   55,
+						MaxDrawdownPct:   1.5,
 						CloseRatioPct:    70,
 						StageName:        "lock_first_profit",
 						RunnerKeepPct:    30,

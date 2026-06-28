@@ -35,6 +35,8 @@ interface ScheduledTier {
   activation_price: number
   planned_quantity: number
   is_satisfied: boolean
+  is_armed?: boolean
+  is_activated?: boolean
   is_triggered: boolean
   stage_name: string
   reason_anchor: string
@@ -138,16 +140,19 @@ function buildProtectionRows(
     const tierIdx = tier.index || 0
     const zone = `DD-${tierIdx}`
     const callbackRate = tier.callback_rate || 0
+    // Activation/armed are distinct: is_activated means the peak reached the
+    // trigger so the trailing stop is live and tracking the peak; is_armed means
+    // an order rests on the exchange but price has not yet reached activation.
+    // Fall back to is_satisfied for older backends that only sent that field.
+    const isActivated = tier.is_activated ?? tier.is_satisfied ?? false
+    const isArmed = tier.is_armed ?? false
 
-    // Calculate trigger price from peak and callback when tier is active
-    // If peak is 0 (new position), show the activation price instead
+    // Trigger price = peak * (1 - callback) ONLY once the stop is genuinely
+    // activated (tracking the peak). Before activation the meaningful number is
+    // the activation price, not a peak-derived level (which would otherwise
+    // render a misleading below-entry "trigger").
     let triggerPrice = 0
-    if (
-      peakPnlPct > 0 &&
-      entryPrice > 0 &&
-      callbackRate > 0 &&
-      tier.is_satisfied
-    ) {
+    if (isActivated && peakPnlPct > 0 && entryPrice > 0 && callbackRate > 0) {
       const peakPrice =
         side === 'LONG'
           ? entryPrice * (1 + peakPnlPct / 100)
@@ -175,19 +180,25 @@ function buildProtectionRows(
     if (tier.is_triggered) {
       status = language === 'zh' ? '已触发' : 'Triggered'
       statusCls = 'text-nofx-red'
-    } else if (tier.is_satisfied) {
+    } else if (isActivated) {
       status = language === 'zh' ? '已激活' : 'Active'
       statusCls = 'text-emerald-300'
+    } else if (isArmed) {
+      status = language === 'zh' ? '已布单' : 'Armed'
+      statusCls = 'text-amber-300'
     } else {
       status = language === 'zh' ? '待满足' : 'Waiting'
       statusCls = 'text-nofx-text-muted'
     }
 
+    // Detail: once activated show the live peak + callback distance; otherwise
+    // show the configured activation/callback distances (callback % == price
+    // retracement % under the unified trailing semantics).
     let detail: string
-    if (tier.is_satisfied && peakPnlPct > 0) {
+    if (isActivated && peakPnlPct > 0) {
       detail = `peak${formatPct(peakPnlPct, 1)} cb${(callbackRate * 100).toFixed(1)}%`
     } else {
-      detail = `min${tier.min_profit_pct.toFixed(1)}% dd${tier.max_drawdown_pct.toFixed(0)}%`
+      detail = `min${tier.min_profit_pct.toFixed(1)}% dd${tier.max_drawdown_pct.toFixed(1)}%`
     }
 
     rows.push({

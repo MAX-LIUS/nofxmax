@@ -8,7 +8,8 @@ import (
 )
 
 func TestAdjustNativeDrawdownCallbackClampsNoiseCallbackToFloor(t *testing.T) {
-	rule := store.DrawdownTakeProfitRule{MinProfitPct: 0.9, MaxDrawdownPct: 1.5, CloseRatioPct: 100}
+	// Unified trailing: callback = MaxDrawdownPct/100, so 0.2 -> 0.002 is below the 0.003 floor.
+	rule := store.DrawdownTakeProfitRule{MinProfitPct: 0.9, MaxDrawdownPct: 0.2, CloseRatioPct: 100}
 	callback := calculateProfitBasedTrailingCallbackRatio(0.1529, "short", rule.MinProfitPct, rule.MaxDrawdownPct)
 	if callback >= minNativeDrawdownCallbackRatio {
 		t.Fatalf("test setup expected noisy callback below safety floor, got %.8f", callback)

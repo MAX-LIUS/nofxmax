@@ -95,6 +95,8 @@ export interface ProtectionRuntimeTier {
   basis_type?: string // "structural" | "atr_based" | "percentage" | "fibonacci"
   atr_distance?: number
   is_satisfied?: boolean
+  is_armed?: boolean
+  is_activated?: boolean
   is_triggered?: boolean
   status?: string
 }

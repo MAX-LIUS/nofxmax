@@ -353,10 +353,13 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			continue
 		}
 
-		// Fallback: legacy path for positions without tier allocations
+		// Fallback: legacy path for positions without tier allocations.
+		// Under unified trailing semantics MaxDrawdownPct is a PRICE retracement
+		// from peak; PnL percentages are price-move percentages from entry, so
+		// convert peak->current move into a price fraction of the peak price.
 		var drawdownPct float64
-		if peakPnLPct > 0 && currentPnLPct < peakPnLPct {
-			drawdownPct = ((peakPnLPct - currentPnLPct) / peakPnLPct) * 100
+		if peakPnLPct > currentPnLPct && (100+peakPnLPct) > 0 {
+			drawdownPct = ((peakPnLPct - currentPnLPct) / (100 + peakPnLPct)) * 100
 		}
 
 		triggeredRules := at.getTriggeredDrawdownRules(currentPnLPct, drawdownPct, rules)
@@ -2840,28 +2843,30 @@ func calculateProfitBasedTrailingTriggerPrice(entryPrice float64, side string, m
 	}
 }
 
-// calculateProfitBasedTrailingCallbackRatio converts a drawdown-on-profit rule into the exchange-native
-// trailing callback ratio relative to price, not relative to total entry value.
+// calculateProfitBasedTrailingCallbackRatio converts a drawdown rule's
+// price-retracement distance into the exchange-native trailing callback ratio
+// (decimal price fraction). Under the unified trailing semantics maxDrawdownPct
+// IS the percentage the price may retrace from the running peak before the stop
+// fires, so the callback ratio equals maxDrawdownPct/100 directly. ATR-unit
+// rules are pre-resolved to an effective percent by resolveDrawdownRulesATR
+// before reaching here, so this single formula covers both units.
 //
-// Example LONG:
-// - entry = 10.0
-// - minProfitPct = 3.0 => activation at 10.3
-// - maxDrawdownPct = 40 => allow 40% giveback of profit (0.3 * 40% = 0.12)
-// - stop target = 10.18
-// - callback ratio at activation = 0.12 / 10.3 = 0.011650...
+// Example LONG (percent mode):
+// - entry = 10.0, minProfitPct = 3.0 => activation at 10.3
+// - maxDrawdownPct = 4.0 => price may retrace 4% from peak
+// - callback ratio = 0.04
 //
-// Returns ratio in decimal form for OKX (0.001..1), and can be converted to percent for other exchanges.
+// Returns ratio in decimal form for OKX (0.001..1); adapters convert to percent
+// for Binance/Bitget at the boundary.
 func calculateProfitBasedTrailingCallbackRatio(entryPrice float64, side string, minProfitPct float64, maxDrawdownPct float64) float64 {
-	activationPrice := calculateProfitBasedTrailingTriggerPrice(entryPrice, side, minProfitPct)
-	if entryPrice <= 0 || activationPrice <= 0 || maxDrawdownPct <= 0 {
+	if entryPrice <= 0 || maxDrawdownPct <= 0 {
 		return 0
 	}
-	profitMoveAbs := math.Abs(activationPrice - entryPrice)
-	allowedGivebackAbs := profitMoveAbs * (maxDrawdownPct / 100.0)
-	if allowedGivebackAbs <= 0 {
-		return 0
+	callback := maxDrawdownPct / 100.0
+	if callback > 1 {
+		callback = 1
 	}
-	return allowedGivebackAbs / activationPrice
+	return callback
 }
 
 func calculateAbsoluteProfitDrawdownCallbackRatio(entryPrice float64, side string, minProfitPct float64, absDrawdownPct float64) float64 {

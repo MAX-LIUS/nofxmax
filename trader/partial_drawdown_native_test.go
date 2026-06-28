@@ -9,7 +9,7 @@ import (
 func TestBuildManagedPartialDrawdownPlanCandidate_Long(t *testing.T) {
 	rule := store.DrawdownTakeProfitRule{
 		MinProfitPct:   10,
-		MaxDrawdownPct: 20,
+		MaxDrawdownPct: 4,
 		CloseRatioPct:  50,
 	}
 
@@ -29,15 +29,16 @@ func TestBuildManagedPartialDrawdownPlanCandidate_Long(t *testing.T) {
 	if plan.TakeProfitOrders[0].CloseRatioPct != 50 {
 		t.Fatalf("expected close ratio 50, got %.2f", plan.TakeProfitOrders[0].CloseRatioPct)
 	}
-	if got := plan.TakeProfitOrders[0].Price; got <= 100 || got >= 110 {
-		t.Fatalf("expected retained-profit long trigger between entry and peak target, got %.4f", got)
+	// Unified trailing: activation = 100*1.10 = 110; trigger = 110*(1-0.04) = 105.6.
+	if got := plan.TakeProfitOrders[0].Price; got < 105.59 || got > 105.61 {
+		t.Fatalf("expected long trailing trigger 105.6 (activation 110, callback 4%%), got %.4f", got)
 	}
 }
 
 func TestBuildManagedPartialDrawdownPlanCandidate_Short(t *testing.T) {
 	rule := store.DrawdownTakeProfitRule{
 		MinProfitPct:   10,
-		MaxDrawdownPct: 20,
+		MaxDrawdownPct: 4,
 		CloseRatioPct:  40,
 	}
 
@@ -48,8 +49,9 @@ func TestBuildManagedPartialDrawdownPlanCandidate_Short(t *testing.T) {
 	if plan.Mode != "drawdown_partial_managed" {
 		t.Fatalf("expected managed mode, got %q", plan.Mode)
 	}
-	if got := plan.TakeProfitOrders[0].Price; got <= 90 || got >= 100 {
-		t.Fatalf("expected retained-profit short trigger between peak target and entry, got %.4f", got)
+	// Unified trailing: activation = 100*0.90 = 90; trigger = 90*(1+0.04) = 93.6.
+	if got := plan.TakeProfitOrders[0].Price; got < 93.59 || got > 93.61 {
+		t.Fatalf("expected short trailing trigger 93.6 (activation 90, callback 4%%), got %.4f", got)
 	}
 }
 

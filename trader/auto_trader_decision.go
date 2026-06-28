@@ -1165,7 +1165,17 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 				"planned_quantity":                  quantity * rule.CloseRatioPct / 100.0,
 				"source":                            source,
 				"execution_mode":                    executionMode,
-				"is_satisfied":                      matchedLive || peakPnLPct >= rule.MinProfitPct || isTierSatisfied(idx, currentPnLPct, rule.MinProfitPct, tierAllocs, len(trailingOrders) > 0),
+				// is_armed: a trailing order for this tier exists on the exchange
+				// (or a managed tier is tracking) — i.e. protection is in place but
+				// not necessarily activated. is_activated: the peak profit actually
+				// reached the activation threshold so the trailing stop is live and
+				// tracking the peak. The two are distinct: an order can rest on the
+				// exchange (armed) long before price reaches activation (activated).
+				"is_armed":     matchedLive || isTierSatisfied(idx, currentPnLPct, rule.MinProfitPct, tierAllocs, len(trailingOrders) > 0),
+				"is_activated": peakPnLPct >= rule.MinProfitPct,
+				// is_satisfied now means genuinely activated (drives the green
+				// "已激活" dot); placement-only state shows as "已布单/待满足".
+				"is_satisfied":                      peakPnLPct >= rule.MinProfitPct,
 				"is_triggered":                      currentPnLPct >= rule.MinProfitPct && isDrawdownThresholdMet(currentPnLPct, drawdownPct, rule),
 				"legacy_drawdown_semantics_warning": legacyWarning,
 				"native_trailing_rejected_reason":   nativeRejectedReason,
