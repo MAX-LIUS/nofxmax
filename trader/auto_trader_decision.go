@@ -881,6 +881,13 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 			drawdownRules = at.restoreAIDrawdownRulesForPositionWithEntry(symbol, side, entryPrice)
 		}
 	}
+	// Resolve ATR-unit min-profit / max-drawdown distances to effective percent
+	// using the position's frozen open-time ATR, exactly as the runtime arming
+	// path does (auto_trader_risk.go). Without this the displayed activation /
+	// callback would treat ATR multiples as raw percents (e.g. 3 ATR shown as
+	// +3% activation, 1.2 ATR shown as 1.2% callback), diverging from the live
+	// exchange order which is placed with ATR-resolved values.
+	drawdownRules = at.resolveDrawdownRulesATR(drawdownRules, symbol, entryPrice)
 	drawdownSource := at.getDrawdownConfigSource(symbol, side)
 	runnerState := at.getDrawdownRunnerState(symbol, side)
 	drawdownCfg := store.DrawdownTakeProfitConfig{}
