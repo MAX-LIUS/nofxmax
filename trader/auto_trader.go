@@ -125,66 +125,66 @@ type AutoTraderConfig struct {
 
 // AutoTrader automatic trader
 type AutoTrader struct {
-	id                    string  // Trader unique identifier
-	name                  string  // Trader display name
-	aiModel               string  // AI model name
-	exchange              string  // Trading platform type (binance/bybit/etc)
-	exchangeID            string  // Exchange account UUID
-	ownsAccountProtection bool    // Whether this instance owns its account's protection lifecycle (account exclusivity)
-	showInCompetition     bool    // Whether to show in competition page
-	allowAIOpen           bool    // Whether AI can actively open positions
-	allowAIClose          bool    // Whether AI can actively close positions
-	allowAIStopClose      bool    // Whether AI can close for stop-loss reasons
-	allowAITakeProfit     bool    // Whether AI can close for take-profit reasons
-	aiStopMinLossPct      float64 // Minimum unrealized loss % before AI can stop-loss
-	aiDecisionMode        string  // conservative | balanced | aggressive
-	config                AutoTraderConfig
-	trader                Trader // Use Trader interface (supports multiple platforms)
-	mcpClient             mcp.AIClient
-	store                 *store.Store           // Data storage (decision records, etc.)
-	strategyEngine        *kernel.StrategyEngine // Strategy engine (uses strategy configuration)
-	cycleNumber           int                    // Current cycle number
-	initialBalance        float64
-	dailyPnL              float64
-	lastResetTime         time.Time
-	stopUntil             time.Time
-	isRunning             bool
-	isRunningMutex        sync.RWMutex                              // Mutex to protect isRunning flag
-	startTime             time.Time                                 // System start time
-	callCount             int                                       // AI call count
-	positionFirstSeenTime map[string]int64                          // Position first seen time (symbol_side -> timestamp in milliseconds)
-	stopMonitorCh         chan struct{}                             // Used to stop monitoring goroutine
-	monitorWg             sync.WaitGroup                            // Used to wait for monitoring goroutine to finish
-	peakPnLCache          map[string]float64                        // Peak profit cache (symbol -> peak P&L percentage)
-	peakPnLCacheMutex     sync.RWMutex                              // Cache read-write lock
-	gbGuardMutex          sync.Mutex                                // Protects giveback-guard breadth state below
-	gbPnlHist             map[string][]float64                      // Giveback guard breadth: symbol_side -> recent profit% samples (velocity)
-	gbBreadthBarsSinceFire int                                      // Giveback guard breadth: ticks since last breadth fire (cooldown)
-	gbLastBreadthBarMs    int64                                     // Giveback guard breadth: ms timestamp of last advanced velocity "bar"
-	protectionStateMutex  sync.RWMutex                              // Protects last protection reconcile state
-	protectionState       map[string]string                         // symbol_side -> last known protection status
-	breakEvenStateMutex   sync.RWMutex                              // Protects break-even armed state per position
-	breakEvenState        map[string]string                         // symbol_side -> idle/armed
-	breakEvenFingerprints map[string]string                         // symbol_side -> entry/qty fingerprint for lifecycle reset
-	breakEvenSource       map[string]string                         // symbol_side -> strategy|ai_decision
-	drawdownState         map[string]string                         // symbol_side -> last executed drawdown rule fingerprint
-	drawdownSource        map[string]string                         // symbol_side -> strategy|ai_decision
-	drawdownAIRules       map[string][]store.DrawdownTakeProfitRule // symbol_side -> per-position AI drawdown rules restored from entry decision
-	drawdownRunnerState   map[string]DrawdownRunnerState            // symbol_side -> active runner semantics after partial drawdown
-	drawdownTierAllocs    map[string][]store.DrawdownTierAllocation // symbol_side -> fixed tier allocations computed at open
-	drawdownTierAllocMu   sync.RWMutex                              // Protects drawdownTierAllocs
-	nativeTrailingArmTime map[string]time.Time                      // fingerprint -> last successful arm time (prevents re-arm loop)
-	immediateTrailingIDs  map[string]string                         // symbol_side -> immediate trailing order ID (canceled when tier trailing arms)
-	cooldownManager       *entryCooldownManager                     // Post-loss entry cooldown per symbol
-	lastBalanceSyncTime   time.Time                                 // Last balance sync time
-	userID                string                                    // User ID
-	gridState             *GridState                                // Grid trading state (only used when StrategyType == "grid_trading")
-	claw402WalletAddr     string                                    // Claw402 wallet address (derived from private key at start)
-	consecutiveAIFailures int                                       // Consecutive AI call failures
-	safeMode              bool                                      // Safe mode: no new positions, protect existing ones
-	safeModeReason        string                                    // Why safe mode was activated
-	lastMarketDataMap     map[string]*market.Data                   // Market data from current cycle (for scene tag recording)
-	lastTriggerTypes      map[string]string                         // Trigger types from current cycle decisions (symbol → trigger_type)
+	id                     string  // Trader unique identifier
+	name                   string  // Trader display name
+	aiModel                string  // AI model name
+	exchange               string  // Trading platform type (binance/bybit/etc)
+	exchangeID             string  // Exchange account UUID
+	ownsAccountProtection  bool    // Whether this instance owns its account's protection lifecycle (account exclusivity)
+	showInCompetition      bool    // Whether to show in competition page
+	allowAIOpen            bool    // Whether AI can actively open positions
+	allowAIClose           bool    // Whether AI can actively close positions
+	allowAIStopClose       bool    // Whether AI can close for stop-loss reasons
+	allowAITakeProfit      bool    // Whether AI can close for take-profit reasons
+	aiStopMinLossPct       float64 // Minimum unrealized loss % before AI can stop-loss
+	aiDecisionMode         string  // conservative | balanced | aggressive
+	config                 AutoTraderConfig
+	trader                 Trader // Use Trader interface (supports multiple platforms)
+	mcpClient              mcp.AIClient
+	store                  *store.Store           // Data storage (decision records, etc.)
+	strategyEngine         *kernel.StrategyEngine // Strategy engine (uses strategy configuration)
+	cycleNumber            int                    // Current cycle number
+	initialBalance         float64
+	dailyPnL               float64
+	lastResetTime          time.Time
+	stopUntil              time.Time
+	isRunning              bool
+	isRunningMutex         sync.RWMutex                              // Mutex to protect isRunning flag
+	startTime              time.Time                                 // System start time
+	callCount              int                                       // AI call count
+	positionFirstSeenTime  map[string]int64                          // Position first seen time (symbol_side -> timestamp in milliseconds)
+	stopMonitorCh          chan struct{}                             // Used to stop monitoring goroutine
+	monitorWg              sync.WaitGroup                            // Used to wait for monitoring goroutine to finish
+	peakPnLCache           map[string]float64                        // Peak profit cache (symbol -> peak P&L percentage)
+	peakPnLCacheMutex      sync.RWMutex                              // Cache read-write lock
+	gbGuardMutex           sync.Mutex                                // Protects giveback-guard breadth state below
+	gbPnlHist              map[string][]float64                      // Giveback guard breadth: symbol_side -> recent profit% samples (velocity)
+	gbBreadthBarsSinceFire int                                       // Giveback guard breadth: ticks since last breadth fire (cooldown)
+	gbLastBreadthBarMs     int64                                     // Giveback guard breadth: ms timestamp of last advanced velocity "bar"
+	protectionStateMutex   sync.RWMutex                              // Protects last protection reconcile state
+	protectionState        map[string]string                         // symbol_side -> last known protection status
+	breakEvenStateMutex    sync.RWMutex                              // Protects break-even armed state per position
+	breakEvenState         map[string]string                         // symbol_side -> idle/armed
+	breakEvenFingerprints  map[string]string                         // symbol_side -> entry/qty fingerprint for lifecycle reset
+	breakEvenSource        map[string]string                         // symbol_side -> strategy|ai_decision
+	drawdownState          map[string]string                         // symbol_side -> last executed drawdown rule fingerprint
+	drawdownSource         map[string]string                         // symbol_side -> strategy|ai_decision
+	drawdownAIRules        map[string][]store.DrawdownTakeProfitRule // symbol_side -> per-position AI drawdown rules restored from entry decision
+	drawdownRunnerState    map[string]DrawdownRunnerState            // symbol_side -> active runner semantics after partial drawdown
+	drawdownTierAllocs     map[string][]store.DrawdownTierAllocation // symbol_side -> fixed tier allocations computed at open
+	drawdownTierAllocMu    sync.RWMutex                              // Protects drawdownTierAllocs
+	nativeTrailingArmTime  map[string]time.Time                      // fingerprint -> last successful arm time (prevents re-arm loop)
+	immediateTrailingIDs   map[string]string                         // symbol_side -> immediate trailing order ID (canceled when tier trailing arms)
+	cooldownManager        *entryCooldownManager                     // Post-loss entry cooldown per symbol
+	lastBalanceSyncTime    time.Time                                 // Last balance sync time
+	userID                 string                                    // User ID
+	gridState              *GridState                                // Grid trading state (only used when StrategyType == "grid_trading")
+	claw402WalletAddr      string                                    // Claw402 wallet address (derived from private key at start)
+	consecutiveAIFailures  int                                       // Consecutive AI call failures
+	safeMode               bool                                      // Safe mode: no new positions, protect existing ones
+	safeModeReason         string                                    // Why safe mode was activated
+	lastMarketDataMap      map[string]*market.Data                   // Market data from current cycle (for scene tag recording)
+	lastTriggerTypes       map[string]string                         // Trigger types from current cycle decisions (symbol → trigger_type)
 }
 
 // NewAutoTrader creates an automatic trader
@@ -473,12 +473,16 @@ func (at *AutoTrader) loadBreadthVelocityStateFromStore() {
 
 	const breadthBarMs int64 = 3600_000
 	ageMs := time.Now().UnixMilli() - st.LastBarMs
-	if st.LastBarMs <= 0 || ageMs > 2*breadthBarMs {
-		// Stale: gap too large. Fail-safe to empty history (cold warm-up) and drop
-		// the bar clock so the next tick starts a fresh bar.
-		logger.Infof("🔁 GivebackGuard Breadth: persisted velocity state stale (age=%.1fh > 2h), starting fresh", float64(ageMs)/3600000.0)
-		return
-	}
+	// stale = the persisted snapshot is older than 2 bars (2h), e.g. across a
+	// downtime gap or a config hot-reload. We DON'T discard history (that left the
+	// velocity path with too few samples and made the breaker hypersensitive for
+	// hours — it fired on 2 thin samples). Instead we KEEP the most recent samples
+	// (capped at staleKeepBars) but reset the bar clock to now, so the retained
+	// samples stay internally contiguous and the next live sample appends cleanly
+	// without computing a slope across the downtime gap. The window-floor in
+	// gbApplyBreadth still prevents firing until enough samples re-accumulate.
+	stale := st.LastBarMs <= 0 || ageMs > 2*breadthBarMs
+	const staleKeepBars = 10
 
 	// Prune to still-open positions (same rationale as peak-PnL restore).
 	openKeys := make(map[string]bool)
@@ -491,14 +495,24 @@ func (at *AutoTrader) loadBreadthVelocityStateFromStore() {
 	restored := 0
 	for posKey, hist := range st.PnlHist {
 		if len(openKeys) == 0 || openKeys[strings.ToLower(posKey)] {
+			if stale && len(hist) > staleKeepBars {
+				hist = hist[len(hist)-staleKeepBars:] // keep most-recent samples only
+			}
 			at.gbPnlHist[posKey] = hist
 			restored++
 		}
 	}
-	at.gbLastBreadthBarMs = st.LastBarMs
-	at.gbBreadthBarsSinceFire = st.BarsSinceFire
+	if stale {
+		// Reset the bar clock to now so the next sampled bar does not span the gap;
+		// retained samples remain valid for velocity (they are internally contiguous).
+		at.gbLastBreadthBarMs = time.Now().UnixMilli()
+		at.gbBreadthBarsSinceFire = 0
+	} else {
+		at.gbLastBreadthBarMs = st.LastBarMs
+		at.gbBreadthBarsSinceFire = st.BarsSinceFire
+	}
 	at.gbGuardMutex.Unlock()
-	logger.Infof("🔁 GivebackGuard Breadth: restored velocity history for %d position(s) (age=%.1fh, barsSinceFire=%d)", restored, float64(ageMs)/3600000.0, st.BarsSinceFire)
+	logger.Infof("🔁 GivebackGuard Breadth: restored velocity history for %d position(s) (age=%.1fh, stale=%v, barsSinceFire=%d)", restored, float64(ageMs)/3600000.0, stale, at.gbBreadthBarsSinceFire)
 }
 
 // restoreEntryCooldownsFromStore rebuilds post-loss entry cooldowns after a

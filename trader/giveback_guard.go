@@ -3,6 +3,7 @@ package trader
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"nofx/logger"
@@ -203,8 +204,8 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 	retracing := func(s gbPosition) bool {
 		key := s.symbol + "_" + s.side
 		hist := at.gbPnlHist[key]
-		atrPct1h := 0.0    // velocity scale
-		atrPctPeak := 0.0  // from-peak scale (timeframe-matched)
+		atrPct1h := 0.0   // velocity scale
+		atrPctPeak := 0.0 // from-peak scale (timeframe-matched)
 		if cfg.BreadthUseATR {
 			var ok1, okp bool
 			atrPct1h, _, ok1 = atrResolve(s.symbol, s.entry, "1h")
@@ -217,7 +218,14 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 		}
 		// Velocity path: profit%/bar normalized by 1h ATR% => "ATR-units lost per bar".
 		// A symbol giving back faster than BreadthVelEps ATRs/bar counts as retracing.
-		if len(hist) >= 2 {
+		//
+		// Minimum-sample floor: require the FULL window of samples (not just 2).
+		// The velocity slope is meant to be measured over `window` bars; computing
+		// it on 2 thin samples (e.g. right after a restart/hot-reload that hasn't
+		// re-accumulated history) degenerates into a single bar-to-bar delta and
+		// makes the breaker hypersensitive — a single hour's pullback would fire it.
+		// The window is the strategy-declared minimum, so the code must honor it.
+		if len(hist) >= window {
 			vel := gbPnlVelocity(hist, window)
 			if atrPct1h > 0 {
 				vel = vel / atrPct1h // raw %/bar -> ATR-units/bar
@@ -352,11 +360,18 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 
 	fired := 0
 	for i, s := range snaps {
-		// Default surgical mode: cut only LOSING positions that are retracing;
-		// winners ride their break-even stop. When BreadthCutWinners is set this
-		// becomes a full deleveraging breaker: retracing winners are cut too.
+		// Winner handling: a retracing WINNER is spared ONLY if it already has armed
+		// downside protection (native trailing / managed drawdown / break-even stop)
+		// — that protection will lock in its gain on the way down. A "naked" winner
+		// (profit but NO armed protection) is exposed exactly like a loser: in a
+		// correlated reversal it would give back the whole unprotected gain, so it
+		// is cut alongside losers. BreadthCutWinners forces cutting ALL retracing
+		// winners regardless of protection (full deleverage).
 		if s.profitPct >= 0 && !cfg.BreadthCutWinners {
-			continue
+			if at.positionHasArmedProtection(s.symbol, s.side, s.entry) {
+				continue // protected winner rides its own stop
+			}
+			// else: naked winner — fall through and cut like a loser
 		}
 		if !legRetr[i] {
 			continue
@@ -400,6 +415,40 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 			logger.Warnf("⚠️ GivebackGuard Breadth: failed to persist velocity state: %v", err)
 		}
 	}
+}
+
+// positionHasArmedProtection reports whether a position already has armed
+// downside protection that would lock in profit on a reversal — a native
+// trailing stop, a managed drawdown stop, or a break-even stop resting on the
+// exchange. Used by the breadth breaker to decide whether a retracing WINNER is
+// safe to leave alone (protected) or must be cut like a loser (naked).
+func (at *AutoTrader) positionHasArmedProtection(symbol, side string, entryPrice float64) bool {
+	// Fast in-memory check: trailing / managed-drawdown arming states.
+	state := at.getProtectionState(symbol, side)
+	if isNativeTrailingProtectionState(state) ||
+		state == "managed_drawdown_armed" || state == "managed_partial_drawdown_armed" ||
+		state == "exchange_protection_verified" {
+		return true
+	}
+	// Native drawdown trailing record armed for this position.
+	if at.hasArmedNativeDrawdownForPosition(symbol, side, entryPrice) {
+		return true
+	}
+	// Break-even stop armed (persisted as a break_even_stop "armed" record).
+	if at.store != nil {
+		if dyn, err := at.store.LoadDynamicProtectionState(); err == nil && dyn != nil {
+			for _, rec := range dyn.Records {
+				if rec.TraderID != "" && rec.TraderID != at.id {
+					continue
+				}
+				if rec.ProtectionType == "break_even_stop" && rec.Status == "armed" &&
+					strings.EqualFold(rec.Symbol, symbol) && strings.EqualFold(rec.Side, side) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // gbPnlVelocity returns the profit%-change per bar over the last `window`

@@ -55,23 +55,26 @@ func breadthCfg(minPos int, frac float64) store.GivebackGuardConfig {
 
 // __TESTS__
 
-// TestGivebackGuardBreadthCutsLosersOnly: a majority retrace together; only the
-// LOSING retracing positions are cut, the winner is left to ride break-even.
+// TestGivebackGuardBreadthCutsLosersOnly: a majority retrace together; the
+// LOSING retracing positions are cut, and a retracing WINNER that ALREADY HAS
+// armed protection is spared (it rides its own stop).
 func TestGivebackGuardBreadthCutsLosersOnly(t *testing.T) {
 	fake := &fakeProtectionTrader{positions: []map[string]interface{}{
-		longPos("ADAUSDT", 100, 97, 200), // -3%, peak 5 => giveback 8 (loser, retracing)
+		longPos("ADAUSDT", 100, 97, 200),  // -3%, peak 5 => giveback 8 (loser, retracing)
 		longPos("SOLUSDT", 100, 96, 200),  // -4%, peak 4 => giveback 8 (loser, retracing)
 		longPos("DOTUSDT", 100, 98, 200),  // -2%, peak 6 => giveback 8 (loser, retracing)
-		longPos("BTCUSDT", 100, 104, 200), // +4%, peak 12 => giveback 8 (WINNER, retracing but protected)
+		longPos("BTCUSDT", 100, 104, 200), // +4%, peak 12 => giveback 8 (WINNER, retracing but PROTECTED)
 	}}
 	peaks := map[string]float64{
 		"ADAUSDT_long": 5, "SOLUSDT_long": 4, "DOTUSDT_long": 6, "BTCUSDT_long": 12,
 	}
 	at := newGuardTrader(fake, breadthCfg(3, 0.7), peaks)
+	// The winner has armed downside protection => spared (rides its own stop).
+	at.protectionState["BTCUSDT_long"] = "native_trailing_armed"
 
 	at.runGivebackGuard()
 	if fake.closeLongCalls != 3 {
-		t.Fatalf("breadth should cut 3 losers only (retracing winner protected), got %d", fake.closeLongCalls)
+		t.Fatalf("breadth should cut 3 losers only (PROTECTED retracing winner spared), got %d", fake.closeLongCalls)
 	}
 	if tag := lastTag(fake.taggedCloseLongs); tag != "giveback_guard_breadth" {
 		t.Fatalf("expected tag giveback_guard_breadth, got %q", tag)
@@ -83,12 +86,34 @@ func TestGivebackGuardBreadthCutsLosersOnly(t *testing.T) {
 	}
 }
 
+// TestGivebackGuardBreadthCutsNakedWinner: a retracing WINNER with NO armed
+// protection (naked) is cut alongside losers — in a correlated reversal an
+// unprotected gain would otherwise be fully given back.
+func TestGivebackGuardBreadthCutsNakedWinner(t *testing.T) {
+	fake := &fakeProtectionTrader{positions: []map[string]interface{}{
+		longPos("ADAUSDT", 100, 97, 200),  // -3%, peak 5 (loser, retracing)
+		longPos("SOLUSDT", 100, 96, 200),  // -4%, peak 4 (loser, retracing)
+		longPos("DOTUSDT", 100, 98, 200),  // -2%, peak 6 (loser, retracing)
+		longPos("BTCUSDT", 100, 104, 200), // +4%, peak 12 (WINNER, retracing, NAKED — no protection)
+	}}
+	peaks := map[string]float64{
+		"ADAUSDT_long": 5, "SOLUSDT_long": 4, "DOTUSDT_long": 6, "BTCUSDT_long": 12,
+	}
+	at := newGuardTrader(fake, breadthCfg(3, 0.7), peaks)
+	// No protectionState set for BTCUSDT => naked winner => cut like a loser.
+
+	at.runGivebackGuard()
+	if fake.closeLongCalls != 4 {
+		t.Fatalf("breadth should cut all 4 (3 losers + 1 NAKED retracing winner), got %d", fake.closeLongCalls)
+	}
+}
+
 // TestGivebackGuardBreadthCutWinners: with BreadthCutWinners enabled the gate
 // becomes a full deleverage breaker — retracing WINNERS are cut too, so all 4
 // retracing positions (3 losers + 1 winner) get closed.
 func TestGivebackGuardBreadthCutWinners(t *testing.T) {
 	fake := &fakeProtectionTrader{positions: []map[string]interface{}{
-		longPos("ADAUSDT", 100, 97, 200), // -3%, peak 5 => giveback 8 (loser, retracing)
+		longPos("ADAUSDT", 100, 97, 200),  // -3%, peak 5 => giveback 8 (loser, retracing)
 		longPos("SOLUSDT", 100, 96, 200),  // -4%, peak 4 => giveback 8 (loser, retracing)
 		longPos("DOTUSDT", 100, 98, 200),  // -2%, peak 6 => giveback 8 (loser, retracing)
 		longPos("BTCUSDT", 100, 104, 200), // +4%, peak 12 => giveback 8 (WINNER, retracing)
@@ -128,7 +153,7 @@ func TestGivebackGuardBreadthNoQuorum(t *testing.T) {
 // correlated reversal; the gate must leave every position to its own SL/BE.
 func TestGivebackGuardBreadthNotMajority(t *testing.T) {
 	fake := &fakeProtectionTrader{positions: []map[string]interface{}{
-		longPos("ADAUSDT", 100, 97, 200), // -3%, peak 5 => retracing loser
+		longPos("ADAUSDT", 100, 97, 200),  // -3%, peak 5 => retracing loser
 		longPos("SOLUSDT", 100, 102, 200), // +2%, peak 2 => not retracing
 		longPos("DOTUSDT", 100, 103, 200), // +3%, peak 3 => not retracing
 		longPos("BTCUSDT", 100, 104, 200), // +4%, peak 4 => not retracing
@@ -177,4 +202,3 @@ func TestGivebackGuardDisabledNoOp(t *testing.T) {
 		t.Fatalf("disabled guard must be no-op, got %d", fake.closeLongCalls)
 	}
 }
-
