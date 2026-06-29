@@ -1205,14 +1205,17 @@ func (at *AutoTrader) cleanupInactiveProtectionState(active map[string]struct{})
 			logger.Infof("🧹 Protection cleanup: canceled orphaned protection orders for inactive symbol %s", symbol)
 		}
 		// Evict the frozen ATR for the closed position so a future position on
-		// the same symbol re-freezes against its own open-time ATR.
-		frozenKey := at.id + "|" + symbol
-		frozenATRMu.Lock()
-		delete(frozenATRCache, frozenKey)
-		frozenATRMu.Unlock()
-		if at.store != nil {
-			if err := at.store.DeleteFrozenATRRecord(frozenKey); err != nil {
-				logger.Warnf("⚠️ Frozen ATR: failed to evict %s: %v", frozenKey, err)
+		// the same symbol re-freezes against its own open-time ATR. Evict every
+		// timeframe variant (1h protection scale + 4h breadth from-peak scale).
+		for _, tf := range []string{"1h", "4h"} {
+			frozenKey := frozenATRKey(at.id, symbol, tf)
+			frozenATRMu.Lock()
+			delete(frozenATRCache, frozenKey)
+			frozenATRMu.Unlock()
+			if at.store != nil {
+				if err := at.store.DeleteFrozenATRRecord(frozenKey); err != nil {
+					logger.Warnf("⚠️ Frozen ATR: failed to evict %s: %v", frozenKey, err)
+				}
 			}
 		}
 	}

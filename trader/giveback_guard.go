@@ -139,42 +139,52 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 	}
 	persistNeeded := newBar // bar advance changed hist + bar clock; persist below
 
-	// Resolve ATR% per symbol once (ATR mode only). We use the FROZEN open-time
-	// ATR (frozenATRForPosition) rather than a fresh live fetch: the live fetch
-	// could fail transiently (kline gap / API hiccup) and silently drop a symbol
-	// from the retracing set, weakening the breaker exactly when markets are
-	// disorderly. The frozen value is computed once at open and persisted, so it
-	// survives restarts and is always available after the first successful resolve.
-	// atrResolve returns (atrPct, frozen, ok): ok=false means ATR is genuinely
-	// unavailable for this symbol this cycle (recorded as an ATR failure, never a
-	// silent drop — see fail-safe handling in retracing()).
-	atrPctCache := make(map[string]float64)
+	// Resolve ATR% per (symbol, timeframe) once. We use the FROZEN open-time ATR
+	// (frozenATRForPosition) rather than a fresh live fetch: the live fetch could
+	// fail transiently (kline gap / API hiccup) and silently drop a symbol from
+	// the retracing set, weakening the breaker exactly when markets are disorderly.
+	// The frozen value is computed once at open and persisted, so it survives
+	// restarts and is always available after the first successful resolve.
+	//
+	// Two timeframes are resolved: 1h for the VELOCITY path (it samples per-1h-bar,
+	// so the scale matches), and BreadthFromPeakTimeframe (default 4h) for the
+	// FROM-PEAK path (cumulative peak-to-current giveback spans many bars, so a
+	// timeframe-matched ATR avoids the systematic inflation of a single 1h ATR).
+	// atrResolve returns (atrPct, frozen, ok); ok=false means ATR is genuinely
+	// unavailable (recorded as a failure, never a silent drop — see retracing()).
+	atrPctCache := make(map[string]float64) // key: symbol+"|"+timeframe
 	atrOkCache := make(map[string]bool)
 	atrFrozenCache := make(map[string]bool)
 	acfg := at.config.StrategyConfig.ATRProtection
-	atrResolve := func(symbol string, entry float64) (float64, bool, bool) {
-		if v, ok := atrPctCache[symbol]; ok {
-			return v, atrFrozenCache[symbol], atrOkCache[symbol]
+	fromPeakTF := cfg.BreadthFromPeakTimeframe
+	if fromPeakTF == "" {
+		fromPeakTF = "4h"
+	}
+	atrResolve := func(symbol string, entry float64, timeframe string) (float64, bool, bool) {
+		ck := symbol + "|" + timeframe
+		if v, ok := atrPctCache[ck]; ok {
+			return v, atrFrozenCache[ck], atrOkCache[ck]
 		}
+		// Per-timeframe ATR config: copy the protection ATR config and override the
+		// timeframe so frozenATRForPosition keys/persists per timeframe.
+		tcfg := acfg
+		tcfg.Timeframe = timeframe
 		v := 0.0
 		ok := false
 		frozen := false
 		if entry > 0 {
-			// Frozen open-time ATR first (stable, restart-safe, never silently 0).
-			if atr, fok := at.frozenATRForPosition(symbol, entry, acfg); fok && atr > 0 {
+			if atr, fok := at.frozenATRForPosition(symbol, entry, tcfg); fok && atr > 0 {
 				v = atr / entry * 100
 				ok = true
 				frozen = true
-			} else if atr, lok := at.atrForProtection(symbol, acfg); lok && atr > 0 {
-				// Fallback to a live fetch only if the frozen path is unavailable
-				// (e.g. position predates frozen-ATR persistence).
+			} else if atr, lok := at.atrForProtection(symbol, tcfg); lok && atr > 0 {
 				v = atr / entry * 100
 				ok = true
 			}
 		}
-		atrPctCache[symbol] = v
-		atrOkCache[symbol] = ok
-		atrFrozenCache[symbol] = frozen
+		atrPctCache[ck] = v
+		atrOkCache[ck] = ok
+		atrFrozenCache[ck] = frozen
 		return v, frozen, ok
 	}
 
@@ -186,38 +196,41 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 	atrFailures := 0
 	atrFailSyms := make(map[string]bool)
 
-	// retracing classifies a position as pulling back from its own peak. Both the
-	// velocity path and the from-peak path are ATR-normalized, so BreadthVelEps and
-	// BreadthATRMult mean the same thing across low- and high-volatility symbols.
+	// retracing classifies a position as pulling back from its own peak. The
+	// velocity path is normalized by the 1h ATR (matches its 1h sampling); the
+	// from-peak path is normalized by the timeframe-matched ATR (default 4h) so
+	// BreadthATRMult means the same thing across low- and high-volatility symbols.
 	retracing := func(s gbPosition) bool {
 		key := s.symbol + "_" + s.side
 		hist := at.gbPnlHist[key]
-		atrPct := 0.0
+		atrPct1h := 0.0    // velocity scale
+		atrPctPeak := 0.0  // from-peak scale (timeframe-matched)
 		if cfg.BreadthUseATR {
-			var ok bool
-			atrPct, _, ok = atrResolve(s.symbol, s.entry)
-			if !ok && !atrFailSyms[s.symbol] {
+			var ok1, okp bool
+			atrPct1h, _, ok1 = atrResolve(s.symbol, s.entry, "1h")
+			atrPctPeak, _, okp = atrResolve(s.symbol, s.entry, fromPeakTF)
+			if (!ok1 || !okp) && !atrFailSyms[s.symbol] {
 				atrFailSyms[s.symbol] = true
 				atrFailures++
-				logger.Warnf("⚠️ [GivebackGuard Breadth] ATR unavailable for %s (frozen+live both failed) — treated as non-retracing this cycle (fail-safe)", s.symbol)
+				logger.Warnf("⚠️ [GivebackGuard Breadth] ATR unavailable for %s (1h_ok=%v %s_ok=%v) — treated as non-retracing this cycle (fail-safe)", s.symbol, ok1, fromPeakTF, okp)
 			}
 		}
-		// Velocity path: profit%/bar normalized by ATR% => "ATR-units lost per bar".
+		// Velocity path: profit%/bar normalized by 1h ATR% => "ATR-units lost per bar".
 		// A symbol giving back faster than BreadthVelEps ATRs/bar counts as retracing.
 		if len(hist) >= 2 {
 			vel := gbPnlVelocity(hist, window)
-			if atrPct > 0 {
-				vel = vel / atrPct // raw %/bar -> ATR-units/bar
+			if atrPct1h > 0 {
+				vel = vel / atrPct1h // raw %/bar -> ATR-units/bar
 			}
 			if vel < -cfg.BreadthVelEps {
 				return true
 			}
 		}
 		if cfg.BreadthUseATR {
-			if atrPct <= 0 {
+			if atrPctPeak <= 0 {
 				return false // fail-safe: unresolved ATR never counts as retracing
 			}
-			return (s.peakPct-s.profitPct)/atrPct >= cfg.BreadthATRMult
+			return (s.peakPct-s.profitPct)/atrPctPeak >= cfg.BreadthATRMult
 		}
 		return (s.peakPct - s.profitPct) >= cfg.BreadthGivebackPct
 	}
@@ -240,8 +253,10 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 		atrFailed := false
 		frozen := false
 		if cfg.BreadthUseATR {
+			// Record the from-peak (timeframe-matched) ATR% since it drives the
+			// from-peak decision; ok reflects whether that scale resolved.
 			var ok bool
-			atrPct, frozen, ok = atrResolve(s.symbol, s.entry)
+			atrPct, frozen, ok = atrResolve(s.symbol, s.entry, fromPeakTF)
 			atrFailed = !ok
 		}
 		legs = append(legs, store.BreadthEventLeg{

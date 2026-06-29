@@ -33,7 +33,7 @@ var (
 // keeps ATR-mode activation/callback stable for the life of the position; the
 // in-memory cache is a fast path in front of the persisted record.
 func (at *AutoTrader) frozenATRForPosition(symbol string, entryPrice float64, cfg store.ATRProtectionConfig) (float64, bool) {
-	key := at.id + "|" + symbol
+	key := frozenATRKey(at.id, symbol, cfg.WithDefaults().Timeframe)
 	frozenATRMu.Lock()
 	ent, ok := frozenATRCache[key]
 	frozenATRMu.Unlock()
@@ -69,6 +69,19 @@ func (at *AutoTrader) frozenATRForPosition(symbol string, entryPrice float64, cf
 		}
 	}
 	return atr, true
+}
+
+// frozenATRKey builds the cache/persistence key for a position's frozen ATR.
+// The 1h timeframe (the protection default) keeps the legacy "id|symbol" form so
+// existing persisted records and the ETH-drift fix are untouched. Other
+// timeframes (e.g. the breadth from-peak path's 4h scale) get a "@tf" suffix so
+// a position can hold an independent frozen ATR per timeframe without collision.
+func frozenATRKey(traderID, symbol, timeframe string) string {
+	base := traderID + "|" + symbol
+	if timeframe == "" || timeframe == "1h" {
+		return base
+	}
+	return base + "@" + timeframe
 }
 
 // entrySamePosition reports whether two entry prices refer to the same position

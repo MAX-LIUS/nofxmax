@@ -327,6 +327,16 @@ type GivebackGuardConfig struct {
 	BreadthLoserCutPct float64 `json:"breadth_loser_cut_pct,omitempty"` // % of each losing+retracing position to cut (default 100)
 	BreadthUseATR      bool    `json:"breadth_use_atr,omitempty"`      // true => retrace measured in ATR-from-peak units
 	BreadthATRMult     float64 `json:"breadth_atr_mult,omitempty"`     // adverse-from-peak in ATR units that counts as retracing
+	// BreadthFromPeakTimeframe is the ATR timeframe used to normalize the
+	// from-peak path ONLY. The from-peak path measures a position's cumulative
+	// peak-to-current giveback, which spans many 1h bars; scaling it by a single
+	// 1h ATR makes the ratio systematically inflated (scale period < judgment
+	// period). Empirically ~70% of 1h from-peak "votes" disappear when rescaled
+	// to a timeframe-matched ATR. Default "4h" (≈1.57x the 1h ATR for crypto);
+	// the velocity path keeps the 1h ATR since it samples per-1h-bar. When set,
+	// BreadthATRMult is interpreted against THIS timeframe's ATR (so the matching
+	// threshold is ~1.0 for 4h vs ~1.5 for 1h). Empty => "1h" (legacy behaviour).
+	BreadthFromPeakTimeframe string  `json:"breadth_from_peak_timeframe,omitempty"`
 	BreadthGivebackPct float64 `json:"breadth_giveback_pct,omitempty"` // peak-to-current giveback% that counts as retracing (pnl% mode)
 	BreadthVelEps      float64 `json:"breadth_vel_eps,omitempty"`      // velocity threshold in ATR-units/bar (giveback% per ATR per bar); below -eps counts as retracing. ATR-normalized so the same value behaves consistently across low- and high-volatility symbols.
 	BreadthVelWindow   int     `json:"breadth_vel_window,omitempty"`   // bars of look-back for pnl-velocity (0 => default 6)
