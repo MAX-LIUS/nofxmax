@@ -19,6 +19,11 @@ export interface SystemStatus {
   ai_decision_mode?: 'conservative' | 'balanced' | 'aggressive'
   strategy_type?: 'ai_trading' | 'grid_trading' | 'breakout_trading'
   grid_symbol?: string
+  // Breadth circuit-breaker pressure indices (0-100) for the two close
+  // conditions. 0 = no risk; 100 = that path reached the breaker fire fraction.
+  breadth_vel_index?: number
+  breadth_peak_index?: number
+  breadth_index_at?: number
 }
 
 export interface AccountInfo {

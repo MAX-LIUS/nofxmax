@@ -983,6 +983,8 @@ export function TraderDashboardPage({
             shortNotion={sideBreakdown.shortNotion}
             longCount={sideBreakdown.longCount}
             shortCount={sideBreakdown.shortCount}
+            velIndex={status?.breadth_vel_index}
+            peakIndex={status?.breadth_peak_index}
             traderId={selectedTraderId}
             language={language}
           />
@@ -1566,11 +1568,71 @@ export function TraderDashboardPage({
 // SideSplitCard shows live long/short notional exposure (USDT) plus a 12h curve
 // of each side's share of total exposure (long% and short%, summing to 100%,
 // bounded 0..100% with explicit axis labels).
+// BreadthGauge renders a single 0–100 breadth circuit-breaker pressure index as
+// a compact vertical bar. Color escalates with urgency: <50 green, 50–70 amber,
+// 70–85 orange, 85–<100 red, 100 solid red (= breaker fire threshold reached).
+// 0 = no risk / no position retracing on that path.
+function BreadthGauge({
+  value,
+  label,
+  title,
+}: {
+  value: number
+  label: string
+  title: string
+}) {
+  const v = Math.max(0, Math.min(100, value))
+  const color =
+    v >= 100
+      ? '#F6465D'
+      : v >= 85
+        ? '#FF5C39'
+        : v >= 70
+          ? '#FF8A00'
+          : v >= 50
+            ? '#F0B90B'
+            : '#0ECB81'
+  const trackH = 28
+  return (
+    <div className="flex flex-col items-center gap-0.5" title={title}>
+      <div
+        className="relative w-2 rounded-sm overflow-hidden bg-white/10"
+        style={{ height: trackH }}
+      >
+        {/* threshold ticks at 50 / 70 / 85 */}
+        {[50, 70, 85].map((m) => (
+          <div
+            key={m}
+            className="absolute left-0 right-0"
+            style={{
+              bottom: `${m}%`,
+              height: 1,
+              background: 'rgba(255,255,255,0.25)',
+            }}
+          />
+        ))}
+        <div
+          className="absolute bottom-0 left-0 right-0 transition-[height] duration-500"
+          style={{ height: `${v}%`, background: color }}
+        />
+      </div>
+      <span className="text-[8px] font-mono leading-none" style={{ color }}>
+        {Math.round(v)}
+      </span>
+      <span className="text-[7px] font-mono uppercase text-nofx-text-muted/60 leading-none">
+        {label}
+      </span>
+    </div>
+  )
+}
+
 function SideSplitCard({
   longNotion,
   shortNotion,
   longCount,
   shortCount,
+  velIndex,
+  peakIndex,
   traderId,
   language,
 }: {
@@ -1578,6 +1640,8 @@ function SideSplitCard({
   shortNotion: number
   longCount: number
   shortCount: number
+  velIndex?: number
+  peakIndex?: number
   traderId: string | null | undefined
   language: string
 }) {
@@ -1644,19 +1708,43 @@ function SideSplitCard({
       <div className="text-[10px] mb-1 font-mono uppercase tracking-wider text-nofx-text-muted">
         {language === 'zh' ? '多空净值 (USDT)' : 'Long/Short Value'}
       </div>
-      <div className="flex items-baseline gap-2">
-        <span
-          className="text-sm font-bold font-mono text-nofx-green"
-          title={language === 'zh' ? '做多名义价值' : 'Long notional'}
-        >
-          L {fmtNotion(longNotion)}
-        </span>
-        <span
-          className="text-sm font-bold font-mono text-nofx-red"
-          title={language === 'zh' ? '做空名义价值' : 'Short notional'}
-        >
-          S {fmtNotion(shortNotion)}
-        </span>
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex items-baseline gap-2">
+          <span
+            className="text-sm font-bold font-mono text-nofx-green"
+            title={language === 'zh' ? '做多名义价值' : 'Long notional'}
+          >
+            L {fmtNotion(longNotion)}
+          </span>
+          <span
+            className="text-sm font-bold font-mono text-nofx-red"
+            title={language === 'zh' ? '做空名义价值' : 'Short notional'}
+          >
+            S {fmtNotion(shortNotion)}
+          </span>
+        </div>
+        {/* Two breadth circuit-breaker pressure gauges: velocity + from-peak.
+            0 = no risk; 100 = that close condition reached the fire threshold. */}
+        <div className="flex items-end gap-1.5">
+          <BreadthGauge
+            value={velIndex ?? 0}
+            label="VEL"
+            title={
+              language === 'zh'
+                ? `回撤熔断·速度路指数 ${Math.round(velIndex ?? 0)}/100（0=无风险，100=达平仓标准）`
+                : `Breadth velocity-path index ${Math.round(velIndex ?? 0)}/100 (0=safe, 100=cut)`
+            }
+          />
+          <BreadthGauge
+            value={peakIndex ?? 0}
+            label="PEAK"
+            title={
+              language === 'zh'
+                ? `回撤熔断·回撤幅度路指数 ${Math.round(peakIndex ?? 0)}/100（0=无风险，100=达平仓标准）`
+                : `Breadth from-peak-path index ${Math.round(peakIndex ?? 0)}/100 (0=safe, 100=cut)`
+            }
+          />
+        </div>
       </div>
       <div className="flex items-center justify-between mt-1 gap-2">
         <div className="flex flex-col text-[10px] font-mono text-nofx-text-muted leading-tight">

@@ -161,6 +161,9 @@ type AutoTrader struct {
 	gbPnlHist              map[string][]float64                      // Giveback guard breadth: symbol_side -> recent profit% samples (velocity)
 	gbBreadthBarsSinceFire int                                       // Giveback guard breadth: ticks since last breadth fire (cooldown)
 	gbLastBreadthBarMs     int64                                     // Giveback guard breadth: ms timestamp of last advanced velocity "bar"
+	gbBreadthVelIndex      float64                                   // Breadth pressure index (0-100) for the velocity path, last eval cycle
+	gbBreadthPeakIndex     float64                                   // Breadth pressure index (0-100) for the from-peak path, last eval cycle
+	gbBreadthIndexAt       int64                                     // ms timestamp the two breadth indices were last computed
 	protectionStateMutex   sync.RWMutex                              // Protects last protection reconcile state
 	protectionState        map[string]string                         // symbol_side -> last known protection status
 	breakEvenStateMutex    sync.RWMutex                              // Protects break-even armed state per position

@@ -201,7 +201,11 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 	// velocity path is normalized by the 1h ATR (matches its 1h sampling); the
 	// from-peak path is normalized by the timeframe-matched ATR (default 4h) so
 	// BreadthATRMult means the same thing across low- and high-volatility symbols.
-	retracing := func(s gbPosition) bool {
+	//
+	// Returns (retr, velHit, peakHit): retr = velHit || peakHit. Both flags are
+	// evaluated independently (velocity does NOT short-circuit from-peak) so the
+	// per-path breadth pressure indices can be computed separately.
+	retracing := func(s gbPosition) (bool, bool, bool) {
 		key := s.symbol + "_" + s.side
 		hist := at.gbPnlHist[key]
 		atrPct1h := 0.0   // velocity scale
@@ -216,6 +220,7 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 				logger.Warnf("⚠️ [GivebackGuard Breadth] ATR unavailable for %s (1h_ok=%v %s_ok=%v) — treated as non-retracing this cycle (fail-safe)", s.symbol, ok1, fromPeakTF, okp)
 			}
 		}
+		velHit := false
 		// Velocity path: profit%/bar normalized by 1h ATR% => "ATR-units lost per bar".
 		// A symbol giving back faster than BreadthVelEps ATRs/bar counts as retracing.
 		//
@@ -231,16 +236,19 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 				vel = vel / atrPct1h // raw %/bar -> ATR-units/bar
 			}
 			if vel < -cfg.BreadthVelEps {
-				return true
+				velHit = true
 			}
 		}
+		peakHit := false
 		if cfg.BreadthUseATR {
-			if atrPctPeak <= 0 {
-				return false // fail-safe: unresolved ATR never counts as retracing
+			if atrPctPeak > 0 {
+				peakHit = (s.peakPct-s.profitPct)/atrPctPeak >= cfg.BreadthATRMult
 			}
-			return (s.peakPct-s.profitPct)/atrPctPeak >= cfg.BreadthATRMult
+			// atrPctPeak<=0 => fail-safe: from-peak does not count
+		} else {
+			peakHit = (s.peakPct - s.profitPct) >= cfg.BreadthGivebackPct
 		}
-		return (s.peakPct - s.profitPct) >= cfg.BreadthGivebackPct
+		return velHit || peakHit, velHit, peakHit
 	}
 
 	// Classify every position once and capture the full per-leg picture so the
@@ -248,14 +256,22 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 	// 事件全貌细节都记录下来"). retracing() is evaluated exactly once per leg here.
 	total := 0
 	retr := 0
+	velCount := 0  // positions retracing via the velocity path
+	peakCount := 0 // positions retracing via the from-peak path
 	legs := make([]store.BreadthEventLeg, 0, len(snaps))
 	legRetr := make([]bool, len(snaps))
 	for i, s := range snaps {
 		total++
-		isRetr := retracing(s)
+		isRetr, velHit, peakHit := retracing(s)
 		legRetr[i] = isRetr
 		if isRetr {
 			retr++
+		}
+		if velHit {
+			velCount++
+		}
+		if peakHit {
+			peakCount++
 		}
 		atrPct := 0.0
 		atrFailed := false
@@ -287,6 +303,31 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 	if total > 0 {
 		frac = float64(retr) / float64(total)
 	}
+
+	// Per-path breadth pressure indices (0–100) for the dashboard gauges. Each
+	// index is that path's retracing fraction relative to the BreadthFrac fire
+	// threshold: index = (pathRetr/total) / BreadthFrac * 100, clamped to 100.
+	// 0 = no position retracing on that path (no risk); 100 = that path alone has
+	// reached the fraction that fires the breaker. The breaker fires on the COMBINED
+	// fraction, so either index hitting 100 (or the two together) means a cut.
+	// Only meaningful at quorum (total >= BreadthMinPos); below quorum the breaker
+	// can't fire, so we report 0 to avoid a misleading "hot" gauge on 1–2 positions.
+	velIdx, peakIdx := 0.0, 0.0
+	if total > 0 && cfg.BreadthFrac > 0 && total >= cfg.BreadthMinPos {
+		velIdx = float64(velCount) / float64(total) / cfg.BreadthFrac * 100
+		peakIdx = float64(peakCount) / float64(total) / cfg.BreadthFrac * 100
+		if velIdx > 100 {
+			velIdx = 100
+		}
+		if peakIdx > 100 {
+			peakIdx = 100
+		}
+	}
+	at.gbGuardMutex.Lock()
+	at.gbBreadthVelIndex = velIdx
+	at.gbBreadthPeakIndex = peakIdx
+	at.gbBreadthIndexAt = time.Now().UnixMilli()
+	at.gbGuardMutex.Unlock()
 
 	// recordEvent persists a full snapshot of this evaluation. Best-effort; never
 	// blocks the guard. cut legs are marked by the caller before invoking on fire.

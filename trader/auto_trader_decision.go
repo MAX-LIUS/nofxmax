@@ -97,6 +97,15 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 		}
 	}
 
+	// Breadth circuit-breaker pressure indices (0–100) for the two close conditions
+	// (velocity path + from-peak path). 0 = no risk; 100 = that path has reached the
+	// fraction-of-positions that fires the breaker. Last computed at gbBreadthIndexAt.
+	at.gbGuardMutex.Lock()
+	result["breadth_vel_index"] = at.gbBreadthVelIndex
+	result["breadth_peak_index"] = at.gbBreadthPeakIndex
+	result["breadth_index_at"] = at.gbBreadthIndexAt
+	at.gbGuardMutex.Unlock()
+
 	return result
 }
 
