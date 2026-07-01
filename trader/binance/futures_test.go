@@ -420,3 +420,35 @@ func TestGetBrOrderID(t *testing.T) {
 		ids[id] = true
 	}
 }
+
+// TestIsMakerTakeProfitLimit locks in the exact signature that distinguishes our
+// post-only maker take-profit from a maker entry limit or a foreign/grid order.
+// Misclassifying an entry as a TP (or vice versa) would corrupt protection
+// attribution, so each discriminating field is covered.
+func TestIsMakerTakeProfitLimit(t *testing.T) {
+	const ours = "x-KzrpZaP91234567890123abcd1234"
+	mk := func(typ futures.OrderType, tif futures.TimeInForceType, side futures.SideType, ps futures.PositionSideType, cid string, ro bool) *futures.Order {
+		return &futures.Order{Type: typ, TimeInForce: tif, Side: side, PositionSide: ps, ClientOrderID: cid, ReduceOnly: ro}
+	}
+	cases := []struct {
+		name string
+		o    *futures.Order
+		want bool
+	}{
+		{"short maker TP (BUY closes short)", mk(futures.OrderTypeLimit, futures.TimeInForceTypeGTX, futures.SideTypeBuy, futures.PositionSideTypeShort, ours, false), true},
+		{"long maker TP (SELL closes long)", mk(futures.OrderTypeLimit, futures.TimeInForceTypeGTX, futures.SideTypeSell, futures.PositionSideTypeLong, ours, false), true},
+		{"short maker ENTRY (SELL opens short) - not TP", mk(futures.OrderTypeLimit, futures.TimeInForceTypeGTX, futures.SideTypeSell, futures.PositionSideTypeShort, ours, false), false},
+		{"long maker ENTRY (BUY opens long) - not TP", mk(futures.OrderTypeLimit, futures.TimeInForceTypeGTX, futures.SideTypeBuy, futures.PositionSideTypeLong, ours, false), false},
+		{"GTC grid limit - not post-only, not TP", mk(futures.OrderTypeLimit, futures.TimeInForceTypeGTC, futures.SideTypeBuy, futures.PositionSideTypeShort, ours, false), false},
+		{"foreign order (no broker prefix) - not TP", mk(futures.OrderTypeLimit, futures.TimeInForceTypeGTX, futures.SideTypeBuy, futures.PositionSideTypeShort, "web_manual_123", false), false},
+		{"non-LIMIT order - not a TP", mk(futures.OrderTypeMarket, futures.TimeInForceTypeGTC, futures.SideTypeBuy, futures.PositionSideTypeShort, ours, false), false},
+		{"nil order", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isMakerTakeProfitLimit(c.o); got != c.want {
+				t.Fatalf("isMakerTakeProfitLimit=%v, want %v", got, c.want)
+			}
+		})
+	}
+}

@@ -702,16 +702,31 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 		stopPrice, _ := strconv.ParseFloat(order.StopPrice, 64)
 		quantity, _ := strconv.ParseFloat(order.OrigQuantity, 64)
 
+		// Maker take-profit is placed as a post-only reduce-direction LIMIT
+		// (see placeMakerTakeProfit) rather than an algo TAKE_PROFIT_MARKET.
+		// The shared protection reconciler only recognises orders whose Type
+		// says TAKE_PROFIT, so a bare LIMIT would look like a missing TP and be
+		// re-placed every cycle (unbounded churn). Report our own maker TP with
+		// Type=TAKE_PROFIT so the shared code dedups/attributes it correctly.
+		// This is confined to the Binance trader — OKX and others never run this
+		// path, and no cancel path consumes GetOpenOrders (they query the
+		// exchange directly), so classification here cannot disturb them.
+		reportType := string(order.Type)
+		if isMakerTakeProfitLimit(order) {
+			reportType = "TAKE_PROFIT"
+		}
+
 		result = append(result, types.OpenOrder{
-			OrderID:      fmt.Sprintf("%d", order.OrderID),
-			Symbol:       toInternalSymbol(order.Symbol),
-			Side:         string(order.Side),
-			PositionSide: string(order.PositionSide),
-			Type:         string(order.Type),
-			Price:        price,
-			StopPrice:    stopPrice,
-			Quantity:     quantity,
-			Status:       string(order.Status),
+			OrderID:       fmt.Sprintf("%d", order.OrderID),
+			Symbol:        toInternalSymbol(order.Symbol),
+			Side:          string(order.Side),
+			PositionSide:  string(order.PositionSide),
+			Type:          reportType,
+			Price:         price,
+			StopPrice:     stopPrice,
+			Quantity:      quantity,
+			Status:        string(order.Status),
+			ClientOrderID: order.ClientOrderID,
 		})
 	}
 
