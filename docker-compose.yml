@@ -18,8 +18,12 @@ services:
     environment:
       - TZ=${TZ:-Asia/Shanghai}
       - AI_MAX_TOKENS=8000
+      # Binance geo-block bypass: only *.binance.com is routed through the s-ui
+      # mixed inbound (-> JP outbound). All other hosts stay direct.
+      - BINANCE_PROXY_URL=${BINANCE_PROXY_URL:-http://s-ui:10808}
     networks:
       - nofx-network
+      - webstack
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/api/health"]
       interval: 30s
@@ -50,3 +54,7 @@ services:
 networks:
   nofx-network:
     driver: bridge
+  # External network created by the s-ui stack; hosts the mixed:10808 proxy
+  # inbound that routes Binance traffic to the JP outbound.
+  webstack:
+    external: true

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"nofx/httpx"
 	"strconv"
 	"strings"
 	"time"
@@ -80,7 +81,7 @@ func getOKXTickerPrice(symbol string) (float64, error) {
 func getBinanceTickerPrice(symbol string) (float64, error) {
 	url := fmt.Sprintf("https://fapi.binance.com/fapi/v1/ticker/price?symbol=%s", symbol)
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := httpx.NewBinanceClient(3 * time.Second)
 	resp, err := client.Get(url)
 	if err != nil {
 		return 0, err

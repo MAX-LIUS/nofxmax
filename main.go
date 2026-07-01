@@ -9,6 +9,7 @@ import (
 	"nofx/manager"
 	_ "nofx/mcp/payment"
 	_ "nofx/mcp/provider"
+	"nofx/proxyhook"
 	"nofx/store"
 	"nofx/telegram"
 	"nofx/telemetry"
@@ -39,6 +40,10 @@ func main() {
 	config.Init()
 	cfg := config.Get()
 	logger.Info("✅ Configuration loaded")
+
+	// Register Binance-scoped proxy hooks (no-op unless BINANCE_PROXY_URL is set).
+	// Must run before any trader/market client is constructed.
+	proxyhook.Register()
 
 	// Initialize encryption service BEFORE database (so EncryptedString can decrypt on read)
 	logger.Info("🔐 Initializing encryption service...")
