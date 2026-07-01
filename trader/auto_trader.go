@@ -279,10 +279,10 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		logger.Infof("🏦 [%s] Using Binance Futures trading", config.Name)
 		bt := binance.NewFuturesTrader(config.BinanceAPIKey, config.BinanceSecretKey, userID)
 		if config.StrategyConfig != nil {
-			bt.SetExecutionPreferences(
-				config.StrategyConfig.RiskControl.PreferUSDCPairs,
-				config.StrategyConfig.RiskControl.MakerTakeProfit,
-			)
+			// One toggle drives both USDC routing and maker take-profit; auto-ON
+			// for Binance unless explicitly disabled in the strategy.
+			usdcMaker := config.StrategyConfig.RiskControl.ResolveBinanceUSDCMaker()
+			bt.SetExecutionPreferences(usdcMaker, usdcMaker)
 		}
 		trader = bt
 	case "bybit":

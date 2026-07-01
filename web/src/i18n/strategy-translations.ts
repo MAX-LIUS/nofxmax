@@ -634,6 +634,16 @@ export const riskControl = {
     en: 'Execution Constraints',
     es: 'Restricciones de Ejecución',
   },
+  binanceUsdcMaker: {
+    zh: 'Binance USDC 挂单模式',
+    en: 'Binance USDC Maker Mode',
+    es: 'Modo Maker USDC de Binance',
+  },
+  binanceUsdcMakerDesc: {
+    zh: '仅 Binance：有 USDC 永续的币自动改用 USDC 交易对（挂单0手续费），止盈改为 post-only 挂单成交。行情与内部记录仍用 USDT。需账户开启多资产模式或持有 USDC 保证金。默认对 Binance 开启。',
+    en: 'Binance only: route bases with a USDC perp to USDC pairs (zero maker fee) and place take-profit as post-only maker orders. Market data and internal records stay USDT. Requires multi-asset mode or USDC margin. On by default for Binance.',
+    es: 'Solo Binance: enruta a pares USDC (comisión maker cero) y coloca take-profit como órdenes maker post-only. Requiere modo multi-activo o margen USDC. Activado por defecto para Binance.',
+  },
   entryCooldown: {
     zh: '止损后冷却 (分钟)',
     en: 'Post-loss cooldown (min)',

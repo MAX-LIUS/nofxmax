@@ -907,19 +907,24 @@ type RiskControlConfig struct {
 	MakerEntryOffsetTicks    int  `json:"maker_entry_offset_ticks,omitempty"`    // ticks inside best bid/ask, default 0 (at touch)
 	MakerEntryFallbackMarket bool `json:"maker_entry_fallback_market,omitempty"` // if unfilled, cross with market
 
-	// PreferUSDCPairs (Binance only): route trades to <base>USDC perpetuals when a
-	// USDC perp exists for the base, to capture Binance's zero maker-fee USDC promo.
-	// Market data and all internal identity stay on the USDT symbol; conversion is
-	// confined to the exchange API boundary. Bases without a USDC perp fall back to
-	// USDT automatically. Requires USDC margin (or multi-asset mode) on the account.
-	// Default false.
-	PreferUSDCPairs bool `json:"prefer_usdc_pairs,omitempty"`
+	// BinanceUSDCMaker is a single tri-state toggle (Binance only) binding two
+	// zero-fee behaviours together:
+	//   - route trades to <base>USDC perpetuals when a USDC perp exists (captures
+	//     Binance's zero maker-fee USDC promo), and
+	//   - place take-profit as post-only reduce-only LIMIT (maker), falling back to
+	//     trigger-market algo TP when the post-only would cross.
+	// Market data and all internal identity stay on USDT; conversion is confined to
+	// the exchange API boundary. Bases without a USDC perp fall back to USDT.
+	// Stop-loss / break-even / trailing are unaffected (protective taker).
+	//
+	// Tri-state: nil = auto (ON for Binance traders, ignored by other exchanges);
+	// *true = force ON; *false = force OFF. Requires USDC margin or multi-asset mode
+	// on the account. Non-Binance exchanges never read this.
+	BinanceUSDCMaker *bool `json:"binance_usdc_maker,omitempty"`
 
-	// MakerTakeProfit (Binance only): place take-profit as post-only reduce-only
-	// LIMIT orders (maker) instead of trigger-market algo orders; falls back to algo
-	// TP if the post-only would cross. Pairs with PreferUSDCPairs to make TP fills
-	// zero-fee. Stop-loss / break-even / trailing are unaffected (stay protective
-	// taker). Default false.
+	// Deprecated: superseded by BinanceUSDCMaker. Retained for backward-compatible
+	// decoding of older strategy JSON; no longer written by the UI.
+	PreferUSDCPairs bool `json:"prefer_usdc_pairs,omitempty"`
 	MakerTakeProfit bool `json:"maker_take_profit,omitempty"`
 
 	// Strong-signal position replacement (CODE ENFORCED): when at MaxPositions and a new
@@ -935,6 +940,23 @@ type RiskControlConfig struct {
 	ReplaceMinHoldMinutes      int     `json:"replace_min_hold_minutes,omitempty"`      // victim must be held at least this long, e.g. 30
 	ReplaceMaxVictimProfitPct  float64 `json:"replace_max_victim_profit_pct,omitempty"` // never cut a winner above this pnl%, e.g. 1.0
 	ReplaceMinConfidenceMargin int     `json:"replace_min_confidence_margin,omitempty"` // new conf must beat victim entry conf by this, e.g. 5
+}
+
+// ResolveBinanceUSDCMaker returns whether the USDC-pair + maker-TP feature should
+// be active for a Binance trader using this config. Tri-state semantics:
+//   - explicit override (BinanceUSDCMaker non-nil) wins;
+//   - otherwise auto: ON for Binance (nil defaults on), honouring the legacy
+//     PreferUSDCPairs/MakerTakeProfit flags if either was set by older configs.
+//
+// Non-Binance exchanges never call this; the Binance trader is the only consumer.
+func (c RiskControlConfig) ResolveBinanceUSDCMaker() bool {
+	if c.BinanceUSDCMaker != nil {
+		return *c.BinanceUSDCMaker
+	}
+	if c.PreferUSDCPairs || c.MakerTakeProfit {
+		return true // legacy explicit opt-in
+	}
+	return true // auto-default ON for Binance
 }
 
 // NewStrategyStore creates a new StrategyStore

@@ -492,4 +492,9 @@ export interface RiskControlConfig {
   // Execution constraints
   entry_cooldown_minutes?: number // Post-loss cooldown per symbol (default: 90)
   max_entry_deviation_pct?: number // Max entry price deviation % (default: 1.5)
+
+  // Binance-only: bind USDC-pair routing + maker take-profit into one toggle.
+  // Tri-state: undefined = auto (ON for Binance), true = force ON, false = OFF.
+  // Non-Binance exchanges ignore this. Requires USDC margin / multi-asset mode.
+  binance_usdc_maker?: boolean
 }
