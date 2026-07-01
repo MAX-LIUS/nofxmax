@@ -49,7 +49,10 @@ func (t *FuturesTrader) SetTrailingStopLoss(symbol string, positionSide string, 
 	if err != nil {
 		return fmt.Errorf("failed to format trailing stop quantity: %w", err)
 	}
-	service = service.Quantity(qtyStr).ReduceOnly(true)
+	// Hedge mode (DualSide): PositionSide already fixes the close direction, so
+	// Binance rejects reduceOnly with -1106 (Parameter 'reduceonly' sent when not
+	// required). Mirror CloseLong/CloseShort: PositionSide + Quantity, no reduceOnly.
+	service = service.Quantity(qtyStr)
 
 	if activationPrice > 0 {
 		// Tick-align activation price (see SetStopLossTagged) to avoid -1111.
@@ -775,23 +778,38 @@ func (t *FuturesTrader) SetStopLossTagged(symbol string, positionSide string, qu
 		return fmt.Errorf("failed to format stop-loss trigger price: %w", err)
 	}
 
-	// Use new Algo Order API
-	_, err = t.client.NewCreateAlgoOrderService().
+	// Use new Algo Order API. In hedge mode Binance permits only ONE
+	// closePosition=true stop per side, so laddered partial stops (quantity>0)
+	// must be placed as explicit-quantity orders (PositionSide + Quantity, no
+	// reduceOnly — that returns -1106; see CloseLong/CloseShort). Only a
+	// full-position stop (quantity<=0: full_sl / break_even / fallback) uses
+	// closePosition=true, which auto-tracks the whole position size.
+	svc := t.client.NewCreateAlgoOrderService().
 		Symbol(symbol).
 		Side(side).
 		PositionSide(posSide).
 		Type(futures.AlgoOrderTypeStopMarket).
 		TriggerPrice(triggerStr).
 		WorkingType(futures.WorkingTypeContractPrice).
-		ClosePosition(true).
-		ClientAlgoId(getBrOrderID()).
-		Do(context.Background())
+		ClientAlgoId(getBrOrderID())
+
+	if quantity > 0 {
+		qtyStr, ferr := t.FormatQuantity(symbol, quantity)
+		if ferr != nil {
+			return fmt.Errorf("failed to format stop-loss quantity: %w", ferr)
+		}
+		svc = svc.Quantity(qtyStr)
+	} else {
+		svc = svc.ClosePosition(true)
+	}
+
+	_, err = svc.Do(context.Background())
 
 	if err != nil {
 		return fmt.Errorf("failed to set stop-loss: %w", err)
 	}
 
-	logger.Infof("  Stop-loss price set (Algo Order): %.4f", stopPrice)
+	logger.Infof("  Stop-loss price set (Algo Order): %.4f (qty=%.6f)", stopPrice, quantity)
 	return nil
 }
 
@@ -823,12 +841,14 @@ func (t *FuturesTrader) SetTakeProfitTagged(symbol string, positionSide string, 
 			logger.Warnf("  ⚠️ Maker TP failed for %s (%v); falling back to algo TP", symbol, err)
 		}
 	}
-	return t.setAlgoTakeProfit(symbol, positionSide, takeProfitPrice)
+	return t.setAlgoTakeProfit(symbol, positionSide, quantity, takeProfitPrice)
 }
 
-// placeMakerTakeProfit places a post-only reduce-only LIMIT order that earns the
-// maker fee when filled. Returns the raw exchange error so callers can classify
-// a post-only cross rejection.
+// placeMakerTakeProfit places a post-only LIMIT order that earns the maker fee
+// when filled. In hedge mode PositionSide already constrains it to a closing
+// order, so reduceOnly must NOT be sent (Binance returns -1106); the opposite
+// Side + PositionSide combination is inherently reduce-only. Returns the raw
+// exchange error so callers can classify a post-only cross rejection.
 func (t *FuturesTrader) placeMakerTakeProfit(symbol, positionSide string, quantity, price float64) error {
 	var side futures.SideType
 	var posSide futures.PositionSideType
@@ -855,7 +875,6 @@ func (t *FuturesTrader) placeMakerTakeProfit(symbol, positionSide string, quanti
 		TimeInForce(futures.TimeInForceTypeGTX). // GTX = post-only (maker or reject)
 		Quantity(qtyStr).
 		Price(priceStr).
-		ReduceOnly(true).
 		NewClientOrderID(getBrOrderID()).
 		Do(context.Background())
 	if err != nil {
@@ -866,7 +885,10 @@ func (t *FuturesTrader) placeMakerTakeProfit(symbol, positionSide string, quanti
 }
 
 // setAlgoTakeProfit is the original trigger-market algo TP (taker on fill).
-func (t *FuturesTrader) setAlgoTakeProfit(symbol, positionSide string, takeProfitPrice float64) error {
+// Laddered partial TPs (quantity>0) use explicit quantity (hedge mode allows
+// only one closePosition=true TP per side; see SetStopLossTagged). A
+// full-position TP (quantity<=0) uses closePosition=true.
+func (t *FuturesTrader) setAlgoTakeProfit(symbol, positionSide string, quantity, takeProfitPrice float64) error {
 	var side futures.SideType
 	var posSide futures.PositionSideType
 	if positionSide == "LONG" {
@@ -883,22 +905,32 @@ func (t *FuturesTrader) setAlgoTakeProfit(symbol, positionSide string, takeProfi
 		return fmt.Errorf("failed to format take-profit trigger price: %w", err)
 	}
 
-	_, err = t.client.NewCreateAlgoOrderService().
+	svc := t.client.NewCreateAlgoOrderService().
 		Symbol(symbol).
 		Side(side).
 		PositionSide(posSide).
 		Type(futures.AlgoOrderTypeTakeProfitMarket).
 		TriggerPrice(triggerStr).
 		WorkingType(futures.WorkingTypeContractPrice).
-		ClosePosition(true).
-		ClientAlgoId(getBrOrderID()).
-		Do(context.Background())
+		ClientAlgoId(getBrOrderID())
+
+	if quantity > 0 {
+		qtyStr, ferr := t.FormatQuantity(symbol, quantity)
+		if ferr != nil {
+			return fmt.Errorf("failed to format take-profit quantity: %w", ferr)
+		}
+		svc = svc.Quantity(qtyStr)
+	} else {
+		svc = svc.ClosePosition(true)
+	}
+
+	_, err = svc.Do(context.Background())
 
 	if err != nil {
 		return fmt.Errorf("failed to set take-profit: %w", err)
 	}
 
-	logger.Infof("  Take-profit price set (Algo Order): %.4f", takeProfitPrice)
+	logger.Infof("  Take-profit price set (Algo Order): %.4f (qty=%.6f)", takeProfitPrice, quantity)
 	return nil
 }
 
