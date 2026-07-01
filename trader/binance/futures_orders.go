@@ -7,6 +7,7 @@ import (
 	"nofx/logger"
 	"nofx/trader/types"
 	"strconv"
+	"strings"
 
 	"github.com/adshao/go-binance/v2/futures"
 )
@@ -758,7 +759,7 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 			orderType := string(algoOrder.OrderType)
 			stopPrice := triggerPrice
 
-			result = append(result, types.OpenOrder{
+			oo := types.OpenOrder{
 				OrderID:      fmt.Sprintf("%d", algoOrder.AlgoId),
 				Symbol:       toInternalSymbol(algoOrder.Symbol),
 				Side:         string(algoOrder.Side),
@@ -768,7 +769,33 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 				StopPrice:    stopPrice,
 				Quantity:     quantity,
 				Status:       "NEW",
-			})
+			}
+
+			// Report native trailing orders as already activated so the shared
+			// drawdown reconciler skips its OKX-oriented "phantom activation"
+			// conversion.
+			//
+			// Background: checkAndFixStaleTrailingActivation (auto_trader_risk.go)
+			// treats a trailing order whose activation price the mark has already
+			// crossed as a *phantom* (OKX sometimes fails to actually activate) and
+			// force-converts it to a MANAGED full-close. That guard keys off
+			// ActivationStatus=="activated", a field ONLY OKX populates. On Binance
+			// it was always "" here, so every in-profit position looked phantom and
+			// got force-closed then re-armed every cycle (the "无端平仓" reports).
+			// Binance's engine, unlike OKX, reliably activates a native
+			// TRAILING_STOP_MARKET once price passes the activation price, so an order
+			// still present in the open list is genuinely armed — reporting it as
+			// "activated" is correct and stops the misfire. The phantom check falls
+			// back to StopPrice (=triggerPrice) for the activation price, which we
+			// already set above, so no ActivationPrice field is needed. Binance's
+			// open-algo list endpoint does not return callbackRate, so that stays 0.
+			// Confined to the Binance trader; OKX keeps its own detection untouched.
+			if strings.Contains(strings.ToUpper(orderType), "TRAILING") {
+				oo.ActivationPrice = triggerPrice
+				oo.ActivationStatus = "activated"
+			}
+
+			result = append(result, oo)
 		}
 	}
 

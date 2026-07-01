@@ -215,6 +215,25 @@ func NewBinanceFuturesTestSuite(t *testing.T) *BinanceFuturesTestSuite {
 		case path == "/fapi/v1/openOrders":
 			respBody = []map[string]interface{}{}
 
+		// Mock ListOpenAlgoOrders - /fapi/v1/openAlgoOrders
+		// One TRAILING_STOP_MARKET short-close order, used to verify GetOpenOrders
+		// reports native trailing as ActivationStatus="activated" (Binance-only fix
+		// preventing the OKX-oriented phantom-activation misfire).
+		case path == "/fapi/v1/openAlgoOrders":
+			respBody = []map[string]interface{}{
+				{
+					"algoId":       int64(555001),
+					"orderType":    "TRAILING_STOP_MARKET",
+					"symbol":       "BTCUSDT",
+					"side":         "BUY",
+					"positionSide": "SHORT",
+					"quantity":     "0.010",
+					"algoStatus":   "WORKING",
+					"triggerPrice": "50000.00",
+					"price":        "0",
+				},
+			}
+
 		// Mock CancelAllOrders - /fapi/v1/allOpenOrders (DELETE)
 		case path == "/fapi/v1/allOpenOrders" && r.Method == "DELETE":
 			respBody = map[string]interface{}{
@@ -485,5 +504,45 @@ func TestCallbackRateNormalization(t *testing.T) {
 		if got := norm(c.in); got != c.want {
 			t.Errorf("norm(%.4f)=%s, want %s", c.in, got, c.want)
 		}
+	}
+}
+
+// TestGetOpenOrders_NativeTrailingActivated verifies the Binance-only fix that
+// reports a live native TRAILING_STOP_MARKET as ActivationStatus="activated".
+// The shared drawdown reconciler (auto_trader_risk.go) only treats a trailing
+// order as a "phantom" (and force-converts it to a MANAGED full-close) when
+// ActivationStatus != "activated". That field is populated by OKX; on Binance it
+// was always empty, so every in-profit position looked phantom and got auto-closed
+// then re-armed every cycle. Binance activates native trailing reliably once price
+// passes the activation price, so an order still present in the open list is armed.
+func TestGetOpenOrders_NativeTrailingActivated(t *testing.T) {
+	suite := NewBinanceFuturesTestSuite(t)
+	defer suite.Cleanup()
+
+	trader, ok := suite.Trader.(*FuturesTrader)
+	if !ok {
+		t.Fatalf("expected *FuturesTrader")
+	}
+
+	orders, err := trader.GetOpenOrders("BTCUSDT")
+	if err != nil {
+		t.Fatalf("GetOpenOrders error: %v", err)
+	}
+
+	var found bool
+	for _, o := range orders {
+		if !strings.Contains(strings.ToUpper(o.Type), "TRAILING") {
+			continue
+		}
+		found = true
+		if o.ActivationStatus != "activated" {
+			t.Errorf("native trailing ActivationStatus=%q, want \"activated\" (prevents phantom force-close)", o.ActivationStatus)
+		}
+		if o.ActivationPrice != 50000.00 {
+			t.Errorf("native trailing ActivationPrice=%.4f, want 50000.0000 (falls back to triggerPrice)", o.ActivationPrice)
+		}
+	}
+	if !found {
+		t.Fatalf("expected a TRAILING order in GetOpenOrders result, got none")
 	}
 }

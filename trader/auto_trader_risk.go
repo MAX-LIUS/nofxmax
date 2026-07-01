@@ -807,24 +807,41 @@ func (at *AutoTrader) checkAndFixStaleTrailingActivation(symbol, side string, en
 }
 
 // matchDrawdownRuleByActivation finds the drawdown rule whose +minProfit activation
-// price matches the given activePx (within tolerance). Falls back to the highest-minProfit
-// rule when no exact match is found.
+// price is CLOSEST to the given activePx (within tolerance). Falls back to the
+// highest-minProfit rule when no rule's activation is within tolerance.
+//
+// Closest-match (not first-within-tolerance) matters because adjacent drawdown tiers
+// can sit only ~1% apart, so a loose "first hit" would misattribute e.g. a 30%
+// partial-lock tier to a neighbouring 100% tier and force a full close instead of the
+// strategy's partial reduction. Minimising the relative distance always resolves to
+// the exact tier the trailing order actually belonged to.
 func matchDrawdownRuleByActivation(rules []store.DrawdownTakeProfitRule, entryPrice float64, side string, activePx float64) (store.DrawdownTakeProfitRule, bool) {
 	var best store.DrawdownTakeProfitRule
 	hasBest := false
+	var matched store.DrawdownTakeProfitRule
+	hasMatched := false
+	bestRelDist := math.MaxFloat64
 	for _, r := range rules {
 		r = normalizeDrawdownRule(r)
 		if r.MinProfitPct <= 0 || r.MaxDrawdownPct <= 0 || r.CloseRatioPct <= 0 {
 			continue
 		}
 		ap := calculateProfitBasedTrailingTriggerPrice(entryPrice, side, r.MinProfitPct)
-		if ap > 0 && activePx > 0 && math.Abs(ap-activePx)/activePx <= 0.01 {
-			return r, true
+		if ap > 0 && activePx > 0 {
+			relDist := math.Abs(ap-activePx) / activePx
+			if relDist <= 0.01 && relDist < bestRelDist {
+				bestRelDist = relDist
+				matched = r
+				hasMatched = true
+			}
 		}
 		if !hasBest || r.MinProfitPct > best.MinProfitPct {
 			best = r
 			hasBest = true
 		}
+	}
+	if hasMatched {
+		return matched, true
 	}
 	return best, hasBest
 }
