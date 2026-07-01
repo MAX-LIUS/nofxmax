@@ -323,7 +323,7 @@ func (t *FuturesTrader) GetExecutionConstraints(symbol string) (map[string]float
 	return nil, fmt.Errorf("symbol not found: %s", symbol)
 }
 
-// FormatPrice formats price to correct precision
+// FormatPrice formats price to the correct precision for a symbol.
 func (t *FuturesTrader) FormatPrice(symbol string, price float64) (string, error) {
 	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	precision, err := t.GetSymbolPricePrecision(symbol)
@@ -334,4 +334,50 @@ func (t *FuturesTrader) FormatPrice(symbol string, price float64) (string, error
 
 	format := fmt.Sprintf("%%.%df", precision)
 	return fmt.Sprintf(format, price), nil
+}
+
+// execPositionAmt returns the absolute size of the open position for an
+// already-exec-converted symbol and internal position side ("LONG"/"SHORT").
+// Used by trailing stops, which cannot use closePosition=true and must supply
+// an explicit reduce-only quantity. Returns 0 when no matching position exists.
+func (t *FuturesTrader) execPositionAmt(execSymbol, positionSide string) (float64, error) {
+	positions, err := t.client.NewGetPositionRiskService().
+		Symbol(execSymbol).
+		Do(context.Background())
+	if err != nil {
+		return 0, fmt.Errorf("get position risk: %w", err)
+	}
+	want := ""
+	switch positionSide {
+	case "LONG":
+		want = "LONG"
+	case "SHORT":
+		want = "SHORT"
+	}
+	for _, pos := range positions {
+		amt, _ := strconv.ParseFloat(pos.PositionAmt, 64)
+		if amt == 0 {
+			continue
+		}
+		// Hedge mode: match on PositionSide. One-way mode: PositionSide is BOTH,
+		// so fall back to sign of the amount.
+		ps := string(pos.PositionSide)
+		if ps == "BOTH" || ps == "" {
+			if (want == "LONG" && amt > 0) || (want == "SHORT" && amt < 0) {
+				return abs(amt), nil
+			}
+			continue
+		}
+		if ps == want {
+			return abs(amt), nil
+		}
+	}
+	return 0, nil
+}
+
+func abs(f float64) float64 {
+	if f < 0 {
+		return -f
+	}
+	return f
 }

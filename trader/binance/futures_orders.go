@@ -31,18 +31,33 @@ func (t *FuturesTrader) SetTrailingStopLoss(symbol string, positionSide string, 
 		WorkingType(futures.WorkingTypeContractPrice).
 		ClientAlgoId(getBrOrderID())
 
+	// Binance rejects closePosition=true for TRAILING_STOP_MARKET with -4136
+	// (Target strategy invalid). Trailing stops require an explicit quantity +
+	// reduceOnly. When the caller wants a full-position trail (quantity<=0),
+	// resolve the live position size and trail the whole amount.
 	if quantity <= 0 {
-		service = service.ClosePosition(true)
-	} else {
-		qtyStr, err := t.FormatQuantity(symbol, quantity)
+		amt, err := t.execPositionAmt(symbol, positionSide)
 		if err != nil {
-			return fmt.Errorf("failed to format trailing stop quantity: %w", err)
+			return fmt.Errorf("failed to resolve position size for trailing stop: %w", err)
 		}
-		service = service.Quantity(qtyStr).ReduceOnly(true)
+		if amt <= 0 {
+			return fmt.Errorf("no open %s position on %s to attach trailing stop", positionSide, symbol)
+		}
+		quantity = amt
 	}
+	qtyStr, err := t.FormatQuantity(symbol, quantity)
+	if err != nil {
+		return fmt.Errorf("failed to format trailing stop quantity: %w", err)
+	}
+	service = service.Quantity(qtyStr).ReduceOnly(true)
 
 	if activationPrice > 0 {
-		service = service.ActivationPrice(fmt.Sprintf("%.8f", activationPrice))
+		// Tick-align activation price (see SetStopLossTagged) to avoid -1111.
+		actStr, err := t.FormatPrice(symbol, activationPrice)
+		if err != nil {
+			return fmt.Errorf("failed to format trailing activation price: %w", err)
+		}
+		service = service.ActivationPrice(actStr)
 	}
 	if callbackRate > 0 {
 		service = service.CallbackRate(fmt.Sprintf("%.4f", callbackRate))
@@ -750,13 +765,23 @@ func (t *FuturesTrader) SetStopLossTagged(symbol string, positionSide string, qu
 		posSide = futures.PositionSideTypeShort
 	}
 
+	// Trigger price MUST be tick-aligned to the exec symbol's precision. Raw
+	// "%.8f" over-specifies decimals and Binance rejects it with -1111
+	// (Precision is over the maximum defined for this asset) — fatal for a
+	// protective order. symbol is already exec-converted above; FormatPrice is
+	// idempotent on exec symbols.
+	triggerStr, err := t.FormatPrice(symbol, stopPrice)
+	if err != nil {
+		return fmt.Errorf("failed to format stop-loss trigger price: %w", err)
+	}
+
 	// Use new Algo Order API
-	_, err := t.client.NewCreateAlgoOrderService().
+	_, err = t.client.NewCreateAlgoOrderService().
 		Symbol(symbol).
 		Side(side).
 		PositionSide(posSide).
 		Type(futures.AlgoOrderTypeStopMarket).
-		TriggerPrice(fmt.Sprintf("%.8f", stopPrice)).
+		TriggerPrice(triggerStr).
 		WorkingType(futures.WorkingTypeContractPrice).
 		ClosePosition(true).
 		ClientAlgoId(getBrOrderID()).
@@ -852,12 +877,18 @@ func (t *FuturesTrader) setAlgoTakeProfit(symbol, positionSide string, takeProfi
 		posSide = futures.PositionSideTypeShort
 	}
 
-	_, err := t.client.NewCreateAlgoOrderService().
+	// Tick-align the trigger price (see SetStopLossTagged) to avoid -1111.
+	triggerStr, err := t.FormatPrice(symbol, takeProfitPrice)
+	if err != nil {
+		return fmt.Errorf("failed to format take-profit trigger price: %w", err)
+	}
+
+	_, err = t.client.NewCreateAlgoOrderService().
 		Symbol(symbol).
 		Side(side).
 		PositionSide(posSide).
 		Type(futures.AlgoOrderTypeTakeProfitMarket).
-		TriggerPrice(fmt.Sprintf("%.8f", takeProfitPrice)).
+		TriggerPrice(triggerStr).
 		WorkingType(futures.WorkingTypeContractPrice).
 		ClosePosition(true).
 		ClientAlgoId(getBrOrderID()).
