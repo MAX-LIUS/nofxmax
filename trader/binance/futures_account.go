@@ -89,7 +89,7 @@ func (t *FuturesTrader) GetClosedPnL(startTime time.Time, limit int) ([]types.Cl
 		}
 
 		records = append(records, types.ClosedPnLRecord{
-			Symbol:      trade.Symbol,
+			Symbol:      toInternalSymbol(trade.Symbol),
 			Side:        side,
 			EntryPrice:  entryPrice,
 			ExitPrice:   trade.Price,
@@ -138,7 +138,7 @@ func (t *FuturesTrader) GetTrades(startTime time.Time, limit int) ([]types.Trade
 		// This is mainly used for detecting recent closures, not historical reconstruction
 		trade := types.TradeRecord{
 			TradeID:     strconv.FormatInt(income.TranID, 10),
-			Symbol:      income.Symbol,
+			Symbol:      toInternalSymbol(income.Symbol),
 			RealizedPnL: pnl,
 			Time:        time.UnixMilli(income.Time).UTC(),
 			// Note: Income API doesn't provide price, quantity, side, fee
@@ -153,6 +153,7 @@ func (t *FuturesTrader) GetTrades(startTime time.Time, limit int) ([]types.Trade
 // GetTradesForSymbol retrieves trade history for a specific symbol
 // This is more reliable than using Income API which may have delays
 func (t *FuturesTrader) GetTradesForSymbol(symbol string, startTime time.Time, limit int) ([]types.TradeRecord, error) {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	if limit <= 0 {
 		limit = 100
 	}
@@ -178,7 +179,7 @@ func (t *FuturesTrader) GetTradesForSymbol(symbol string, startTime time.Time, l
 
 		trade := types.TradeRecord{
 			TradeID:      strconv.FormatInt(at.ID, 10),
-			Symbol:       at.Symbol,
+			Symbol:       toInternalSymbol(at.Symbol),
 			Side:         string(at.Side),
 			PositionSide: string(at.PositionSide),
 			Price:        price,
@@ -196,6 +197,7 @@ func (t *FuturesTrader) GetTradesForSymbol(symbol string, startTime time.Time, l
 // GetTradesForSymbolFromID retrieves trade history for a specific symbol starting from a given trade ID
 // This is used for incremental sync - only fetch new trades since last sync
 func (t *FuturesTrader) GetTradesForSymbolFromID(symbol string, fromID int64, limit int) ([]types.TradeRecord, error) {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	if limit <= 0 {
 		limit = 100
 	}
@@ -221,7 +223,7 @@ func (t *FuturesTrader) GetTradesForSymbolFromID(symbol string, fromID int64, li
 
 		trade := types.TradeRecord{
 			TradeID:      strconv.FormatInt(at.ID, 10),
-			Symbol:       at.Symbol,
+			Symbol:       toInternalSymbol(at.Symbol),
 			Side:         string(at.Side),
 			PositionSide: string(at.PositionSide),
 			Price:        price,
@@ -251,7 +253,7 @@ func (t *FuturesTrader) GetCommissionSymbols(lastSyncTime time.Time) ([]string, 
 	symbolMap := make(map[string]bool)
 	for _, income := range incomes {
 		if income.Symbol != "" {
-			symbolMap[income.Symbol] = true
+			symbolMap[toInternalSymbol(income.Symbol)] = true // exec USDC -> internal USDT for consistent sync identity
 		}
 	}
 
@@ -278,7 +280,7 @@ func (t *FuturesTrader) GetPnLSymbols(lastSyncTime time.Time) ([]string, error) 
 	symbolMap := make(map[string]bool)
 	for _, income := range incomes {
 		if income.Symbol != "" {
-			symbolMap[income.Symbol] = true
+			symbolMap[toInternalSymbol(income.Symbol)] = true // exec USDC -> internal USDT for consistent sync identity
 		}
 	}
 

@@ -46,6 +46,16 @@ func getBrOrderID() string {
 type FuturesTrader struct {
 	client *futures.Client
 
+	// preferUSDC routes trades to <base>USDC perpetuals (zero maker fee) when a
+	// USDC perp exists for the base. Internal symbols stay USDT; conversion is
+	// confined to the API boundary (see symbol_mapping.go). Default false.
+	preferUSDC bool
+
+	// makerTakeProfit places take-profit as post-only reduce-only LIMIT orders
+	// (maker, 0 fee on USDC) instead of trigger-market algo orders. Falls back to
+	// algo TP if post-only would cross. SL/BE/trailing are unaffected. Default false.
+	makerTakeProfit bool
+
 	// Balance cache
 	cachedBalance     map[string]interface{}
 	balanceCacheTime  time.Time
@@ -58,6 +68,19 @@ type FuturesTrader struct {
 
 	// Cache validity period (15 seconds)
 	cacheDuration time.Duration
+}
+
+// SetExecutionPreferences configures USDC routing and maker take-profit. Called
+// right after construction by the caller that has the strategy config. Safe to
+// call with both false (identical to legacy behaviour). When preferUSDC is
+// enabled it eagerly warms the USDC-perp base cache.
+func (t *FuturesTrader) SetExecutionPreferences(preferUSDC, makerTakeProfit bool) {
+	t.preferUSDC = preferUSDC
+	t.makerTakeProfit = makerTakeProfit
+	if preferUSDC {
+		t.refreshUSDCPerpBases(true)
+	}
+	logger.Infof("⚙️ Binance execution prefs: preferUSDC=%v makerTakeProfit=%v", preferUSDC, makerTakeProfit)
 }
 
 // NewFuturesTrader creates futures trader

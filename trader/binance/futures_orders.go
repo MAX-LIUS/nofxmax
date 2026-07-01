@@ -11,6 +11,7 @@ import (
 )
 
 func (t *FuturesTrader) SetTrailingStopLoss(symbol string, positionSide string, activationPrice float64, callbackRate float64, quantity float64) error {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	var side futures.SideType
 	var posSide futures.PositionSideType
 
@@ -56,6 +57,7 @@ func (t *FuturesTrader) SetTrailingStopLoss(symbol string, positionSide string, 
 }
 
 func (t *FuturesTrader) CancelTrailingStopOrders(symbol string) error {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	err := t.client.NewCancelAllAlgoOpenOrdersService().
 		Symbol(symbol).
 		Do(context.Background())
@@ -69,6 +71,7 @@ func (t *FuturesTrader) CancelTrailingStopOrders(symbol string) error {
 
 // OpenLong opens a long position
 func (t *FuturesTrader) OpenLong(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	// First cancel all pending orders for this symbol (clean up old stop-loss and take-profit orders)
 	if err := t.CancelAllOrders(symbol); err != nil {
 		logger.Infof("  ⚠ Failed to cancel old pending orders (may not have any): %v", err)
@@ -124,6 +127,7 @@ func (t *FuturesTrader) OpenLong(symbol string, quantity float64, leverage int) 
 
 // OpenShort opens a short position
 func (t *FuturesTrader) OpenShort(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	// First cancel all pending orders for this symbol (clean up old stop-loss and take-profit orders)
 	if err := t.CancelAllOrders(symbol); err != nil {
 		logger.Infof("  ⚠ Failed to cancel old pending orders (may not have any): %v", err)
@@ -179,6 +183,7 @@ func (t *FuturesTrader) OpenShort(symbol string, quantity float64, leverage int)
 
 // CloseLong closes a long position
 func (t *FuturesTrader) CloseLong(symbol string, quantity float64) (map[string]interface{}, error) {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	// If quantity is 0, get current position quantity
 	if quantity == 0 {
 		positions, err := t.GetPositions()
@@ -234,6 +239,7 @@ func (t *FuturesTrader) CloseLong(symbol string, quantity float64) (map[string]i
 
 // CloseShort closes a short position
 func (t *FuturesTrader) CloseShort(symbol string, quantity float64) (map[string]interface{}, error) {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	// If quantity is 0, get current position quantity
 	if quantity == 0 {
 		positions, err := t.GetPositions()
@@ -290,6 +296,7 @@ func (t *FuturesTrader) CloseShort(symbol string, quantity float64) (map[string]
 // CancelStopLossOrders cancels only stop-loss orders (doesn't affect take-profit orders)
 // Now uses both legacy API and new Algo Order API
 func (t *FuturesTrader) CancelStopLossOrders(symbol string) error {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	canceledCount := 0
 	var cancelErrors []error
 
@@ -366,6 +373,7 @@ func (t *FuturesTrader) CancelStopLossOrders(symbol string) error {
 // CancelTakeProfitOrders cancels only take-profit orders (doesn't affect stop-loss orders)
 // Now uses both legacy API and new Algo Order API
 func (t *FuturesTrader) CancelTakeProfitOrders(symbol string) error {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	canceledCount := 0
 	var cancelErrors []error
 
@@ -442,6 +450,7 @@ func (t *FuturesTrader) CancelTakeProfitOrders(symbol string) error {
 // CancelAllOrders cancels all pending orders for this symbol
 // Now uses both legacy API and new Algo Order API
 func (t *FuturesTrader) CancelAllOrders(symbol string) error {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	// 1. Cancel all legacy orders
 	err := t.client.NewCancelAllOpenOrdersService().
 		Symbol(symbol).
@@ -473,6 +482,11 @@ func (t *FuturesTrader) CancelAllOrders(symbol string) error {
 // PlaceLimitOrder places a limit order for grid trading
 // This implements the GridTrader interface for FuturesTrader
 func (t *FuturesTrader) PlaceLimitOrder(req *types.LimitOrderRequest) (*types.LimitOrderResult, error) {
+	// Convert internal USDT symbol to exec (USDC when applicable) for all API calls
+	// below. FormatQuantity/FormatPrice are idempotent on already-exec symbols.
+	if req != nil {
+		req.Symbol = t.toExecSymbol(req.Symbol)
+	}
 	// Format quantity to correct precision
 	quantityStr, err := t.FormatQuantity(req.Symbol, req.Quantity)
 	if err != nil {
@@ -527,7 +541,7 @@ func (t *FuturesTrader) PlaceLimitOrder(req *types.LimitOrderRequest) (*types.Li
 	return &types.LimitOrderResult{
 		OrderID:      fmt.Sprintf("%d", order.OrderID),
 		ClientID:     order.ClientOrderID,
-		Symbol:       order.Symbol,
+		Symbol:       toInternalSymbol(order.Symbol),
 		Side:         string(order.Side),
 		PositionSide: string(order.PositionSide),
 		Price:        req.Price,
@@ -561,6 +575,7 @@ func (t *FuturesTrader) CancelOrder(symbol, orderID string) error {
 // GetOrderBook gets the order book for a symbol
 // This implements the GridTrader interface for FuturesTrader
 func (t *FuturesTrader) GetOrderBook(symbol string, depth int) (bids, asks [][]float64, err error) {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	book, err := t.client.NewDepthService().
 		Symbol(symbol).
 		Limit(depth).
@@ -592,6 +607,7 @@ func (t *FuturesTrader) GetOrderBook(symbol string, depth int) (bids, asks [][]f
 // CancelStopOrders cancels take-profit/stop-loss orders for this symbol (used to adjust TP/SL positions)
 // Now uses both legacy API and new Algo Order API (Binance migrated stop orders to Algo system)
 func (t *FuturesTrader) CancelStopOrders(symbol string) error {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	canceledCount := 0
 
 	// 1. Cancel legacy stop orders (for backward compatibility)
@@ -651,6 +667,7 @@ func (t *FuturesTrader) CancelStopOrders(symbol string) error {
 
 // GetOpenOrders gets all open/pending orders for a symbol
 func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	var result []types.OpenOrder
 
 	// 1. Get legacy open orders
@@ -669,7 +686,7 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 
 		result = append(result, types.OpenOrder{
 			OrderID:      fmt.Sprintf("%d", order.OrderID),
-			Symbol:       order.Symbol,
+			Symbol:       toInternalSymbol(order.Symbol),
 			Side:         string(order.Side),
 			PositionSide: string(order.PositionSide),
 			Type:         string(order.Type),
@@ -694,7 +711,7 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 
 			result = append(result, types.OpenOrder{
 				OrderID:      fmt.Sprintf("%d", algoOrder.AlgoId),
-				Symbol:       algoOrder.Symbol,
+				Symbol:       toInternalSymbol(algoOrder.Symbol),
 				Side:         string(algoOrder.Side),
 				PositionSide: string(algoOrder.PositionSide),
 				Type:         orderType,
@@ -712,6 +729,16 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 // SetStopLoss sets stop-loss order using new Algo Order API
 // Binance has migrated stop orders to Algo Order system (error -4120 STOP_ORDER_SWITCH_ALGO)
 func (t *FuturesTrader) SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error {
+	return t.SetStopLossTagged(symbol, positionSide, quantity, stopPrice, "")
+}
+
+// SetStopLossTagged sets a stop-loss order. Stop-loss is protective and MUST fill
+// on trigger, so it always uses the trigger-market algo order (taker) — never a
+// resting post-only limit, which could fail to fill in a fast adverse move. The
+// reasonTag is accepted for interface parity with OKX/attribution but does not
+// change execution semantics.
+func (t *FuturesTrader) SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) error {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	var side futures.SideType
 	var posSide futures.PositionSideType
 
@@ -743,12 +770,80 @@ func (t *FuturesTrader) SetStopLoss(symbol string, positionSide string, quantity
 	return nil
 }
 
-// SetTakeProfit sets take-profit order using new Algo Order API
-// Binance has migrated stop orders to Algo Order system (error -4120 STOP_ORDER_SWITCH_ALGO)
+// SetTakeProfit sets take-profit. Delegates to the tagged implementation.
 func (t *FuturesTrader) SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error {
+	return t.SetTakeProfitTagged(symbol, positionSide, quantity, takeProfitPrice, "")
+}
+
+// SetTakeProfitTagged sets a take-profit order.
+//
+// When makerTakeProfit is enabled and a concrete quantity is given, it first tries
+// a POST-ONLY reduce-only LIMIT order at the TP price. Such an order rests on the
+// book and, when hit, fills as a MAKER (0 fee on USDC pairs) instead of crossing
+// the book as a taker. If the exchange would execute it immediately (price already
+// through the market) it rejects the post-only order; we detect that and fall back
+// to the trigger-market algo TP so the target is never silently dropped.
+//
+// SL / break-even / trailing intentionally do NOT use this path: those are
+// protective and must fill on trigger, so they stay trigger-market (taker).
+func (t *FuturesTrader) SetTakeProfitTagged(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) error {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
+
+	if t.makerTakeProfit && quantity > 0 {
+		if err := t.placeMakerTakeProfit(symbol, positionSide, quantity, takeProfitPrice); err == nil {
+			return nil
+		} else if isPostOnlyCrossRejection(err) {
+			logger.Infof("  ↩️ Maker TP would cross for %s @ %.8f; falling back to algo TP", symbol, takeProfitPrice)
+		} else {
+			logger.Warnf("  ⚠️ Maker TP failed for %s (%v); falling back to algo TP", symbol, err)
+		}
+	}
+	return t.setAlgoTakeProfit(symbol, positionSide, takeProfitPrice)
+}
+
+// placeMakerTakeProfit places a post-only reduce-only LIMIT order that earns the
+// maker fee when filled. Returns the raw exchange error so callers can classify
+// a post-only cross rejection.
+func (t *FuturesTrader) placeMakerTakeProfit(symbol, positionSide string, quantity, price float64) error {
 	var side futures.SideType
 	var posSide futures.PositionSideType
+	if positionSide == "LONG" {
+		side = futures.SideTypeSell
+		posSide = futures.PositionSideTypeLong
+	} else {
+		side = futures.SideTypeBuy
+		posSide = futures.PositionSideTypeShort
+	}
+	qtyStr, err := t.FormatQuantity(symbol, quantity)
+	if err != nil {
+		return fmt.Errorf("format maker TP quantity: %w", err)
+	}
+	priceStr, err := t.FormatPrice(symbol, price)
+	if err != nil {
+		return fmt.Errorf("format maker TP price: %w", err)
+	}
+	_, err = t.client.NewCreateOrderService().
+		Symbol(symbol).
+		Side(side).
+		PositionSide(posSide).
+		Type(futures.OrderTypeLimit).
+		TimeInForce(futures.TimeInForceTypeGTX). // GTX = post-only (maker or reject)
+		Quantity(qtyStr).
+		Price(priceStr).
+		ReduceOnly(true).
+		NewClientOrderID(getBrOrderID()).
+		Do(context.Background())
+	if err != nil {
+		return err
+	}
+	logger.Infof("  ✓ Maker TP (post-only limit) set: %s %s %s @ %s", symbol, posSide, qtyStr, priceStr)
+	return nil
+}
 
+// setAlgoTakeProfit is the original trigger-market algo TP (taker on fill).
+func (t *FuturesTrader) setAlgoTakeProfit(symbol, positionSide string, takeProfitPrice float64) error {
+	var side futures.SideType
+	var posSide futures.PositionSideType
 	if positionSide == "LONG" {
 		side = futures.SideTypeSell
 		posSide = futures.PositionSideTypeLong
@@ -757,7 +852,6 @@ func (t *FuturesTrader) SetTakeProfit(symbol string, positionSide string, quanti
 		posSide = futures.PositionSideTypeShort
 	}
 
-	// Use new Algo Order API
 	_, err := t.client.NewCreateAlgoOrderService().
 		Symbol(symbol).
 		Side(side).
@@ -777,8 +871,22 @@ func (t *FuturesTrader) SetTakeProfit(symbol string, positionSide string, quanti
 	return nil
 }
 
+// isPostOnlyCrossRejection reports whether err is Binance's rejection of a
+// post-only order that would have executed immediately (would-be taker).
+// -5022: "Due to the order could not be executed as maker" ; -2021: order would
+// immediately trigger.
+func isPostOnlyCrossRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := err.Error()
+	return contains(m, "-5022") || contains(m, "-2021") ||
+		contains(m, "GTX") || contains(m, "immediately") || contains(m, "post only") || contains(m, "post-only")
+}
+
 // GetOrderStatus gets order status
 func (t *FuturesTrader) GetOrderStatus(symbol string, orderID string) (map[string]interface{}, error) {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	// Convert orderID to int64
 	orderIDInt, err := strconv.ParseInt(orderID, 10, 64)
 	if err != nil {

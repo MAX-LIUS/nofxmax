@@ -38,7 +38,7 @@ func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 		}
 
 		posMap := make(map[string]interface{})
-		posMap["symbol"] = pos.Symbol
+		posMap["symbol"] = toInternalSymbol(pos.Symbol) // exec (USDC) -> internal USDT for protection/posKey matching
 		posMap["positionAmt"], _ = strconv.ParseFloat(pos.PositionAmt, 64)
 		posMap["entryPrice"], _ = strconv.ParseFloat(pos.EntryPrice, 64)
 		posMap["markPrice"], _ = strconv.ParseFloat(pos.MarkPrice, 64)
@@ -68,6 +68,7 @@ func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 
 // SetMarginMode sets margin mode
 func (t *FuturesTrader) SetMarginMode(symbol string, isCrossMargin bool) error {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	var marginType futures.MarginType
 	if isCrossMargin {
 		marginType = futures.MarginTypeCrossed
@@ -119,6 +120,7 @@ func (t *FuturesTrader) SetMarginMode(symbol string, isCrossMargin bool) error {
 
 // SetLeverage sets leverage (with smart detection and cooldown period)
 func (t *FuturesTrader) SetLeverage(symbol string, leverage int) error {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	// First try to get current leverage (from position information)
 	currentLeverage := 0
 	positions, err := t.GetPositions()
@@ -165,6 +167,7 @@ func (t *FuturesTrader) SetLeverage(symbol string, leverage int) error {
 
 // GetMarketPrice gets market price
 func (t *FuturesTrader) GetMarketPrice(symbol string) (float64, error) {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	prices, err := t.client.NewListPricesService().Symbol(symbol).Do(context.Background())
 	if err != nil {
 		return 0, fmt.Errorf("failed to get price: %w", err)
@@ -192,12 +195,14 @@ func (t *FuturesTrader) CalculatePositionSize(balance, riskPercent, price float6
 
 // GetMinNotional gets minimum notional value (Binance requirement)
 func (t *FuturesTrader) GetMinNotional(symbol string) float64 {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	// Use conservative default value of 10 USDT to ensure order passes exchange validation
 	return 10.0
 }
 
 // CheckMinNotional checks if order meets minimum notional value requirement
 func (t *FuturesTrader) CheckMinNotional(symbol string, quantity float64) error {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	price, err := t.GetMarketPrice(symbol)
 	if err != nil {
 		return fmt.Errorf("failed to get market price: %w", err)
@@ -218,6 +223,7 @@ func (t *FuturesTrader) CheckMinNotional(symbol string, quantity float64) error 
 
 // GetSymbolPrecision gets the quantity precision for a trading pair
 func (t *FuturesTrader) GetSymbolPrecision(symbol string) (int, error) {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	exchangeInfo, err := t.client.NewExchangeInfoService().Do(context.Background())
 	if err != nil {
 		return 0, fmt.Errorf("failed to get trading rules: %w", err)
@@ -243,6 +249,7 @@ func (t *FuturesTrader) GetSymbolPrecision(symbol string) (int, error) {
 
 // FormatQuantity formats quantity to correct precision
 func (t *FuturesTrader) FormatQuantity(symbol string, quantity float64) (string, error) {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	precision, err := t.GetSymbolPrecision(symbol)
 	if err != nil {
 		// If retrieval fails, use default format
@@ -255,6 +262,7 @@ func (t *FuturesTrader) FormatQuantity(symbol string, quantity float64) (string,
 
 // GetSymbolPricePrecision gets the price precision for a trading pair
 func (t *FuturesTrader) GetSymbolPricePrecision(symbol string) (int, error) {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	exchangeInfo, err := t.client.NewExchangeInfoService().Do(context.Background())
 	if err != nil {
 		return 0, fmt.Errorf("failed to get trading rules: %w", err)
@@ -279,6 +287,7 @@ func (t *FuturesTrader) GetSymbolPricePrecision(symbol string) (int, error) {
 
 // GetExecutionConstraints returns compact Binance execution constraints from exchange rules.
 func (t *FuturesTrader) GetExecutionConstraints(symbol string) (map[string]float64, error) {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	exchangeInfo, err := t.client.NewExchangeInfoService().Do(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get trading rules: %w", err)
@@ -316,6 +325,7 @@ func (t *FuturesTrader) GetExecutionConstraints(symbol string) (map[string]float
 
 // FormatPrice formats price to correct precision
 func (t *FuturesTrader) FormatPrice(symbol string, price float64) (string, error) {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	precision, err := t.GetSymbolPricePrecision(symbol)
 	if err != nil {
 		// If retrieval fails, use default format

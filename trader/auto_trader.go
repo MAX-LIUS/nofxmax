@@ -277,7 +277,14 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 	switch config.Exchange {
 	case "binance":
 		logger.Infof("🏦 [%s] Using Binance Futures trading", config.Name)
-		trader = binance.NewFuturesTrader(config.BinanceAPIKey, config.BinanceSecretKey, userID)
+		bt := binance.NewFuturesTrader(config.BinanceAPIKey, config.BinanceSecretKey, userID)
+		if config.StrategyConfig != nil {
+			bt.SetExecutionPreferences(
+				config.StrategyConfig.RiskControl.PreferUSDCPairs,
+				config.StrategyConfig.RiskControl.MakerTakeProfit,
+			)
+		}
+		trader = bt
 	case "bybit":
 		logger.Infof("🏦 [%s] Using Bybit Futures trading", config.Name)
 		trader = bybit.NewBybitTrader(config.BybitAPIKey, config.BybitSecretKey)

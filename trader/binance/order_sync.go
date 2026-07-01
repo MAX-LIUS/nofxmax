@@ -181,8 +181,9 @@ func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string
 			continue // Trade already exists, skip
 		}
 
-		// Normalize symbol
-		symbol := market.Normalize(trade.Symbol)
+		// Normalize symbol (reverse-map exec USDC -> internal USDT first, so a
+		// BTCUSDC fill is stored/keyed as BTCUSDT like the rest of the system)
+		symbol := market.Normalize(toInternalSymbol(trade.Symbol))
 
 		// Determine order action based on side and position side
 		orderAction := t.determineOrderAction(trade.Side, trade.PositionSide, trade.RealizedPnL)

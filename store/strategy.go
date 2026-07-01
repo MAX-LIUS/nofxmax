@@ -322,11 +322,11 @@ type GivebackGuardConfig struct {
 	// they ride their break-even stop. Cross-validated production preset:
 	// min4 / f70% / ATR0.9 / cut100 / no cooldown.
 	BreadthEnabled     bool    `json:"breadth_enabled,omitempty"`
-	BreadthMinPos      int     `json:"breadth_min_pos,omitempty"`      // quorum: min open positions before the gate can fire
-	BreadthFrac        float64 `json:"breadth_frac,omitempty"`         // fraction (0..1) of positions retracing that fires the gate
+	BreadthMinPos      int     `json:"breadth_min_pos,omitempty"`       // quorum: min open positions before the gate can fire
+	BreadthFrac        float64 `json:"breadth_frac,omitempty"`          // fraction (0..1) of positions retracing that fires the gate
 	BreadthLoserCutPct float64 `json:"breadth_loser_cut_pct,omitempty"` // % of each losing+retracing position to cut (default 100)
-	BreadthUseATR      bool    `json:"breadth_use_atr,omitempty"`      // true => retrace measured in ATR-from-peak units
-	BreadthATRMult     float64 `json:"breadth_atr_mult,omitempty"`     // adverse-from-peak in ATR units that counts as retracing
+	BreadthUseATR      bool    `json:"breadth_use_atr,omitempty"`       // true => retrace measured in ATR-from-peak units
+	BreadthATRMult     float64 `json:"breadth_atr_mult,omitempty"`      // adverse-from-peak in ATR units that counts as retracing
 	// BreadthFromPeakTimeframe is the ATR timeframe used to normalize the
 	// from-peak path ONLY. The from-peak path measures a position's cumulative
 	// peak-to-current giveback, which spans many 1h bars; scaling it by a single
@@ -337,10 +337,10 @@ type GivebackGuardConfig struct {
 	// BreadthATRMult is interpreted against THIS timeframe's ATR (so the matching
 	// threshold is ~1.0 for 4h vs ~1.5 for 1h). Empty => "1h" (legacy behaviour).
 	BreadthFromPeakTimeframe string  `json:"breadth_from_peak_timeframe,omitempty"`
-	BreadthGivebackPct float64 `json:"breadth_giveback_pct,omitempty"` // peak-to-current giveback% that counts as retracing (pnl% mode)
-	BreadthVelEps      float64 `json:"breadth_vel_eps,omitempty"`      // velocity threshold in ATR-units/bar (giveback% per ATR per bar); below -eps counts as retracing. ATR-normalized so the same value behaves consistently across low- and high-volatility symbols.
-	BreadthVelWindow   int     `json:"breadth_vel_window,omitempty"`   // bars of look-back for pnl-velocity (0 => default 6)
-	BreadthCooldownBars int    `json:"breadth_cooldown_bars,omitempty"` // min bars between fires (0 => disabled, the validated default)
+	BreadthGivebackPct       float64 `json:"breadth_giveback_pct,omitempty"`  // peak-to-current giveback% that counts as retracing (pnl% mode)
+	BreadthVelEps            float64 `json:"breadth_vel_eps,omitempty"`       // velocity threshold in ATR-units/bar (giveback% per ATR per bar); below -eps counts as retracing. ATR-normalized so the same value behaves consistently across low- and high-volatility symbols.
+	BreadthVelWindow         int     `json:"breadth_vel_window,omitempty"`    // bars of look-back for pnl-velocity (0 => default 6)
+	BreadthCooldownBars      int     `json:"breadth_cooldown_bars,omitempty"` // min bars between fires (0 => disabled, the validated default)
 
 	// BreadthCutWinners turns the breadth breaker into a full deleveraging circuit
 	// breaker: when the gate fires, retracing WINNING positions are cut too (not
@@ -906,6 +906,21 @@ type RiskControlConfig struct {
 	MakerEntryTimeoutSec     int  `json:"maker_entry_timeout_sec,omitempty"`     // e.g. 15
 	MakerEntryOffsetTicks    int  `json:"maker_entry_offset_ticks,omitempty"`    // ticks inside best bid/ask, default 0 (at touch)
 	MakerEntryFallbackMarket bool `json:"maker_entry_fallback_market,omitempty"` // if unfilled, cross with market
+
+	// PreferUSDCPairs (Binance only): route trades to <base>USDC perpetuals when a
+	// USDC perp exists for the base, to capture Binance's zero maker-fee USDC promo.
+	// Market data and all internal identity stay on the USDT symbol; conversion is
+	// confined to the exchange API boundary. Bases without a USDC perp fall back to
+	// USDT automatically. Requires USDC margin (or multi-asset mode) on the account.
+	// Default false.
+	PreferUSDCPairs bool `json:"prefer_usdc_pairs,omitempty"`
+
+	// MakerTakeProfit (Binance only): place take-profit as post-only reduce-only
+	// LIMIT orders (maker) instead of trigger-market algo orders; falls back to algo
+	// TP if the post-only would cross. Pairs with PreferUSDCPairs to make TP fills
+	// zero-fee. Stop-loss / break-even / trailing are unaffected (stay protective
+	// taker). Default false.
+	MakerTakeProfit bool `json:"maker_take_profit,omitempty"`
 
 	// Strong-signal position replacement (CODE ENFORCED): when at MaxPositions and a new
 	// high-conviction entry arrives, close the weakest existing position to free a slot instead
