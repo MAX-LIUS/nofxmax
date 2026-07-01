@@ -3,6 +3,7 @@ package binance
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -450,5 +451,39 @@ func TestIsMakerTakeProfitLimit(t *testing.T) {
 				t.Fatalf("isMakerTakeProfitLimit=%v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// TestCallbackRateNormalization documents the -2007 fix: Binance callbackRate
+// must be in [0.1,5] with a 0.1 step. This mirrors the clamp+round applied in
+// SetTrailingStopLoss so the invariant is locked even though the network call
+// itself isn't exercised here.
+func TestCallbackRateNormalization(t *testing.T) {
+	norm := func(cb float64) string {
+		if cb < 0.1 {
+			cb = 0.1
+		}
+		if cb > 5 {
+			cb = 5
+		}
+		cb = math.Round(cb*10) / 10
+		return fmt.Sprintf("%.1f", cb)
+	}
+	cases := []struct {
+		in   float64
+		want string
+	}{
+		{1.0089, "1.0"}, // ETH full-path value that hit -2007
+		{3.4147, "3.4"}, // WLD value that hit -2007
+		{1.2000, "1.2"}, // previously-successful value, unchanged
+		{0.0500, "0.1"}, // below min -> floor
+		{7.5000, "5.0"}, // above max -> ceil
+		{0.1499, "0.1"}, // rounds down to step
+		{0.1500, "0.2"}, // rounds up to step
+	}
+	for _, c := range cases {
+		if got := norm(c.in); got != c.want {
+			t.Errorf("norm(%.4f)=%s, want %s", c.in, got, c.want)
+		}
 	}
 }

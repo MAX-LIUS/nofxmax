@@ -3,6 +3,7 @@ package binance
 import (
 	"context"
 	"fmt"
+	"math"
 	"nofx/logger"
 	"nofx/trader/types"
 	"strconv"
@@ -63,14 +64,29 @@ func (t *FuturesTrader) SetTrailingStopLoss(symbol string, positionSide string, 
 		service = service.ActivationPrice(actStr)
 	}
 	if callbackRate > 0 {
-		service = service.CallbackRate(fmt.Sprintf("%.4f", callbackRate))
+		// Binance callbackRate is a percentage constrained to [0.1, 5] with a
+		// 0.1 step. Callers pass strategy-derived values like 1.0089 or 3.4147;
+		// sending those 4-decimal values is rejected with -2007 (Invalid callBack
+		// rate). Clamp to the valid range and round to the 0.1 step so the
+		// exchange trailing always registers. This is the single boundary every
+		// trailing callback passes through (Binance-only; OKX/others unaffected).
+		cb := callbackRate
+		if cb < 0.1 {
+			cb = 0.1
+		}
+		if cb > 5 {
+			cb = 5
+		}
+		cb = math.Round(cb*10) / 10
+		service = service.CallbackRate(fmt.Sprintf("%.1f", cb))
+		callbackRate = cb
 	}
 
 	if _, err := service.Do(context.Background()); err != nil {
 		return fmt.Errorf("failed to set trailing stop-loss: %w", err)
 	}
 
-	logger.Infof("  Trailing stop-loss set (Algo Order): activation=%.4f callback=%.4f%%", activationPrice, callbackRate)
+	logger.Infof("  Trailing stop-loss set (Algo Order): activation=%.4f callback=%.1f%%", activationPrice, callbackRate)
 	return nil
 }
 
