@@ -123,7 +123,20 @@ type EntryGateConfig struct {
 	// on both time halves): target/ATR >= 5 flips EV negative (win rate collapses,
 	// target only hit ~12% of the time). Setups in 2.5-5×ATR are the profitable
 	// sweet spot. Default 5.0. Set 0 to disable.
-	MaxTargetATRMul             float64 `json:"max_target_atr_mul,omitempty"`
+	MaxTargetATRMul float64 `json:"max_target_atr_mul,omitempty"`
+	// TargetReachabilityMode controls what happens when first_target exceeds
+	// MaxTargetATRMul: "cap" (default) rewrites first_target to the reachable
+	// ceiling and recomputes RR, keeping the trade with a realistic target;
+	// "reject" hard-blocks the entry (legacy behaviour). Backtest of the 178
+	// >5×ATR trades: 54% actually ran ≥1× risk in profit (net +47.7%) but reverted
+	// before the unreachable target — capping+early-lock recovers most of that.
+	// Full-portfolio: reject → +28.7%, cap(0.8×risk lock, 1.8×ATR floor) → +37.0%.
+	TargetReachabilityMode string `json:"target_reachability_mode,omitempty"`
+	// RealisticTargetRiskMul is the profit-lock ladder/BE tier distance as a
+	// multiple of stop-risk, fed to the AI prompt. Default 0.8 (easier to bank:
+	// 105/174 blocked winners reach it vs 94 at 1.0×). Floored by MinRewardATRMul
+	// so the lock tier never lands inside the ATR noise band and gets scanned out.
+	RealisticTargetRiskMul      float64 `json:"realistic_target_risk_mul,omitempty"`
 	EntryProximityATRMul        float64 `json:"entry_proximity_atr_mul,omitempty"`
 	EntryProximityMinPct        float64 `json:"entry_proximity_min_pct,omitempty"`
 	EntryProximityMaxPct        float64 `json:"entry_proximity_max_pct,omitempty"`
@@ -175,6 +188,12 @@ func (c EntryGateConfig) WithDefaults() EntryGateConfig {
 		c.MaxTargetATRMul = 5.0
 	} else if c.MaxTargetATRMul < 0 {
 		c.MaxTargetATRMul = 0 // negative means explicitly disabled
+	}
+	if c.TargetReachabilityMode == "" {
+		c.TargetReachabilityMode = "cap" // cap unreachable targets by default (reshape > reject)
+	}
+	if c.RealisticTargetRiskMul <= 0 {
+		c.RealisticTargetRiskMul = 0.8 // profit-lock tier at 0.8× risk (easier to bank)
 	}
 	if c.EntryProximityATRMul <= 0 {
 		c.EntryProximityATRMul = 0.6

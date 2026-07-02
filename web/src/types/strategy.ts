@@ -87,8 +87,15 @@ export interface EntryGateConfig {
   volatility_buffer_atr_mul?: number
   // Reward distance
   min_reward_atr_mul?: number
-  // Max target distance / ATR. Rejects unreachable far targets. Default 5.0, 0/negative disables.
+  // Max target distance / ATR. Default 5.0, 0/negative disables.
   max_target_atr_mul?: number
+  // What to do when first_target > max_target_atr_mul: 'cap' (default, rewrite to
+  // reachable ceiling + recompute RR) or 'reject' (legacy hard-block). Cap recovers
+  // reverting winners: full-portfolio reject +28.7% vs cap +37.0%.
+  target_reachability_mode?: 'cap' | 'reject'
+  // Profit-lock ladder/BE tier distance as multiple of stop-risk, fed to AI prompt.
+  // Default 0.8 (easier to bank; floored by min_reward_atr_mul to clear noise band).
+  realistic_target_risk_mul?: number
   // Path clarity
   max_blocking_levels?: number
   // Confidence & direction

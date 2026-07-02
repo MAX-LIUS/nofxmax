@@ -169,7 +169,7 @@ export function PreEntryGateEditor({
 
   const updateEntryGate = (
     key: keyof EntryGateConfig,
-    value: number | boolean
+    value: number | boolean | string
   ) => {
     if (disabled) return
     update('entry_structure', {
@@ -403,7 +403,7 @@ export function PreEntryGateEditor({
                 disabled={disabled}
                 className="h-4 w-4 accent-sky-500"
               />
-              {t('blockLongInHtfDowntrend')}
+              {ts(preEntryGate.blockLongInHtfDowntrend, language)}
             </label>
           )}
           {config.require_trend_alignment &&
@@ -412,7 +412,7 @@ export function PreEntryGateEditor({
                 className="text-[11px] leading-relaxed"
                 style={{ color: '#848E9C' }}
               >
-                {t('blockLongInHtfDowntrendDesc')}
+                {ts(preEntryGate.blockLongInHtfDowntrendDesc, language)}
               </div>
             )}
           {config.require_trend_alignment && (
@@ -429,7 +429,7 @@ export function PreEntryGateEditor({
                 disabled={disabled}
                 className="h-4 w-4 accent-sky-500"
               />
-              {t('blockShortInHtfUptrend')}
+              {ts(preEntryGate.blockShortInHtfUptrend, language)}
             </label>
           )}
           {config.require_trend_alignment &&
@@ -438,7 +438,7 @@ export function PreEntryGateEditor({
                 className="text-[11px] leading-relaxed"
                 style={{ color: '#848E9C' }}
               >
-                {t('blockShortInHtfUptrendDesc')}
+                {ts(preEntryGate.blockShortInHtfUptrendDesc, language)}
               </div>
             )}
           {config.require_trend_alignment &&
@@ -886,6 +886,61 @@ export function PreEntryGateEditor({
           />
           <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
             {ts(preEntryGate.maxTargetAtrDesc, language)}
+          </div>
+          <label
+            className="flex items-center gap-2 text-sm mt-2"
+            style={{ color: '#EAECEF' }}
+          >
+            <input
+              type="checkbox"
+              checked={
+                (config.entry_structure?.entry_gate?.target_reachability_mode ||
+                  'cap') === 'reject'
+              }
+              onChange={(e) =>
+                updateEntryGate(
+                  'target_reachability_mode',
+                  e.target.checked ? 'reject' : 'cap'
+                )
+              }
+              disabled={
+                disabled ||
+                !(config.entry_structure?.entry_gate?.enabled ?? false) ||
+                config.entry_structure?.entry_gate?.stop_quality_enabled ===
+                  false
+              }
+              className="h-4 w-4 accent-amber-500"
+            />
+            {ts(preEntryGate.targetReachabilityMode, language)}
+            {' — '}
+            {(config.entry_structure?.entry_gate?.target_reachability_mode ||
+              'cap') === 'reject'
+              ? isZh
+                ? '拒绝(旧)'
+                : 'reject (legacy)'
+              : isZh
+                ? '压缩(默认)'
+                : 'cap (default)'}
+          </label>
+          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+            {ts(preEntryGate.targetReachabilityModeDesc, language)}
+          </div>
+          <EntryGateInput
+            label={ts(preEntryGate.realisticTargetRiskMul, language)}
+            value={
+              config.entry_structure?.entry_gate?.realistic_target_risk_mul ??
+              0.8
+            }
+            step={0.1}
+            disabled={
+              disabled ||
+              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
+              config.entry_structure?.entry_gate?.stop_quality_enabled === false
+            }
+            onChange={(v) => updateEntryGate('realistic_target_risk_mul', v)}
+          />
+          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+            {ts(preEntryGate.realisticTargetRiskMulDesc, language)}
           </div>
         </EntryGateGroup>
 

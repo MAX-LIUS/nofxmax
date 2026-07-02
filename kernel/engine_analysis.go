@@ -934,6 +934,21 @@ func ValidateEntryProtectionRationale(d Decision, minRR float64, config *store.S
 		return err
 	}
 
+	// Target reachability: cap an unreachable first_target (target/ATR > max) to
+	// the reachable ceiling and recompute RR (default), or reject in legacy mode.
+	// Mutates d.EntryProtection.RiskReward in place, so re-read the local copy so
+	// the RR recompute and plan-consistency checks below see the capped values.
+	if config.EntryStructure.Enabled {
+		gate := config.EntryStructure.EntryGate.WithDefaults()
+		if gate.Enabled {
+			if capped, err := enforceTargetReachability(d.Action, d.EntryProtection, gate); err != nil {
+				return err
+			} else if capped {
+				rr = d.EntryProtection.RiskReward
+			}
+		}
+	}
+
 	computedRR := rr.GrossEstimatedRR
 	riskDistance := absFloat(rr.Entry - rr.Invalidation)
 	rewardDistance := absFloat(rr.FirstTarget - rr.Entry)
@@ -1047,11 +1062,6 @@ func validateStructuralPriceAlignment(action string, rationale *AIEntryProtectio
 		return err
 	}
 
-	// 1b. 检查目标可达性 (目标距离/ATR 过大 = 够不着的远目标, 回测证明 EV 转负)
-	if err := validateTargetReachability(rationale, gate); err != nil {
-		return err
-	}
-
 	// 2. 检查入场位是否贴近结构位
 	if err := validateEntryProximityToStructure(action, rationale, gate); err != nil {
 		return err
@@ -1152,8 +1162,8 @@ func validateMinimumVolatility(rationale *AIEntryProtectionRationale, gate store
 	return nil
 }
 
-// validateTargetReachability rejects entries whose first_target sits an
-// unreachable distance from entry relative to volatility (target/ATR too high).
+// enforceTargetReachability handles first_target that sits an unreachable
+// distance from entry relative to volatility (target/ATR too high).
 //
 // Rationale (full-sample backtest, 781 matched trades, out-of-sample validated
 // on both time halves): the first_target-distance / ATR ratio is the dominant
@@ -1165,37 +1175,75 @@ func validateMinimumVolatility(rationale *AIEntryProtectionRationale, gate store
 //	target/ATR 7.0+    : -16.6% net
 //
 // Beyond ~5×ATR the target is statistically unreachable within the holding
-// window (hit only ~12% of the time), win rate collapses to ~48%, and EV turns
-// negative. This is the same phenomenon as inflated high-RR setups (rr>=4 has
-// 90% overlap with target/ATR>=5) but target/ATR is the more fundamental,
-// monotonic measure. Filtering it improved net EV in BOTH backtest halves
-// (good regime +33.6%→+44.3%, bad regime -40.3%→-16.3%), i.e. it is not a
-// regime-dependent artifact. It touches only the entry gate; no exit/close
-// logic is affected, so it cannot kill winning trades mid-flight.
-func validateTargetReachability(rationale *AIEntryProtectionRationale, gate store.EntryGateConfig) error {
+// window (hit only ~12% of the time). BUT tracing the 178 >5×ATR trades showed
+// 54% actually ran ≥1× risk in profit (net +47.7%, 79% win) and only reverted
+// because the far target never let them lock in. So the default is NOT to reject
+// but to CAP first_target to the reachable ceiling (maxMul×ATR) and recompute RR,
+// keeping a realistic trade. Full-portfolio: reject → +28.7%, cap → +37.0%.
+//
+// mode "reject" preserves the legacy hard-block. Returns (capped, err): capped=true
+// when first_target was rewritten (caller must re-read RR); err!=0 only in reject mode.
+func enforceTargetReachability(action string, rationale *AIEntryProtectionRationale, gate store.EntryGateConfig) (bool, error) {
 	maxMul := gate.MaxTargetATRMul
 	if maxMul <= 0 {
-		return nil // disabled
+		return false, nil // disabled
 	}
 	atrPct := rationale.VolatilityAdjustment.ATR14Pct
 	entry := rationale.RiskReward.Entry
 	if atrPct <= 0 || entry <= 0 {
-		// No volatility context to normalize against; do not block.
-		return nil
+		return false, nil // no volatility context to normalize against
 	}
 	rewardDistance := absFloat(rationale.RiskReward.FirstTarget - entry)
 	if rewardDistance <= 0 {
-		return nil
+		return false, nil
 	}
 	atrAbs := entry * (atrPct / 100)
 	if atrAbs <= 0 {
-		return nil
+		return false, nil
 	}
 	targetATRMul := rewardDistance / atrAbs
-	if targetATRMul > maxMul {
-		return fmt.Errorf("first_target %.2f×ATR away exceeds max %.2f×ATR (unreachable target: backtest shows EV turns negative beyond ~5×ATR, target hit only ~12%% of the time)", targetATRMul, maxMul)
+	if targetATRMul <= maxMul {
+		return false, nil // reachable, nothing to do
 	}
-	return nil
+
+	if strings.EqualFold(gate.TargetReachabilityMode, "reject") {
+		return false, fmt.Errorf("first_target %.2f×ATR away exceeds max %.2f×ATR (unreachable target: backtest shows EV turns negative beyond ~5×ATR, target hit only ~12%% of the time)", targetATRMul, maxMul)
+	}
+
+	// Cap mode (default): rewrite first_target to the reachable ceiling on the
+	// correct side, then recompute gross/net RR so downstream consistency holds.
+	ceilingDist := maxMul * atrAbs
+	var newTarget float64
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "open_short":
+		newTarget = entry - ceilingDist
+	default: // open_long
+		newTarget = entry + ceilingDist
+	}
+	if newTarget <= 0 {
+		// Degenerate (ceiling below zero for a short); fall back to reject.
+		return false, fmt.Errorf("first_target %.2f×ATR unreachable and cap produced non-positive target", targetATRMul)
+	}
+	rationale.RiskReward.FirstTarget = newTarget
+
+	// Recompute RR from the capped target so line-971 gross/net checks pass.
+	riskDistance := absFloat(entry - rationale.RiskReward.Invalidation)
+	if riskDistance > 0 {
+		newGross := ceilingDist / riskDistance
+		rationale.RiskReward.GrossEstimatedRR = newGross
+		if rationale.RiskReward.NetEstimatedRR > 0 {
+			// Scale net proportionally to preserve the AI's cost assumption.
+			if rationale.RiskReward.GrossEstimatedRR > 0 {
+				ratio := rationale.RiskReward.NetEstimatedRR / newGross
+				if ratio > 0 && ratio <= 1 {
+					rationale.RiskReward.NetEstimatedRR = newGross * ratio
+				} else {
+					rationale.RiskReward.NetEstimatedRR = newGross
+				}
+			}
+		}
+	}
+	return true, nil
 }
 
 // validateEntryProximityToStructure 检查入场位是否贴近结构位
