@@ -114,3 +114,73 @@ func TestTrendFollowingShortPasses(t *testing.T) {
 		t.Error("trend-following short in trending_down should pass alignment")
 	}
 }
+
+// --- Momentum-divergence guard (data-driven, 2026-07-02) --------------------
+// A 627-trade audit showed MACD-divergent entries lose -0.56/trade while
+// non-divergent trend-following makes +0.15/trade. Even when the regime label
+// agrees with the direction, an entry that fights MACD momentum must be blocked.
+
+// divergentShort: forced trending_down (price 3% below EMA20) but MACD is
+// POSITIVE (bullish momentum) — the ZEC 2026-07-01 stale-label case.
+func divergentShortData() *market.Data {
+	return &market.Data{
+		CurrentPrice:  97.0,
+		CurrentEMA20:  100.0, // -3% → forced trending_down
+		PriceChange4h: -2.5,
+		PriceChange1h: -0.1,
+		CurrentMACD:   0.8, // bullish momentum → divergent with open_short
+	}
+}
+
+// divergentLong: forced trending_up (price 3% above EMA20) but MACD is NEGATIVE
+// (bearish momentum) — the mirror case.
+func divergentLongData() *market.Data {
+	return &market.Data{
+		CurrentPrice:  103.0,
+		CurrentEMA20:  100.0, // +3% → forced trending_up
+		PriceChange4h: 2.5,
+		PriceChange1h: 0.1,
+		CurrentMACD:   -0.8, // bearish momentum → divergent with open_long
+	}
+}
+
+func TestDivergentShortIsBlocked(t *testing.T) {
+	// SHORT in trending_down but MACD>0 → momentum divergence, must be blocked
+	// even though the regime label "agrees" with a short.
+	checks := evaluateMarketStateGate(mkInput("open_short", divergentShortData(), baseRegimeCfg()))
+	c := findCheck(checks, "trend_misaligned")
+	if c == nil {
+		t.Fatal("expected trend_misaligned check")
+	}
+	if c.Passed {
+		t.Error("divergent short (MACD>0) in trending_down must be blocked (ZEC case)")
+	}
+	if !c.Enforced {
+		t.Error("momentum-divergence block must be hard-enforced")
+	}
+}
+
+func TestDivergentLongIsBlocked(t *testing.T) {
+	// LONG in trending_up but MACD<0 → momentum divergence, must be blocked.
+	checks := evaluateMarketStateGate(mkInput("open_long", divergentLongData(), baseRegimeCfg()))
+	c := findCheck(checks, "trend_misaligned")
+	if c == nil {
+		t.Fatal("expected trend_misaligned check")
+	}
+	if c.Passed {
+		t.Error("divergent long (MACD<0) in trending_up must be blocked")
+	}
+}
+
+func TestNonDivergentTrendFollowingStillPasses(t *testing.T) {
+	// Control: trending_down + short with MACD<0 (aligned momentum) must STILL pass.
+	// Guards against the divergence check over-blocking genuine trend-following.
+	checks := evaluateMarketStateGate(mkInput("open_short", trendingDownData(), baseRegimeCfg()))
+	c := findCheck(checks, "trend_misaligned")
+	if c == nil {
+		t.Fatal("expected trend_misaligned check")
+	}
+	if !c.Passed {
+		t.Error("non-divergent trend-following short must still pass after divergence guard")
+	}
+}

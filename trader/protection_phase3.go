@@ -159,6 +159,57 @@ func classifyTrendDirection(data *market.Data) int {
 // - narrow/standard/wide: both directions allowed (range trading is valid)
 // - volatile: both directions allowed (but other filters may block)
 // - If regime is not directional, fall back to multi-factor scoring
+// momentumDivergenceBlocksEntry detects when an entry fights the short-term
+// momentum even though the coarse regime label agrees with the entry direction.
+//
+// Motivation (data-driven, 2026-07-02): a 627-trade audit over 40 days showed that
+// entries where MACD momentum opposed the entry direction ("divergent") lost
+// -0.56/trade (183 trades, -102.2 total) while non-divergent trend-following made
+// +0.15/trade. The coarse regime branch of isTrendAlignedWithMode used to return
+// true unconditionally for "aligned" directions (trending_down+short,
+// trending_up+long), so a market that had already turned (MACD flipped) but still
+// carried a stale trending_* label let counter-momentum entries straight through.
+// The ZEC 2026-07-01 short (MACD=+0.84, chg1h=-0.07%, chg4h=-1.2%) is the canonical
+// case: three noise-level factors outvoted a clearly bullish MACD.
+//
+// Divergence is defined as:
+//   - open_short while MACD > 0 (bullish momentum), or
+//   - open_long  while MACD < 0 (bearish momentum)
+//
+// allowReversalException implements the "narrow window": when true, a divergent
+// entry may still pass if it is an explicit reversal/range-edge setup with
+// structural plausibility (deliberate counter-momentum fade at a level). When
+// false, divergence is a hard block. Both variants are regression-tested against
+// the historical divergent-loss set so the policy can be chosen from evidence.
+func momentumDivergenceBlocksEntry(action string, setup string, data *market.Data, allowReversalException bool) bool {
+	if data == nil {
+		return false
+	}
+	act := strings.ToLower(strings.TrimSpace(action))
+	stp := strings.ToLower(strings.TrimSpace(setup))
+
+	divergent := false
+	if act == "open_short" && data.CurrentMACD > 0 {
+		divergent = true
+	} else if act == "open_long" && data.CurrentMACD < 0 {
+		divergent = true
+	}
+	if !divergent {
+		return false
+	}
+
+	// Narrow window: a deliberate reversal/range-edge fade at a structural level is
+	// the one context where fighting momentum is the intended thesis. Require both
+	// an explicit reversal-type setup AND structural plausibility to let it through.
+	if allowReversalException {
+		isReversalSetup := strings.Contains(stp, "reversal") || strings.Contains(stp, "range")
+		if isReversalSetup && isRangeEdgeReversalStructurallyPlausible(act, data) {
+			return false // exception granted — do not block
+		}
+	}
+	return true // divergent and no exception — block
+}
+
 func isTrendAlignedWithMode(action string, setupType string, data *market.Data, mode store.RegimeTrendAlignmentMode) bool {
 	if data == nil {
 		return true
@@ -167,6 +218,13 @@ func isTrendAlignedWithMode(action string, setupType string, data *market.Data, 
 	regime := classifyProtectionRegime(data)
 	act := strings.ToLower(action)
 	setup := strings.ToLower(strings.TrimSpace(setupType))
+
+	// Momentum-divergence guard (data-driven, 2026-07-02): even when the regime
+	// label agrees with the entry direction, block entries that fight MACD momentum.
+	// The narrow reversal exception is enabled for the range-edge-reversal mode so
+	// deliberate structural fades can still pass; strict mode hard-blocks divergence.
+	allowReversalException := mode == store.RegimeTrendAlignmentAllowRangeEdgeReversal
+	divergenceBlocks := momentumDivergenceBlocksEntry(act, setup, data, allowReversalException)
 
 	// Downgrade weak trends: if regime is trending but evidence is thin
 	// (4h change < 0.5% AND ATR < 1.2%), treat as standard range instead.
@@ -203,6 +261,11 @@ func isTrendAlignedWithMode(action string, setupType string, data *market.Data, 
 			}
 			return false
 		}
+		// open_long is "aligned" with the uptrend, but still block it when it
+		// fights bearish MACD momentum (stale-label / early-reversal protection).
+		if divergenceBlocks {
+			return false
+		}
 		return true
 
 	case string(market.RegimeLevelTrendingDown):
@@ -215,6 +278,11 @@ func isTrendAlignedWithMode(action string, setupType string, data *market.Data, 
 			}
 			return false
 		}
+		// open_short is "aligned" with the downtrend, but still block it when it
+		// fights bullish MACD momentum (the ZEC 2026-07-01 case).
+		if divergenceBlocks {
+			return false
+		}
 		return true
 
 	case string(market.RegimeLevelTrending):
@@ -223,6 +291,9 @@ func isTrendAlignedWithMode(action string, setupType string, data *market.Data, 
 			return false
 		}
 		if act == "open_short" && data.PriceChange4h > 1 {
+			return false
+		}
+		if divergenceBlocks {
 			return false
 		}
 		return true
