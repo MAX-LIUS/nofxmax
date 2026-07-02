@@ -637,6 +637,11 @@ type RegimeFilterConfig struct {
 	MaxATR14Pct           float64                  `json:"max_atr14_pct,omitempty"`
 	RequireTrendAlignment bool                     `json:"require_trend_alignment"`
 	TrendAlignmentMode    RegimeTrendAlignmentMode `json:"trend_alignment_mode,omitempty"`
+	// BlockLongInHTFDowntrend hard-blocks open_long into an established 1h downtrend
+	// (EMA20<EMA50 & price<EMA50). Backtest: the down×LONG cell is -59.6% net over
+	// 137 trades (OOS-validated on both time halves). Pointer distinguishes unset
+	// (=default true) from an explicit false. Asymmetric: never affects shorts.
+	BlockLongInHTFDowntrend *bool `json:"block_long_in_htf_downtrend,omitempty"`
 	// Coin momentum gate — blocks entries on coins with insufficient or excessive momentum
 	MomentumGateEnabled    bool    `json:"momentum_gate_enabled"`
 	MomentumStaleChg1h     float64 `json:"momentum_stale_chg1h,omitempty"`     // abs(chg1h) below this = stale (default 0.15)

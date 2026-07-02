@@ -252,6 +252,9 @@ export interface RegimeFilterConfig {
   max_atr14_pct: number
   require_trend_alignment: boolean
   trend_alignment_mode?: 'strict' | 'allow_range_edge_reversal'
+  // Block open_long into an established 1h downtrend (down×LONG cell, -59.6% net).
+  // Unset defaults to true (enabled). Asymmetric: never affects shorts.
+  block_long_in_htf_downtrend?: boolean
 
   // Coin momentum gate
   momentum_gate_enabled?: boolean

@@ -389,6 +389,36 @@ export function PreEntryGateEditor({
                 : 'Allow range_edge support/resistance reversal exception'}
             </label>
           )}
+          {config.require_trend_alignment && (
+            <label
+              className="flex items-center gap-2 text-sm"
+              style={{ color: '#EAECEF' }}
+            >
+              <input
+                type="checkbox"
+                checked={config.block_long_in_htf_downtrend !== false}
+                onChange={(e) =>
+                  update('block_long_in_htf_downtrend', e.target.checked)
+                }
+                disabled={disabled}
+                className="h-4 w-4 accent-sky-500"
+              />
+              {isZh
+                ? '1h 下跌趋势禁止做多 (down×LONG)'
+                : 'Block long in 1h downtrend (down×LONG)'}
+            </label>
+          )}
+          {config.require_trend_alignment &&
+            config.block_long_in_htf_downtrend !== false && (
+              <div
+                className="text-[11px] leading-relaxed"
+                style={{ color: '#848E9C' }}
+              >
+                {isZh
+                  ? '全样本回测(137单,样本外验证)：在既定1h下跌趋势(EMA20<EMA50且价<EMA50)里做多净亏-59.6%、胜率46%。与MACD背离拦截几乎不重叠(增量挽回+54%)。不对称，只拦多不拦空。'
+                  : 'Backtest (137 trades, OOS-validated): going long into an established 1h downtrend (EMA20<EMA50 & price<EMA50) is -59.6% net, 46% win rate. Largely orthogonal to the MACD-divergence guard (+54% incremental). Asymmetric: blocks longs only, never shorts.'}
+              </div>
+            )}
           {config.require_trend_alignment &&
             (config.trend_alignment_mode || 'strict') ===
               'allow_range_edge_reversal' && (

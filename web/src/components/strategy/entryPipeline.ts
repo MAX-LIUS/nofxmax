@@ -62,6 +62,16 @@ export function buildEntryPipeline(
   })
   gates.push({
     stage: 'market_state',
+    label: ['1h下跌禁多', 'Block long in 1h downtrend'],
+    // Defaults to ON when trend alignment is active (unset => enabled).
+    active:
+      !!rf?.enabled &&
+      !!rf?.require_trend_alignment &&
+      rf?.block_long_in_htf_downtrend !== false,
+    source: 'regime_filter',
+  })
+  gates.push({
+    stage: 'market_state',
     label: ['动量门', 'Momentum gate'],
     active: !!rf?.enabled && !!rf?.momentum_gate_enabled,
     source: 'regime_filter',

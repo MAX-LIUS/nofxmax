@@ -210,7 +210,70 @@ func momentumDivergenceBlocksEntry(action string, setup string, data *market.Dat
 	return true // divergent and no exception — block
 }
 
-func isTrendAlignedWithMode(action string, setupType string, data *market.Data, mode store.RegimeTrendAlignmentMode) bool {
+// higherTimeframeDowntrendBlocksLong blocks open_long entries taken into an
+// established 1h downtrend (EMA20 < EMA50 AND price < EMA50). This is the single
+// most toxic regime×direction cell in the full-sample backtest (137 trades,
+// -59.6% net, 46% win rate; OOS-validated on both time halves). It is largely
+// orthogonal to the MACD-divergence guard: 121 of the 137 have a rising 15m MACD
+// (short-term momentum up) that the divergence guard lets through — i.e. bounce
+// traps inside a higher-timeframe downtrend. Blocking the whole cell is net
+// positive because losers (-126%) vastly outweigh the winners forgone (+67%).
+//
+// Deliberately ASYMMETRIC: only open_long × 1h-downtrend is blocked. The mirror
+// cell (open_short × 1h-uptrend) is NET POSITIVE in the backtest (+8.9%), so
+// shorts against a higher-tf uptrend are NOT blocked here.
+//
+// Adding EMA50-slope or price<EMA20 confirmations was tested and made the filter
+// WORSE (let toxic trades through), so the basic EMA-structure criterion is used.
+func higherTimeframeDowntrendBlocksLong(action string, data *market.Data) bool {
+	if data == nil {
+		return false
+	}
+	if strings.ToLower(strings.TrimSpace(action)) != "open_long" {
+		return false
+	}
+	series := higherTimeframeSeriesFor(data, "1h")
+	if series == nil {
+		return false // no 1h context → do not block (avoid false positives)
+	}
+	ema20, ema50, price := latestEMAStructure(series)
+	if ema20 <= 0 || ema50 <= 0 || price <= 0 {
+		return false
+	}
+	// Established 1h downtrend: fast EMA below slow EMA AND price below the slow EMA.
+	return ema20 < ema50 && price < ema50
+}
+
+// higherTimeframeSeriesFor returns the per-timeframe series for tf, or nil.
+func higherTimeframeSeriesFor(data *market.Data, tf string) *market.TimeframeSeriesData {
+	if data == nil || data.TimeframeData == nil {
+		return nil
+	}
+	if s, ok := data.TimeframeData[tf]; ok && s != nil {
+		return s
+	}
+	return nil
+}
+
+// latestEMAStructure extracts the most recent EMA20, EMA50, and close price from
+// a timeframe series. Returns zeros when data is insufficient.
+func latestEMAStructure(s *market.TimeframeSeriesData) (ema20, ema50, price float64) {
+	if s == nil {
+		return 0, 0, 0
+	}
+	if len(s.EMA20Values) > 0 {
+		ema20 = s.EMA20Values[len(s.EMA20Values)-1]
+	}
+	if len(s.EMA50Values) > 0 {
+		ema50 = s.EMA50Values[len(s.EMA50Values)-1]
+	}
+	if len(s.Klines) > 0 {
+		price = s.Klines[len(s.Klines)-1].Close
+	}
+	return ema20, ema50, price
+}
+
+func isTrendAlignedWithMode(action string, setupType string, data *market.Data, mode store.RegimeTrendAlignmentMode, blockLongInHTFDowntrend bool) bool {
 	if data == nil {
 		return true
 	}
@@ -225,6 +288,15 @@ func isTrendAlignedWithMode(action string, setupType string, data *market.Data, 
 	// deliberate structural fades can still pass; strict mode hard-blocks divergence.
 	allowReversalException := mode == store.RegimeTrendAlignmentAllowRangeEdgeReversal
 	divergenceBlocks := momentumDivergenceBlocksEntry(act, setup, data, allowReversalException)
+
+	// Higher-timeframe downtrend guard (data-driven, 2026-07-02): block open_long
+	// into an established 1h downtrend (the -59.6% down×LONG cell). Orthogonal to
+	// the MACD guard (catches bounce-trap longs it misses). Asymmetric by design:
+	// only longs-into-downtrend are blocked, never shorts. No reversal exception —
+	// adding confirmations was shown to weaken the filter.
+	if blockLongInHTFDowntrend && higherTimeframeDowntrendBlocksLong(act, data) {
+		return false
+	}
 
 	// Downgrade weak trends: if regime is trending but evidence is thin
 	// (4h change < 0.5% AND ATR < 1.2%), treat as standard range instead.
@@ -356,7 +428,17 @@ func isStrongCounterTrend(action string, data *market.Data) bool {
 }
 
 func isTrendAligned(action string, data *market.Data) bool {
-	return isTrendAlignedWithMode(action, "", data, store.RegimeTrendAlignmentStrict)
+	return isTrendAlignedWithMode(action, "", data, store.RegimeTrendAlignmentStrict, true)
+}
+
+// resolveBlockLongInHTFDowntrend returns the effective toggle for the 1h-downtrend
+// long block. Unset (nil) defaults to true (enabled) since the backtest shows the
+// down×LONG cell is strongly net-negative; an explicit false disables it.
+func resolveBlockLongInHTFDowntrend(cfg store.RegimeFilterConfig) bool {
+	if cfg.BlockLongInHTFDowntrend == nil {
+		return true
+	}
+	return *cfg.BlockLongInHTFDowntrend
 }
 
 // isRangeEdgeReversalStructurallyPlausible allows deliberate support/resistance
@@ -472,7 +554,7 @@ func (at *AutoTrader) evaluateDecisionRegimeGate(decision *kernel.Decision, data
 	}
 
 	if cfg.RequireTrendAlignment {
-		aligned := isTrendAlignedWithMode(decision.Action, decision.SetupType, data, cfg.TrendAlignmentMode)
+		aligned := isTrendAlignedWithMode(decision.Action, decision.SetupType, data, cfg.TrendAlignmentMode, resolveBlockLongInHTFDowntrend(cfg))
 		result.TrendAligned = &aligned
 		if !aligned {
 			result.Allowed = false
@@ -635,7 +717,7 @@ func buildAIProtectionPlan(entryPrice float64, action string, plan *kernel.AIPro
 					RunnerTargetMode:    rule.RunnerTargetMode,
 					RunnerTargetSource:  rule.RunnerTargetSource,
 				}, drawdownCfg)
-			if drawdownRule.CloseRatioPct > 0 {
+				if drawdownRule.CloseRatioPct > 0 {
 					rules = append(rules, drawdownRule)
 				}
 			}
