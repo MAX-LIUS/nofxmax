@@ -1183,6 +1183,11 @@ export const preEntryGate = {
   squeezeMinConf: { zh: '挤压行情最低置信度', en: 'Squeeze min confidence' },
   squeezeMinRR: { zh: '挤压行情最低 RR', en: 'Squeeze min RR' },
   minRewardAtr: { zh: '最小TP距离 (ATR×)', en: 'Min TP distance (ATR×)' },
+  maxTargetAtr: { zh: '最大TP距离 (ATR×)', en: 'Max TP distance (ATR×)' },
+  maxTargetAtrDesc: {
+    zh: '目标距离超过该 ATR 倍数则拦截：远目标够不着，全样本回测(781单,样本外验证)显示 >5×ATR 时期望收益转负、目标仅~12%达成。默认 5.0，设 0 关闭。',
+    en: 'Reject entries whose first_target exceeds this ATR multiple: far targets are unreachable. Full-sample backtest (781 trades, OOS-validated) shows EV turns negative and targets hit only ~12% of the time beyond 5×ATR. Default 5.0, set 0 to disable.',
+  },
 }
 
 // ============================================================================

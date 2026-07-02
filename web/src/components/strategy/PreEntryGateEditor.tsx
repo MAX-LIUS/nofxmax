@@ -819,6 +819,22 @@ export function PreEntryGateEditor({
             }
             onChange={(v) => updateEntryGate('min_reward_atr_mul', v)}
           />
+          <EntryGateInput
+            label={ts(preEntryGate.maxTargetAtr, language)}
+            value={
+              config.entry_structure?.entry_gate?.max_target_atr_mul ?? 5.0
+            }
+            step={0.5}
+            disabled={
+              disabled ||
+              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
+              config.entry_structure?.entry_gate?.stop_quality_enabled === false
+            }
+            onChange={(v) => updateEntryGate('max_target_atr_mul', v)}
+          />
+          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+            {ts(preEntryGate.maxTargetAtrDesc, language)}
+          </div>
         </EntryGateGroup>
 
         {/* Group D: Path Clarity */}

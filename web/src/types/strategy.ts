@@ -87,6 +87,8 @@ export interface EntryGateConfig {
   volatility_buffer_atr_mul?: number
   // Reward distance
   min_reward_atr_mul?: number
+  // Max target distance / ATR. Rejects unreachable far targets. Default 5.0, 0/negative disables.
+  max_target_atr_mul?: number
   // Path clarity
   max_blocking_levels?: number
   // Confidence & direction

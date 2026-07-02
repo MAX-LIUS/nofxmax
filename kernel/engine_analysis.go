@@ -1047,6 +1047,11 @@ func validateStructuralPriceAlignment(action string, rationale *AIEntryProtectio
 		return err
 	}
 
+	// 1b. 检查目标可达性 (目标距离/ATR 过大 = 够不着的远目标, 回测证明 EV 转负)
+	if err := validateTargetReachability(rationale, gate); err != nil {
+		return err
+	}
+
 	// 2. 检查入场位是否贴近结构位
 	if err := validateEntryProximityToStructure(action, rationale, gate); err != nil {
 		return err
@@ -1144,6 +1149,52 @@ func validateMinimumVolatility(rationale *AIEntryProtectionRationale, gate store
 		return fmt.Errorf("first_target distance %.2f%% too small (min %.2f%%), insufficient room for fees", rewardPct, minRewardPct)
 	}
 
+	return nil
+}
+
+// validateTargetReachability rejects entries whose first_target sits an
+// unreachable distance from entry relative to volatility (target/ATR too high).
+//
+// Rationale (full-sample backtest, 781 matched trades, out-of-sample validated
+// on both time halves): the first_target-distance / ATR ratio is the dominant
+// entry-quality factor and is monotonic —
+//
+//	target/ATR 2.5-3.5 : +11.7% net
+//	target/ATR 3.5-5.0 : +15.6% net (sweet spot)
+//	target/ATR 5.0-7.0 : -18.1% net
+//	target/ATR 7.0+    : -16.6% net
+//
+// Beyond ~5×ATR the target is statistically unreachable within the holding
+// window (hit only ~12% of the time), win rate collapses to ~48%, and EV turns
+// negative. This is the same phenomenon as inflated high-RR setups (rr>=4 has
+// 90% overlap with target/ATR>=5) but target/ATR is the more fundamental,
+// monotonic measure. Filtering it improved net EV in BOTH backtest halves
+// (good regime +33.6%→+44.3%, bad regime -40.3%→-16.3%), i.e. it is not a
+// regime-dependent artifact. It touches only the entry gate; no exit/close
+// logic is affected, so it cannot kill winning trades mid-flight.
+func validateTargetReachability(rationale *AIEntryProtectionRationale, gate store.EntryGateConfig) error {
+	maxMul := gate.MaxTargetATRMul
+	if maxMul <= 0 {
+		return nil // disabled
+	}
+	atrPct := rationale.VolatilityAdjustment.ATR14Pct
+	entry := rationale.RiskReward.Entry
+	if atrPct <= 0 || entry <= 0 {
+		// No volatility context to normalize against; do not block.
+		return nil
+	}
+	rewardDistance := absFloat(rationale.RiskReward.FirstTarget - entry)
+	if rewardDistance <= 0 {
+		return nil
+	}
+	atrAbs := entry * (atrPct / 100)
+	if atrAbs <= 0 {
+		return nil
+	}
+	targetATRMul := rewardDistance / atrAbs
+	if targetATRMul > maxMul {
+		return fmt.Errorf("first_target %.2f×ATR away exceeds max %.2f×ATR (unreachable target: backtest shows EV turns negative beyond ~5×ATR, target hit only ~12%% of the time)", targetATRMul, maxMul)
+	}
 	return nil
 }
 

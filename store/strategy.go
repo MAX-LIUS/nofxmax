@@ -113,11 +113,17 @@ type EntryStructureConfig struct {
 // EntryGateConfig controls executable entry-quality gates that validate AI open proposals.
 // It is nested under EntryStructure so it composes with existing entry/protection gates.
 type EntryGateConfig struct {
-	Enabled                     bool    `json:"enabled,omitempty"`
-	MinATR14Pct                 float64 `json:"min_atr14_pct,omitempty"`
-	MinRiskDistancePct          float64 `json:"min_risk_distance_pct,omitempty"`
-	MinSLDistanceATRMul         float64 `json:"min_sl_distance_atr_mul,omitempty"`
-	MinRewardATRMul             float64 `json:"min_reward_atr_mul,omitempty"`
+	Enabled             bool    `json:"enabled,omitempty"`
+	MinATR14Pct         float64 `json:"min_atr14_pct,omitempty"`
+	MinRiskDistancePct  float64 `json:"min_risk_distance_pct,omitempty"`
+	MinSLDistanceATRMul float64 `json:"min_sl_distance_atr_mul,omitempty"`
+	MinRewardATRMul     float64 `json:"min_reward_atr_mul,omitempty"`
+	// MaxTargetATRMul rejects entries whose first_target is unreachably far from
+	// entry relative to volatility. Full-sample backtest (781 trades, OOS-validated
+	// on both time halves): target/ATR >= 5 flips EV negative (win rate collapses,
+	// target only hit ~12% of the time). Setups in 2.5-5×ATR are the profitable
+	// sweet spot. Default 5.0. Set 0 to disable.
+	MaxTargetATRMul             float64 `json:"max_target_atr_mul,omitempty"`
 	EntryProximityATRMul        float64 `json:"entry_proximity_atr_mul,omitempty"`
 	EntryProximityMinPct        float64 `json:"entry_proximity_min_pct,omitempty"`
 	EntryProximityMaxPct        float64 `json:"entry_proximity_max_pct,omitempty"`
@@ -164,6 +170,11 @@ func (c EntryGateConfig) WithDefaults() EntryGateConfig {
 	}
 	if c.MinRewardATRMul <= 0 {
 		c.MinRewardATRMul = 1.8
+	}
+	if c.MaxTargetATRMul == 0 {
+		c.MaxTargetATRMul = 5.0
+	} else if c.MaxTargetATRMul < 0 {
+		c.MaxTargetATRMul = 0 // negative means explicitly disabled
 	}
 	if c.EntryProximityATRMul <= 0 {
 		c.EntryProximityATRMul = 0.6
