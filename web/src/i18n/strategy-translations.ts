@@ -1188,6 +1188,22 @@ export const preEntryGate = {
     zh: '目标距离超过该 ATR 倍数则拦截：远目标够不着，全样本回测(781单,样本外验证)显示 >5×ATR 时期望收益转负、目标仅~12%达成。默认 5.0，设 0 关闭。',
     en: 'Reject entries whose first_target exceeds this ATR multiple: far targets are unreachable. Full-sample backtest (781 trades, OOS-validated) shows EV turns negative and targets hit only ~12% of the time beyond 5×ATR. Default 5.0, set 0 to disable.',
   },
+  blockLongInHtfDowntrend: {
+    zh: '拦截1h+4h确认下跌做多',
+    en: 'Block long in 1h+4h downtrend',
+  },
+  blockLongInHtfDowntrendDesc: {
+    zh: '当1h和4h均确认下跌趋势时禁止做多。真实2026数据：4h确认的下跌做多15单净-4.7%(真下跌)，1h单独下跌16单净+1.7%(牛市回踩)。多时间框架确认过滤真下跌，保留盈利回踩机会。默认启用。',
+    en: 'Block open_long when both 1h and 4h confirm downtrend. Real 2026: 4h-confirmed down×LONG 15 trades -4.7% (true downtrend), 1h-only 16 trades +1.7% (bull-market dips). Multi-TF confirmation filters toxic downtrends while preserving profitable dip-buys. Default enabled.',
+  },
+  blockShortInHtfUptrend: {
+    zh: '拦截1h+4h确认上涨做空',
+    en: 'Block short in 1h+4h uptrend',
+  },
+  blockShortInHtfUptrendDesc: {
+    zh: '当1h和4h均确认上涨趋势时禁止做空。真实2026数据：4h确认的上涨做空9单净-4.9%(真上涨)，1h单独上涨7单净+6.6%(熊市反弹)。牛市模拟：快牛上涨做空-970%，慢牛-328%。多时间框架门控拦截真上涨做空，保留盈利熊市反弹空单。默认启用。',
+    en: 'Block open_short when both 1h and 4h confirm uptrend. Real 2026: 4h-confirmed up×SHORT 9 trades -4.9% (true uptrend), 1h-only 7 trades +6.6% (bear bounces). Bull sim: up×SHORT -970% in fast bulls, -328% in slow bulls. Multi-TF gate blocks toxic real-uptrend shorts while preserving profitable bear-bounce fades. Default enabled.',
+  },
 }
 
 // ============================================================================

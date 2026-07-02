@@ -637,11 +637,21 @@ type RegimeFilterConfig struct {
 	MaxATR14Pct           float64                  `json:"max_atr14_pct,omitempty"`
 	RequireTrendAlignment bool                     `json:"require_trend_alignment"`
 	TrendAlignmentMode    RegimeTrendAlignmentMode `json:"trend_alignment_mode,omitempty"`
-	// BlockLongInHTFDowntrend hard-blocks open_long into an established 1h downtrend
-	// (EMA20<EMA50 & price<EMA50). Backtest: the down×LONG cell is -59.6% net over
-	// 137 trades (OOS-validated on both time halves). Pointer distinguishes unset
-	// (=default true) from an explicit false. Asymmetric: never affects shorts.
+	// BlockLongInHTFDowntrend hard-blocks open_long into an established downtrend
+	// when BOTH 1h and 4h agree (EMA20<EMA50 & price<EMA50 on both timeframes).
+	// Real 2026 data: 4h-confirmed down×LONG is 15 trades, -4.7% net, 40% win;
+	// 1h-only down (bull-dip longs) is 16 trades, +1.7%, 44% win. Multi-timeframe
+	// confirmation filters true downtrends while preserving profitable dip-buys.
+	// Pointer distinguishes unset (=default true) from explicit false.
 	BlockLongInHTFDowntrend *bool `json:"block_long_in_htf_downtrend,omitempty"`
+	// BlockShortInHTFUptrend: symmetric counterpart to the long-side block. Prevents
+	// open_short into a confirmed uptrend (BOTH 1h+4h: EMA20>EMA50 & price>EMA50).
+	// Real 2026 data: 4h-confirmed up×SHORT is 9 trades, -4.9% net, 44% win (toxic);
+	// bear-bounce shorts (1h-only up) is 7 trades, +6.6%, 71% win (profitable).
+	// Bull-market sim: up×SHORT in fast bulls is -970%, slow bulls -328%. Symmetric
+	// multi-TF gate allows profitable bear-bounce shorts while blocking real uptrend.
+	// Pointer distinguishes unset (=default true) from explicit false.
+	BlockShortInHTFUptrend *bool `json:"block_short_in_htf_uptrend,omitempty"`
 	// Coin momentum gate — blocks entries on coins with insufficient or excessive momentum
 	MomentumGateEnabled    bool    `json:"momentum_gate_enabled"`
 	MomentumStaleChg1h     float64 `json:"momentum_stale_chg1h,omitempty"`     // abs(chg1h) below this = stale (default 0.15)

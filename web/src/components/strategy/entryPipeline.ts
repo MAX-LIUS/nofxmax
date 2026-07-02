@@ -62,12 +62,21 @@ export function buildEntryPipeline(
   })
   gates.push({
     stage: 'market_state',
-    label: ['1h下跌禁多', 'Block long in 1h downtrend'],
+    label: ['1h+4h下跌禁多', 'Block long in 1h+4h downtrend'],
     // Defaults to ON when trend alignment is active (unset => enabled).
     active:
       !!rf?.enabled &&
       !!rf?.require_trend_alignment &&
       rf?.block_long_in_htf_downtrend !== false,
+    source: 'regime_filter',
+  })
+  gates.push({
+    stage: 'market_state',
+    label: ['1h+4h上涨禁空', 'Block short in 1h+4h uptrend'],
+    active:
+      !!rf?.enabled &&
+      !!rf?.require_trend_alignment &&
+      rf?.block_short_in_htf_uptrend !== false,
     source: 'regime_filter',
   })
   gates.push({

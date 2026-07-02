@@ -252,9 +252,14 @@ export interface RegimeFilterConfig {
   max_atr14_pct: number
   require_trend_alignment: boolean
   trend_alignment_mode?: 'strict' | 'allow_range_edge_reversal'
-  // Block open_long into an established 1h downtrend (down×LONG cell, -59.6% net).
-  // Unset defaults to true (enabled). Asymmetric: never affects shorts.
+  // Block open_long into confirmed 1h+4h downtrend (multi-TF gate, symmetric with short-side).
+  // Real 2026: 4h-confirmed down×LONG -4.7% vs 1h-only +1.7% (preserves bull-dip longs).
+  // Unset defaults to true (enabled).
   block_long_in_htf_downtrend?: boolean
+  // Block open_short into confirmed 1h+4h uptrend (symmetric counterpart to long-side gate).
+  // Real 2026: 4h-confirmed up×SHORT -4.9% vs 1h-only +6.6% (preserves bear-bounce shorts).
+  // Bull sim: up×SHORT in fast bulls -970%, slow bulls -328%. Unset defaults to true.
+  block_short_in_htf_uptrend?: boolean
 
   // Coin momentum gate
   momentum_gate_enabled?: boolean

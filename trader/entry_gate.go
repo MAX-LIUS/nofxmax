@@ -244,7 +244,7 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 
 	// 1d. Trend alignment (direction vs regime)
 	if regimeCfg.RequireTrendAlignment {
-		aligned := isTrendAlignedWithMode(d.Action, d.SetupType, data, regimeCfg.TrendAlignmentMode, resolveBlockLongInHTFDowntrend(regimeCfg))
+		aligned := isTrendAlignedWithMode(d.Action, d.SetupType, data, regimeCfg.TrendAlignmentMode, resolveBlockLongInHTFDowntrend(regimeCfg), resolveBlockShortInHTFUptrend(regimeCfg))
 		check := EntryGateCheck{
 			Code:     "trend_misaligned",
 			Stage:    string(EntryGateStageMarketState),

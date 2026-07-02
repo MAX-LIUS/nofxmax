@@ -219,12 +219,15 @@ func momentumDivergenceBlocksEntry(action string, setup string, data *market.Dat
 // traps inside a higher-timeframe downtrend. Blocking the whole cell is net
 // positive because losers (-126%) vastly outweigh the winners forgone (+67%).
 //
-// Deliberately ASYMMETRIC: only open_long × 1h-downtrend is blocked. The mirror
-// cell (open_short × 1h-uptrend) is NET POSITIVE in the backtest (+8.9%), so
-// shorts against a higher-tf uptrend are NOT blocked here.
-//
-// Adding EMA50-slope or price<EMA20 confirmations was tested and made the filter
-// WORSE (let toxic trades through), so the basic EMA-structure criterion is used.
+// REVISED 2026-06-27 to SYMMETRIC + MULTI-TIMEFRAME after bull-market validation:
+// - Original asymmetric design (block down×LONG only) failed in bull markets where
+//   up×SHORT lost -970% (fast bulls) to -328% (slow bulls). The +8.9% up×SHORT in
+//   original backtest was sample bias (2026 data = 45-57% down regime, no sustained bulls).
+// - Multi-TF confirmation (1h+4h both agree) separates toxic counter-trend entries from
+//   profitable structural trades:
+//     * down×LONG: 4h-confirmed -4.7% (真下跌), 1h-only +1.7% (牛市回踩)
+//     * up×SHORT: 4h-confirmed -4.9% (真上涨), 1h-only +6.6% (熊市反弹)
+// - Both directions now blocked when 1h AND 4h agree on trend direction.
 func higherTimeframeDowntrendBlocksLong(action string, data *market.Data) bool {
 	if data == nil {
 		return false
@@ -232,16 +235,48 @@ func higherTimeframeDowntrendBlocksLong(action string, data *market.Data) bool {
 	if strings.ToLower(strings.TrimSpace(action)) != "open_long" {
 		return false
 	}
-	series := higherTimeframeSeriesFor(data, "1h")
-	if series == nil {
-		return false // no 1h context → do not block (avoid false positives)
+	// Require BOTH 1h and 4h to confirm downtrend (filters bull-dip longs, preserves real opportunities)
+	series1h := higherTimeframeSeriesFor(data, "1h")
+	series4h := higherTimeframeSeriesFor(data, "4h")
+	if series1h == nil || series4h == nil {
+		return false // missing data → do not block (avoid false positives)
 	}
-	ema20, ema50, price := latestEMAStructure(series)
-	if ema20 <= 0 || ema50 <= 0 || price <= 0 {
+	ema20_1h, ema50_1h, price1h := latestEMAStructure(series1h)
+	ema20_4h, ema50_4h, price4h := latestEMAStructure(series4h)
+	if ema20_1h <= 0 || ema50_1h <= 0 || price1h <= 0 || ema20_4h <= 0 || ema50_4h <= 0 || price4h <= 0 {
 		return false
 	}
-	// Established 1h downtrend: fast EMA below slow EMA AND price below the slow EMA.
-	return ema20 < ema50 && price < ema50
+	// Block only when BOTH timeframes show established downtrend
+	downtrend1h := ema20_1h < ema50_1h && price1h < ema50_1h
+	downtrend4h := ema20_4h < ema50_4h && price4h < ema50_4h
+	return downtrend1h && downtrend4h
+}
+
+// higherTimeframeUptrendBlocksShort: symmetric counterpart to the long-side block.
+// Prevents open_short into confirmed uptrends (BOTH 1h+4h: EMA20>EMA50 & price>EMA50).
+// Bull-market validation: up×SHORT in fast bulls is -970%, slow bulls -328%; real 2026
+// 4h-confirmed up×SHORT is -4.9% vs +6.6% for bear-bounce shorts (1h-only). Multi-TF
+// gate blocks toxic real-uptrend shorts while preserving profitable bear-bounce fades.
+func higherTimeframeUptrendBlocksShort(action string, data *market.Data) bool {
+	if data == nil {
+		return false
+	}
+	if strings.ToLower(strings.TrimSpace(action)) != "open_short" {
+		return false
+	}
+	series1h := higherTimeframeSeriesFor(data, "1h")
+	series4h := higherTimeframeSeriesFor(data, "4h")
+	if series1h == nil || series4h == nil {
+		return false
+	}
+	ema20_1h, ema50_1h, price1h := latestEMAStructure(series1h)
+	ema20_4h, ema50_4h, price4h := latestEMAStructure(series4h)
+	if ema20_1h <= 0 || ema50_1h <= 0 || price1h <= 0 || ema20_4h <= 0 || ema50_4h <= 0 || price4h <= 0 {
+		return false
+	}
+	uptrend1h := ema20_1h > ema50_1h && price1h > ema50_1h
+	uptrend4h := ema20_4h > ema50_4h && price4h > ema50_4h
+	return uptrend1h && uptrend4h
 }
 
 // higherTimeframeSeriesFor returns the per-timeframe series for tf, or nil.
@@ -273,7 +308,7 @@ func latestEMAStructure(s *market.TimeframeSeriesData) (ema20, ema50, price floa
 	return ema20, ema50, price
 }
 
-func isTrendAlignedWithMode(action string, setupType string, data *market.Data, mode store.RegimeTrendAlignmentMode, blockLongInHTFDowntrend bool) bool {
+func isTrendAlignedWithMode(action string, setupType string, data *market.Data, mode store.RegimeTrendAlignmentMode, blockLongInHTFDowntrend bool, blockShortInHTFUptrend bool) bool {
 	if data == nil {
 		return true
 	}
@@ -289,12 +324,15 @@ func isTrendAlignedWithMode(action string, setupType string, data *market.Data, 
 	allowReversalException := mode == store.RegimeTrendAlignmentAllowRangeEdgeReversal
 	divergenceBlocks := momentumDivergenceBlocksEntry(act, setup, data, allowReversalException)
 
-	// Higher-timeframe downtrend guard (data-driven, 2026-07-02): block open_long
-	// into an established 1h downtrend (the -59.6% down×LONG cell). Orthogonal to
-	// the MACD guard (catches bounce-trap longs it misses). Asymmetric by design:
-	// only longs-into-downtrend are blocked, never shorts. No reversal exception —
-	// adding confirmations was shown to weaken the filter.
+	// Higher-timeframe multi-TF guard (data-driven, 2026-06-27): block counter-trend
+	// entries when BOTH 1h+4h confirm the opposing trend direction. Symmetric design
+	// (both longs-into-downtrend and shorts-into-uptrend) validated across bear/bull
+	// regimes. Multi-TF confirmation separates toxic real-trend entries from profitable
+	// structural bounce/dip trades. Orthogonal to MACD guard. No reversal exception.
 	if blockLongInHTFDowntrend && higherTimeframeDowntrendBlocksLong(act, data) {
+		return false
+	}
+	if blockShortInHTFUptrend && higherTimeframeUptrendBlocksShort(act, data) {
 		return false
 	}
 
@@ -428,7 +466,7 @@ func isStrongCounterTrend(action string, data *market.Data) bool {
 }
 
 func isTrendAligned(action string, data *market.Data) bool {
-	return isTrendAlignedWithMode(action, "", data, store.RegimeTrendAlignmentStrict, true)
+	return isTrendAlignedWithMode(action, "", data, store.RegimeTrendAlignmentStrict, true, true)
 }
 
 // resolveBlockLongInHTFDowntrend returns the effective toggle for the 1h-downtrend
@@ -439,6 +477,17 @@ func resolveBlockLongInHTFDowntrend(cfg store.RegimeFilterConfig) bool {
 		return true
 	}
 	return *cfg.BlockLongInHTFDowntrend
+}
+
+// resolveBlockShortInHTFUptrend: symmetric counterpart to the long-side resolver.
+// Unset (nil) defaults to true (enabled) since bull-market validation shows up×SHORT
+// is -970% in fast bulls, -328% in slow bulls; real 2026 4h-confirmed up×SHORT is
+// -4.9%. Explicit false disables it (preserves profitable bear-bounce shorts).
+func resolveBlockShortInHTFUptrend(cfg store.RegimeFilterConfig) bool {
+	if cfg.BlockShortInHTFUptrend == nil {
+		return true
+	}
+	return *cfg.BlockShortInHTFUptrend
 }
 
 // isRangeEdgeReversalStructurallyPlausible allows deliberate support/resistance
@@ -554,7 +603,7 @@ func (at *AutoTrader) evaluateDecisionRegimeGate(decision *kernel.Decision, data
 	}
 
 	if cfg.RequireTrendAlignment {
-		aligned := isTrendAlignedWithMode(decision.Action, decision.SetupType, data, cfg.TrendAlignmentMode, resolveBlockLongInHTFDowntrend(cfg))
+		aligned := isTrendAlignedWithMode(decision.Action, decision.SetupType, data, cfg.TrendAlignmentMode, resolveBlockLongInHTFDowntrend(cfg), resolveBlockShortInHTFUptrend(cfg))
 		result.TrendAligned = &aligned
 		if !aligned {
 			result.Allowed = false
