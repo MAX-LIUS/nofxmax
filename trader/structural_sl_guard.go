@@ -67,7 +67,9 @@ func (at *AutoTrader) runStructuralSLGuard() {
 // frozen structural boundary. Dedups per closed-bar so a single breach fires once.
 func (at *AutoTrader) evaluateStructuralSLClose(symbol, side string, entry, qty float64, sscfg store.StructuralSLConfig, acfg store.ATRProtectionConfig) {
 	isLong := actionFromPositionSide(side) == "open_long"
-	boundary, ok := at.frozenStructBoundaryForPosition(symbol, entry, isLong, sscfg, acfg)
+	// allowCompute=false: the guard only enforces a boundary that was frozen AT ENTRY.
+	// A position with no frozen boundary (opened before enablement) rides the backstop.
+	boundary, ok := at.frozenStructBoundaryForPosition(symbol, entry, isLong, false, sscfg, acfg)
 	if !ok || boundary <= 0 {
 		return // no structural edge for this position; resting backstop covers it
 	}

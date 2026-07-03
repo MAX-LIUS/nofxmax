@@ -280,7 +280,9 @@ func (at *AutoTrader) BuildConfiguredProtectionPlanForSymbol(entryPrice float64,
 	if at.config.StrategyConfig == nil {
 		return nil, nil
 	}
-	protection, _ := at.resolveATRProtection(entryPrice, symbol, action)
+	// atEntry=true: this is the position-open path, so a structural boundary may be
+	// computed fresh from the (now genuinely pre-entry) window and frozen.
+	protection, _ := at.resolveATRProtection(entryPrice, symbol, action, true)
 	return at.buildConfiguredProtectionPlanWith(entryPrice, action, protection)
 }
 

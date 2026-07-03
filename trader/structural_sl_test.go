@@ -95,13 +95,34 @@ func TestResolveATRProtection_StructuralUnitWiring(t *testing.T) {
 		}},
 	}
 
-	resolved, applied := at.resolveATRProtection(entry, symbol, "open_long")
+	resolved, applied := at.resolveATRProtection(entry, symbol, "open_long", true)
 	if !applied {
 		t.Fatalf("expected structural resolution to apply")
 	}
 	got := resolved.LadderTPSL.Rules[0].StopLossPct
 	if math.Abs(got-6.0) > 1e-9 {
 		t.Fatalf("structural SL want 6%% (3 ATR), got %.4f", got)
+	}
+}
+
+// Safety property: with an EMPTY cache and atEntry=false (reconcile/guard path), the
+// structural boundary is NOT computed fresh — so a pre-existing position that never
+// had a boundary frozen at entry is never assigned a fabricated (post-entry-window)
+// level. frozenStructBoundaryForPosition must return ok=false without touching klines.
+func TestFrozenStructBoundary_NoComputeOffEntry(t *testing.T) {
+	const traderID, symbol = "t-noentry", "SOLUSDT"
+	tf := store.ATRProtectionConfig{}.WithDefaults().Timeframe
+	key := frozenATRKey(traderID, symbol, tf)
+	frozenStructMu.Lock()
+	delete(frozenStructCache, key)
+	frozenStructMu.Unlock()
+
+	at := &AutoTrader{id: traderID} // no store, no exchange — compute would need klines
+	ss := store.StructuralSLConfig{Enabled: true}
+	acfg := store.ATRProtectionConfig{Enabled: true}
+
+	if _, ok := at.frozenStructBoundaryForPosition(symbol, 100, true, false, ss, acfg); ok {
+		t.Fatalf("off-entry path must not fabricate a boundary")
 	}
 }
 
@@ -146,7 +167,7 @@ func TestResolveATRProtection_CloseConfirmParksBackstop(t *testing.T) {
 		}},
 	}
 
-	resolved, applied := at.resolveATRProtection(entry, symbol, "open_long")
+	resolved, applied := at.resolveATRProtection(entry, symbol, "open_long", true)
 	if !applied {
 		t.Fatalf("expected resolution to apply")
 	}

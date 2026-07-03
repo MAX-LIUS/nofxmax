@@ -130,10 +130,15 @@ func (at *AutoTrader) atrForProtection(symbol string, cfg store.ATRProtectionCon
 
 // frozenStructBoundaryForPosition returns the pre-entry range boundary price frozen
 // at open (swing low for long / swing high for short), used by the structural stop.
-// Mirrors frozenATRForPosition: in-memory cache → persisted record → fresh compute,
-// then freeze + persist. Freezing is mandatory — the boundary lives in the pre-entry
-// window, which cannot be recovered from a later GetKlines call.
-func (at *AutoTrader) frozenStructBoundaryForPosition(symbol string, entryPrice float64, isLong bool, sscfg store.StructuralSLConfig, acfg store.ATRProtectionConfig) (float64, bool) {
+// In-memory cache → persisted record → (only when allowCompute) fresh compute + freeze.
+//
+// CRITICAL: allowCompute must be TRUE only at genuine position ENTRY. The boundary
+// lives in the PRE-entry window; computing it later (reconcile / guard) would read a
+// post-entry window and produce a wrong level that could trigger an unexpected exit.
+// The reconcile path and the close-confirm guard pass allowCompute=false, so a
+// position that never had a boundary frozen at entry (e.g. opened before the feature
+// was enabled) is left to the resting backstop instead of a fabricated level.
+func (at *AutoTrader) frozenStructBoundaryForPosition(symbol string, entryPrice float64, isLong bool, allowCompute bool, sscfg store.StructuralSLConfig, acfg store.ATRProtectionConfig) (float64, bool) {
 	tf := acfg.WithDefaults().Timeframe
 	key := frozenATRKey(at.id, symbol, tf)
 
@@ -155,6 +160,11 @@ func (at *AutoTrader) frozenStructBoundaryForPosition(symbol string, entryPrice 
 				return rec.StructuralBoundary, true
 			}
 		}
+	}
+
+	// Only compute a fresh boundary at genuine entry. Reconcile/guard get "none".
+	if !allowCompute {
+		return 0, false
 	}
 
 	// Fresh compute from the pre-entry window.
@@ -297,7 +307,10 @@ func absFloat(v float64) float64 {
 // least one field was ATR-resolved; (original, false) otherwise. This replaces
 // the former global per-dimension overlay: the unit now lives on each rule, so
 // the UI manages everything in the original TP/SL/BE/DD panels.
-func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol, action string) (store.ProtectionConfig, bool) {
+// atEntry must be true only when called at genuine position open (entry path). It
+// gates fresh structural-boundary computation so the reconcile path never fabricates
+// a boundary from a post-entry window.
+func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol, action string, atEntry bool) (store.ProtectionConfig, bool) {
 	if at.config.StrategyConfig == nil {
 		return store.ProtectionConfig{}, false
 	}
@@ -329,7 +342,7 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol, action st
 		// Resolve the structural stop percent ONCE (shared by all structural SL rules).
 		structPct, structOK := 0.0, false
 		if base.LadderTPSL.StructuralSL.Enabled {
-			if boundary, ok := at.frozenStructBoundaryForPosition(symbol, entryPrice, isLong, base.LadderTPSL.StructuralSL, acfg); ok {
+			if boundary, ok := at.frozenStructBoundaryForPosition(symbol, entryPrice, isLong, atEntry, base.LadderTPSL.StructuralSL, acfg); ok {
 				structPct, structOK = structuralSLPercent(entryPrice, boundary, atr, base.LadderTPSL.StructuralSL, acfg)
 			}
 			// Phase 2: when close-confirm is on, the RESTING stop is parked at the wide

@@ -182,7 +182,9 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 			// use the configured ladder values as a safety net.
 			// Use ATR-resolved protection so the fallback ladder matches open-time
 			// distances when ATR protection is enabled (no percent/ATR mismatch).
-			resolvedProt, _ := at.resolveATRProtection(entryPrice, symbol, actionFromPositionSide(side))
+			// atEntry=false: reconcile path must NOT compute a fresh structural boundary
+			// (would read a post-entry window). Frozen-at-entry boundary only.
+			resolvedProt, _ := at.resolveATRProtection(entryPrice, symbol, actionFromPositionSide(side), false)
 			ladderCfg := resolvedProt.LadderTPSL
 			if ladderCfg.Enabled && ladderCfg.Mode == store.ProtectionModeAI {
 				if fallbackPlan, fbErr := buildManualLadderProtectionPlan(entryPrice, actionFromPositionSide(side), ladderCfg); fbErr == nil && fallbackPlan != nil {
