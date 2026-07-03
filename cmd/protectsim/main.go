@@ -69,6 +69,11 @@ type Position struct {
 	Realized   float64
 	Fee        float64
 	CloseReason string
+	// RangeSLMul: structural-SL distance in ATR multiples, precomputed from the
+	// pre-entry range boundary (swing low for LONG / swing high for SHORT). 0 = not
+	// computed. Used only by ladders with StructSL=true; clamped by the ladder to
+	// [StructSLFloorATR, SLATR] to avoid whipsaw (too tight) or blowing past backstop.
+	RangeSLMul float64
 }
 
 type Bar struct {
@@ -280,6 +285,30 @@ type Ladder struct {
 	SLATR       float64 // full stop in ATR multiples (loss side), 0 = none
 	SLClosePct  float64
 
+	// StructSL: when true, the full SL uses the position's precomputed structural
+	// distance (Position.RangeSLMul, from the pre-entry range boundary) instead of
+	// the fixed SLATR — but clamped to [StructSLFloorATR, SLATR]. This tightens the
+	// stop in narrow ranges (smaller loss on a real breakout) while keeping SLATR as
+	// the never-wider backstop and StructSLFloorATR as the never-tighter whipsaw guard.
+	StructSL       bool
+	StructSLFloorATR float64 // min structural SL distance in ATR (whipsaw guard)
+	// SLCloseConfirm: when true, the full SL fires only when a bar CLOSES beyond the
+	// stop level (fill at that close), not on an intrabar wick. Cuts stop-hunt/false-
+	// break whipsaw at the cost of a slightly worse fill on genuine breaks.
+	SLCloseConfirm bool
+	// StructSLReanchor: when true, the structural stop TRAILS — as the trade forms new
+	// consolidation, the range boundary is recomputed from the trailing window and the
+	// stop moves in the favorable direction only (never loosens). Models the user's
+	// "walked out of the range into a trend, widen tolerance" lifecycle.
+	StructSLReanchor    bool
+	StructSLReanchorBars int // trailing window (bars) for re-anchoring; 0 = default
+	// StructSLReanchorArmATR: the FAVORABLE excursion (ATR multiples) the trade must
+	// reach before re-anchoring/trailing activates. Below it, the static structural
+	// stop holds (ranging phase — tight, no trailing). Above it, the trade has
+	// confirmed a favorable trend, so the stop trails to protect the runner. This is
+	// the regime-lifecycle gate: static-tight while ranging, trailing once trending.
+	StructSLReanchorArmATR float64
+
 	// Engine-semantics DD: when EngineDD is true, replay() routes to replayEngine,
 	// which models the REAL trader: DD tiers are pre-sliced at open (cumulative cap
 	// 100% of original qty), higher tiers supersede lower ones when armed, the active
@@ -309,6 +338,72 @@ func (l Ladder) effFrac(atrMult, atrPct float64) float64 {
 	return p / 100.0
 }
 
+// effSLATR resolves the full-SL distance (in ATR multiples) for this ladder on a
+// given position. Fixed SLATR by default; structural (range-anchored) when StructSL
+// is set and the position has a valid RangeSLMul, clamped to [floor, SLATR].
+func (l Ladder) effSLATR(p Position) float64 {
+	if !l.StructSL || p.RangeSLMul <= 0 {
+		return l.SLATR
+	}
+	m := p.RangeSLMul
+	floor := l.StructSLFloorATR
+	if floor <= 0 {
+		floor = 1.5 // default whipsaw guard
+	}
+	if m < floor {
+		m = floor
+	}
+	if l.SLATR > 0 && m > l.SLATR {
+		m = l.SLATR // never wider than the fixed backstop
+	}
+	return m
+}
+
+// computeRangeSLMul derives the structural-SL distance (ATR multiples from entry) from
+// the pre-entry range boundary. For a LONG it uses the lowest low over the lookback
+// window before entry (the range floor); for a SHORT the highest high (range ceiling).
+// The distance is |entry - boundary| in ATR units. Returns 0 if it cannot be computed.
+func computeRangeSLMul(p Position, bars1h []Bar, atrAbs float64) float64 {
+	if atrAbs <= 0 || p.Entry <= 0 || len(bars1h) == 0 {
+		return 0
+	}
+	const lookbackBars = 24 // ~1 day of 1h bars before entry
+	lo, hi := math.MaxFloat64, -math.MaxFloat64
+	cnt := 0
+	for _, b := range bars1h {
+		if b.T >= p.EntryTime { // pre-entry only
+			continue
+		}
+		if b.T < p.EntryTime-int64(lookbackBars)*barMs("1H") {
+			continue
+		}
+		if b.Low < lo {
+			lo = b.Low
+		}
+		if b.High > hi {
+			hi = b.High
+		}
+		cnt++
+	}
+	if cnt < 4 { // not enough pre-entry context
+		return 0
+	}
+	var boundary float64
+	if strings.EqualFold(p.Side, "LONG") {
+		boundary = lo
+		if boundary >= p.Entry { // entry below range floor (breakout entry) — no structural edge
+			return 0
+		}
+	} else {
+		boundary = hi
+		if boundary <= p.Entry {
+			return 0
+		}
+	}
+	dist := math.Abs(p.Entry - boundary)
+	return dist / atrAbs
+}
+
 type SimResult struct {
 	NetPnL    float64
 	GrossPnL  float64
@@ -317,6 +412,11 @@ type SimResult struct {
 	TierFires map[string]int
 	TierPnL   map[string]float64
 	ExitedFlat bool // true if ladder fully closed before actual exit
+	// Whipsaw diagnostic: the full SL fired, but AFTER the fire the price recovered to
+	// a favorable excursion >= WhipsawRecoverATR (default 1.0) within the remaining
+	// window — i.e. a genuine "stopped at the low then it ran our way" false break.
+	SLFiredWhipsaw bool
+	SLFiredAtATR   float64 // adverse ATR distance where the full SL actually fired
 }
 
 // PathMetrics characterizes a position's realized price path in ATR units.
@@ -418,8 +518,8 @@ func replay(p Position, bars []Bar, atrAbs float64, l Ladder) SimResult {
 		}
 	}
 	var slPrice float64
-	if l.SLATR > 0 {
-		slPrice = p.Entry * (1 - dir*l.effFrac(l.SLATR, atrPct))
+	if slATR := l.effSLATR(p); slATR > 0 {
+		slPrice = p.Entry * (1 - dir*l.effFrac(slATR, atrPct))
 	}
 	var partialSLPrice float64
 	partialSLDone := false
@@ -644,8 +744,8 @@ func replayEngine(p Position, bars []Bar, atrAbs float64, l Ladder) SimResult {
 		beLockPrice[i] = p.Entry * (1 + dir*l.effFrac(lk, atrPct))
 	}
 	var slPrice float64
-	if l.SLATR > 0 {
-		slPrice = p.Entry * (1 - dir*l.effFrac(l.SLATR, atrPct))
+	if slATR := l.effSLATR(p); slATR > 0 {
+		slPrice = p.Entry * (1 - dir*l.effFrac(slATR, atrPct))
 	}
 	var partialSLPrice float64
 	partialSLDone := false
@@ -656,11 +756,23 @@ func replayEngine(p Position, bars []Bar, atrAbs float64, l Ladder) SimResult {
 	favFrac := func(price float64) float64 { return (price - p.Entry) * dir / p.Entry } // profit frac
 
 	exitBound := simExitBoundFor(p)
-	var lastClose float64
+	// Build the in-window bar slice (index-addressable for re-anchor + whipsaw lookahead).
+	win := make([]Bar, 0, len(bars))
 	for _, b := range bars {
 		if b.T < p.EntryTime || b.T > exitBound {
 			continue
 		}
+		win = append(win, b)
+	}
+	// Re-anchor state: current structural SL price trails favorably as new lows/highs form.
+	reanchorBars := l.StructSLReanchorBars
+	if reanchorBars <= 0 {
+		reanchorBars = 12 // ~half day of 1h/quarter day context
+	}
+	var lastClose float64
+	var peakFav float64 // running peak favorable excursion (fraction) — gates re-anchor
+	for bi := 0; bi < len(win); bi++ {
+		b := win[bi]
 		lastClose = b.Close
 		if remaining <= 1e-9 {
 			break
@@ -674,6 +786,40 @@ func replayEngine(p Position, bars []Bar, atrAbs float64, l Ladder) SimResult {
 		}
 		advFrac := favFrac(adverse)
 		favHi := favFrac(favorable)
+		if favHi > peakFav {
+			peakFav = favHi
+		}
+
+		// Re-anchor the structural SL: as the trade forms a trailing consolidation, move
+		// the stop toward the newest boundary — favorable direction only (never loosens).
+		// GATED: only trail once the trade has confirmed a favorable trend (peakFav >=
+		// arm). While ranging (below arm) the static structural stop holds — this is the
+		// regime-lifecycle fix (tight while ranging, trail once trending).
+		trendConfirmed := l.StructSLReanchorArmATR <= 0 ||
+			peakFav >= l.effFrac(l.StructSLReanchorArmATR, atrPct)
+		if l.StructSL && l.StructSLReanchor && trendConfirmed && slPrice > 0 && bi >= reanchorBars {
+			lo, hi := math.MaxFloat64, -math.MaxFloat64
+			for k := bi - reanchorBars; k < bi; k++ {
+				if win[k].Low < lo {
+					lo = win[k].Low
+				}
+				if win[k].High > hi {
+					hi = win[k].High
+				}
+			}
+			var cand float64
+			if dir > 0 {
+				cand = lo // trail stop up to newest range floor
+				if cand > slPrice {
+					slPrice = cand
+				}
+			} else {
+				cand = hi
+				if cand < slPrice {
+					slPrice = cand
+				}
+			}
+		}
 
 		// 1) Partial SL, then full SL (loss side, nearest first).
 		if partialSLPrice > 0 && !partialSLDone && remaining > 1e-9 {
@@ -683,8 +829,35 @@ func replayEngine(p Position, bars []Bar, atrAbs float64, l Ladder) SimResult {
 			}
 		}
 		if slPrice > 0 && remaining > 1e-9 {
-			if (dir > 0 && adverse <= slPrice) || (dir < 0 && adverse >= slPrice) {
-				addClose("SL", remaining, slPrice)
+			// Close-confirm mode: require a bar CLOSE beyond the level (fill at close),
+			// not just an intrabar wick — filters stop-hunt / false-break whipsaw.
+			var hit bool
+			var fill float64
+			if l.SLCloseConfirm {
+				if (dir > 0 && b.Close <= slPrice) || (dir < 0 && b.Close >= slPrice) {
+					hit = true
+					fill = b.Close
+				}
+			} else {
+				if (dir > 0 && adverse <= slPrice) || (dir < 0 && adverse >= slPrice) {
+					hit = true
+					fill = slPrice
+				}
+			}
+			if hit {
+				res.SLFiredAtATR = -favFrac(fill) / atrPct * 100 // adverse ATR distance
+				// Whipsaw diagnostic: did price recover favorably after this fire?
+				for k := bi; k < len(win); k++ {
+					fh := favFrac(win[k].High)
+					if dir < 0 {
+						fh = favFrac(win[k].Low)
+					}
+					if fh >= 1.0*atrPct/100 { // recovered >= 1 ATR favorable after stop
+						res.SLFiredWhipsaw = true
+						break
+					}
+				}
+				addClose("SL", remaining, fill)
 				break
 			}
 		}
@@ -998,7 +1171,95 @@ func ladders() []Ladder {
 		engTrend("C_DENSE",
 			[]TPTier{{ATR: 0.6, ClosePct: 18}, {ATR: 0.9, ClosePct: 16}, {ATR: 1.3, ClosePct: 14}, {ATR: 1.8, ClosePct: 12}},
 			[]DDTier{{ArmATR: 3.0, Giveback: 0.45, SlicePct: 100}}),
+
+		// ===== LIVE-MIRROR pair: isolate the SL change on the DEPLOYED stack =====
+		// LIVE_NOW mirrors the current live claude config: TP 1.1/1.7/2.5/3.6 (65% banked,
+		// 35% runner), DD 3.0/4.0, BE 1.0/2.0, fixed SL 4.0(partial 40%)+4.5(full 60%).
+		// LIVE_SC is IDENTICAL except the full SL becomes structural + close-confirm.
+		// Their delta is the PURE contribution of the SL engine change on live params.
+		engTrend("LIVE_NOW",
+			[]TPTier{{ATR: 1.1, ClosePct: 20}, {ATR: 1.7, ClosePct: 18}, {ATR: 2.5, ClosePct: 15}, {ATR: 3.6, ClosePct: 12}},
+			[]DDTier{{ArmATR: 3.0, Giveback: 0.40, SlicePct: 65}, {ArmATR: 4.0, Giveback: 0.30, SlicePct: 35}}),
+		slConfirm(withStructSL(engTrend("LIVE_SC",
+			[]TPTier{{ATR: 1.1, ClosePct: 20}, {ATR: 1.7, ClosePct: 18}, {ATR: 2.5, ClosePct: 15}, {ATR: 3.6, ClosePct: 12}},
+			[]DDTier{{ArmATR: 3.0, Giveback: 0.40, SlicePct: 65}, {ArmATR: 4.0, Giveback: 0.30, SlicePct: 35}}), 1.5)),
+
+		// ===== PART C: STRUCTURAL-SL candidates (range-boundary anchored) =====
+		// Base = T_RUN80 (the extended-replay winner) with the full SL moved from a
+		// fixed 4.5 ATR to the pre-entry range boundary, clamped to [floor, 4.5]. Idea:
+		// in a narrow range the structural stop is TIGHTER (smaller loss if the range
+		// breaks) but the floor guards against whipsaw. Three floors probe the
+		// tightness/whipsaw tradeoff the user asked about.
+		withStructSL(engTrend("SC_RUN80_F15",
+			[]TPTier{{ATR: 1.1, ClosePct: 20}},
+			[]DDTier{{ArmATR: 3.0, Giveback: 0.50, SlicePct: 100}}), 1.5),
+		withStructSL(engTrend("SC_RUN80_F20",
+			[]TPTier{{ATR: 1.1, ClosePct: 20}},
+			[]DDTier{{ArmATR: 3.0, Giveback: 0.50, SlicePct: 100}}), 2.0),
+		withStructSL(engTrend("SC_RUN80_F25",
+			[]TPTier{{ATR: 1.1, ClosePct: 20}},
+			[]DDTier{{ArmATR: 3.0, Giveback: 0.50, SlicePct: 100}}), 2.5),
+		// SC_KEEP67_F20: structural SL on the T_KEEP67 stack (more early banking).
+		withStructSL(engTrend("SC_KEEP67_F20",
+			[]TPTier{{ATR: 1.1, ClosePct: 18}, {ATR: 1.7, ClosePct: 15}},
+			[]DDTier{{ArmATR: 3.0, Giveback: 0.50, SlicePct: 100}}), 2.0),
+
+		// ===== PART C-2: DYNAMIC structural-SL (regime-lifecycle aware) =====
+		// Answers the user's "specific-situation" critique: the static SC_* freezes the
+		// range boundary at entry. These adapt DURING the trade.
+		// SCX_CONFIRM: structural SL fires only on a bar CLOSE beyond the range boundary
+		// (not an intrabar wick) — kills stop-hunt / false-break whipsaw.
+		slConfirm(withStructSL(engTrend("SCX_CONFIRM_F15",
+			[]TPTier{{ATR: 1.1, ClosePct: 20}},
+			[]DDTier{{ArmATR: 3.0, Giveback: 0.50, SlicePct: 100}}), 1.5)),
+		// SCX_TRAIL: UNGATED trailing re-anchor (reference — expected to whipsaw badly in
+		// chop; kept to show WHY the gate matters).
+		slReanchor(withStructSL(engTrend("SCX_TRAIL_F15",
+			[]TPTier{{ATR: 1.1, ClosePct: 20}},
+			[]DDTier{{ArmATR: 3.0, Giveback: 0.50, SlicePct: 100}}), 1.5), 12),
+
+		// ===== PART C-3: GATED lifecycle SL (the corrected design) =====
+		// Static tight structural SL + close-confirm WHILE RANGING; trailing re-anchor
+		// activates ONLY after the trade confirms a favorable trend (peakFav >= armATR).
+		// This is the "specific-situation" answer: don't trail in chop, do trail in trend.
+		slGatedTrail(slConfirm(withStructSL(engTrend("SCG_ARM2_F15",
+			[]TPTier{{ATR: 1.1, ClosePct: 20}},
+			[]DDTier{{ArmATR: 3.0, Giveback: 0.50, SlicePct: 100}}), 1.5)), 12, 2.0),
+		slGatedTrail(slConfirm(withStructSL(engTrend("SCG_ARM3_F15",
+			[]TPTier{{ATR: 1.1, ClosePct: 20}},
+			[]DDTier{{ArmATR: 3.0, Giveback: 0.50, SlicePct: 100}}), 1.5)), 12, 3.0),
+		// SCG_ARM2 without close-confirm — isolates the gate's contribution.
+		slGatedTrail(withStructSL(engTrend("SCG_ARM2_NC_F15",
+			[]TPTier{{ATR: 1.1, ClosePct: 20}},
+			[]DDTier{{ArmATR: 3.0, Giveback: 0.50, SlicePct: 100}}), 1.5), 12, 2.0),
 	}
+}
+
+// slGatedTrail enables trailing re-anchor that activates only after the trade's peak
+// favorable excursion reaches armATR (trend confirmed). Below it, the static stop holds.
+func slGatedTrail(l Ladder, winBars int, armATR float64) Ladder {
+	l.StructSLReanchor = true
+	l.StructSLReanchorBars = winBars
+	l.StructSLReanchorArmATR = armATR
+	return l
+}
+
+// slConfirm requires a bar close beyond the SL level to trigger (whipsaw filter).
+func slConfirm(l Ladder) Ladder { l.SLCloseConfirm = true; return l }
+
+// slReanchor makes the structural SL trail the developing range (favorable-only).
+func slReanchor(l Ladder, winBars int) Ladder {
+	l.StructSLReanchor = true
+	l.StructSLReanchorBars = winBars
+	return l
+}
+
+// withStructSL enables structural (range-anchored) SL on a ladder with the given
+// whipsaw-guard floor (min SL distance in ATR). SLATR stays as the wider backstop.
+func withStructSL(l Ladder, floorATR float64) Ladder {
+	l.StructSL = true
+	l.StructSLFloorATR = floorATR
+	return l
 }
 
 // engTrend builds an engine-semantics ladder with a PARAMETERIZED TP ladder and DD
@@ -1115,6 +1376,8 @@ func main() {
 		flat             int
 		capAtr           float64 // sum of captured ATR per position (NetPnL/(qty*atr))
 		availAtr         float64 // sum of available ATR (MFE) — same across configs in a bucket
+		slFires          int     // full-SL fire count
+		slWhipsaw        int     // of those, how many recovered >=1 ATR favorable after (false break)
 	}
 	newAggs := func() []agg {
 		a := make([]agg, len(configs))
@@ -1134,13 +1397,17 @@ func main() {
 	// MFE distribution over ALL positions — sizes the favorable-trend opportunity.
 	mfeAll := []float64{}
 
-	// Validation diagnostic: per-close-reason sim(BASELINE) vs actual realized.
+	// Validation diagnostic: per-close-reason sim vs actual realized (ALL configs).
 	type diagRow struct {
 		n             int
 		actual, sim   float64
 		simSL, simFlat int
 	}
-	diag := map[string]diagRow{}
+	// diag[configIndex][reason]
+	diag := make([]map[string]diagRow, len(configs))
+	for i := range diag {
+		diag[i] = map[string]diagRow{}
+	}
 
 	accumulate := func(b string, ci int, r SimResult, capAtr, availAtr float64) {
 		a := &bucket[b][ci]
@@ -1158,6 +1425,12 @@ func main() {
 		}
 		if r.ExitedFlat {
 			a.flat++
+		}
+		if r.TierFires["SL"] > 0 {
+			a.slFires++
+			if r.SLFiredWhipsaw {
+				a.slWhipsaw++
+			}
 		}
 		for k, v := range r.TierFires {
 			a.tierFires[k] += v
@@ -1186,6 +1459,8 @@ func main() {
 			noATR++
 			continue
 		}
+		// Structural-SL distance from the pre-entry range boundary (used by StructSL ladders).
+		p.RangeSLMul = computeRangeSLMul(p, bars1h, atr)
 		pm := pathMetrics(p, bars15, atr)
 		// Oscillation = price never ran far in one direction AND path inefficient.
 		// Objective, path-based: MFE<2 ATR and MAE<2 ATR (stayed in a band), OR
@@ -1228,29 +1503,27 @@ func main() {
 			if isBreakout {
 				accumulate("BREAKOUT", ci, r, capAtr, availAtr)
 			}
-			// Validation diagnostic: compare BASELINE (ci==0) sim vs ACTUAL realized,
+			// Validation diagnostic: compare sim vs ACTUAL realized for ALL configs,
 			// bucketed by the original close reason. This tests whether the replay
 			// faithfully reproduces what the live system actually did. A large gap on
 			// reversal/AI-exit reasons means the fixed-window + ladder model is NOT a
 			// reliable proxy for those positions (user's concern).
-			if ci == 0 {
-				reason := p.CloseReason
-				if reason == "" {
-					reason = "(none)"
-				}
-				d := diag[reason]
-				d.n++
-				d.actual += p.Realized
-				d.sim += r.NetPnL
-				// Did the sim hit its synthetic SL (worse-than-actual tail risk)?
-				if r.TierFires["SL"] > 0 || r.TierFires["PartialSL"] > 0 {
-					d.simSL++
-				}
-				if r.ExitedFlat {
-					d.simFlat++
-				}
-				diag[reason] = d
+			reason := p.CloseReason
+			if reason == "" {
+				reason = "(none)"
 			}
+			d := diag[ci][reason]
+			d.n++
+			d.actual += p.Realized
+			d.sim += r.NetPnL
+			// Did the sim hit its synthetic SL (worse-than-actual tail risk)?
+			if r.TierFires["SL"] > 0 || r.TierFires["PartialSL"] > 0 {
+				d.simSL++
+			}
+			if r.ExitedFlat {
+				d.simFlat++
+			}
+			diag[ci][reason] = d
 		}
 		if (pi+1)%100 == 0 {
 			fmt.Fprintf(os.Stderr, "  processed %d/%d\n", pi+1, len(positions))
@@ -1332,6 +1605,20 @@ func main() {
 		}
 	}
 
+	// Whipsaw report: of the full-SL fires, how many were false breaks (price
+	// recovered >=1 ATR favorable AFTER the stop). High whipsaw% => the stop is too
+	// tight / getting hunted; close-confirm and re-anchor variants should lower it.
+	fmt.Printf("\n=== SL whipsaw report (ALL): fires / of-which false-break-recover ===\n")
+	fmt.Printf("%-16s %8s %10s %8s\n", "CONFIG", "SLfires", "whipsaw", "whip%")
+	for ci, l := range configs {
+		a := bucket["ALL"][ci]
+		if a.slFires == 0 {
+			continue
+		}
+		fmt.Printf("%-16s %8d %10d %7.1f%%\n", l.Name, a.slFires, a.slWhipsaw,
+			float64(a.slWhipsaw)/float64(a.slFires)*100)
+	}
+
 	fmt.Printf("\n=== Per-tier fire counts & PnL (ALL) ===\n")
 	for ci, l := range configs {
 		r := bucket["ALL"][ci]
@@ -1346,27 +1633,38 @@ func main() {
 		}
 	}
 
-	// === VALIDATION: BASELINE sim vs ACTUAL realized, per close reason ===
+	// === VALIDATION: sim vs ACTUAL realized, per close reason (selected configs) ===
 	// If the replay were faithful, sim≈actual per bucket. Large gaps reveal where
 	// the fixed-window + passive-ladder model fails (esp. reversal/AI exits, where
 	// the live system closed at a flip price the replay never sees).
-	fmt.Printf("\n=== VALIDATION: BASELINE sim vs ACTUAL realized (per close_reason) ===\n")
-	fmt.Printf("%-26s %5s %10s %10s %10s %7s %7s\n",
-		"close_reason", "N", "ACTUAL", "SIM", "GAP", "simSL", "simFlat")
-	rkeys := make([]string, 0, len(diag))
-	for k := range diag {
-		rkeys = append(rkeys, k)
+	// Print BASELINE + best OSC performers (T_RUN80, T_KEEP67, C_DENSE).
+	printDiag := func(ci int, name string) {
+		fmt.Printf("\n=== VALIDATION: %s sim vs ACTUAL (per close_reason) ===\n", name)
+		fmt.Printf("%-26s %5s %10s %10s %10s %7s %7s\n",
+			"close_reason", "N", "ACTUAL", "SIM", "GAP", "simSL", "simFlat")
+		rkeys := make([]string, 0, len(diag[ci]))
+		for k := range diag[ci] {
+			rkeys = append(rkeys, k)
+		}
+		sort.Slice(rkeys, func(i, j int) bool { return diag[ci][rkeys[i]].n > diag[ci][rkeys[j]].n })
+		var totA, totS float64
+		for _, k := range rkeys {
+			d := diag[ci][k]
+			totA += d.actual
+			totS += d.sim
+			fmt.Printf("%-26s %5d %10.2f %10.2f %10.2f %7d %7d\n",
+				trunc(k, 26), d.n, d.actual, d.sim, d.sim-d.actual, d.simSL, d.simFlat)
+		}
+		fmt.Printf("%-26s %5s %10.2f %10.2f %10.2f\n", "TOTAL", "", totA, totS, totS-totA)
 	}
-	sort.Slice(rkeys, func(i, j int) bool { return diag[rkeys[i]].n > diag[rkeys[j]].n })
-	var totA, totS float64
-	for _, k := range rkeys {
-		d := diag[k]
-		totA += d.actual
-		totS += d.sim
-		fmt.Printf("%-26s %5d %10.2f %10.2f %10.2f %7d %7d\n",
-			trunc(k, 26), d.n, d.actual, d.sim, d.sim-d.actual, d.simSL, d.simFlat)
+	printDiag(0, "BASELINE")
+	// Find indices for the headline candidates.
+	for ci, l := range configs {
+		switch l.Name {
+		case "LIVE_NOW", "LIVE_SC", "SCX_CONFIRM_F15":
+			printDiag(ci, l.Name)
+		}
 	}
-	fmt.Printf("%-26s %5s %10.2f %10.2f %10.2f\n", "TOTAL", "", totA, totS, totS-totA)
 }
 
 func trunc(s string, n int) string {

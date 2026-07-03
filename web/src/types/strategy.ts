@@ -183,6 +183,19 @@ export interface LadderTPSLRule {
   stop_loss_unit?: ProtectionDistanceUnit
 }
 
+// Structural (range-anchored) stop-loss config. Active when a ladder SL rule uses
+// stop_loss_unit='structural'. The stop is placed just beyond the pre-entry range
+// boundary (swing low for long / swing high for short), clamped to [floor, backstop]
+// ATR multiples. close_confirm (Phase 2) enforces it on a confirmed bar close via an
+// engine poll, parking the resting exchange stop at the backstop as a downtime net.
+export interface StructuralSLConfig {
+  enabled?: boolean
+  floor_atr_mul?: number
+  backstop_atr_mul?: number
+  lookback_bars?: number
+  close_confirm?: boolean
+}
+
 export interface LadderTPSLConfig {
   enabled: boolean
   mode: ProtectionMode
@@ -194,6 +207,7 @@ export interface LadderTPSLConfig {
   stop_loss_size: ProtectionValueSource
   fallback_max_loss: ProtectionValueSource
   rules: LadderTPSLRule[]
+  structural_sl?: StructuralSLConfig
 }
 
 export type DrawdownEngineMode = 'manual' | 'ai'
@@ -292,7 +306,7 @@ export interface RegimeFilterConfig {
 // into ATR via their own per-field unit toggle (percent | atr); when a field is
 // in ATR mode its value is an ATR MULTIPLE resolved at use time to an effective
 // percent (value × ATR(period) / entryPrice × 100), clamped to min/max_eff_pct.
-export type ProtectionDistanceUnit = 'percent' | 'atr'
+export type ProtectionDistanceUnit = 'percent' | 'atr' | 'structural'
 
 export interface ATRProtectionConfig {
   enabled: boolean

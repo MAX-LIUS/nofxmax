@@ -410,7 +410,54 @@ type ProtectionDistanceUnit string
 const (
 	ProtectionUnitPercent ProtectionDistanceUnit = "percent"
 	ProtectionUnitATR     ProtectionDistanceUnit = "atr"
+	// ProtectionUnitStructural: the stop distance is derived from the pre-entry
+	// price-structure boundary (swing low for long / swing high for short) instead of
+	// a fixed distance. Resolved to an effective percent at entry, clamped to the
+	// StructuralSL floor/backstop ATR multiples. See LadderTPSLConfig.StructuralSL.
+	ProtectionUnitStructural ProtectionDistanceUnit = "structural"
 )
+
+// StructuralSLConfig controls the structural (range-anchored) full stop-loss.
+// When a ladder SL rule uses StopLossUnit=="structural", the stop is placed just
+// beyond the pre-entry range boundary rather than at a fixed ATR/percent distance.
+// This tightens the stop in narrow ranges (smaller loss on a genuine breakout) while
+// the backstop caps how wide it can ever be and the floor guards against whipsaw.
+//
+// Backtest support (extended-replay, reversal-inclusive, n=1033 closed positions):
+// on the live TP/BE/DD stack, swapping the fixed 4.5 ATR full stop for this
+// structural stop improved net PnL by ~+60 overall and ~+58 in the ranging regime
+// (which is 92% of positions), with breakout capture unchanged.
+type StructuralSLConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// FloorATRMul: minimum structural stop distance in ATR multiples (whipsaw guard).
+	// If the range boundary is closer than this, the stop widens to the floor.
+	FloorATRMul float64 `json:"floor_atr_mul,omitempty"`
+	// BackstopATRMul: maximum structural stop distance in ATR multiples. Also the
+	// distance of the resting exchange stop when CloseConfirm is on (the safety net).
+	BackstopATRMul float64 `json:"backstop_atr_mul,omitempty"`
+	// LookbackBars: how many pre-entry bars (on the ATR timeframe) define the range.
+	LookbackBars int `json:"lookback_bars,omitempty"`
+	// CloseConfirm: Phase 2. When true the structural stop is enforced by an engine
+	// poll that fires only when a bar CLOSES beyond the boundary (kills stop-hunt /
+	// false-break whipsaw); the resting exchange stop is parked at BackstopATRMul as a
+	// bot-downtime safety net. When false (Phase 1) the resting stop sits at the
+	// structural distance and fires on an intrabar touch.
+	CloseConfirm bool `json:"close_confirm,omitempty"`
+}
+
+// WithDefaults fills unset structural-SL fields with safe, backtested defaults.
+func (c StructuralSLConfig) WithDefaults() StructuralSLConfig {
+	if c.FloorATRMul <= 0 {
+		c.FloorATRMul = 1.5
+	}
+	if c.BackstopATRMul <= 0 {
+		c.BackstopATRMul = 4.5
+	}
+	if c.LookbackBars <= 0 {
+		c.LookbackBars = 24
+	}
+	return c
+}
 
 type ProtectionValueSource struct {
 	Mode  ProtectionValueMode `json:"mode,omitempty"`
@@ -482,6 +529,9 @@ type LadderTPSLConfig struct {
 	StopLossSize      ProtectionValueSource `json:"stop_loss_size,omitempty"`
 	Rules             []LadderTPSLRule      `json:"rules,omitempty"`
 	FallbackMaxLoss   ProtectionValueSource `json:"fallback_max_loss,omitempty"`
+	// StructuralSL configures the range-anchored full stop used when any SL rule sets
+	// StopLossUnit=="structural". Ignored otherwise.
+	StructuralSL StructuralSLConfig `json:"structural_sl,omitempty"`
 }
 
 type LadderTPSLRule struct {

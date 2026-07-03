@@ -22,6 +22,14 @@ var (
 	frozenATRCache = map[string]frozenATREntry{}
 )
 
+// frozenStructBoundary caches a position's pre-entry range boundary frozen at open,
+// keyed like the ATR cache. Value 0 means "computed, none available"; absence means
+// not yet computed. Persisted via FrozenATRRecord.StructuralBoundary.
+var (
+	frozenStructMu    sync.Mutex
+	frozenStructCache = map[string]float64{}
+)
+
 // frozenATRForPosition returns a stable ATR for a position keyed by symbol.
 // First call (at open) computes fresh ATR and freezes it against the entry
 // price; subsequent calls (reconcile cycles) reuse the frozen value. When the
@@ -120,6 +128,127 @@ func (at *AutoTrader) atrForProtection(symbol string, cfg store.ATRProtectionCon
 	return atr, true
 }
 
+// frozenStructBoundaryForPosition returns the pre-entry range boundary price frozen
+// at open (swing low for long / swing high for short), used by the structural stop.
+// Mirrors frozenATRForPosition: in-memory cache → persisted record → fresh compute,
+// then freeze + persist. Freezing is mandatory — the boundary lives in the pre-entry
+// window, which cannot be recovered from a later GetKlines call.
+func (at *AutoTrader) frozenStructBoundaryForPosition(symbol string, entryPrice float64, isLong bool, sscfg store.StructuralSLConfig, acfg store.ATRProtectionConfig) (float64, bool) {
+	tf := acfg.WithDefaults().Timeframe
+	key := frozenATRKey(at.id, symbol, tf)
+
+	frozenStructMu.Lock()
+	b, ok := frozenStructCache[key]
+	frozenStructMu.Unlock()
+	if ok {
+		return b, b > 0
+	}
+
+	// Persisted record (survives restart), guarded by entry price to avoid stale reuse.
+	if entryPrice > 0 && at.store != nil {
+		if state, err := at.store.LoadFrozenATRState(); err == nil {
+			if rec, found := state.Records[key]; found && rec.StructuralBoundary > 0 &&
+				entrySamePosition(rec.EntryPrice, entryPrice) {
+				frozenStructMu.Lock()
+				frozenStructCache[key] = rec.StructuralBoundary
+				frozenStructMu.Unlock()
+				return rec.StructuralBoundary, true
+			}
+		}
+	}
+
+	// Fresh compute from the pre-entry window.
+	boundary, ok := at.computeStructuralBoundary(symbol, entryPrice, isLong, sscfg, acfg)
+	if !ok {
+		// Cache the "none" result so we don't re-fetch every reconcile cycle.
+		frozenStructMu.Lock()
+		frozenStructCache[key] = 0
+		frozenStructMu.Unlock()
+		return 0, false
+	}
+	frozenStructMu.Lock()
+	frozenStructCache[key] = boundary
+	frozenStructMu.Unlock()
+
+	// Persist onto the existing frozen-ATR record (same key) so both survive restart.
+	if entryPrice > 0 && at.store != nil {
+		if state, err := at.store.LoadFrozenATRState(); err == nil {
+			rec := state.Records[key]
+			rec.TraderID, rec.Symbol, rec.EntryPrice = at.id, symbol, entryPrice
+			rec.StructuralBoundary = boundary
+			rec.UpdatedAt = time.Now().Unix()
+			if err := at.store.SaveFrozenATRRecord(key, rec); err != nil {
+				logger.Warnf("⚠️ Structural SL: failed to persist boundary %s: %v", key, err)
+			}
+		}
+	}
+	return boundary, true
+}
+
+// computeStructuralBoundary fetches the ATR-timeframe bars and returns the swing low
+// (long) / swing high (short) over the lookback window ending at the most recent
+// CLOSED bar (excludes the entry-forming bar). Returns ok=false when the boundary is
+// on the wrong side of entry (e.g. breakout entry above the range) — no structural
+// edge, caller falls back to the fixed backstop.
+func (at *AutoTrader) computeStructuralBoundary(symbol string, entryPrice float64, isLong bool, sscfg store.StructuralSLConfig, acfg store.ATRProtectionConfig) (float64, bool) {
+	c := acfg.WithDefaults()
+	ss := sscfg.WithDefaults()
+	// Fetch a little more than the lookback so we can drop the live/forming bar.
+	bars, err := market.GetKlines(symbol, c.Timeframe, at.exchange, ss.LookbackBars+4)
+	if err != nil || len(bars) < 4 {
+		return 0, false
+	}
+	// Use the last LookbackBars CLOSED bars (drop the final, still-forming bar).
+	end := len(bars) - 1
+	start := end - ss.LookbackBars
+	if start < 0 {
+		start = 0
+	}
+	lo, hi := 0.0, 0.0
+	for i := start; i < end; i++ {
+		if lo == 0 || bars[i].Low < lo {
+			lo = bars[i].Low
+		}
+		if bars[i].High > hi {
+			hi = bars[i].High
+		}
+	}
+	if lo <= 0 || hi <= 0 {
+		return 0, false
+	}
+	if isLong {
+		if lo >= entryPrice { // entered at/below range floor (breakout) — no edge
+			return 0, false
+		}
+		return lo, true
+	}
+	if hi <= entryPrice {
+		return 0, false
+	}
+	return hi, true
+}
+
+// structuralSLPercent converts the frozen boundary into an effective stop-loss
+// percent-of-entry, clamped to [floor, backstop] ATR multiples. Returns (pct, ok).
+func structuralSLPercent(entryPrice, boundary, atr float64, sscfg store.StructuralSLConfig, acfg store.ATRProtectionConfig) (float64, bool) {
+	if entryPrice <= 0 || boundary <= 0 || atr <= 0 {
+		return 0, false
+	}
+	ss := sscfg.WithDefaults()
+	dist := entryPrice - boundary
+	if dist < 0 {
+		dist = -dist
+	}
+	mult := dist / atr // structural distance in ATR multiples
+	if mult < ss.FloorATRMul {
+		mult = ss.FloorATRMul
+	}
+	if mult > ss.BackstopATRMul {
+		mult = ss.BackstopATRMul
+	}
+	return acfg.EffectivePercent(mult, atr, entryPrice)
+}
+
 // wilderATRLast computes Wilder ATR(period) and returns the last value.
 func wilderATRLast(highs, lows, closes []float64, period int) float64 {
 	n := len(closes)
@@ -168,7 +297,7 @@ func absFloat(v float64) float64 {
 // least one field was ATR-resolved; (original, false) otherwise. This replaces
 // the former global per-dimension overlay: the unit now lives on each rule, so
 // the UI manages everything in the original TP/SL/BE/DD panels.
-func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol string) (store.ProtectionConfig, bool) {
+func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol, action string) (store.ProtectionConfig, bool) {
 	if at.config.StrategyConfig == nil {
 		return store.ProtectionConfig{}, false
 	}
@@ -190,15 +319,48 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol string) (s
 	adj := base // value copy; nested slices copied below before mutation
 	applied := false
 
-	// Ladder TP/SL: resolve each rule's TP and SL distance when its unit is "atr".
+	// Ladder TP/SL: resolve each rule's TP and SL distance when its unit is "atr" or
+	// "structural". Structural SL is derived from the frozen pre-entry range boundary.
 	if len(base.LadderTPSL.Rules) > 0 {
 		rules := make([]store.LadderTPSLRule, len(base.LadderTPSL.Rules))
 		copy(rules, base.LadderTPSL.Rules)
+		ss := base.LadderTPSL.StructuralSL.WithDefaults()
+		isLong := action == "open_long"
+		// Resolve the structural stop percent ONCE (shared by all structural SL rules).
+		structPct, structOK := 0.0, false
+		if base.LadderTPSL.StructuralSL.Enabled {
+			if boundary, ok := at.frozenStructBoundaryForPosition(symbol, entryPrice, isLong, base.LadderTPSL.StructuralSL, acfg); ok {
+				structPct, structOK = structuralSLPercent(entryPrice, boundary, atr, base.LadderTPSL.StructuralSL, acfg)
+			}
+			// Phase 2: when close-confirm is on, the RESTING stop is parked at the wide
+			// backstop (bot-downtime safety net); the tight structural level is enforced
+			// by the engine poll (runStructuralSLGuard) instead of the resting order.
+			if ss.CloseConfirm {
+				if pct, ok := acfg.EffectivePercent(ss.BackstopATRMul, atr, entryPrice); ok {
+					structPct, structOK = pct, true
+				}
+			}
+		}
 		for i := range rules {
-			if rules[i].StopLossUnit == store.ProtectionUnitATR && rules[i].StopLossPct > 0 {
-				if pct, ok := acfg.EffectivePercent(rules[i].StopLossPct, atr, entryPrice); ok {
-					rules[i].StopLossPct = pct
+			switch rules[i].StopLossUnit {
+			case store.ProtectionUnitATR:
+				if rules[i].StopLossPct > 0 {
+					if pct, ok := acfg.EffectivePercent(rules[i].StopLossPct, atr, entryPrice); ok {
+						rules[i].StopLossPct = pct
+						applied = true
+					}
+				}
+			case store.ProtectionUnitStructural:
+				if structOK {
+					rules[i].StopLossPct = structPct
 					applied = true
+				} else if rules[i].StopLossPct > 0 {
+					// Fallback: no structural boundary (breakout entry / no data) — treat
+					// the configured value as an ATR multiple backstop.
+					if pct, ok := acfg.EffectivePercent(rules[i].StopLossPct, atr, entryPrice); ok {
+						rules[i].StopLossPct = pct
+						applied = true
+					}
 				}
 			}
 			if rules[i].TakeProfitUnit == store.ProtectionUnitATR && rules[i].TakeProfitPct > 0 {
@@ -261,7 +423,8 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol string) (s
 // so we skip the ATR fetch entirely for pure-percent strategies.
 func protectionUsesATR(p store.ProtectionConfig) bool {
 	for _, r := range p.LadderTPSL.Rules {
-		if r.StopLossUnit == store.ProtectionUnitATR || r.TakeProfitUnit == store.ProtectionUnitATR {
+		if r.StopLossUnit == store.ProtectionUnitATR || r.TakeProfitUnit == store.ProtectionUnitATR ||
+			r.StopLossUnit == store.ProtectionUnitStructural {
 			return true
 		}
 	}

@@ -11,6 +11,7 @@ import type {
   ProtectionConfig,
   FullTPSLConfig,
   LadderTPSLConfig,
+  StructuralSLConfig,
   DrawdownTakeProfitConfig,
   BreakEvenStopConfig,
   LadderTPSLRule,
@@ -359,6 +360,14 @@ export function ProtectionEditor({
   const ladderRules = config.ladder_tp_sl.rules || []
   const breakEvenRules = config.break_even_stop.rules || []
 
+  const structuralSL = config.ladder_tp_sl.structural_sl || {}
+  const anySLStructural = ladderRules.some(
+    (r) => r.stop_loss_unit === 'structural'
+  )
+  const updateStructuralSL = (patch: Partial<StructuralSLConfig>) => {
+    updateLadder('structural_sl', { ...structuralSL, ...patch })
+  }
+
   const addLadderRule = () => {
     const nextRule: LadderTPSLRule = {
       take_profit_pct: 3,
@@ -501,9 +510,15 @@ export function ProtectionEditor({
   // distance field. ATR mode resolves at runtime as value × ATR / entry × 100.
   const unitToggle = (
     value: ProtectionDistanceUnit | undefined,
-    onSelect: (unit: ProtectionDistanceUnit) => void
+    onSelect: (unit: ProtectionDistanceUnit) => void,
+    allowStructural = false
   ) => {
-    const current: ProtectionDistanceUnit = value === 'atr' ? 'atr' : 'percent'
+    const current: ProtectionDistanceUnit =
+      value === 'atr'
+        ? 'atr'
+        : value === 'structural'
+          ? 'structural'
+          : 'percent'
     return (
       <select
         value={current}
@@ -513,12 +528,15 @@ export function ProtectionEditor({
         style={inputStyle}
         title={
           isZh
-            ? '单位：% = 固定百分比；ATR = ATR倍数（按波动自适应）'
-            : 'Unit: % = fixed percent; ATR = ATR multiple (volatility-adaptive)'
+            ? '单位：% = 固定百分比；ATR = ATR倍数（按波动自适应）；结构位 = 锚定入场前震荡区边界'
+            : 'Unit: % = fixed percent; ATR = ATR multiple; Structural = anchored to pre-entry range boundary'
         }
       >
         <option value="percent">%</option>
         <option value="atr">ATR×</option>
+        {allowStructural && (
+          <option value="structural">{isZh ? '结构位' : 'Struct'}</option>
+        )}
       </select>
     )
   }
@@ -1442,16 +1460,22 @@ export function ProtectionEditor({
                         className="block text-xs"
                         style={{ color: '#848E9C' }}
                       >
-                        {rule.stop_loss_unit === 'atr'
+                        {rule.stop_loss_unit === 'structural'
                           ? isZh
-                            ? '止损触发 (ATR倍数)'
-                            : 'SL Trigger (ATR×)'
-                          : isZh
-                            ? '止损触发 %'
-                            : 'SL Trigger %'}
+                            ? '止损触发 (结构位·倍数为兜底)'
+                            : 'SL Trigger (Structural · value=fallback)'
+                          : rule.stop_loss_unit === 'atr'
+                            ? isZh
+                              ? '止损触发 (ATR倍数)'
+                              : 'SL Trigger (ATR×)'
+                            : isZh
+                              ? '止损触发 %'
+                              : 'SL Trigger %'}
                       </label>
-                      {unitToggle(rule.stop_loss_unit, (u) =>
-                        updateLadderRule(index, { stop_loss_unit: u })
+                      {unitToggle(
+                        rule.stop_loss_unit,
+                        (u) => updateLadderRule(index, { stop_loss_unit: u }),
+                        true
                       )}
                     </div>
                     {config.ladder_tp_sl.stop_loss_price.mode === 'manual' ? (
@@ -1518,6 +1542,129 @@ export function ProtectionEditor({
                 </div>
               </div>
             ))}
+
+            {/* Structural SL config — shown when any SL rule uses the structural unit */}
+            {anySLStructural && (
+              <div
+                className="mt-3 p-3 rounded-lg space-y-3"
+                style={helpCardStyle}
+              >
+                <div
+                  className="text-xs font-semibold"
+                  style={{ color: '#EAECEF' }}
+                >
+                  {isZh
+                    ? '结构位止损设置（锚定入场前震荡区边界）'
+                    : 'Structural Stop-Loss (anchored to pre-entry range boundary)'}
+                </div>
+                <div className="text-xs" style={{ color: '#AAB2BD' }}>
+                  {isZh
+                    ? '止损放在入场前震荡区边界外（多头=区间低点，空头=区间高点），按下方倍数钳制。窄幅震荡里更紧（突破损失更小），地板防插针。回测：在现有TP/BE/DD上替换固定4.5ATR止损,全盘约+60、震荡区约+58,突破捕获不变。'
+                    : 'Places the stop just beyond the pre-entry range boundary (swing low for long / high for short), clamped by the multiples below. Backtest: replacing the fixed 4.5 ATR stop on the current stack gains ~+60 overall / ~+58 in the ranging regime, breakout unchanged.'}
+                </div>
+                <label
+                  className="flex items-center gap-2 text-xs"
+                  style={{ color: '#EAECEF' }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={structuralSL.enabled ?? false}
+                    onChange={(e) =>
+                      updateStructuralSL({ enabled: e.target.checked })
+                    }
+                    disabled={disabled}
+                  />
+                  {isZh ? '启用结构位止损' : 'Enable structural stop-loss'}
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <label
+                      className="block text-[11px] mb-1"
+                      style={{ color: '#848E9C' }}
+                    >
+                      {isZh ? '地板 (ATR倍数)' : 'Floor (ATR×)'}
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={structuralSL.floor_atr_mul ?? 1.5}
+                      onChange={(e) =>
+                        updateStructuralSL({
+                          floor_atr_mul: parseFloat(e.target.value) || 0,
+                        })
+                      }
+                      disabled={disabled}
+                      className="w-full px-2 py-1.5 rounded text-xs"
+                      style={inputStyle}
+                    />
+                  </div>
+                  <div>
+                    <label
+                      className="block text-[11px] mb-1"
+                      style={{ color: '#848E9C' }}
+                    >
+                      {isZh ? '兜底上限 (ATR倍数)' : 'Backstop (ATR×)'}
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={structuralSL.backstop_atr_mul ?? 4.5}
+                      onChange={(e) =>
+                        updateStructuralSL({
+                          backstop_atr_mul: parseFloat(e.target.value) || 0,
+                        })
+                      }
+                      disabled={disabled}
+                      className="w-full px-2 py-1.5 rounded text-xs"
+                      style={inputStyle}
+                    />
+                  </div>
+                  <div>
+                    <label
+                      className="block text-[11px] mb-1"
+                      style={{ color: '#848E9C' }}
+                    >
+                      {isZh ? '回看K线数' : 'Lookback bars'}
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={structuralSL.lookback_bars ?? 24}
+                      onChange={(e) =>
+                        updateStructuralSL({
+                          lookback_bars: parseInt(e.target.value, 10) || 0,
+                        })
+                      }
+                      disabled={disabled}
+                      className="w-full px-2 py-1.5 rounded text-xs"
+                      style={inputStyle}
+                    />
+                  </div>
+                </div>
+                <label
+                  className="flex items-start gap-2 text-xs"
+                  style={{ color: '#EAECEF' }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={structuralSL.close_confirm ?? false}
+                    onChange={(e) =>
+                      updateStructuralSL({ close_confirm: e.target.checked })
+                    }
+                    disabled={disabled}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    {isZh
+                      ? '收盘确认（第二期）：仅当K线收盘跌破结构位才平仓（防插针）。交易所挂单移到兜底上限做宕机保命，紧止损由引擎轮询执行。'
+                      : 'Close-confirm (Phase 2): exit only when a bar CLOSES beyond the boundary (anti stop-hunt). Resting stop parks at the backstop as a downtime net; the tight stop runs via engine poll.'}
+                  </span>
+                </label>
+              </div>
+            )}
           </div>
         </div>
       </div>

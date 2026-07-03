@@ -280,7 +280,7 @@ func (at *AutoTrader) BuildConfiguredProtectionPlanForSymbol(entryPrice float64,
 	if at.config.StrategyConfig == nil {
 		return nil, nil
 	}
-	protection, _ := at.resolveATRProtection(entryPrice, symbol)
+	protection, _ := at.resolveATRProtection(entryPrice, symbol, action)
 	return at.buildConfiguredProtectionPlanWith(entryPrice, action, protection)
 }
 

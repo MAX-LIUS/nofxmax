@@ -122,6 +122,12 @@ func (at *AutoTrader) checkPositionDrawdown() {
 	// Runs first because L2 is portfolio-level. No-op unless explicitly enabled.
 	at.runGivebackGuard()
 
+	// Structural stop-loss close-confirm layer (Phase 2). No-op unless the strategy
+	// enables structural SL with close-confirm. Closes positions whose last CLOSED bar
+	// breached the frozen pre-entry range boundary; the resting backstop stays as the
+	// bot-downtime safety net.
+	at.runStructuralSLGuard()
+
 	// Get current positions
 	positions, err := at.trader.GetPositions()
 	if err != nil {

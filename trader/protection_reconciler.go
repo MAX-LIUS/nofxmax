@@ -182,7 +182,7 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 			// use the configured ladder values as a safety net.
 			// Use ATR-resolved protection so the fallback ladder matches open-time
 			// distances when ATR protection is enabled (no percent/ATR mismatch).
-			resolvedProt, _ := at.resolveATRProtection(entryPrice, symbol)
+			resolvedProt, _ := at.resolveATRProtection(entryPrice, symbol, actionFromPositionSide(side))
 			ladderCfg := resolvedProt.LadderTPSL
 			if ladderCfg.Enabled && ladderCfg.Mode == store.ProtectionModeAI {
 				if fallbackPlan, fbErr := buildManualLadderProtectionPlan(entryPrice, actionFromPositionSide(side), ladderCfg); fbErr == nil && fallbackPlan != nil {
@@ -1212,6 +1212,9 @@ func (at *AutoTrader) cleanupInactiveProtectionState(active map[string]struct{})
 			frozenATRMu.Lock()
 			delete(frozenATRCache, frozenKey)
 			frozenATRMu.Unlock()
+			frozenStructMu.Lock()
+			delete(frozenStructCache, frozenKey)
+			frozenStructMu.Unlock()
 			if at.store != nil {
 				if err := at.store.DeleteFrozenATRRecord(frozenKey); err != nil {
 					logger.Warnf("⚠️ Frozen ATR: failed to evict %s: %v", frozenKey, err)

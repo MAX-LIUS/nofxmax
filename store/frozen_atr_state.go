@@ -23,6 +23,11 @@ type FrozenATRRecord struct {
 	EntryPrice float64 `json:"entry_price"`
 	ATR        float64 `json:"atr"`
 	UpdatedAt  int64   `json:"updated_at"`
+	// StructuralBoundary is the pre-entry range boundary price frozen at open (swing
+	// low for a long, swing high for a short) used by the structural stop-loss. 0 when
+	// the position does not use structural SL. Frozen because it cannot be recomputed
+	// after the fact — GetKlines returns the latest bars, not the pre-entry window.
+	StructuralBoundary float64 `json:"structural_boundary,omitempty"`
 }
 
 type FrozenATRState struct {
