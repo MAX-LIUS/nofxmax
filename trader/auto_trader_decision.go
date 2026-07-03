@@ -838,7 +838,7 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 		acfg := at.config.StrategyConfig.ATRProtection
 		if acfg.Enabled {
 			atrTimeframe = acfg.WithDefaults().Timeframe
-			if v, ok := at.frozenATRForPosition(symbol, entryPrice, acfg); ok {
+			if v, ok := at.frozenATRForPosition(symbol, side, entryPrice, acfg); ok {
 				atrAtEntry = v
 			}
 			if v, ok := at.atrForProtection(symbol, acfg); ok {
@@ -896,7 +896,7 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 	// callback would treat ATR multiples as raw percents (e.g. 3 ATR shown as
 	// +3% activation, 1.2 ATR shown as 1.2% callback), diverging from the live
 	// exchange order which is placed with ATR-resolved values.
-	drawdownRules = at.resolveDrawdownRulesATR(drawdownRules, symbol, entryPrice)
+	drawdownRules = at.resolveDrawdownRulesATR(drawdownRules, symbol, side, entryPrice)
 	drawdownSource := at.getDrawdownConfigSource(symbol, side)
 	runnerState := at.getDrawdownRunnerState(symbol, side)
 	drawdownCfg := store.DrawdownTakeProfitConfig{}
@@ -1160,27 +1160,27 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 				}
 			}
 			tier := map[string]interface{}{
-				"index":                             idx + 1,
-				"stage_name":                        rule.StageName,
-				"timeframe":                         rule.Timeframe,
-				"reason_anchor":                     rule.ReasonAnchor,
-				"min_profit_pct":                    rule.MinProfitPct,
-				"max_drawdown_pct":                  rule.MaxDrawdownPct,
-				"max_drawdown_abs_profit_pct":       rule.MaxDrawdownAbsPct,
-				"close_ratio_pct":                   rule.CloseRatioPct,
-				"runner_keep_pct":                   rule.RunnerKeepPct,
-				"runner_stop_mode":                  rule.RunnerStopMode,
-				"runner_stop_source":                rule.RunnerStopSource,
-				"runner_target_mode":                rule.RunnerTargetMode,
-				"runner_target_source":              rule.RunnerTargetSource,
-				"activation_price":                  activationPrice,
-				"planned_activation_price":          plannedActivationPrice,
-				"activation_source":                 activationSource,
-				"callback_rate":                     callbackRate,
-				"callback_source":                   callbackSource,
-				"planned_quantity":                  quantity * rule.CloseRatioPct / 100.0,
-				"source":                            source,
-				"execution_mode":                    executionMode,
+				"index":                       idx + 1,
+				"stage_name":                  rule.StageName,
+				"timeframe":                   rule.Timeframe,
+				"reason_anchor":               rule.ReasonAnchor,
+				"min_profit_pct":              rule.MinProfitPct,
+				"max_drawdown_pct":            rule.MaxDrawdownPct,
+				"max_drawdown_abs_profit_pct": rule.MaxDrawdownAbsPct,
+				"close_ratio_pct":             rule.CloseRatioPct,
+				"runner_keep_pct":             rule.RunnerKeepPct,
+				"runner_stop_mode":            rule.RunnerStopMode,
+				"runner_stop_source":          rule.RunnerStopSource,
+				"runner_target_mode":          rule.RunnerTargetMode,
+				"runner_target_source":        rule.RunnerTargetSource,
+				"activation_price":            activationPrice,
+				"planned_activation_price":    plannedActivationPrice,
+				"activation_source":           activationSource,
+				"callback_rate":               callbackRate,
+				"callback_source":             callbackSource,
+				"planned_quantity":            quantity * rule.CloseRatioPct / 100.0,
+				"source":                      source,
+				"execution_mode":              executionMode,
 				// is_armed: a trailing order for this tier exists on the exchange
 				// (or a managed tier is tracking) — i.e. protection is in place but
 				// not necessarily activated. is_activated: the peak profit actually

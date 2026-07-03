@@ -1,6 +1,7 @@
 package trader
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -22,12 +23,21 @@ var (
 	frozenATRCache = map[string]frozenATREntry{}
 )
 
+// frozenStructEntry pairs the frozen boundary with the entry price it was frozen
+// against, so a cache hit can be rejected when it belongs to a different position
+// on the same key (e.g. a new position reusing a not-yet-evicted slot). boundary 0
+// means "computed, none available"; absence means not yet computed.
+type frozenStructEntry struct {
+	entryPrice float64
+	boundary   float64
+}
+
 // frozenStructBoundary caches a position's pre-entry range boundary frozen at open,
-// keyed like the ATR cache. Value 0 means "computed, none available"; absence means
-// not yet computed. Persisted via FrozenATRRecord.StructuralBoundary.
+// keyed like the ATR cache (trader|symbol|side[@tf]). Persisted via
+// FrozenATRRecord.StructuralBoundary.
 var (
 	frozenStructMu    sync.Mutex
-	frozenStructCache = map[string]float64{}
+	frozenStructCache = map[string]frozenStructEntry{}
 )
 
 // frozenATRForPosition returns a stable ATR for a position keyed by symbol.
@@ -40,8 +50,8 @@ var (
 // open-time ATR instead of re-freezing at the then-current (drifted) ATR. This
 // keeps ATR-mode activation/callback stable for the life of the position; the
 // in-memory cache is a fast path in front of the persisted record.
-func (at *AutoTrader) frozenATRForPosition(symbol string, entryPrice float64, cfg store.ATRProtectionConfig) (float64, bool) {
-	key := frozenATRKey(at.id, symbol, cfg.WithDefaults().Timeframe)
+func (at *AutoTrader) frozenATRForPosition(symbol, side string, entryPrice float64, cfg store.ATRProtectionConfig) (float64, bool) {
+	key := frozenATRKey(at.id, symbol, cfg.WithDefaults().Timeframe, side)
 	frozenATRMu.Lock()
 	ent, ok := frozenATRCache[key]
 	frozenATRMu.Unlock()
@@ -84,12 +94,37 @@ func (at *AutoTrader) frozenATRForPosition(symbol string, entryPrice float64, cf
 // existing persisted records and the ETH-drift fix are untouched. Other
 // timeframes (e.g. the breadth from-peak path's 4h scale) get a "@tf" suffix so
 // a position can hold an independent frozen ATR per timeframe without collision.
-func frozenATRKey(traderID, symbol, timeframe string) string {
+// side ("LONG"/"SHORT") is part of the key so a symbol held simultaneously on
+// both sides (hedge positions) freezes an independent ATR/boundary per side.
+// Without it, LONG and SHORT share one slot: because entrySamePosition guards on
+// entry price and the two legs have different entries, each reconcile pass evicts
+// the other's frozen value and recomputes against today's (drifted) ATR — which
+// makes the structural close-confirm backstop price wobble and the reconciler
+// churn duplicate stops. An empty side falls back to the legacy (side-less) key
+// so callers without side context (and persisted pre-migration records) still
+// resolve.
+func frozenATRKey(traderID, symbol, timeframe, side string) string {
 	base := traderID + "|" + symbol
+	if s := normalizeFrozenSide(side); s != "" {
+		base += "|" + s
+	}
 	if timeframe == "" || timeframe == "1h" {
 		return base
 	}
 	return base + "@" + timeframe
+}
+
+// normalizeFrozenSide maps assorted side/action spellings to "LONG"/"SHORT" (or
+// "" when unknown, which selects the legacy side-less key).
+func normalizeFrozenSide(side string) string {
+	switch strings.ToUpper(strings.TrimSpace(side)) {
+	case "LONG", "BUY", "OPEN_LONG":
+		return "LONG"
+	case "SHORT", "SELL", "OPEN_SHORT":
+		return "SHORT"
+	default:
+		return ""
+	}
 }
 
 // entrySamePosition reports whether two entry prices refer to the same position
@@ -140,13 +175,20 @@ func (at *AutoTrader) atrForProtection(symbol string, cfg store.ATRProtectionCon
 // was enabled) is left to the resting backstop instead of a fabricated level.
 func (at *AutoTrader) frozenStructBoundaryForPosition(symbol string, entryPrice float64, isLong bool, allowCompute bool, sscfg store.StructuralSLConfig, acfg store.ATRProtectionConfig) (float64, bool) {
 	tf := acfg.WithDefaults().Timeframe
-	key := frozenATRKey(at.id, symbol, tf)
+	side := "SHORT"
+	if isLong {
+		side = "LONG"
+	}
+	key := frozenATRKey(at.id, symbol, tf, side)
 
 	frozenStructMu.Lock()
-	b, ok := frozenStructCache[key]
+	ent, ok := frozenStructCache[key]
 	frozenStructMu.Unlock()
-	if ok {
-		return b, b > 0
+	// Cache hit only counts when it belongs to THIS position. Guarding on entry
+	// price stops a new position from inheriting a prior (not-yet-evicted) boundary
+	// on the same key. entryPrice<=0 (callers without price context) trusts the hit.
+	if ok && (entryPrice <= 0 || ent.entryPrice <= 0 || entrySamePosition(ent.entryPrice, entryPrice)) {
+		return ent.boundary, ent.boundary > 0
 	}
 
 	// Persisted record (survives restart), guarded by entry price to avoid stale reuse.
@@ -155,7 +197,7 @@ func (at *AutoTrader) frozenStructBoundaryForPosition(symbol string, entryPrice 
 			if rec, found := state.Records[key]; found && rec.StructuralBoundary > 0 &&
 				entrySamePosition(rec.EntryPrice, entryPrice) {
 				frozenStructMu.Lock()
-				frozenStructCache[key] = rec.StructuralBoundary
+				frozenStructCache[key] = frozenStructEntry{entryPrice: rec.EntryPrice, boundary: rec.StructuralBoundary}
 				frozenStructMu.Unlock()
 				return rec.StructuralBoundary, true
 			}
@@ -172,12 +214,12 @@ func (at *AutoTrader) frozenStructBoundaryForPosition(symbol string, entryPrice 
 	if !ok {
 		// Cache the "none" result so we don't re-fetch every reconcile cycle.
 		frozenStructMu.Lock()
-		frozenStructCache[key] = 0
+		frozenStructCache[key] = frozenStructEntry{entryPrice: entryPrice, boundary: 0}
 		frozenStructMu.Unlock()
 		return 0, false
 	}
 	frozenStructMu.Lock()
-	frozenStructCache[key] = boundary
+	frozenStructCache[key] = frozenStructEntry{entryPrice: entryPrice, boundary: boundary}
 	frozenStructMu.Unlock()
 
 	// Persist onto the existing frozen-ATR record (same key) so both survive restart.
@@ -323,7 +365,7 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol, action st
 	if !protectionUsesATR(base) {
 		return base, false
 	}
-	atr, ok := at.frozenATRForPosition(symbol, entryPrice, acfg)
+	atr, ok := at.frozenATRForPosition(symbol, action, entryPrice, acfg)
 	if !ok {
 		logger.Warnf("  ⚠️ ATR-protection: no ATR for %s; falling back to configured percents", symbol)
 		return base, false
@@ -458,7 +500,7 @@ func protectionUsesATR(p store.ProtectionConfig) bool {
 // percent when its MinProfitUnit is "atr", so the runtime DD arm threshold
 // matches the open-time distance (fixes the prior bug where DD armed on the raw
 // percent while open-time ATR-ized it). Percent-unit rules pass through.
-func (at *AutoTrader) resolveDrawdownRulesATR(rules []store.DrawdownTakeProfitRule, symbol string, entryPrice float64) []store.DrawdownTakeProfitRule {
+func (at *AutoTrader) resolveDrawdownRulesATR(rules []store.DrawdownTakeProfitRule, symbol, side string, entryPrice float64) []store.DrawdownTakeProfitRule {
 	if len(rules) == 0 || at.config.StrategyConfig == nil {
 		return rules
 	}
@@ -476,7 +518,7 @@ func (at *AutoTrader) resolveDrawdownRulesATR(rules []store.DrawdownTakeProfitRu
 	if !anyATR {
 		return rules
 	}
-	atr, ok := at.frozenATRForPosition(symbol, entryPrice, acfg)
+	atr, ok := at.frozenATRForPosition(symbol, side, entryPrice, acfg)
 	if !ok {
 		return rules
 	}
@@ -501,7 +543,7 @@ func (at *AutoTrader) resolveDrawdownRulesATR(rules []store.DrawdownTakeProfitRu
 // rule's trigger value resolved to a percent when its TriggerUnit is "atr", so
 // the runtime BE monitor arms at the SAME distance the orders were placed with
 // at open (no percent/ATR mismatch). Percent-unit rules pass through unchanged.
-func (at *AutoTrader) getActiveBreakEvenRulesATR(symbol string, entryPrice float64) []store.BreakEvenStopRule {
+func (at *AutoTrader) getActiveBreakEvenRulesATR(symbol, side string, entryPrice float64) []store.BreakEvenStopRule {
 	rules := at.getActiveBreakEvenRules()
 	if len(rules) == 0 {
 		return rules
@@ -524,7 +566,7 @@ func (at *AutoTrader) getActiveBreakEvenRulesATR(symbol string, entryPrice float
 	if !anyATR {
 		return rules
 	}
-	atr, ok := at.frozenATRForPosition(symbol, entryPrice, acfg)
+	atr, ok := at.frozenATRForPosition(symbol, side, entryPrice, acfg)
 	if !ok {
 		return rules
 	}
@@ -567,4 +609,3 @@ func atrOffsetEffectivePercent(acfg store.ATRProtectionConfig, atrMultiple, atrV
 	}
 	return sign * pct, true
 }
-

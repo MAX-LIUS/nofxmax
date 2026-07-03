@@ -33,9 +33,9 @@ func (t *idCancelReconcileTrader) CancelAlgoOrderByID(symbol string, algoID stri
 // reconciler must cancel the stale duplicate directly and NOT re-place the plan
 // (which would add yet another same-price/different-qty order and never converge).
 //
-// Note: the SL-only duplicate case is already absorbed by the line-274 exemption
-// ("preserving extra protective stop orders because stop coverage is satisfied"),
-// so the churn that actually escaped was on the TP side, which had no such guard.
+// Note: the SL-only duplicate case is absorbed by the "preserving extra protective
+// stop orders because stop coverage is satisfied" exemption, so the churn that
+// actually escaped was on the TP side, which had no such guard.
 func TestProtectionReconcilerCancelsStaleDuplicateTPWithoutReplaceWhenCoverageComplete(t *testing.T) {
 	// The reconcile cooldown map is a package global; clear our key before and
 	// after so this test neither inherits nor leaks cooldown state across the suite.

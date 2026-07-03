@@ -1208,18 +1208,23 @@ func (at *AutoTrader) cleanupInactiveProtectionState(active map[string]struct{})
 		}
 		// Evict the frozen ATR for the closed position so a future position on
 		// the same symbol re-freezes against its own open-time ATR. Evict every
-		// timeframe variant (1h protection scale + 4h breadth from-peak scale).
+		// timeframe variant (1h protection scale + 4h breadth from-peak scale) AND
+		// every side. The key now carries side (LONG/SHORT) so hedge legs freeze
+		// independently; evicting only one side (or the legacy side-less key) would
+		// strand the other. "" covers pre-migration side-less records.
 		for _, tf := range []string{"1h", "4h"} {
-			frozenKey := frozenATRKey(at.id, symbol, tf)
-			frozenATRMu.Lock()
-			delete(frozenATRCache, frozenKey)
-			frozenATRMu.Unlock()
-			frozenStructMu.Lock()
-			delete(frozenStructCache, frozenKey)
-			frozenStructMu.Unlock()
-			if at.store != nil {
-				if err := at.store.DeleteFrozenATRRecord(frozenKey); err != nil {
-					logger.Warnf("⚠️ Frozen ATR: failed to evict %s: %v", frozenKey, err)
+			for _, side := range []string{"LONG", "SHORT", ""} {
+				frozenKey := frozenATRKey(at.id, symbol, tf, side)
+				frozenATRMu.Lock()
+				delete(frozenATRCache, frozenKey)
+				frozenATRMu.Unlock()
+				frozenStructMu.Lock()
+				delete(frozenStructCache, frozenKey)
+				frozenStructMu.Unlock()
+				if at.store != nil {
+					if err := at.store.DeleteFrozenATRRecord(frozenKey); err != nil {
+						logger.Warnf("⚠️ Frozen ATR: failed to evict %s: %v", frozenKey, err)
+					}
 				}
 			}
 		}

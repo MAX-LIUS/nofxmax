@@ -161,8 +161,8 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 	if fromPeakTF == "" {
 		fromPeakTF = "4h"
 	}
-	atrResolve := func(symbol string, entry float64, timeframe string) (float64, bool, bool) {
-		ck := symbol + "|" + timeframe
+	atrResolve := func(symbol, side string, entry float64, timeframe string) (float64, bool, bool) {
+		ck := symbol + "|" + side + "|" + timeframe
 		if v, ok := atrPctCache[ck]; ok {
 			return v, atrFrozenCache[ck], atrOkCache[ck]
 		}
@@ -174,7 +174,7 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 		ok := false
 		frozen := false
 		if entry > 0 {
-			if atr, fok := at.frozenATRForPosition(symbol, entry, tcfg); fok && atr > 0 {
+			if atr, fok := at.frozenATRForPosition(symbol, side, entry, tcfg); fok && atr > 0 {
 				v = atr / entry * 100
 				ok = true
 				frozen = true
@@ -212,8 +212,8 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 		atrPctPeak := 0.0 // from-peak scale (timeframe-matched)
 		if cfg.BreadthUseATR {
 			var ok1, okp bool
-			atrPct1h, _, ok1 = atrResolve(s.symbol, s.entry, "1h")
-			atrPctPeak, _, okp = atrResolve(s.symbol, s.entry, fromPeakTF)
+			atrPct1h, _, ok1 = atrResolve(s.symbol, s.side, s.entry, "1h")
+			atrPctPeak, _, okp = atrResolve(s.symbol, s.side, s.entry, fromPeakTF)
 			if (!ok1 || !okp) && !atrFailSyms[s.symbol] {
 				atrFailSyms[s.symbol] = true
 				atrFailures++
@@ -280,7 +280,7 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 			// Record the from-peak (timeframe-matched) ATR% since it drives the
 			// from-peak decision; ok reflects whether that scale resolved.
 			var ok bool
-			atrPct, frozen, ok = atrResolve(s.symbol, s.entry, fromPeakTF)
+			atrPct, frozen, ok = atrResolve(s.symbol, s.side, s.entry, fromPeakTF)
 			atrFailed = !ok
 		}
 		legs = append(legs, store.BreadthEventLeg{
