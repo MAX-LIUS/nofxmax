@@ -47,6 +47,23 @@ func AttributionConfidence(reason string) string {
 	}
 }
 
+// isPortfolioLevelReason reports whether the mechanism fires on a PORTFOLIO-wide
+// signal (market breadth / equity breaker) rather than the individual position's
+// own price path. These are trusted attributions — we know they fired — but a
+// per-entry price replay structurally CANNOT reproduce *when* they fire, because
+// the trigger depends on state outside the single trade. They are therefore
+// excluded from the per-entry price-fidelity metric (reported separately) so a
+// portfolio-level exit doesn't masquerade as a price-mechanism modeling miss.
+func isPortfolioLevelReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "giveback_guard_breadth", "breadth_breaker",
+		"equity_breaker", "portfolio_breaker":
+		return true
+	default:
+		return false
+	}
+}
+
 // isTrustedProtectionReason reports whether the reason is a genuine, recovered
 // protection mechanism (post-fix deterministic attribution or native-side).
 func isTrustedProtectionReason(r string) bool {
