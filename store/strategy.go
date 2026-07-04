@@ -78,6 +78,17 @@ type StrategyConfig struct {
 
 	// Grid trading configuration (only used when StrategyType == "grid_trading")
 	GridConfig *GridStrategyConfig `json:"grid_config,omitempty"`
+
+	// TimeframeDiscipline controls whether every timeframe-derived setting is
+	// force-aligned to Indicators.Klines.PrimaryTimeframe at parse time. This makes
+	// primary_timeframe the single source of truth: change it and the whole
+	// lifecycle (AI data, ATR protection, structural SL, breakout scan, breadth,
+	// selected/longer timeframes) follows, keeping strict per-trader timeframe
+	// discipline. Values:
+	//   ""             => legacy: fields keep their stored values (backward compatible)
+	//   "follow_primary" => align all timeframe-derived fields to primary at parse time
+	// See AlignToPrimaryTimeframe.
+	TimeframeDiscipline string `json:"timeframe_discipline,omitempty"`
 }
 
 // BreakoutEntryConfig controls the code-level breakout entry engine.
@@ -970,6 +981,14 @@ type RiskControlConfig struct {
 	MaxHoldHours           float64 `json:"max_hold_hours,omitempty"`             // e.g. 18
 	MaxHoldProfitExemptPct float64 `json:"max_hold_profit_exempt_pct,omitempty"` // positive, e.g. 2.0
 
+	// Bar-count holds (optional, timeframe-disciplined). When TimeframeDiscipline
+	// is "follow_primary" and these are > 0, they OVERRIDE the *Hours fields by
+	// converting bars→hours against the primary timeframe, so a "hold N bars"
+	// intent stays constant in bar count across any primary timeframe (e.g. 72
+	// bars = 18h on 15m, 3h on 1m, 72h on 1h). 0/unset = fall back to *Hours.
+	TimeStopBars int `json:"time_stop_bars,omitempty"`
+	MaxHoldBars  int `json:"max_hold_bars,omitempty"`
+
 	// Trailing take-profit (CODE ENFORCED): once unrealized pnl reaches TrailingActivatePct,
 	// track the peak; if pnl gives back TrailingGivebackPct of that peak, close the remaining
 	// position. This converts the "cut winners short / let losers run" payoff (claude 0.67) into
@@ -1400,6 +1419,9 @@ func (s *Strategy) ParseConfig() (*StrategyConfig, error) {
 		return nil, fmt.Errorf("failed to parse strategy configuration: %w", err)
 	}
 	config.Indicators.FillSentimentDefaults()
+	// Enforce timeframe discipline: when enabled, every timeframe-derived field
+	// is aligned to primary_timeframe so the whole lifecycle stays self-consistent.
+	config.AlignToPrimaryTimeframe()
 	return &config, nil
 }
 
