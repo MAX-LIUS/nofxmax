@@ -205,6 +205,36 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 				}
 			}
 		}
+
+		// --- non-price close proxy: time-stop / max-hold / AI-discretionary ---
+		// These fire at bar close on the FULL remainder, mirroring the live
+		// code-enforced stops the raw replay otherwise ignores.
+		if cp := p.CloseProxy; cp.Enabled {
+			heldHours := float64(res.BarsHeld) * cp.TimeframeHours
+			// time-stop: held long enough AND still losing worse than threshold.
+			if cp.TimeStopHours > 0 && heldHours >= cp.TimeStopHours &&
+				cp.TimeStopLossPct < 0 && closePnL <= cp.TimeStopLossPct {
+				addExit(bar.Close, remaining)
+				res.CloseReasons = append(res.CloseReasons, "time_stop")
+				continue
+			}
+			// max-hold: held long enough, not a profitable runner.
+			if cp.MaxHoldHours > 0 && heldHours >= cp.MaxHoldHours &&
+				closePnL < cp.MaxHoldProfitExemptPct {
+				addExit(bar.Close, remaining)
+				res.CloseReasons = append(res.CloseReasons, "max_hold")
+				continue
+			}
+			// AI/discretionary proxy: after a runup ≥ arm, close on give-back.
+			if cp.AIPeakArmPct > 0 && peak >= cp.AIPeakArmPct && cp.AIGiveBackPct > 0 {
+				giveback := (peak - closePnL) / peak * 100
+				if giveback >= cp.AIGiveBackPct {
+					addExit(bar.Close, remaining)
+					res.CloseReasons = append(res.CloseReasons, "ai_proxy")
+					continue
+				}
+			}
+		}
 	}
 
 	// Any unclosed remainder marks-to-last-close (open-ended exit).

@@ -26,6 +26,7 @@ func main() {
 	top := flag.Int("top", 15, "how many best sweep points to print")
 	limit := flag.Int("limit", 0, "limit number of entries (0 = all)")
 	recent := flag.Bool("recent", false, "when limiting, take the most RECENT entries (default takes earliest)")
+	proxy := flag.Bool("proxy", false, "enable the non-price close proxy (time-stop/max-hold/AI) for higher fidelity")
 	flag.Parse()
 
 	db, err := sql.Open("sqlite", *dbPath)
@@ -59,8 +60,12 @@ func main() {
 
 	// 1) Fidelity: percent-mode baseline vs Claude's actual realized P&L.
 	baseline := backtest.ClaudeBaselineParams()
+	if *proxy {
+		baseline.CloseProxy = backtest.ClaudeCloseProxy(backtest.TimeframeHours(*tf))
+	}
 	report, relErr := backtest.FidelityReport(loaded, baseline)
 	fmt.Println("==== FIDELITY (percent baseline vs Claude actual) ====")
+	fmt.Printf("(close-proxy: %v)\n", *proxy)
 	fmt.Println(report)
 	if relErr > 50 || relErr < -50 {
 		fmt.Printf("⚠️ fidelity rel_err=%.1f%% is large — engine semantics may diverge; treat sweep as directional only\n", relErr)
