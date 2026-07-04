@@ -29,6 +29,7 @@ func main() {
 	proxy := flag.Bool("proxy", false, "enable the non-price close proxy (time-stop/max-hold/AI) for higher fidelity")
 	liveConfig := flag.Bool("liveconfig", false, "use the trader's LIVE strategy protection config (ATR/structural) as the replay baseline")
 	variants := flag.Bool("variants", false, "compare pre-specified single-change optimization variants derived from the live baseline (keeps the structural stop type; faithful to live)")
+	pertrade := flag.Bool("pertrade", false, "with -variants: decompose each variant vs baseline TRADE-BY-TRADE (winners cut early vs losers saved)")
 	flag.Parse()
 
 	db, err := sql.Open("sqlite", *dbPath)
@@ -134,5 +135,19 @@ func main() {
 		}
 		fmt.Println("→ dPnL is vs the live-baseline row. These deltas are on the FULL loaded")
 		fmt.Println("  sample (all close reasons) and use the same structural stop as live.")
+
+		// Per-trade decomposition: does a variant cut winners early? Compare each
+		// variant against the baseline trade-by-trade.
+		if *pertrade {
+			fmt.Println()
+			vs := backtest.LiveVariants(baseline)
+			for _, v := range vs {
+				if v.Name == "live-baseline" {
+					continue
+				}
+				fmt.Print(backtest.FormatPerTradeCompare(v.Name, baseline, v.P, loaded, 8))
+				fmt.Println()
+			}
+		}
 	}
 }
