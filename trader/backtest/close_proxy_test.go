@@ -90,3 +90,31 @@ func hasReason(rs []string, want string) bool {
 	}
 	return false
 }
+
+// ATR-give-back DD: a LONG that peaks then retraces ≥ MaxDrawdownATR×ATR in
+// PRICE terms (not % of peak PnL) must close via drawdown. Bars: rise to a peak,
+// then pull back exactly one ATR-multiple's worth.
+func TestDDRule_ATRGiveback(t *testing.T) {
+	const hourMs = 3600_000
+	entry := Entry{Symbol: "X", Side: "long", EntryPrice: 100, Quantity: 1, EntryTime: 0}
+	// Build bars: 20 pre-entry flat @100 (ATR≈0 guard), then entry, rise to 106,
+	// then fall to 104. With ATR≈~1 (from a small wiggle) a 1.5×ATR retrace fires.
+	bars := make([]market.Kline, 0, 40)
+	for i := 0; i < 20; i++ { // pre-entry, small range to seed ATR≈1
+		px := 100.0
+		bars = append(bars, market.Kline{OpenTime: int64(i-20) * hourMs, Open: px, High: px + 0.5, Low: px - 0.5, Close: px})
+	}
+	// forward: climb 100→106, then retrace to 104 (=-2 from peak).
+	fwd := []float64{101, 103, 106, 104, 104}
+	for i, px := range fwd {
+		bars = append(bars, market.Kline{OpenTime: int64(i) * hourMs, Open: px, High: px, Low: px, Close: px})
+	}
+	entryIdx := 20
+	p := ProtectionParams{Unit: UnitATRMult, StopLossATR: 20} // SL far away
+	// arm at +2% (min profit), give-back 1.5×ATR. ATR≈1 → retrace≥1.5 triggers at 104 (peak106, -2).
+	p.DDRules = []DDRule{{MinProfitATR: 0.5, MaxDrawdownATR: 1.5, CloseRatioPct: 100}}
+	res := ReplayEntry(p, entry, bars, entryIdx)
+	if !hasReason(res.CloseReasons, "drawdown") {
+		t.Fatalf("expected ATR-giveback drawdown close, got %v (exit=%.2f)", res.CloseReasons, res.ExitPrice)
+	}
+}

@@ -27,6 +27,7 @@ func main() {
 	limit := flag.Int("limit", 0, "limit number of entries (0 = all)")
 	recent := flag.Bool("recent", false, "when limiting, take the most RECENT entries (default takes earliest)")
 	proxy := flag.Bool("proxy", false, "enable the non-price close proxy (time-stop/max-hold/AI) for higher fidelity")
+	liveConfig := flag.Bool("liveconfig", false, "use the trader's LIVE strategy protection config (ATR/structural) as the replay baseline")
 	flag.Parse()
 
 	db, err := sql.Open("sqlite", *dbPath)
@@ -58,9 +59,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 1) Fidelity: percent-mode baseline vs Claude's actual realized P&L.
+	// 1) Baseline: either the hardcoded percent params, or the trader's LIVE
+	//    strategy protection config (ATR/structural units) via -liveconfig. The
+	//    live config is what makes trusted-subset fidelity meaningful.
 	baseline := backtest.ClaudeBaselineParams()
-	if *proxy {
+	if *liveConfig {
+		cfg, ctf, err := backtest.LoadTraderStrategyConfig(db, *traderLike)
+		if err != nil {
+			log.Fatalf("liveconfig: %v", err)
+		}
+		baseline = backtest.LiveConfigParams(cfg, backtest.TimeframeHours(ctf))
+		fmt.Printf("(baseline from LIVE strategy config; primary_tf=%s, unit=%s, TP=%d BE=%d DD=%d SL_atr=%.1f)\n",
+			ctf, baseline.Unit, len(baseline.TPLegs), len(baseline.BELegs), len(baseline.DDRules), baseline.StopLossATR)
+	}
+	if *proxy && !*liveConfig {
 		baseline.CloseProxy = backtest.ClaudeCloseProxy(backtest.TimeframeHours(*tf))
 	}
 	report, relErr := backtest.FidelityReport(loaded, baseline)

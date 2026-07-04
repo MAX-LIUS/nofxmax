@@ -90,8 +90,9 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 	}
 
 	remaining := 1.0
-	peak := 0.0
-	beStop := 0.0 // 0 = not armed
+	peak := 0.0      // peak PnL% (percent-give-back model)
+	peakPrice := 0.0 // peak favorable PRICE (ATR-give-back model)
+	beStop := 0.0    // 0 = not armed
 	beArmedTier := -1
 	ddFired := make([]bool, len(p.DDRules))
 
@@ -179,6 +180,16 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 		if closePnL > peak {
 			peak = closePnL
 		}
+		// Track peak favorable PRICE for the ATR give-back model.
+		if isLong {
+			if peakPrice == 0 || bar.Close > peakPrice {
+				peakPrice = bar.Close
+			}
+		} else {
+			if peakPrice == 0 || bar.Close < peakPrice {
+				peakPrice = bar.Close
+			}
+		}
 
 		// BE arming: highest tier whose trigger is met.
 		for ti := range p.BELegs {
@@ -190,15 +201,38 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 			}
 		}
 
-		// DD: close ratio when profit>=min and giveback from peak>=max.
+		// DD: close ratio when profit>=min and give-back from peak>=max.
+		// Two give-back models:
+		//   - ATR (MaxDrawdownATR>0): peak→current PRICE retrace ≥ k×ATR, matching
+		//     live drawdown_trailing_convert (callback=(k*atr)/refPrice). Tracks
+		//     the peak PRICE, not peak PnL%.
+		//   - percent (legacy): give-back ≥ MaxDrawdownPct as a % of peak PnL.
 		if peak > 0 {
-			giveback := (peak - closePnL) / peak * 100
+			givebackPctOfPeak := (peak - closePnL) / peak * 100
 			for di := range p.DDRules {
 				if ddFired[di] {
 					continue
 				}
 				minP := ddMinProfitPct(p.DDRules[di], p.Unit, e.EntryPrice, atr)
-				if closePnL >= minP && giveback >= p.DDRules[di].MaxDrawdownPct {
+				if closePnL < minP {
+					continue
+				}
+				triggered := false
+				if p.DDRules[di].MaxDrawdownATR > 0 && atr > 0 && peakPrice > 0 {
+					// price retrace from peak in ATR multiples
+					var retrace float64
+					if isLong {
+						retrace = peakPrice - bar.Close
+					} else {
+						retrace = bar.Close - peakPrice
+					}
+					if retrace >= p.DDRules[di].MaxDrawdownATR*atr {
+						triggered = true
+					}
+				} else if givebackPctOfPeak >= p.DDRules[di].MaxDrawdownPct {
+					triggered = true
+				}
+				if triggered {
 					ddFired[di] = true
 					addExit(bar.Close, p.DDRules[di].CloseRatioPct/100.0)
 					res.CloseReasons = append(res.CloseReasons, "drawdown")

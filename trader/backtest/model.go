@@ -72,6 +72,12 @@ type DDRule struct {
 	MinProfitATR   float64 // arm threshold in ATR multiples (atr mode)
 	MaxDrawdownPct float64 // give-back of peak (% of peak) that triggers close
 	CloseRatioPct  float64 // fraction of original position closed
+
+	// MaxDrawdownATR, when > 0, switches the give-back trigger to LIVE ATR
+	// semantics: close when the peak→current PRICE retrace ≥ MaxDrawdownATR×ATR
+	// (matches drawdown_trailing_convert.go callback=(pct*atr)/refPrice), instead
+	// of the "% of peak PnL" model. Set by the config converter for atr-unit DD.
+	MaxDrawdownATR float64
 }
 
 // ProtectionParams is the full protection spec the backtest replays.
