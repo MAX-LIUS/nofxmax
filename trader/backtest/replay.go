@@ -61,6 +61,17 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 				slPrice = sl
 			}
 		}
+	} else if p.RangeSLEnabled && atr > 0 {
+		// Range-anchored structural SL (faithful live reconstruction): boundary =
+		// lookback range low(long)/high(short) from pre-entry bars, distance
+		// clamped to [floor, backstop] ATR. Falls back to the flat StopLossATR
+		// when the range has no edge (entered at/through the boundary).
+		if slp, ok := rangeStructuralSLPrice(p, e, bars, entryIdx, atr, isLong); ok {
+			slPrice = slp
+		} else {
+			slDist := p.slDistancePct(e.EntryPrice, atr)
+			slPrice = priceAtDistance(e.EntryPrice, slDist, isLong, false /*adverse*/)
+		}
 	} else {
 		slDist := p.slDistancePct(e.EntryPrice, atr)
 		slPrice = priceAtDistance(e.EntryPrice, slDist, isLong, false /*adverse*/)

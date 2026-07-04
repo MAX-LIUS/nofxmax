@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"nofx/market"
 	"nofx/store"
 )
 
@@ -41,8 +42,17 @@ func LiveConfigParams(cfg *store.StrategyConfig, tfHours float64) ProtectionPara
 	// The live full stop is a structural boundary clamped to [floor, backstop]
 	// ATR; without the live range we approximate the resting stop at the
 	// backstop multiple (the safety-net level a replay can represent).
-	ss := prot.LadderTPSL.StructuralSL
-	if ss.Enabled && ss.BackstopATRMul > 0 {
+	ss := prot.LadderTPSL.StructuralSL.WithDefaults()
+	if prot.LadderTPSL.StructuralSL.Enabled {
+		// Faithful reconstruction: replay the live range-anchored boundary
+		// clamped to [floor, backstop] ATR, instead of resting at the backstop.
+		p.RangeSLEnabled = true
+		p.RangeSLFloorATR = ss.FloorATRMul
+		p.RangeSLBackstopATR = ss.BackstopATRMul
+		p.RangeSLLookback = ss.LookbackBars
+		// Keep StopLossATR as the flat fallback (used when range has no edge).
+		p.StopLossATR = ss.BackstopATRMul
+	} else if ss.Enabled && ss.BackstopATRMul > 0 {
 		p.StopLossATR = ss.BackstopATRMul
 	} else {
 		// fall back to any structural SL rule distance, else a wide default.
@@ -131,4 +141,64 @@ func LoadTraderStrategyConfig(db *sql.DB, traderIDLike string) (*store.StrategyC
 		tf = "1h"
 	}
 	return &cfg, tf, nil
+}
+
+// rangeStructuralSLPrice reconstructs the live structural stop for one entry:
+// boundary = lookback range low (long) / high (short) over the RangeSLLookback
+// CLOSED bars BEFORE entry, with the entry→boundary distance clamped to
+// [RangeSLFloorATR, RangeSLBackstopATR] ATR multiples. Mirrors live
+// computeStructuralBoundary + structuralSLPercent. Returns (price, ok); ok=false
+// when the range has no edge (entered at/through the boundary) so the caller
+// falls back to the flat ATR stop.
+func rangeStructuralSLPrice(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int, atr float64, isLong bool) (float64, bool) {
+	lb := p.RangeSLLookback
+	if lb <= 0 {
+		lb = 24
+	}
+	// Use the lb CLOSED bars before entry (bars[entryIdx] is the entry bar).
+	start := entryIdx - lb
+	if start < 0 {
+		start = 0
+	}
+	if entryIdx-start < 2 {
+		return 0, false
+	}
+	lo, hi := 0.0, 0.0
+	for i := start; i < entryIdx; i++ {
+		if lo == 0 || bars[i].Low < lo {
+			lo = bars[i].Low
+		}
+		if bars[i].High > hi {
+			hi = bars[i].High
+		}
+	}
+	if lo <= 0 || hi <= 0 {
+		return 0, false
+	}
+	var boundary float64
+	if isLong {
+		if lo >= e.EntryPrice { // entered at/below range floor — no edge
+			return 0, false
+		}
+		boundary = lo
+	} else {
+		if hi <= e.EntryPrice {
+			return 0, false
+		}
+		boundary = hi
+	}
+	// Clamp the entry→boundary distance to [floor, backstop] ATR multiples.
+	dist := e.EntryPrice - boundary
+	if dist < 0 {
+		dist = -dist
+	}
+	mult := dist / atr
+	if p.RangeSLFloorATR > 0 && mult < p.RangeSLFloorATR {
+		mult = p.RangeSLFloorATR
+	}
+	if p.RangeSLBackstopATR > 0 && mult > p.RangeSLBackstopATR {
+		mult = p.RangeSLBackstopATR
+	}
+	distPct := mult * atr / e.EntryPrice * 100
+	return priceAtDistance(e.EntryPrice, distPct, isLong, false /*adverse*/), true
 }

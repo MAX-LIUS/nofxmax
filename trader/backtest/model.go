@@ -96,6 +96,17 @@ type ProtectionParams struct {
 	// Drawdown tiers
 	DDRules []DDRule
 
+	// Range-anchored structural SL (matches live computeStructuralBoundary +
+	// structuralSLPercent). When RangeSLEnabled, the stop is the lookback range
+	// low(long)/high(short) with its DISTANCE clamped to [RangeSLFloorATR,
+	// RangeSLBackstopATR] ATR multiples — replacing the flat StopLossATR. This is
+	// the faithful reconstruction of the live structural stop (the backtest has
+	// the pre-entry bars), instead of approximating with the backstop multiple.
+	RangeSLEnabled     bool
+	RangeSLFloorATR    float64
+	RangeSLBackstopATR float64
+	RangeSLLookback    int
+
 	// Structural mode (UnitStructural): per-entry SL/TP come from Entry.Structural.
 	// StructBufferATR, when > 0, re-derives the stop from the bare structural
 	// anchor as anchor ± StructBufferATR×ATR (Variant B). When 0, the AI's own
