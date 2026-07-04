@@ -125,6 +125,20 @@ export interface ProtectionRuntime {
   drawdown_execution_mode?: string
   drawdown_config_source?: string
   break_even_execution_mode?: string
+  // Structural stop-loss (range-anchored) surface. Auto-populated when enabled;
+  // boundary is the frozen swing edge enforced on bar close (Phase 2), backstop
+  // is the wide resting exchange stop covering downtime/gaps (Phase 1).
+  structural_sl_enabled?: boolean
+  structural_close_confirm?: boolean
+  structural_boundary_price?: number
+  structural_backstop_price?: number
+  structural_floor_atr_mul?: number
+  structural_backstop_atr_mul?: number
+  // Time / max-hold forced-close conditions (condition-based, no fixed price).
+  time_stop_hours?: number
+  time_stop_loss_pct?: number
+  max_hold_hours?: number
+  max_hold_profit_exempt_pct?: number
   current_pnl_pct?: number
   drawdown_peak_pnl_pct?: number
   current_drawdown_pct?: number

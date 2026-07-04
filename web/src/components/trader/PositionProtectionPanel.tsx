@@ -12,8 +12,25 @@ interface PositionProtectionPanelProps {
   onSymbolClick?: (symbol: string) => void
 }
 
+// ProtectionFamily groups every close-triggering mechanism into a color family so
+// the panel reads as one map: where (and by what) the position will close.
+//   liquidation — exchange hard floor (never should be hit)
+//   sl          — stop-loss orders (full/ladder/fallback)
+//   be          — break-even stop
+//   tp          — take-profit orders (full/ladder)
+//   dynamic     — trailing / managed-drawdown / runner (price moves with peak)
+//   structural  — range-anchored structural stop (boundary + backstop)
+type ProtectionFamily =
+  | 'liquidation'
+  | 'sl'
+  | 'be'
+  | 'tp'
+  | 'dynamic'
+  | 'structural'
+
 type ProtectionRow = {
   zone: string
+  family: ProtectionFamily
   price: number
   sortPrice: number
   deltaPct: number
@@ -24,6 +41,17 @@ type ProtectionRow = {
   statusCls: string
   detail?: string
   isCurrentPrice?: boolean
+}
+
+// FAMILY_CLS maps a family to its Tailwind text+border classes. Kept in one place
+// so the legend and the rows never drift apart.
+const FAMILY_CLS: Record<ProtectionFamily, string> = {
+  liquidation: 'text-red-400 border-red-500/50',
+  sl: 'text-orange-300 border-orange-400/30',
+  be: 'text-amber-300 border-amber-400/30',
+  tp: 'text-nofx-green border-emerald-400/30',
+  dynamic: 'text-purple-300 border-purple-400/30',
+  structural: 'text-blue-300 border-blue-400/40',
 }
 
 interface ScheduledTier {
@@ -203,6 +231,7 @@ function buildProtectionRows(
 
     rows.push({
       zone,
+      family: 'dynamic',
       price: triggerPrice,
       sortPrice: triggerPrice > 0 ? triggerPrice : markPrice,
       deltaPct,
@@ -215,7 +244,33 @@ function buildProtectionRows(
     })
   }
 
-  // Build rows from exchange orders (BE + Ladder only, skip trailing since DD comes from tiers)
+  // Runner stop: an explicit stop parked under a profit runner (distinct from the
+  // trailing tiers above). Shown as its own dynamic-family row when present.
+  if (rt?.runner_mode_active && Number(rt?.runner_stop_price ?? 0) > 0) {
+    const rsp = Number(rt.runner_stop_price)
+    const rawDelta =
+      entryPrice > 0 ? ((rsp - entryPrice) / entryPrice) * 100 : 0
+    const deltaPct = rawDelta * dirMul
+    rows.push({
+      zone: 'Runner',
+      family: 'dynamic',
+      price: rsp,
+      sortPrice: rsp,
+      deltaPct,
+      atrMult: toAtrMult(deltaPct),
+      ratioPct: 100 - Number(rt.runner_keep_pct ?? 0),
+      usdValue: 0,
+      status: language === 'zh' ? '跟随中' : 'Runner',
+      statusCls: 'text-purple-300',
+      detail:
+        typeof rt.runner_keep_pct === 'number'
+          ? `keep ${rt.runner_keep_pct}%`
+          : undefined,
+    })
+  }
+
+  // Build rows from exchange orders (BE + Ladder + fallback, skip trailing since
+  // DD comes from tiers). Family is inferred from zone + profit direction.
   let beIndex = 0
   for (const order of orders) {
     const type = String(order.type || '').toUpperCase()
@@ -233,9 +288,24 @@ function buildProtectionRows(
     let zone = classifyZone(order, entryPrice, side)
     if (zone === 'DD') continue
 
+    const id = String(order.client_order_id || '').toLowerCase()
+    const isTP =
+      type.includes('TAKE_PROFIT') || type.includes('TP') || id.includes('_tp')
+    const isFallback = id.includes('fallback') || id.includes('maxloss')
+
+    let family: ProtectionFamily
     if (zone === 'BE') {
       beIndex++
       zone = `BE-${beIndex}`
+      family = 'be'
+    } else if (isFallback) {
+      zone = 'Fallback'
+      family = 'sl'
+    } else if (isTP) {
+      family = 'tp'
+    } else {
+      // A profit-side stop that isn't tagged BE is still a stop (ladder/full SL).
+      family = 'sl'
     }
 
     const status = language === 'zh' ? '委托中' : 'Live'
@@ -243,6 +313,7 @@ function buildProtectionRows(
 
     rows.push({
       zone,
+      family,
       price: triggerPrice,
       sortPrice: triggerPrice,
       deltaPct,
@@ -254,6 +325,82 @@ function buildProtectionRows(
     })
   }
 
+  // Structural stop-loss (range-anchored) — auto-shown when enabled. Two levels:
+  // the frozen boundary (Phase 2, close-confirm) and the wide backstop (Phase 1).
+  const structEnabled = Boolean(rt?.structural_sl_enabled)
+  if (structEnabled) {
+    const boundary = Number(rt?.structural_boundary_price ?? 0)
+    if (boundary > 0) {
+      const rawDelta =
+        entryPrice > 0 ? ((boundary - entryPrice) / entryPrice) * 100 : 0
+      rows.push({
+        zone: 'Struct',
+        family: 'structural',
+        price: boundary,
+        sortPrice: boundary,
+        deltaPct: rawDelta * dirMul,
+        atrMult: toAtrMult(rawDelta * dirMul),
+        ratioPct: 100,
+        usdValue: 0,
+        status: rt?.structural_close_confirm
+          ? language === 'zh'
+            ? '收盘确认'
+            : 'Close-confirm'
+          : language === 'zh'
+            ? '已布单'
+            : 'Armed',
+        statusCls: 'text-blue-300',
+        detail:
+          language === 'zh'
+            ? '结构位:K线收盘跌破边界即平'
+            : 'Structural: closes on bar close beyond boundary',
+      })
+    }
+    const backstop = Number(rt?.structural_backstop_price ?? 0)
+    if (backstop > 0) {
+      const rawDelta =
+        entryPrice > 0 ? ((backstop - entryPrice) / entryPrice) * 100 : 0
+      rows.push({
+        zone: 'Backstop',
+        family: 'structural',
+        price: backstop,
+        sortPrice: backstop,
+        deltaPct: rawDelta * dirMul,
+        atrMult: toAtrMult(rawDelta * dirMul),
+        ratioPct: 100,
+        usdValue: 0,
+        status: language === 'zh' ? '安全网' : 'Backstop',
+        statusCls: 'text-blue-300',
+        detail:
+          language === 'zh'
+            ? '安全网止损(挂交易所,防宕机/跳空)'
+            : 'Resting safety-net stop (downtime/gap cover)',
+      })
+    }
+  }
+
+  // Liquidation — the exchange hard floor. Always last-resort; render if present.
+  const liqPrice = Number(position.liquidation_price ?? 0)
+  if (liqPrice > 0 && entryPrice > 0) {
+    const rawDelta = ((liqPrice - entryPrice) / entryPrice) * 100
+    rows.push({
+      zone: 'Liq',
+      family: 'liquidation',
+      price: liqPrice,
+      sortPrice: liqPrice,
+      deltaPct: rawDelta * dirMul,
+      atrMult: toAtrMult(rawDelta * dirMul),
+      ratioPct: 100,
+      usdValue: 0,
+      status: language === 'zh' ? '强平线' : 'Liquidation',
+      statusCls: 'text-red-400',
+      detail:
+        language === 'zh'
+          ? '交易所强制平仓价(最后底线)'
+          : 'Exchange forced-liquidation price (hard floor)',
+    })
+  }
+
   // Insert current price marker
   if (markPrice > 0) {
     const markDelta =
@@ -262,6 +409,7 @@ function buildProtectionRows(
         : 0
     rows.push({
       zone: '',
+      family: 'dynamic',
       price: markPrice,
       sortPrice: markPrice,
       deltaPct: markDelta,
@@ -543,11 +691,7 @@ const PositionCard = memo(function PositionCard({
                   : row.deltaPct < 0
                     ? 'text-nofx-red'
                     : 'text-nofx-text-muted'
-              const zoneCls = row.zone.startsWith('DD')
-                ? 'text-purple-300 border-purple-400/30'
-                : row.zone.startsWith('BE')
-                  ? 'text-amber-300 border-amber-400/30'
-                  : 'text-blue-300 border-blue-400/30'
+              const zoneCls = FAMILY_CLS[row.family] || FAMILY_CLS.dynamic
               const statusDot = row.statusCls.includes('emerald')
                 ? 'bg-emerald-400'
                 : row.statusCls.includes('amber')
@@ -606,9 +750,96 @@ const PositionCard = memo(function PositionCard({
           {language === 'zh' ? '无保护委托' : 'No protection orders'}
         </div>
       )}
+
+      <ConditionTriggers rt={rt} language={language} />
     </div>
   )
 })
+
+// ConditionTriggers renders the close mechanisms that have NO fixed price — they
+// fire on elapsed time / loss conditions, not a level. Kept visually separate
+// (gray) from the price ladder so the user does not read them as price lines.
+function ConditionTriggers({
+  rt,
+  language,
+}: {
+  rt: Position['protection_runtime']
+  language: Language
+}) {
+  const chips: { label: string; title: string }[] = []
+  const tsh = Number(rt?.time_stop_hours ?? 0)
+  const tsl = Number(rt?.time_stop_loss_pct ?? 0)
+  if (tsh > 0) {
+    chips.push({
+      label:
+        language === 'zh'
+          ? `时间止损 ${tsh}h${tsl ? ` / 亏损<${tsl}%` : ''}`
+          : `Time-stop ${tsh}h${tsl ? ` / loss<${tsl}%` : ''}`,
+      title:
+        language === 'zh'
+          ? `持仓超过 ${tsh} 小时且仍亏损差于 ${tsl}% 时强制平仓`
+          : `Force-close when held > ${tsh}h and still in loss worse than ${tsl}%`,
+    })
+  }
+  const mhh = Number(rt?.max_hold_hours ?? 0)
+  const mhe = Number(rt?.max_hold_profit_exempt_pct ?? 0)
+  if (mhh > 0) {
+    chips.push({
+      label:
+        language === 'zh'
+          ? `超时平仓 ${mhh}h${mhe ? ` / 盈利≥${mhe}%豁免` : ''}`
+          : `Max-hold ${mhh}h${mhe ? ` / exempt≥${mhe}%` : ''}`,
+      title:
+        language === 'zh'
+          ? `持仓超过 ${mhh} 小时强制平仓,除非盈利≥${mhe}%(盈利runner豁免)`
+          : `Force-close after ${mhh}h unless profit ≥ ${mhe}% (runner exempt)`,
+    })
+  }
+  if (chips.length === 0) return null
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 pt-1">
+      <span className="text-[10px] uppercase tracking-wider text-nofx-text-muted">
+        {language === 'zh'
+          ? '条件触发(无固定价位)'
+          : 'Condition triggers (no price)'}
+      </span>
+      {chips.map((c, i) => (
+        <span
+          key={i}
+          className="rounded border border-white/15 bg-white/5 px-1.5 py-0.5 text-[10px] text-nofx-text-muted"
+          title={c.title}
+        >
+          {c.label}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+// ProtectionLegend explains the color families once at the top so every price
+// row below is self-describing.
+function ProtectionLegend({ language }: { language: Language }) {
+  const items: { family: ProtectionFamily; zh: string; en: string }[] = [
+    { family: 'tp', zh: '止盈', en: 'TP' },
+    { family: 'be', zh: '保本', en: 'BE' },
+    { family: 'sl', zh: '止损/兜底', en: 'SL/Fallback' },
+    { family: 'dynamic', zh: '移动/回撤', en: 'Trailing/DD' },
+    { family: 'structural', zh: '结构位', en: 'Structural' },
+    { family: 'liquidation', zh: '强平', en: 'Liq' },
+  ]
+  return (
+    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 mb-3 text-[10px] text-nofx-text-muted">
+      {items.map((it) => (
+        <span key={it.family} className="inline-flex items-center gap-1">
+          <span
+            className={`inline-block w-2 h-2 rounded-sm border ${FAMILY_CLS[it.family]}`}
+          />
+          {language === 'zh' ? it.zh : it.en}
+        </span>
+      ))}
+    </div>
+  )
+}
 
 export function PositionProtectionPanel({
   traderId,
@@ -683,6 +914,8 @@ export function PositionProtectionPanel({
           <span className="text-[10px] text-nofx-text-muted ml-2">⟳</span>
         )}
       </h2>
+
+      <ProtectionLegend language={language} />
 
       <div className="space-y-4">
         {positions.map((position, index) => (

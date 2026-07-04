@@ -860,6 +860,59 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 		}
 	}
 
+	// Structural stop-loss (range-anchored) surface for the UI. Two price levels:
+	//   Phase 2 boundary  — the frozen pre-entry swing edge; a bar CLOSE beyond it
+	//                       triggers the tight structural close (the real "structural
+	//                       stop"). Read-only here (allowCompute=false) so the panel
+	//                       never fabricates a boundary — it shows exactly what the
+	//                       guard enforces, or nothing when none was frozen.
+	//   Phase 1 backstop  — the wide resting exchange stop (entry ∓ BackstopATRMul×ATR)
+	//                       that covers bot downtime / catastrophic gaps.
+	isLong := strings.EqualFold(side, "LONG")
+	structuralSLEnabled := false
+	structuralCloseConfirm := false
+	structuralBoundaryPrice := 0.0
+	structuralBackstopPrice := 0.0
+	structuralFloorATRMul := 0.0
+	structuralBackstopATRMul := 0.0
+	if at.config.StrategyConfig != nil {
+		ladderCfg := at.config.StrategyConfig.Protection.LadderTPSL
+		sscfg := ladderCfg.StructuralSL
+		if sscfg.Enabled {
+			structuralSLEnabled = true
+			ss := sscfg.WithDefaults()
+			structuralCloseConfirm = ss.CloseConfirm
+			structuralFloorATRMul = ss.FloorATRMul
+			structuralBackstopATRMul = ss.BackstopATRMul
+			acfg := at.config.StrategyConfig.ATRProtection
+			if b, ok := at.frozenStructBoundaryForPosition(symbol, entryPrice, isLong, false, sscfg, acfg); ok && b > 0 {
+				structuralBoundaryPrice = b
+			}
+			// Backstop price mirrors the resting stop distance (entry ∓ backstop×ATR).
+			if atrAtEntry > 0 && entryPrice > 0 && ss.BackstopATRMul > 0 {
+				dist := ss.BackstopATRMul * atrAtEntry
+				if isLong {
+					structuralBackstopPrice = entryPrice - dist
+				} else {
+					structuralBackstopPrice = entryPrice + dist
+				}
+			}
+		}
+	}
+
+	// Time / max-hold forced-close conditions (no fixed price — condition-based).
+	timeStopHours := 0.0
+	timeStopLossPct := 0.0
+	maxHoldHours := 0.0
+	maxHoldProfitExemptPct := 0.0
+	if at.config.StrategyConfig != nil {
+		rc := at.config.StrategyConfig.RiskControl
+		timeStopHours = rc.TimeStopHours
+		timeStopLossPct = rc.TimeStopLossPct
+		maxHoldHours = rc.MaxHoldHours
+		maxHoldProfitExemptPct = rc.MaxHoldProfitExemptPct
+	}
+
 	be := at.getActiveBreakEvenConfigForPlan(nil)
 	breakEvenTrigger := 0.0
 	breakEvenOffset := 0.0
@@ -1487,5 +1540,17 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 		"active_orders":                         activeOrders,
 		"active_trailing_orders":                trailingOrders,
 		"scheduled_tiers":                       tiers,
+		// Structural stop-loss (range-anchored) surface — auto-populated when enabled.
+		"structural_sl_enabled":       structuralSLEnabled,
+		"structural_close_confirm":    structuralCloseConfirm,
+		"structural_boundary_price":   structuralBoundaryPrice,
+		"structural_backstop_price":   structuralBackstopPrice,
+		"structural_floor_atr_mul":    structuralFloorATRMul,
+		"structural_backstop_atr_mul": structuralBackstopATRMul,
+		// Time / max-hold forced-close conditions (condition-based, no fixed price).
+		"time_stop_hours":            timeStopHours,
+		"time_stop_loss_pct":         timeStopLossPct,
+		"max_hold_hours":             maxHoldHours,
+		"max_hold_profit_exempt_pct": maxHoldProfitExemptPct,
 	}
 }
