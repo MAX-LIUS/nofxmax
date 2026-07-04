@@ -172,6 +172,10 @@ func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string
 	posBuilder := store.NewPositionBuilder(positionStore)
 	syncedCount := 0
 
+	// Per-run cache for close attribution: a single triggered order can produce
+	// many fills, so dedup the GetOrder / close-intent resolution by order id.
+	closeAttrCache := make(map[string]resolvedCloseOrder)
+
 	skippedCount := 0
 	for _, trade := range allTrades {
 		// Check if trade already exists
@@ -202,6 +206,36 @@ func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string
 		// Normalize side
 		side := strings.ToUpper(trade.Side)
 
+		// Deterministic close attribution. Binance protection (STOP/TP/TRAILING/
+		// maker-TP) fires exchange-side and returns a bare close fill; resolve the
+		// real originating order type + any bot close-intent so the close event is
+		// attributed to a mechanism instead of sync_external. Only for closes;
+		// opens keep their bare open_long/open_short. The synthetic "MARKET" type
+		// stays only when nothing resolved (today's behaviour).
+		recordType := "MARKET"
+		recordAction := orderAction
+		recordStopPrice := 0.0
+		recordClientID := ""
+		recordParentID := ""
+		if strings.HasPrefix(orderAction, "close_") {
+			resolved := t.resolveBinanceClose(st, traderID, symbol, positionSide, trade, closeAttrCache)
+			if resolved.realType != "" {
+				recordType = resolved.realType
+			}
+			// A resolved bot mechanism (ai_close/managed_drawdown/...) is written
+			// as the order action so deriveCloseReason adopts it directly. Native
+			// protection (STOP/TP/TRAILING) keeps the bare close action and is
+			// classified from recordType with full position context downstream.
+			if resolved.reason != "" {
+				recordAction = resolved.reason
+			}
+			recordStopPrice = resolved.stopPrice
+			recordClientID = resolved.clientOrderID
+			if trade.OrderID != "" {
+				recordParentID = trade.OrderID
+			}
+		}
+
 		// Create order record - use Unix milliseconds UTC
 		tradeTimeMs := trade.Time.UTC().UnixMilli()
 		orderRecord := &store.TraderOrder{
@@ -209,11 +243,14 @@ func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string
 			ExchangeID:      exchangeID,
 			ExchangeType:    exchangeType,
 			ExchangeOrderID: trade.TradeID,
+			ClientOrderID:   recordClientID,
+			ParentOrderID:   recordParentID,
 			Symbol:          symbol,
 			Side:            side,
 			PositionSide:    positionSide,
-			Type:            "MARKET",
-			OrderAction:     orderAction,
+			Type:            recordType,
+			StopPrice:       recordStopPrice,
+			OrderAction:     recordAction,
 			Quantity:        trade.Quantity,
 			Price:           trade.Price,
 			Status:          "FILLED",

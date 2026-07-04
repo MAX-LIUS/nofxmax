@@ -12,8 +12,17 @@ import {
   formatAlignmentNotes,
 } from './reviewContextSummary'
 import { CompactEntryRationaleBlock } from './CompactEntryRationaleBlock'
+import {
+  buildProtectionPlan,
+  classifyMechanism,
+  mechanismLabel,
+  categoryOf,
+  categoryMeta,
+  type PlanItem,
+} from './protectionPlan'
 import type {
   HistoricalPosition,
+  PositionCloseEvent,
   TraderStats,
   SymbolStats,
   DirectionStats,
@@ -165,41 +174,6 @@ function summarizeCloseSource(
     label: rawSource || rawReason || 'Unknown close source',
     confidence: 'low',
     group: 'unknown',
-  }
-}
-
-function getCloseSourceBadgeStyle(presentation: CloseSourcePresentation) {
-  switch (presentation.group) {
-    case 'ai':
-      return {
-        background: 'rgba(96,165,250,0.14)',
-        color: '#60A5FA',
-        border: '1px solid rgba(96,165,250,0.3)',
-      }
-    case 'protection':
-      return {
-        background: 'rgba(168,85,247,0.14)',
-        color: '#C084FC',
-        border: '1px solid rgba(168,85,247,0.3)',
-      }
-    case 'manual':
-      return {
-        background: 'rgba(14,203,129,0.14)',
-        color: '#0ECB81',
-        border: '1px solid rgba(14,203,129,0.3)',
-      }
-    case 'sync':
-      return {
-        background: 'rgba(251,191,36,0.14)',
-        color: '#F0B90B',
-        border: '1px solid rgba(251,191,36,0.3)',
-      }
-    default:
-      return {
-        background: 'rgba(132,142,156,0.14)',
-        color: '#AAB2BD',
-        border: '1px solid rgba(132,142,156,0.25)',
-      }
   }
 }
 
@@ -1034,103 +1008,6 @@ function formatReviewContextSummary(
   return parts.length > 0 ? parts.join(' | ') : '—'
 }
 
-function formatProtectionSourceLabel(source?: string): string {
-  switch (String(source || '').toLowerCase()) {
-    case 'ai_decision':
-      return 'AI'
-    case 'strategy':
-      return 'Strategy'
-    case 'none':
-      return 'None'
-    default:
-      return source || '—'
-  }
-}
-
-function formatProtectionBadge(
-  sourceLabel: string,
-  modeLabel?: string,
-  kind?: 'full' | 'ladder' | 'drawdown' | 'break_even'
-) {
-  const colorMap = {
-    full: {
-      bg: 'rgba(14, 203, 129, 0.10)',
-      border: '1px solid rgba(14, 203, 129, 0.22)',
-      color: '#8CF4C4',
-    },
-    ladder: {
-      bg: 'rgba(59, 130, 246, 0.10)',
-      border: '1px solid rgba(59, 130, 246, 0.22)',
-      color: '#93C5FD',
-    },
-    drawdown: {
-      bg: 'rgba(168, 85, 247, 0.10)',
-      border: '1px solid rgba(168, 85, 247, 0.22)',
-      color: '#D8B4FE',
-    },
-    break_even: {
-      bg: 'rgba(249, 115, 22, 0.10)',
-      border: '1px solid rgba(249, 115, 22, 0.22)',
-      color: '#FDBA74',
-    },
-  } as const
-  return {
-    label: modeLabel ? `${sourceLabel} · ${modeLabel}` : sourceLabel,
-    style: colorMap[kind || 'full'],
-  }
-}
-
-function formatProtectionSummary(
-  snapshot?: HistoricalPosition['protection_snapshot']
-): { label: string; style: React.CSSProperties }[] {
-  if (!snapshot) return []
-  const parts: { label: string; style: React.CSSProperties }[] = []
-  if (snapshot.full_tp_sl?.enabled) {
-    parts.push(
-      formatProtectionBadge(
-        'Full',
-        snapshot.full_tp_sl.mode || 'manual',
-        'full'
-      )
-    )
-  }
-  if (snapshot.ladder_tp_sl?.enabled) {
-    parts.push(
-      formatProtectionBadge(
-        'Ladder',
-        snapshot.ladder_tp_sl.mode || 'manual',
-        'ladder'
-      )
-    )
-  }
-  if (snapshot.drawdown && snapshot.drawdown.length > 0) {
-    const first = snapshot.drawdown[0]
-    const extras = [
-      first.stage ? first.stage.replace(/_/g, ' ') : '',
-      first.runner_mode_active
-        ? `runner ${typeof first.runner_keep_pct === 'number' ? `${first.runner_keep_pct}%` : 'on'}`
-        : '',
-      first.break_even_suppressed_by_runner ? 'BE suppressed' : '',
-    ].filter(Boolean)
-    const detail = [
-      first.mode || 'manual',
-      formatProtectionSourceLabel(first.source),
-      ...extras,
-    ].join(' · ')
-    parts.push(formatProtectionBadge('Drawdown', detail, 'drawdown'))
-  }
-  if (snapshot.break_even?.enabled) {
-    parts.push(
-      formatProtectionBadge(
-        'Break-even',
-        formatProtectionSourceLabel(snapshot.break_even.source),
-        'break_even'
-      )
-    )
-  }
-  return parts
-}
-
 // Stats Card Component with formula tooltip
 function StatCard({
   title,
@@ -1332,6 +1209,107 @@ function DirectionStatsCard({
   )
 }
 
+// matchCloseEventToPlan links an actual close event to the entry-plan item that
+// fired it. Primary key is the mechanism (both come from the same taxonomy);
+// among same-mechanism tiers (ladder TP1/TP2/...), the tier whose trigger price
+// is closest to the fill price wins. Returns undefined when no plan item shares
+// the event's mechanism (e.g. AI close, exchange-unattributed).
+function matchCloseEventToPlan(
+  event: PositionCloseEvent,
+  plan: PlanItem[]
+): PlanItem | undefined {
+  const mech =
+    event.mechanism ||
+    classifyMechanism(event.close_reason || event.execution_source)
+  const sameMech = plan.filter((p) => p.mechanism === mech)
+  if (sameMech.length === 0) return undefined
+  if (sameMech.length === 1) return sameMech[0]
+  const fill = event.execution_price || 0
+  if (fill <= 0) return sameMech[0]
+  let best = sameMech[0]
+  let bestDist = Infinity
+  for (const p of sameMech) {
+    if (typeof p.triggerPrice !== 'number') continue
+    const d = Math.abs(p.triggerPrice - fill)
+    if (d < bestDist) {
+      bestDist = d
+      best = p
+    }
+  }
+  return best
+}
+
+// EntryProtectionPlan renders the price-anchored protection plan captured at
+// entry: every ladder TP/SL tier, break-even arm point, and drawdown floor with
+// its concrete trigger price and close ratio. `firedMechanisms` highlights the
+// levels that actually fired so the plan and the outcome read as one story.
+function EntryProtectionPlan({
+  plan,
+  language,
+  firedMechanisms,
+}: {
+  plan: PlanItem[]
+  language: string
+  firedMechanisms: Set<string>
+}) {
+  if (plan.length === 0) return null
+  const kindColor: Record<PlanItem['kind'], string> = {
+    tp: '#0ECB81',
+    sl: '#F6465D',
+    be: '#F0B90B',
+    drawdown: '#C084FC',
+    trailing: '#60A5FA',
+  }
+  return (
+    <div>
+      <div className="text-xs mb-2" style={{ color: '#848E9C' }}>
+        {language === 'zh' ? '开仓保护方案' : 'Entry Protection Plan'} (
+        {plan.length})
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {plan.map((item, idx) => {
+          const c = kindColor[item.kind]
+          const fired = firedMechanisms.has(item.mechanism)
+          return (
+            <div
+              key={`${item.mechanism}-${idx}`}
+              className="rounded px-2 py-1 text-[11px]"
+              style={{
+                background: `${c}14`,
+                border: `1px solid ${c}${fired ? 'aa' : '33'}`,
+                color: '#EAECEF',
+                boxShadow: fired ? `0 0 0 1px ${c}55` : 'none',
+              }}
+              title={item.note || ''}
+            >
+              <span style={{ color: c, fontWeight: 600 }}>{item.label}</span>
+              <span className="ml-1" style={{ color: '#848E9C' }}>
+                {item.triggerPct >= 0 ? '+' : ''}
+                {item.triggerPct}%
+              </span>
+              {typeof item.triggerPrice === 'number' && (
+                <span className="ml-1 font-mono">
+                  @{formatPrice(item.triggerPrice)}
+                </span>
+              )}
+              {typeof item.closeRatioPct === 'number' && (
+                <span className="ml-1" style={{ color: '#848E9C' }}>
+                  ·{item.closeRatioPct}%
+                </span>
+              )}
+              {fired && (
+                <span className="ml-1" style={{ color: c }}>
+                  ✓
+                </span>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 // Position Row Component
 function PositionRow({
   position,
@@ -1340,6 +1318,7 @@ function PositionRow({
   position: HistoricalPosition
   onSymbolClick?: (symbol: string) => void
 }) {
+  const { language } = useLanguage()
   const [expanded, setExpanded] = useState(false)
   const side = position.side || ''
   const isLong = side.toUpperCase() === 'LONG'
@@ -1377,15 +1356,28 @@ function PositionRow({
 
   const closeRatioPct = position.close_ratio_pct || 0
   const closeValueUsdt = position.close_value_usdt || exitPrice * displayQty
-  const executionSourcePresentation = summarizeCloseSource(
-    position.execution_source,
-    position.close_reason,
-    position.execution_order_type,
-    Boolean(position.exit_decision_cycle),
-    Boolean(position.exit_decision_review?.review_context)
+  // Position-level canonical mechanism/category from the taxonomy.
+  const positionMech = classifyMechanism(
+    position.close_reason || position.execution_source
   )
-  const executionSource = executionSourcePresentation.label
+  const positionCat = categoryOf(positionMech)
+  const positionCatMeta = categoryMeta(positionCat)
   const closeFlowSummary = summarizeCloseEventFlow(position.close_events)
+  // Entry protection plan (price-anchored) + which of its mechanisms actually
+  // fired, derived from the close-event taxonomy. Prefer the exit snapshot when
+  // present (protection can be re-planned mid-hold), else the entry snapshot.
+  const planSnapshot =
+    position.exit_decision_review?.protection_snapshot ||
+    position.entry_decision_review?.protection_snapshot ||
+    position.protection_snapshot
+  const protectionPlan = buildProtectionPlan(planSnapshot, entryPrice, isLong)
+  const firedMechanisms = new Set<string>(
+    (position.close_events || []).map(
+      (ev) =>
+        ev.mechanism ||
+        classifyMechanism(ev.close_reason || ev.execution_source)
+    )
+  )
   const entryReviewSummary = position.entry_review_summary
   const entryTf = entryReviewSummary?.timeframe_context as
     | { primary?: string; lower?: string[]; higher?: string[] }
@@ -1564,29 +1556,32 @@ function PositionRow({
             <div className="rounded-lg border border-white/10 bg-black/20 p-4 mt-2 space-y-3">
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-xs">
                 <div>
-                  <div style={{ color: '#848E9C' }}>{'委托来源 / Source'}</div>
-                  <div
-                    className="px-2 py-1 rounded text-[11px] font-semibold inline-flex"
-                    style={getCloseSourceBadgeStyle(
-                      executionSourcePresentation
-                    )}
-                  >
-                    {executionSource}
+                  <div style={{ color: '#848E9C' }}>
+                    {language === 'zh' ? '平仓归因 / Source' : 'Close Source'}
                   </div>
-                  {executionSourcePresentation.detail ? (
+                  <div
+                    className="px-2 py-1 rounded text-[11px] font-semibold inline-flex items-center gap-1"
+                    style={{
+                      background: positionCatMeta.bg,
+                      color: positionCatMeta.color,
+                      border: `1px solid ${positionCatMeta.border}`,
+                    }}
+                  >
+                    <span>{mechanismLabel(language, positionMech)}</span>
+                    <span className="opacity-60" style={{ fontSize: '9px' }}>
+                      {language === 'zh'
+                        ? positionCatMeta.zh
+                        : positionCatMeta.en}
+                    </span>
+                  </div>
+                  {positionMech === 'sync_external' && (
                     <div
                       className="mt-1 text-[11px]"
-                      style={{ color: '#848E9C' }}
+                      style={{ color: '#F0B90B' }}
                     >
-                      {executionSourcePresentation.detail} · confidence{' '}
-                      {executionSourcePresentation.confidence}
-                    </div>
-                  ) : (
-                    <div
-                      className="mt-1 text-[11px]"
-                      style={{ color: '#848E9C' }}
-                    >
-                      confidence {executionSourcePresentation.confidence}
+                      {language === 'zh'
+                        ? '交易所侧平仓,机制未回传(旧仓或历史成交)'
+                        : 'Closed exchange-side; mechanism not resolved'}
                     </div>
                   )}
                   <div
@@ -1597,19 +1592,6 @@ function PositionRow({
                     {position.execution_source ||
                       position.close_reason ||
                       'unknown'}
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {formatProtectionSummary(position.protection_snapshot).map(
-                      (item, idx) => (
-                        <span
-                          key={idx}
-                          className="px-2 py-1 rounded text-[11px] font-medium"
-                          style={item.style}
-                        >
-                          {item.label}
-                        </span>
-                      )
-                    )}
                   </div>
                 </div>
                 <div>
@@ -1707,20 +1689,6 @@ function PositionRow({
                       )}
                     </div>
                   )}
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {formatProtectionSummary(
-                      position.exit_decision_review?.protection_snapshot ||
-                        position.entry_decision_review?.protection_snapshot
-                    ).map((item, idx) => (
-                      <span
-                        key={idx}
-                        className="px-2 py-1 rounded text-[11px] font-medium"
-                        style={item.style}
-                      >
-                        {item.label}
-                      </span>
-                    ))}
-                  </div>
                   <div className="mt-2">
                     <DecisionAuditPanel
                       review={
@@ -1833,6 +1801,14 @@ function PositionRow({
                   }
                 })()}
 
+              {protectionPlan.length > 0 && (
+                <EntryProtectionPlan
+                  plan={protectionPlan}
+                  language={language}
+                  firedMechanisms={firedMechanisms}
+                />
+              )}
+
               {position.close_events &&
                 position.close_events.length > 0 &&
                 (() => {
@@ -1895,12 +1871,19 @@ function PositionRow({
                           </thead>
                           <tbody>
                             {events.map((event, idx) => {
-                              const eventPresentation = summarizeCloseSource(
-                                event.execution_source,
-                                event.close_reason,
-                                event.execution_type,
-                                Boolean(event.decision_cycle),
-                                Boolean(event.decision_review?.review_context)
+                              // Canonical taxonomy: prefer the backend-resolved
+                              // mechanism, else classify the raw reason. Then map
+                              // the event back to the entry-plan tier that fired.
+                              const eventMech =
+                                event.mechanism ||
+                                classifyMechanism(
+                                  event.close_reason || event.execution_source
+                                )
+                              const eventCat = categoryOf(eventMech)
+                              const catMeta = categoryMeta(eventCat)
+                              const matchedPlan = matchCloseEventToPlan(
+                                event,
+                                protectionPlan
                               )
                               const pnl = event.realized_pnl_delta || 0
                               const pnlColor = pnl >= 0 ? '#0ECB81' : '#F6465D'
@@ -1961,23 +1944,47 @@ function PositionRow({
                                   </td>
                                   <td className="py-2 px-3">
                                     <div
-                                      className="inline-flex px-2 py-0.5 rounded text-[10px] font-medium"
-                                      style={getCloseSourceBadgeStyle(
-                                        eventPresentation
-                                      )}
+                                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium"
+                                      style={{
+                                        background: catMeta.bg,
+                                        color: catMeta.color,
+                                        border: `1px solid ${catMeta.border}`,
+                                      }}
                                     >
-                                      {eventPresentation.label}
+                                      <span>
+                                        {mechanismLabel(language, eventMech)}
+                                      </span>
+                                      <span
+                                        className="opacity-60"
+                                        style={{ fontSize: '9px' }}
+                                      >
+                                        {language === 'zh'
+                                          ? catMeta.zh
+                                          : catMeta.en}
+                                      </span>
                                     </div>
-                                    {event.mechanism &&
-                                      event.mechanism !==
-                                        event.close_reason && (
-                                        <div
-                                          className="mt-0.5 font-mono text-[10px]"
-                                          style={{ color: '#848E9C' }}
-                                        >
-                                          {event.mechanism}
-                                        </div>
-                                      )}
+                                    {matchedPlan && (
+                                      <div
+                                        className="mt-0.5 text-[10px]"
+                                        style={{ color: '#848E9C' }}
+                                        title={
+                                          language === 'zh'
+                                            ? '对应开仓保护档位'
+                                            : 'matched entry-plan tier'
+                                        }
+                                      >
+                                        → {matchedPlan.label}
+                                        {typeof matchedPlan.triggerPrice ===
+                                          'number' && (
+                                          <span className="font-mono ml-0.5">
+                                            @
+                                            {formatPrice(
+                                              matchedPlan.triggerPrice
+                                            )}
+                                          </span>
+                                        )}
+                                      </div>
+                                    )}
                                   </td>
                                   <td
                                     className="py-2 px-3 text-right font-mono font-semibold"
