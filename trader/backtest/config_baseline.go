@@ -50,6 +50,9 @@ func LiveConfigParams(cfg *store.StrategyConfig, tfHours float64) ProtectionPara
 		p.RangeSLFloorATR = ss.FloorATRMul
 		p.RangeSLBackstopATR = ss.BackstopATRMul
 		p.RangeSLLookback = ss.LookbackBars
+		// Phase-2 close-confirm: tight boundary enforced on bar close, wide
+		// backstop is the resting intrabar stop. Mirrors runStructuralSLGuard.
+		p.RangeSLCloseConfirm = ss.CloseConfirm
 		// Keep StopLossATR as the flat fallback (used when range has no edge).
 		p.StopLossATR = ss.BackstopATRMul
 	} else if ss.Enabled && ss.BackstopATRMul > 0 {

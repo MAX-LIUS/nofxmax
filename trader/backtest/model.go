@@ -106,6 +106,14 @@ type ProtectionParams struct {
 	RangeSLFloorATR    float64
 	RangeSLBackstopATR float64
 	RangeSLLookback    int
+	// RangeSLCloseConfirm models the live Phase-2 close-confirm structural stop:
+	// the tight structural boundary is NOT a resting intrabar stop — it fires
+	// only when a bar CLOSES beyond the boundary, filling at that close. A wide
+	// resting backstop (RangeSLBackstopATR ATR) still catches catastrophic
+	// intrabar moves. This mirrors runStructuralSLGuard + the backstop resting
+	// order. Without it the replay exits on an intrabar wick at the tight level,
+	// which is FAVORABLE vs live and understates full_sl losses.
+	RangeSLCloseConfirm bool
 
 	// Structural mode (UnitStructural): per-entry SL/TP come from Entry.Structural.
 	// StructBufferATR, when > 0, re-derives the stop from the bare structural

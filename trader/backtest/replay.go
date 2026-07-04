@@ -46,6 +46,10 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 	// Structural mode reads absolute SL/TP prices from the per-entry plan;
 	// percent/ATR modes derive distances uniformly.
 	var slPrice float64
+	// confirmBoundary>0 activates close-confirm modelling: the tight structural
+	// level fires only on a bar CLOSE beyond it (fill at close), while slPrice is
+	// the wide backstop resting stop that still fires intrabar.
+	var confirmBoundary float64
 	if p.Unit == UnitStructural {
 		if p.StructUseATRSL && p.StopLossATR > 0 && atr > 0 {
 			// Hybrid: ATR-wide SL, structural TP (set below).
@@ -66,8 +70,18 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 		// lookback range low(long)/high(short) from pre-entry bars, distance
 		// clamped to [floor, backstop] ATR. Falls back to the flat StopLossATR
 		// when the range has no edge (entered at/through the boundary).
-		if slp, ok := rangeStructuralSLPrice(p, e, bars, entryIdx, atr, isLong); ok {
-			slPrice = slp
+		tight, hasEdge := rangeStructuralSLPrice(p, e, bars, entryIdx, atr, isLong)
+		if p.RangeSLCloseConfirm && hasEdge {
+			// Live Phase-2: tight structural level enforced on bar CLOSE only; the
+			// resting exchange stop sits at the wide backstop for intrabar wicks.
+			confirmBoundary = tight
+			backDist := p.RangeSLBackstopATR
+			if backDist <= 0 {
+				backDist = 4.5
+			}
+			slPrice = priceAtDistance(e.EntryPrice, backDist*atr/e.EntryPrice*100, isLong, false /*adverse*/)
+		} else if hasEdge {
+			slPrice = tight
 		} else {
 			slDist := p.slDistancePct(e.EntryPrice, atr)
 			slPrice = priceAtDistance(e.EntryPrice, slDist, isLong, false /*adverse*/)
@@ -163,6 +177,19 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 				beArmedTier = -1
 			}
 			continue
+		}
+
+		// --- close-confirm structural stop: fires only when a bar CLOSES beyond
+		// the tight boundary (fill at close), modelling live runStructuralSLGuard.
+		// The wide backstop above already covers intrabar catastrophes. Only while
+		// the full structural stop is in force (BE not yet armed).
+		if confirmBoundary > 0 && beStop == 0 {
+			confirmed := (isLong && bar.Close < confirmBoundary) || (!isLong && bar.Close > confirmBoundary)
+			if confirmed {
+				addExit(bar.Close, remaining)
+				res.CloseReasons = append(res.CloseReasons, "structural_sl")
+				continue
+			}
 		}
 
 		// --- favorable extreme: take-profit legs ---
