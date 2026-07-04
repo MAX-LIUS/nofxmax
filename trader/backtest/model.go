@@ -117,6 +117,11 @@ type Entry struct {
 	// RealizedPnL is Claude's actual realized P&L for this trade, used for
 	// engine-fidelity validation (percent baseline should approximate it).
 	RealizedPnL float64
+	// CloseReason is the live close mechanism recorded for this trade
+	// (full_sl / ai_close / managed_drawdown / max_hold / ...). Used to bucket
+	// fidelity error by mechanism so we can see which live closes the replay
+	// fails to model (the AI/time/breadth closes it currently ignores).
+	CloseReason string
 	// Structural carries the AI's per-entry structural SL/TP, populated only for
 	// entries loaded with structural plans (UnitStructural mode). Nil otherwise.
 	Structural *StructuralPlan

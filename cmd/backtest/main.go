@@ -25,6 +25,7 @@ func main() {
 	tf := flag.String("tf", "1h", "timeframe for replay")
 	top := flag.Int("top", 15, "how many best sweep points to print")
 	limit := flag.Int("limit", 0, "limit number of entries (0 = all)")
+	recent := flag.Bool("recent", false, "when limiting, take the most RECENT entries (default takes earliest)")
 	flag.Parse()
 
 	db, err := sql.Open("sqlite", *dbPath)
@@ -38,7 +39,11 @@ func main() {
 		log.Fatalf("load entries: %v", err)
 	}
 	if *limit > 0 && *limit < len(entries) {
-		entries = entries[:*limit]
+		if *recent {
+			entries = entries[len(entries)-*limit:] // most recent N (entries are ascending)
+		} else {
+			entries = entries[:*limit]
+		}
 	}
 	fmt.Printf("loaded %d closed entries for trader=%s\n", len(entries), *traderLike)
 	if len(entries) == 0 {
@@ -60,6 +65,11 @@ func main() {
 	if relErr > 50 || relErr < -50 {
 		fmt.Printf("⚠️ fidelity rel_err=%.1f%% is large — engine semantics may diverge; treat sweep as directional only\n", relErr)
 	}
+
+	// 1b) Per-mechanism fidelity breakdown: shows which live close mechanisms the
+	//     replay can/can't reproduce, and how much PnL error each contributes.
+	fmt.Println("==== FIDELITY BY CLOSE MECHANISM ====")
+	fmt.Print(backtest.FormatMechanismFidelity(loaded, baseline))
 
 	// 2) ATR-multiple parameter sweep.
 	fmt.Println("==== ATR-MULTIPLE SWEEP (best by total PnL) ====")

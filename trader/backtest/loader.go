@@ -13,7 +13,7 @@ import (
 // zero/invalid entry price or quantity are skipped.
 func LoadClaudeEntries(db *sql.DB, traderIDLike string) ([]Entry, error) {
 	rows, err := db.Query(`
-		SELECT symbol, side, entry_price, entry_time, exit_time, quantity, realized_pnl
+		SELECT symbol, side, entry_price, entry_time, exit_time, quantity, realized_pnl, COALESCE(close_reason,'')
 		FROM trader_positions
 		WHERE trader_id LIKE ? AND status='CLOSED'
 		ORDER BY entry_time ASC`, traderIDLike)
@@ -28,8 +28,9 @@ func LoadClaudeEntries(db *sql.DB, traderIDLike string) ([]Entry, error) {
 			symbol, side              string
 			entryPrice, qty, realized float64
 			entryTime, exitTime       sql.NullInt64
+			closeReason               string
 		)
-		if err := rows.Scan(&symbol, &side, &entryPrice, &entryTime, &exitTime, &qty, &realized); err != nil {
+		if err := rows.Scan(&symbol, &side, &entryPrice, &entryTime, &exitTime, &qty, &realized, &closeReason); err != nil {
 			return nil, err
 		}
 		if entryPrice <= 0 || qty <= 0 {
@@ -43,6 +44,7 @@ func LoadClaudeEntries(db *sql.DB, traderIDLike string) ([]Entry, error) {
 			ExitTime:    exitTime.Int64,
 			Quantity:    qty,
 			RealizedPnL: realized,
+			CloseReason: closeReason,
 		})
 	}
 	return out, rows.Err()
@@ -57,11 +59,42 @@ func OKXBars(symbol, timeframe string, start, end time.Time) ([]market.Kline, er
 	return market.GetKlinesRangeOKX(symbol, timeframe, start, end)
 }
 
+// tfDuration returns the wall-clock duration of one bar for a timeframe token.
+// Defaults to 1h for unknown tokens so callers never get a zero window.
+func tfDuration(tf string) time.Duration {
+	switch tf {
+	case "1m":
+		return time.Minute
+	case "3m":
+		return 3 * time.Minute
+	case "5m":
+		return 5 * time.Minute
+	case "15m":
+		return 15 * time.Minute
+	case "30m":
+		return 30 * time.Minute
+	case "1h":
+		return time.Hour
+	case "2h":
+		return 2 * time.Hour
+	case "4h":
+		return 4 * time.Hour
+	case "6h":
+		return 6 * time.Hour
+	case "12h":
+		return 12 * time.Hour
+	case "1d":
+		return 24 * time.Hour
+	default:
+		return time.Hour
+	}
+}
+
 // fetchEntryBars returns bars for one entry with `preBars` of pre-entry history
 // (for ATR) and forward bars until exit (or +maxHoldHours if open-ended), plus
 // the index of the entry bar within the returned slice.
 func fetchEntryBars(e Entry, tf string, preBars, maxHoldHours int, provider BarsProvider) ([]market.Kline, int, error) {
-	tfDur := time.Hour // backtest uses 1h
+	tfDur := tfDuration(tf) // bar duration must match the replay timeframe
 	start := time.UnixMilli(e.EntryTime).Add(-time.Duration(preBars+2) * tfDur)
 	endMs := e.ExitTime
 	if endMs <= 0 {
