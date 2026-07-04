@@ -28,6 +28,7 @@ func main() {
 	recent := flag.Bool("recent", false, "when limiting, take the most RECENT entries (default takes earliest)")
 	proxy := flag.Bool("proxy", false, "enable the non-price close proxy (time-stop/max-hold/AI) for higher fidelity")
 	liveConfig := flag.Bool("liveconfig", false, "use the trader's LIVE strategy protection config (ATR/structural) as the replay baseline")
+	variants := flag.Bool("variants", false, "compare pre-specified single-change optimization variants derived from the live baseline (keeps the structural stop type; faithful to live)")
 	flag.Parse()
 
 	db, err := sql.Open("sqlite", *dbPath)
@@ -110,4 +111,28 @@ func main() {
 	fmt.Println("==== BASELINE (Claude percent params, replayed) ====")
 	fmt.Printf("TotalPnL=%.2f Win%%=%.1f PF=%.2f MaxDD=%.2f Trades=%d\n",
 		base.TotalPnL, base.WinRatePct, base.ProfitFactor, base.MaxDrawdown, base.Trades)
+
+	// 4) Faithful optimization variants: each is a single pre-specified change
+	//    off the LIVE baseline, so it keeps the structural-stop reconstruction
+	//    (same stop TYPE live runs). Deltas are attributable to the one change.
+	//    Only meaningful with -liveconfig (needs the real structural/ATR spec).
+	if *variants {
+		if !*liveConfig {
+			fmt.Println("\n(-variants requires -liveconfig to derive from the real structural spec; skipping)")
+			return
+		}
+		fmt.Println("\n==== OPTIMIZATION VARIANTS (single change off live baseline; structural stop preserved) ====")
+		fmt.Printf("%-24s %-10s %-7s %-6s %-10s %-8s\n", "variant", "TotalPnL", "Win%", "PF", "MaxDD", "dPnL")
+		var basePnL float64
+		for _, v := range backtest.LiveVariants(baseline) {
+			r := backtest.RunParams(v.P, loaded)
+			if v.Name == "live-baseline" {
+				basePnL = r.TotalPnL
+			}
+			fmt.Printf("%-24s %-10.2f %-7.1f %-6.2f %-10.2f %-+8.2f\n",
+				v.Name, r.TotalPnL, r.WinRatePct, r.ProfitFactor, r.MaxDrawdown, r.TotalPnL-basePnL)
+		}
+		fmt.Println("→ dPnL is vs the live-baseline row. These deltas are on the FULL loaded")
+		fmt.Println("  sample (all close reasons) and use the same structural stop as live.")
+	}
 }
