@@ -25,6 +25,8 @@ func main() {
 	dbPath := flag.String("db", "/tmp/v.db", "path to SQLite DB (use a COPY first)")
 	apply := flag.Bool("apply", false, "actually write changes (default: dry-run)")
 	traderLike := flag.String("trader", "%", "trader_id LIKE filter")
+	showDiff := flag.Bool("diff", false, "print the old->new transition matrix")
+	safe := flag.Bool("safe", false, "additive recovery only: upgrade data-loss/sync rows to a recovered protection label, but NEVER overwrite an already-trusted or portfolio-level label")
 	flag.Parse()
 
 	db, err := sql.Open("sqlite", *dbPath)
@@ -69,25 +71,54 @@ func main() {
 
 	newCounts := map[string]int{}
 	changed := 0
+	transitions := map[string]int{} // "old -> new" : count
 	var updates []struct {
 		id     int64
 		reason string
 	}
+	skippedProtected := 0
 	for _, p := range positions {
 		reason := deriveReasonForPosition(db, p.id, p.exchangeID, p.side, p.entry, p.exitCycle, p.traderID)
+		// SAFE mode: only touch rows whose CURRENT label is untrusted
+		// (data-loss/sync/empty), and only when the rebuild recovers a genuine
+		// trusted mechanism. Never overwrite an already-trusted or
+		// portfolio-level label, and never rewrite one untrusted label to
+		// another untrusted one (e.g. close_short -> ai_close is not a recovery).
+		if *safe {
+			if isTrustedOrPortfolio(p.oldReason) || !isTrustedOrPortfolio(reason) {
+				if isTrustedOrPortfolio(p.oldReason) && reason != p.oldReason {
+					skippedProtected++
+				}
+				newCounts[normReason(p.oldReason)]++
+				continue
+			}
+		}
 		newCounts[reason]++
 		if reason != p.oldReason {
 			changed++
+			old := p.oldReason
+			if old == "" {
+				old = "(empty)"
+			}
+			transitions[old+" -> "+reason]++
 			updates = append(updates, struct {
 				id     int64
 				reason string
 			}{p.id, reason})
 		}
 	}
+	if *safe {
+		fmt.Printf("SAFE mode: protected %d already-trusted/portfolio rows from overwrite\n", skippedProtected)
+	}
 
 	fmt.Println("==== NEW close_reason distribution ====")
 	printSortedCounts(newCounts)
 	fmt.Printf("changed rows: %d / %d\n", changed, len(positions))
+
+	if *showDiff {
+		fmt.Println("==== TRANSITIONS (old -> new) ====")
+		printSortedCounts(transitions)
+	}
 
 	if !*apply {
 		fmt.Println("DRY-RUN: no changes written. Re-run with --apply to persist.")
@@ -123,6 +154,33 @@ func printSortedCounts(m map[string]int) {
 	for _, it := range items {
 		fmt.Printf("  %-28s %d\n", it.k, it.v)
 	}
+}
+
+// isTrustedOrPortfolio reports whether a label is a genuine protection mechanism
+// (per-entry) or a portfolio-level trigger — i.e. attribution we already trust
+// and must NOT overwrite in safe mode.
+func isTrustedOrPortfolio(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "full_sl", "ladder_sl", "fallback_maxloss_sl",
+		"full_tp", "ladder_tp",
+		"break_even_stop",
+		"managed_drawdown", "native_trailing", "trailing_take_profit",
+		"max_hold", "time_stop",
+		"trend_reversal_flip",
+		"liquidation", "emergency_protection_close",
+		"giveback_guard_breadth", "breadth_breaker",
+		"equity_breaker", "portfolio_breaker":
+		return true
+	default:
+		return false
+	}
+}
+
+func normReason(r string) string {
+	if r == "" {
+		return "(empty)"
+	}
+	return r
 }
 
 var _ = strings.Contains
