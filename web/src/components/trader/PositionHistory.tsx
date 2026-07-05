@@ -140,14 +140,13 @@ function summarizeCloseSource(
       group: 'sync',
     }
 
-  if (
-    merged.includes('ai_close') ||
-    merged === 'close_long' ||
-    merged === 'close_short' ||
-    merged.includes('close_long') ||
-    merged.includes('close_short') ||
-    type === 'AI_CLOSE'
-  ) {
+  // Only an explicit ai_close* reason is a genuine AI proactive close. A bare
+  // close_long/close_short is NOT: on Binance those are exchange-side protection
+  // triggers (STOP/TP/TRAILING/maker-TP) whose native type wasn't recovered at
+  // sync time, and exit_decision_cycle is always populated (latest cycle) so a
+  // decision-cycle link is NOT evidence of an AI close. Treating bare closes as
+  // AI here is the false-positive the panel used to show.
+  if (merged.includes('ai_close') || type === 'AI_CLOSE') {
     if (hasDecisionCycle || hasReview) {
       return {
         label: 'AI proactive close',
@@ -157,8 +156,24 @@ function summarizeCloseSource(
       }
     }
     return {
-      label: 'AI/sync close attribution',
-      detail: 'not decision-linked',
+      label: 'AI close (not decision-linked)',
+      detail: 'reason=ai_close but no matching decision',
+      confidence: 'low',
+      group: 'sync',
+    }
+  }
+
+  if (
+    merged === 'close_long' ||
+    merged === 'close_short' ||
+    merged.includes('close_long') ||
+    merged.includes('close_short') ||
+    merged.includes('sync_external') ||
+    merged.includes('sync_absent')
+  ) {
+    return {
+      label: 'Exchange close · mechanism unresolved',
+      detail: 'exchange-side protection, native type not recovered',
       confidence: 'low',
       group: 'sync',
     }
@@ -1209,6 +1224,17 @@ function DirectionStatsCard({
   )
 }
 
+// PLAN_KIND_COLOR maps a protection-plan item's kind to its system color so the
+// entry plan and the matched close-event row read as one color-coded story
+// (green=TP, red=SL, amber=break-even, purple=drawdown, blue=trailing).
+const PLAN_KIND_COLOR: Record<PlanItem['kind'], string> = {
+  tp: '#0ECB81',
+  sl: '#F6465D',
+  be: '#F0B90B',
+  drawdown: '#C084FC',
+  trailing: '#60A5FA',
+}
+
 // matchCloseEventToPlan links an actual close event to the entry-plan item that
 // fired it. Primary key is the mechanism (both come from the same taxonomy);
 // among same-mechanism tiers (ladder TP1/TP2/...), the tier whose trigger price
@@ -1253,13 +1279,7 @@ function EntryProtectionPlan({
   firedMechanisms: Set<string>
 }) {
   if (plan.length === 0) return null
-  const kindColor: Record<PlanItem['kind'], string> = {
-    tp: '#0ECB81',
-    sl: '#F6465D',
-    be: '#F0B90B',
-    drawdown: '#C084FC',
-    trailing: '#60A5FA',
-  }
+  const kindColor = PLAN_KIND_COLOR
   return (
     <div>
       <div className="text-xs mb-2" style={{ color: '#848E9C' }}>
@@ -1631,12 +1651,21 @@ function PositionRow({
                     {`${position.entry_decision_cycle || '—'} / ${position.exit_decision_cycle || '—'}`}
                   </div>
                 </div>
-                <div>
-                  <div style={{ color: '#848E9C' }}>
+                <details className="group">
+                  <summary
+                    className="cursor-pointer list-none select-none flex items-center gap-1"
+                    style={{ color: '#848E9C' }}
+                  >
+                    <span
+                      className="transition-transform group-open:rotate-90"
+                      style={{ fontSize: '9px' }}
+                    >
+                      ▶
+                    </span>
                     {'复盘上下文 / Review Context'}
-                  </div>
+                  </summary>
                   <div
-                    className="text-[11px] leading-5"
+                    className="mt-1 text-[11px] leading-5"
                     style={{ color: '#EAECEF' }}
                   >
                     {formatReviewContextSummary(
@@ -1697,7 +1726,7 @@ function PositionRow({
                       }
                     />
                   </div>
-                </div>
+                </details>
                 <div>
                   <div style={{ color: '#848E9C' }}>
                     {'成交比例 / Close Ratio'}
@@ -1963,28 +1992,51 @@ function PositionRow({
                                           : catMeta.en}
                                       </span>
                                     </div>
-                                    {matchedPlan && (
-                                      <div
-                                        className="mt-0.5 text-[10px]"
-                                        style={{ color: '#848E9C' }}
-                                        title={
-                                          language === 'zh'
-                                            ? '对应开仓保护档位'
-                                            : 'matched entry-plan tier'
-                                        }
-                                      >
-                                        → {matchedPlan.label}
-                                        {typeof matchedPlan.triggerPrice ===
-                                          'number' && (
-                                          <span className="font-mono ml-0.5">
-                                            @
-                                            {formatPrice(
-                                              matchedPlan.triggerPrice
+                                    {matchedPlan &&
+                                      (() => {
+                                        const pc =
+                                          PLAN_KIND_COLOR[matchedPlan.kind]
+                                        return (
+                                          <div
+                                            className="mt-0.5 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]"
+                                            style={{
+                                              background: `${pc}14`,
+                                              border: `1px solid ${pc}55`,
+                                              color: pc,
+                                            }}
+                                            title={
+                                              language === 'zh'
+                                                ? '对应开仓保护档位'
+                                                : 'matched entry-plan tier'
+                                            }
+                                          >
+                                            <span style={{ fontWeight: 600 }}>
+                                              → {matchedPlan.label}
+                                            </span>
+                                            <span className="font-mono">
+                                              {matchedPlan.triggerPct >= 0
+                                                ? '+'
+                                                : ''}
+                                              {matchedPlan.triggerPct}%
+                                            </span>
+                                            {typeof matchedPlan.triggerPrice ===
+                                              'number' && (
+                                              <span className="font-mono opacity-80">
+                                                @
+                                                {formatPrice(
+                                                  matchedPlan.triggerPrice
+                                                )}
+                                              </span>
                                             )}
-                                          </span>
-                                        )}
-                                      </div>
-                                    )}
+                                            {typeof matchedPlan.closeRatioPct ===
+                                              'number' && (
+                                              <span className="opacity-70">
+                                                ·{matchedPlan.closeRatioPct}%
+                                              </span>
+                                            )}
+                                          </div>
+                                        )
+                                      })()}
                                   </td>
                                   <td
                                     className="py-2 px-3 text-right font-mono font-semibold"
