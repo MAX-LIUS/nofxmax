@@ -438,7 +438,12 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 			executionOrderType = "STOP_MARKET"
 		case strings.Contains(sourceLower, "manual"):
 			executionOrderType = "MANUAL"
-		case strings.Contains(sourceLower, "close_long") || strings.Contains(sourceLower, "close_short"):
+		case strings.Contains(sourceLower, "ai_close"):
+			// Only an explicit ai_close reason is a genuine AI proactive close.
+			// A bare close_long/close_short must NOT be relabeled AI_CLOSE — on
+			// Binance those are exchange-side fills whose native type wasn't
+			// recovered at sync time; keep the real resolved order type (MARKET)
+			// so the panel doesn't contradict the "未归因" attribution.
 			executionOrderType = "AI_CLOSE"
 		}
 
