@@ -607,6 +607,39 @@ func (t *FuturesTrader) CancelOrder(symbol, orderID string) error {
 	return nil
 }
 
+// CancelAlgoOrderByID cancels a single algo (stop/take-profit) order by its algo
+// ID. Binance migrated stop orders to the Algo Order system, so they must be
+// cancelled via the algo endpoint — the regular CancelOrder path (fapi/v1/order)
+// does not know about them.
+//
+// The shared protection reconciler cancels stale duplicate protection orders
+// through the okxProtectionOrderIDCanceller interface (cancelUnexpectedProtection
+// OrdersByID). Only OKX implemented it, so on Binance the type assertion failed
+// silently: the fast-path logged "canceling N stale duplicates" but nothing was
+// actually cancelled, leaving the reconciler to report "stale duplicate cleanup
+// incomplete" every cycle while the stops accumulated. Implementing it here lets
+// Binance's own stale stops actually be removed.
+//
+// The algoID string is the AlgoId GetOpenOrders reported as OpenOrder.OrderID
+// (fmt.Sprintf("%d", algoOrder.AlgoId)).
+func (t *FuturesTrader) CancelAlgoOrderByID(symbol string, algoID string) error {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
+	algoIDInt, err := strconv.ParseInt(algoID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid algo order ID %q: %w", algoID, err)
+	}
+
+	_, err = t.client.NewCancelAlgoOrderService().
+		AlgoID(algoIDInt).
+		Do(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to cancel algo order %d: %w", algoIDInt, err)
+	}
+
+	logger.Infof("✓ [Binance] Cancelled algo order: %s/%d", symbol, algoIDInt)
+	return nil
+}
+
 // GetOrderBook gets the order book for a symbol
 // This implements the GridTrader interface for FuturesTrader
 func (t *FuturesTrader) GetOrderBook(symbol string, depth int) (bids, asks [][]float64, err error) {
