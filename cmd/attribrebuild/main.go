@@ -78,7 +78,7 @@ func main() {
 	}
 	skippedProtected := 0
 	for _, p := range positions {
-		reason := deriveReasonForPosition(db, p.id, p.exchangeID, p.side, p.entry, p.exitCycle, p.traderID)
+		reason := deriveReasonForPosition(db, p.id, p.exchangeID, p.symbol, p.side, p.entry, p.exitCycle, p.traderID)
 		// SAFE mode: only touch rows whose CURRENT label is untrusted
 		// (data-loss/sync/empty), and only when the rebuild recovers a genuine
 		// trusted mechanism. Never overwrite an already-trusted or
@@ -167,6 +167,7 @@ func isTrustedOrPortfolio(reason string) bool {
 		"managed_drawdown", "native_trailing", "trailing_take_profit",
 		"max_hold", "time_stop",
 		"trend_reversal_flip",
+		"ai_close", "ai_close_long", "ai_close_short",
 		"liquidation", "emergency_protection_close",
 		"giveback_guard_breadth", "breadth_breaker",
 		"equity_breaker", "portfolio_breaker":

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -257,6 +258,61 @@ func (s *PositionStore) deriveCloseReason(pos *TraderPosition, exchangeOrderID s
 	return reason, source, executionType
 }
 
+// decisionCycleHasAICloseFor reports whether the decision_records row for this
+// trader+cycle contains an AI close decision for the given symbol/side. It is the
+// deterministic signal used to attribute a bare close_long/close_short fill to an
+// AI proactive close when no close-intent was persisted (e.g. Binance). Matching
+// on the recorded AI decision — not a guess — keeps attribution trustworthy: a
+// cycle=0 or exchange-discovered close (no matching decision) is left as-is.
+func (s *PositionStore) decisionCycleHasAICloseFor(traderID string, cycle int, symbol, side string) bool {
+	if s.db == nil || cycle <= 0 {
+		return false
+	}
+	var rec DecisionRecordDB
+	if err := s.db.Where("trader_id = ? AND cycle_number = ?", traderID, cycle).
+		First(&rec).Error; err != nil {
+		return false
+	}
+	if rec.Decisions == "" {
+		return false
+	}
+	var decisions []struct {
+		Action string `json:"action"`
+		Symbol string `json:"symbol"`
+	}
+	if err := json.Unmarshal([]byte(rec.Decisions), &decisions); err != nil {
+		return false
+	}
+	wantAction := "close_long"
+	if strings.EqualFold(side, "SHORT") {
+		wantAction = "close_short"
+	}
+	normSym := normalizeSymbolForMatch(symbol)
+	for _, d := range decisions {
+		if strings.EqualFold(d.Action, wantAction) && normalizeSymbolForMatch(d.Symbol) == normSym {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeSymbolForMatch reduces a symbol to a comparable base form (upper-case,
+// stripped of common quote suffixes and separators) so a decision-record symbol
+// matches the position symbol regardless of USDT/USDC/PERP/dash formatting
+// differences across exchanges.
+func normalizeSymbolForMatch(sym string) string {
+	s := strings.ToUpper(strings.TrimSpace(sym))
+	s = strings.ReplaceAll(s, "-", "")
+	s = strings.ReplaceAll(s, "_", "")
+	s = strings.ReplaceAll(s, "/", "")
+	for _, suffix := range []string{"USDTPERP", "USDCPERP", "USDPERP", "PERP", "USDT", "USDC", "USD"} {
+		if strings.HasSuffix(s, suffix) {
+			return strings.TrimSuffix(s, suffix)
+		}
+	}
+	return s
+}
+
 func (s *PositionStore) logCloseEvent(pos *TraderPosition, closeReason, executionSource, executionType, exchangeOrderID string, closeQty, executionPrice, feeDelta, realizedPnLDelta float64, eventTimeMs int64) error {
 	if s.db == nil || pos == nil || closeQty <= 0 {
 		return nil
@@ -314,6 +370,26 @@ func (s *PositionStore) logCloseEvent(pos *TraderPosition, closeReason, executio
 					break
 				}
 			}
+		}
+	}
+	// Decision-cycle fallback (exchange-agnostic, deterministic): some exchanges
+	// (notably Binance) do not reliably persist a close-intent for a bot-issued AI
+	// market close — the intent write can be skipped and the synced fill loses the
+	// broker client id, so the two intent lookups above miss and the close lands in
+	// sync_external even though the AI truly initiated it. When the position's exit
+	// decision cycle links to a REAL close decision for THIS symbol/side in
+	// decision_records, the close is deterministically an AI proactive close. This
+	// makes the stored attribution agree with what the review panel already infers
+	// from the decision link, instead of leaving the header as 未归因.
+	if attr.Mechanism == MechSyncExternal && decisionCycle > 0 {
+		if s.decisionCycleHasAICloseFor(pos.TraderID, decisionCycle, pos.Symbol, pos.Side) {
+			aiReason := "ai_close_long"
+			if strings.EqualFold(pos.Side, "SHORT") {
+				aiReason = "ai_close_short"
+			}
+			closeReason = aiReason
+			executionSource = aiReason
+			attr = ClassifyClose(aiReason)
 		}
 	}
 	event := &PositionCloseEvent{
@@ -462,48 +538,77 @@ func (s *PositionStore) FindEntryDecisionCycleForPosition(traderID, symbol, side
 	// Strip all whitespace (spaces, newlines, tabs) for matching pretty-printed JSON.
 	stripped := "REPLACE(REPLACE(REPLACE(decisions, ' ', ''), char(10), ''), char(13), '')"
 
-	query := func() *gorm.DB {
-		q := s.db.Model(&DecisionRecordDB{}).
-			Where("trader_id = ? AND success = ?", traderID, true).
-			Where(fmt.Sprintf("(%s LIKE ? OR %s LIKE ?)", stripped, stripped), combinedAS, combinedSA)
-		return q
+	// IMPORTANT: do NOT compare the decision timestamp in SQL. The timestamp /
+	// created_at columns are declared `datetime`, and the modernc sqlite driver
+	// coerces both the column and the bound string parameter to a datetime value
+	// for `<=` comparisons — which silently corrupts ordering (a 21:22 row can
+	// test as `<= 12:24`). That bug caused entry_decision_cycle to be linked to
+	// the wrong re-entry of the same symbol, or not backfilled at all. Instead we
+	// fetch the symbol/action candidates and pick the nearest by absolute time in
+	// Go, using time.Parse on the scanned string (plain text, no coercion).
+	type cand struct {
+		Cycle     int
+		Timestamp string
+		CreatedAt string
+	}
+	var candidates []cand
+	s.db.Model(&DecisionRecordDB{}).
+		Where("trader_id = ? AND success = ?", traderID, true).
+		Where(fmt.Sprintf("(%s LIKE ? OR %s LIKE ?)", stripped, stripped), combinedAS, combinedSA).
+		Order("cycle_number DESC").
+		Select("cycle_number AS cycle, timestamp, created_at").
+		Scan(&candidates)
+
+	if len(candidates) == 0 {
+		return 0
 	}
 
-	if !entryTime.IsZero() {
-		// The decision record is written AFTER the order executes (AI response →
-		// parse → execute order → record decision), so the decision timestamp is
-		// typically 5-30 s after the position entry_time. Extend the search window
-		// slightly past entry_time so the correct cycle is found on the first pass.
-		postEntryGrace := entryTime.Add(90 * time.Second)
+	// No entry time known: fall back to the most recent matching cycle.
+	if entryTime.IsZero() {
+		return candidates[0].Cycle
+	}
 
-		var cycle int
-		query().Where("timestamp <= ? OR created_at <= ?", postEntryGrace, postEntryGrace).
-			Order("cycle_number DESC").
-			Limit(1).
-			Select("cycle_number").
-			Scan(&cycle)
-		if cycle > 0 {
-			return cycle
+	parseTS := func(c cand) (time.Time, bool) {
+		for _, v := range []string{c.CreatedAt, c.Timestamp} {
+			if v == "" {
+				continue
+			}
+			if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+				return t.UTC(), true
+			}
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				return t.UTC(), true
+			}
 		}
-
-		// Exchange sync can create the local position after the order/decision timestamp.
-		// If no pre-entry match exists, use the nearest same-symbol/side open decision
-		// after the observed position time, bounded to avoid stale historical matches.
-		windowEnd := entryTime.Add(6 * time.Hour)
-		query().Where("(timestamp > ? AND timestamp <= ?) OR (created_at > ? AND created_at <= ?)", postEntryGrace, windowEnd, postEntryGrace, windowEnd).
-			Order("timestamp ASC, created_at ASC, cycle_number ASC").
-			Limit(1).
-			Select("cycle_number").
-			Scan(&cycle)
-		return cycle
+		return time.Time{}, false
 	}
 
-	var cycle int
-	query().Order("cycle_number DESC").
-		Limit(1).
-		Select("cycle_number").
-		Scan(&cycle)
-	return cycle
+	// The decision record is written AFTER the order executes (AI response →
+	// parse → execute order → record decision), so the decision timestamp is
+	// typically 5-30 s after entry_time. Pick the candidate whose time is closest
+	// to entry_time in absolute terms, bounded to 6h so a stale historical
+	// re-entry of the same symbol can never be linked by mistake.
+	const maxSkewMs = int64(6 * 60 * 60 * 1000)
+	bestCycle := 0
+	bestDiff := int64(1<<62 - 1)
+	for _, c := range candidates {
+		t, ok := parseTS(c)
+		if !ok {
+			continue
+		}
+		diff := entryTimeMs - t.UnixMilli()
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff < bestDiff {
+			bestDiff = diff
+			bestCycle = c.Cycle
+		}
+	}
+	if bestCycle > 0 && bestDiff <= maxSkewMs {
+		return bestCycle
+	}
+	return 0
 }
 
 func (s *PositionStore) BackfillEntryDecisionCycle(positionID int64, cycle int) error {
