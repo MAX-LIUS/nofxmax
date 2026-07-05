@@ -2509,6 +2509,7 @@ func (at *AutoTrader) applyBreakEvenStop(symbol, side string, quantity, entryPri
 		if err := okxTrader.SetStopLossTagged(symbol, positionSide, quantity, breakEvenPrice, "break_even_stop"); err != nil {
 			return fmt.Errorf("failed to set break-even stop loss: %w", err)
 		}
+		at.recordProtectionIntent(symbol, positionSide, "break_even_stop", quantity, breakEvenPrice)
 	} else if err := at.trader.SetStopLoss(symbol, positionSide, quantity, breakEvenPrice); err != nil {
 		return fmt.Errorf("failed to set break-even stop loss: %w", err)
 	}
@@ -2681,6 +2682,26 @@ func (at *AutoTrader) recordCloseIntentFromOrderResult(order map[string]interfac
 	}
 	if err := at.store.CloseIntent().Record(at.id, at.exchangeID, market.Normalize(symbol), side, closeReason, quantity, at.cycleNumber, orderID); err != nil {
 		logger.Warnf("⚠️ Failed to record close intent for %s %s (%s): %v", symbol, side, closeReason, err)
+	}
+}
+
+// recordProtectionIntent writes a placement-time close-intent for an
+// exchange-native protection order (Binance STOP/TP), keyed by its trigger price.
+// This is what brings Binance protection attribution to OKX parity: unlike OKX
+// (bot MARKET close, resolved by order id), Binance protection fires exchange-side
+// and its triggered fill carries a NEW order id the bot never saw — but the fill
+// price equals the trigger, so a trigger-price intent recorded here lets the sync
+// path attribute the mechanism deterministically, even after the conditional
+// order has aged out of the exchange (origType lookup fails). positionSide is
+// LONG/SHORT. Safe no-op when triggerPrice<=0 or store is nil.
+func (at *AutoTrader) recordProtectionIntent(symbol, positionSide, mechanism string, quantity, triggerPrice float64) {
+	if at.store == nil || mechanism == "" || triggerPrice <= 0 {
+		return
+	}
+	if err := at.store.CloseIntent().RecordProtection(
+		at.id, at.exchangeID, market.Normalize(symbol), positionSide, mechanism, quantity, triggerPrice, at.cycleNumber, "",
+	); err != nil {
+		logger.Warnf("⚠️ Failed to record protection intent for %s %s (%s @ %.6f): %v", symbol, positionSide, mechanism, triggerPrice, err)
 	}
 }
 

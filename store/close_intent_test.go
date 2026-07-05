@@ -149,3 +149,58 @@ func TestCloseIntentPrune(t *testing.T) {
 		t.Fatalf("expected 1 pruned, got %d", deleted)
 	}
 }
+
+// A Binance native protection order (STOP/TP) recorded at placement time with its
+// trigger price must be attributed to its mechanism by a later fill whose price ≈
+// the trigger — the aged-order-survivable path that reaches OKX parity. This is
+// the exact BN failure mode: no order-id intent, origType lookup would fail.
+func TestCloseIntentTriggerPriceMatch(t *testing.T) {
+	s := newIntentStore(t)
+	ci := s.CloseIntent()
+	// Two protection tiers placed at open: a TP at 472.6 and an SL at 446.2.
+	if err := ci.RecordProtection("t", "ex", "ZECUSDT", "LONG", "ladder_tp", 0.3, 472.60, 10, "algo-1"); err != nil {
+		t.Fatalf("record tp: %v", err)
+	}
+	if err := ci.RecordProtection("t", "ex", "ZECUSDT", "LONG", "full_sl", 1.0, 446.20, 10, "algo-2"); err != nil {
+		t.Fatalf("record sl: %v", err)
+	}
+	// A fill at 472.55 (TP triggered) resolves to the TP tier, not the SL.
+	got, err := ci.MatchByTriggerPriceAndConsume("t", "ZECUSDT", "LONG", 472.55, 0.15)
+	if err != nil || got == nil {
+		t.Fatalf("tp match: %v got=%+v", err, got)
+	}
+	if got.Reason != "ladder_tp" {
+		t.Fatalf("expected ladder_tp, got %q", got.Reason)
+	}
+	// Consumed: a second fill at the same price must NOT re-grab the TP tier.
+	again, _ := ci.MatchByTriggerPriceAndConsume("t", "ZECUSDT", "LONG", 472.55, 0.15)
+	if again != nil {
+		t.Fatalf("expected nil on consumed tier, got %+v", again)
+	}
+	// A fill far from any trigger (mid-price active close) resolves to nothing —
+	// never fabricate a protection attribution for a mid-price close.
+	none, _ := ci.MatchByTriggerPriceAndConsume("t", "ZECUSDT", "LONG", 460.00, 0.15)
+	if none != nil {
+		t.Fatalf("mid-price fill should not match any protection tier, got %+v", none)
+	}
+	// The SL tier remains matchable by a fill at its trigger.
+	sl, _ := ci.MatchByTriggerPriceAndConsume("t", "ZECUSDT", "LONG", 446.18, 0.15)
+	if sl == nil || sl.Reason != "full_sl" {
+		t.Fatalf("expected full_sl, got %+v", sl)
+	}
+}
+
+// Side isolation: a LONG protection intent must never be grabbed by a SHORT fill.
+func TestCloseIntentTriggerPriceSideIsolation(t *testing.T) {
+	s := newIntentStore(t)
+	ci := s.CloseIntent()
+	if err := ci.RecordProtection("t", "ex", "ETHUSDT", "LONG", "ladder_tp", 0.2, 1800.0, 1, ""); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "ETHUSDT", "SHORT", 1800.0, 0.15); got != nil {
+		t.Fatalf("SHORT fill must not match LONG protection intent, got %+v", got)
+	}
+	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "ETHUSDT", "LONG", 1800.0, 0.15); got == nil {
+		t.Fatalf("LONG fill should match LONG protection intent")
+	}
+}

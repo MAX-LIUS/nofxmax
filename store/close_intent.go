@@ -27,8 +27,16 @@ type CloseIntent struct {
 	Reason          string  `gorm:"column:reason;not null" json:"reason"`
 	DecisionCycle   int     `gorm:"column:decision_cycle;default:0" json:"decision_cycle"`
 	ExchangeOrderID string  `gorm:"column:exchange_order_id;default:'';index:idx_close_intents_order" json:"exchange_order_id"`
-	IntentTime      int64   `gorm:"column:intent_time;not null;index:idx_close_intents_match,sort:desc" json:"intent_time"`
-	Consumed        bool    `gorm:"column:consumed;default:false;index:idx_close_intents_match" json:"consumed"`
+	// TriggerPrice is the price at which an exchange-native protection order
+	// (Binance STOP_MARKET/TAKE_PROFIT_MARKET) is set to fire. It is 0 for
+	// bot-issued MARKET closes (which resolve by order id instead). It enables the
+	// aged-order-survivable price match: a real STOP/TP fills AT its trigger, so a
+	// close fill whose price ≈ trigger_price resolves to this intent's mechanism
+	// even after the originating conditional order has been purged from the
+	// exchange (GetOrder/origType lookup fails).
+	TriggerPrice float64 `gorm:"column:trigger_price;default:0" json:"trigger_price"`
+	IntentTime   int64   `gorm:"column:intent_time;not null;index:idx_close_intents_match,sort:desc" json:"intent_time"`
+	Consumed     bool    `gorm:"column:consumed;default:false;index:idx_close_intents_match" json:"consumed"`
 	ConsumedAt      int64   `gorm:"column:consumed_at;default:0" json:"consumed_at"`
 	CreatedAt       int64   `gorm:"column:created_at" json:"created_at"`
 }
@@ -80,6 +88,87 @@ func (s *CloseIntentStore) Record(traderID, exchangeID, symbol, side, reason str
 	return s.db.Create(intent).Error
 }
 
+// RecordProtection persists an intent for an exchange-native protection order at
+// PLACEMENT time (Binance STOP_MARKET/TAKE_PROFIT_MARKET/TRAILING). Unlike Record
+// (bot MARKET close, keyed by order id), this stores the trigger price so a later
+// exchange-side fill can be attributed by price proximity even when the
+// originating conditional order has aged out of the exchange's queryable window.
+// exchangeOrderID is the placement id (AlgoId) when known — kept for audit only,
+// since a triggered algo order spawns a NEW fill order id that differs from it.
+func (s *CloseIntentStore) RecordProtection(traderID, exchangeID, symbol, side, reason string, quantity, triggerPrice float64, decisionCycle int, exchangeOrderID string) error {
+	if s.db == nil || traderID == "" || symbol == "" || reason == "" || triggerPrice <= 0 {
+		return nil
+	}
+	now := time.Now().UTC().UnixMilli()
+	intent := &CloseIntent{
+		TraderID:        traderID,
+		ExchangeID:      exchangeID,
+		Symbol:          symbol,
+		Side:            strings.ToUpper(side),
+		Quantity:        quantity,
+		Reason:          reason,
+		DecisionCycle:   decisionCycle,
+		ExchangeOrderID: strings.TrimSpace(exchangeOrderID),
+		TriggerPrice:    triggerPrice,
+		IntentTime:      now,
+		CreatedAt:       now,
+	}
+	return s.db.Create(intent).Error
+}
+
+// MatchByTriggerPriceAndConsume resolves the protection intent for
+// trader+symbol+side whose trigger_price is closest to fillPrice within
+// tolerancePct (relative). This is the aged-order-survivable attribution path for
+// Binance native protection: a triggered STOP/TP fills AT its trigger, so the
+// fill price pins the exact mechanism even when GetOrder(origType) has failed.
+// Only intents with a trigger_price>0 (protection placements) are considered, so
+// bot MARKET-close intents (order-id keyed) are never grabbed here. Returns nil
+// when nothing matches within tolerance.
+func (s *CloseIntentStore) MatchByTriggerPriceAndConsume(traderID, symbol, side string, fillPrice, tolerancePct float64) (*CloseIntent, error) {
+	if s.db == nil || traderID == "" || fillPrice <= 0 {
+		return nil, nil
+	}
+	if tolerancePct <= 0 {
+		tolerancePct = 0.15
+	}
+	band := fillPrice * tolerancePct / 100.0
+	var candidates []CloseIntent
+	err := s.db.Where("trader_id = ? AND symbol = ? AND side = ? AND consumed = ? AND trigger_price > 0 AND trigger_price BETWEEN ? AND ?",
+		traderID, symbol, strings.ToUpper(side), false, fillPrice-band, fillPrice+band).
+		Order("intent_time DESC").Find(&candidates).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	// Closest trigger price wins (ties resolve to the newest by the DESC order).
+	best := &candidates[0]
+	bestDist := absFloat(best.TriggerPrice - fillPrice)
+	for i := 1; i < len(candidates); i++ {
+		d := absFloat(candidates[i].TriggerPrice - fillPrice)
+		if d < bestDist {
+			bestDist = d
+			best = &candidates[i]
+		}
+	}
+	now := time.Now().UTC().UnixMilli()
+	if err := s.db.Model(&CloseIntent{}).Where("id = ? AND consumed = ?", best.ID, false).
+		Updates(map[string]interface{}{"consumed": true, "consumed_at": now}).Error; err != nil {
+		return nil, err
+	}
+	best.Consumed = true
+	best.ConsumedAt = now
+	return best, nil
+}
+
+func absFloat(f float64) float64 {
+	if f < 0 {
+		return -f
+	}
+	return f
+}
+
 // MatchByOrderIDAndConsume resolves the intent whose exchange order id matches
 // exactly. This is the fully-deterministic path: a system market close records
 // its order id, and the resulting fill(s) carry that same order id.
@@ -127,8 +216,13 @@ func (s *CloseIntentStore) MatchByWindowAndConsume(traderID, symbol, side string
 	if windowMs <= 0 {
 		windowMs = 5 * 60 * 1000
 	}
+	// Exclude protection placements (trigger_price>0): those are resolved only by
+	// the dedicated trigger-price path (MatchByTriggerPriceAndConsume). A stop/TP
+	// placed at open could otherwise be wrongly grabbed here by a close that
+	// happens within the window of the placement, mislabeling an active close as
+	// protection. The loose window fallback is for bot MARKET-close intents only.
 	var intent CloseIntent
-	err := s.db.Where("trader_id = ? AND symbol = ? AND side = ? AND consumed = ? AND intent_time BETWEEN ? AND ?",
+	err := s.db.Where("trader_id = ? AND symbol = ? AND side = ? AND consumed = ? AND trigger_price <= 0 AND intent_time BETWEEN ? AND ?",
 		traderID, symbol, strings.ToUpper(side), false, fillTimeMs-windowMs, fillTimeMs+windowMs).
 		Order("intent_time DESC").First(&intent).Error
 	if err != nil {
@@ -179,5 +273,19 @@ func (s *CloseIntentStore) PruneConsumed(olderThanMs int64) (int64, error) {
 	}
 	res := s.db.Where("consumed = ? AND consumed_at > 0 AND consumed_at < ?", true, olderThanMs).
 		Delete(&CloseIntent{})
+	return res.RowsAffected, res.Error
+}
+
+// PruneStale deletes intents (consumed or not) whose intent_time is older than
+// the cutoff. Protection intents are recorded per tier at open and only the tier
+// that fires is consumed; the rest would accumulate forever. A cutoff well beyond
+// any hold time (e.g. 72h) reclaims those unfired tiers once the position is long
+// closed, without touching intents that could still match a live position.
+// Returns rows deleted.
+func (s *CloseIntentStore) PruneStale(olderThanMs int64) (int64, error) {
+	if s.db == nil {
+		return 0, nil
+	}
+	res := s.db.Where("intent_time < ?", olderThanMs).Delete(&CloseIntent{})
 	return res.RowsAffected, res.Error
 }

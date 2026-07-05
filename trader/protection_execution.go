@@ -699,6 +699,7 @@ func (at *AutoTrader) placeFallbackMaxLossProtection(symbol, positionSide string
 		if err := setter.SetStopLossTagged(symbol, positionSide, quantity, stopLossPrice, "fallback_maxloss_sl"); err != nil {
 			return fmt.Errorf("failed to set fallback max-loss stop loss: %w", err)
 		}
+		at.recordProtectionIntent(symbol, positionSide, "fallback_maxloss_sl", quantity, stopLossPrice)
 		return nil
 	}
 	if err := at.trader.SetStopLoss(symbol, positionSide, quantity, stopLossPrice); err != nil {
@@ -732,6 +733,7 @@ func (at *AutoTrader) placeAndVerifyLadderProtection(symbol, positionSide string
 			if err := setter.SetStopLossTagged(symbol, positionSide, orderQty, order.Price, "ladder_sl"); err != nil {
 				return fmt.Errorf("failed to set ladder stop loss %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err)
 			}
+			at.recordProtectionIntent(symbol, positionSide, "ladder_sl", orderQty, order.Price)
 		} else if err := at.trader.SetStopLoss(symbol, positionSide, orderQty, order.Price); err != nil {
 			return fmt.Errorf("failed to set ladder stop loss %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err)
 		}
@@ -751,6 +753,7 @@ func (at *AutoTrader) placeAndVerifyLadderProtection(symbol, positionSide string
 			if err := setter.SetTakeProfitTagged(symbol, positionSide, orderQty, order.Price, "ladder_tp"); err != nil {
 				return fmt.Errorf("failed to set ladder take profit %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err)
 			}
+			at.recordProtectionIntent(symbol, positionSide, "ladder_tp", orderQty, order.Price)
 		} else if err := at.trader.SetTakeProfit(symbol, positionSide, orderQty, order.Price); err != nil {
 			return fmt.Errorf("failed to set ladder take profit %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err)
 		}
@@ -836,6 +839,7 @@ func (at *AutoTrader) placeAndVerifyProtection(symbol, positionSide string, quan
 			if err := setter.SetStopLossTagged(symbol, positionSide, quantity, stopLossPrice, "full_sl"); err != nil {
 				return fmt.Errorf("failed to set stop loss: %w", err)
 			}
+			at.recordProtectionIntent(symbol, positionSide, "full_sl", quantity, stopLossPrice)
 		} else if err := at.trader.SetStopLoss(symbol, positionSide, quantity, stopLossPrice); err != nil {
 			return fmt.Errorf("failed to set stop loss: %w", err)
 		}
@@ -848,6 +852,7 @@ func (at *AutoTrader) placeAndVerifyProtection(symbol, positionSide string, quan
 			if err := setter.SetTakeProfitTagged(symbol, positionSide, quantity, takeProfitPrice, "full_tp"); err != nil {
 				return fmt.Errorf("failed to set take profit: %w", err)
 			}
+			at.recordProtectionIntent(symbol, positionSide, "full_tp", quantity, takeProfitPrice)
 		} else if err := at.trader.SetTakeProfit(symbol, positionSide, quantity, takeProfitPrice); err != nil {
 			return fmt.Errorf("failed to set take profit: %w", err)
 		}
