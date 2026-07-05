@@ -769,6 +769,15 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 				StopPrice:    stopPrice,
 				Quantity:     quantity,
 				Status:       "NEW",
+				// Carry the algo client ID so the shared protection reconciler can
+				// recognise our own stops via the broker-tag prefix (x-KzrpZaP9).
+				// Binance stop-loss/take-profit are ALGO orders placed with
+				// ClientAlgoId(getBrOrderID()); the regular-orders branch copies
+				// ClientOrderID but this algo branch previously dropped it, so every
+				// stop looked manual/foreign to isLikelyBotProtectionOrder and was
+				// preserved forever — stale stops then accumulated across re-entries
+				// and eventually hit Binance's max stop-order limit (-4045).
+				ClientOrderID: algoOrder.ClientAlgoId,
 			}
 
 			// Report native trailing orders as already activated so the shared

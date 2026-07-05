@@ -223,6 +223,7 @@ func NewBinanceFuturesTestSuite(t *testing.T) *BinanceFuturesTestSuite {
 			respBody = []map[string]interface{}{
 				{
 					"algoId":       int64(555001),
+					"clientAlgoId": "x-KzrpZaP91700000000001a2b3c",
 					"orderType":    "TRAILING_STOP_MARKET",
 					"symbol":       "BTCUSDT",
 					"side":         "BUY",
@@ -544,5 +545,45 @@ func TestGetOpenOrders_NativeTrailingActivated(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected a TRAILING order in GetOpenOrders result, got none")
+	}
+}
+
+// TestGetOpenOrders_AlgoClientIDPropagated verifies that the algo-order branch of
+// GetOpenOrders copies the exchange clientAlgoId into OpenOrder.ClientOrderID.
+// Binance stop-loss/take-profit are ALGO orders placed with
+// ClientAlgoId(getBrOrderID()), so the broker-tag prefix (x-KzrpZaP9) lives on
+// clientAlgoId. Dropping it made every Binance stop look manual/foreign to the
+// shared reconciler's isLikelyBotProtectionOrder, so stale stops were preserved
+// forever and accumulated across re-entries until Binance's max stop-order limit
+// (-4045) deadlocked the reconciler's stage-before-cleanup path.
+func TestGetOpenOrders_AlgoClientIDPropagated(t *testing.T) {
+	suite := NewBinanceFuturesTestSuite(t)
+	defer suite.Cleanup()
+
+	trader, ok := suite.Trader.(*FuturesTrader)
+	if !ok {
+		t.Fatalf("expected *FuturesTrader")
+	}
+
+	orders, err := trader.GetOpenOrders("BTCUSDT")
+	if err != nil {
+		t.Fatalf("GetOpenOrders error: %v", err)
+	}
+
+	var found bool
+	for _, o := range orders {
+		if o.OrderID != "555001" {
+			continue
+		}
+		found = true
+		if o.ClientOrderID != "x-KzrpZaP91700000000001a2b3c" {
+			t.Errorf("algo order ClientOrderID=%q, want the broker-tagged clientAlgoId (needed for stale-stop cleanup)", o.ClientOrderID)
+		}
+		if !strings.HasPrefix(o.ClientOrderID, "x-KzrpZaP9") {
+			t.Errorf("algo order ClientOrderID=%q lost the broker prefix; reconciler will misread it as manual/foreign", o.ClientOrderID)
+		}
+	}
+	if !found {
+		t.Fatalf("expected algo order 555001 in GetOpenOrders result, got none")
 	}
 }
