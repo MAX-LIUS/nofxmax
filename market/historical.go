@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"nofx/httpx"
 	"time"
 )
 
@@ -30,7 +31,7 @@ func GetKlinesRange(symbol string, timeframe string, start, end time.Time) ([]Kl
 	var all []Kline
 	cursor := startMs
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := httpx.NewBinanceClient(15 * time.Second)
 
 	for cursor < endMs {
 		req, err := http.NewRequest("GET", binanceFuturesKlinesURL, nil)

@@ -43,8 +43,53 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 	}
 
 	// Resolve protective price levels (percent-of-entry distances).
-	slDist := p.slDistancePct(e.EntryPrice, atr)
-	slPrice := priceAtDistance(e.EntryPrice, slDist, isLong, false /*adverse*/)
+	// Structural mode reads absolute SL/TP prices from the per-entry plan;
+	// percent/ATR modes derive distances uniformly.
+	var slPrice float64
+	// confirmBoundary>0 activates close-confirm modelling: the tight structural
+	// level fires only on a bar CLOSE beyond it (fill at close), while slPrice is
+	// the wide backstop resting stop that still fires intrabar.
+	var confirmBoundary float64
+	if p.Unit == UnitStructural {
+		if p.StructUseATRSL && p.StopLossATR > 0 && atr > 0 {
+			// Hybrid: ATR-wide SL, structural TP (set below).
+			slDist := p.StopLossATR * atr / e.EntryPrice * 100
+			slPrice = priceAtDistance(e.EntryPrice, slDist, isLong, false /*adverse*/)
+		} else {
+			sl, ok := resolveStructuralSLPrice(p, e, atr)
+			if !ok {
+				// No usable structural stop — fall back to a wide percent stop so the
+				// trade still replays (marked via a sentinel distance).
+				slPrice = priceAtDistance(e.EntryPrice, 8.0, isLong, false /*adverse*/)
+			} else {
+				slPrice = sl
+			}
+		}
+	} else if p.RangeSLEnabled && atr > 0 {
+		// Range-anchored structural SL (faithful live reconstruction): boundary =
+		// lookback range low(long)/high(short) from pre-entry bars, distance
+		// clamped to [floor, backstop] ATR. Falls back to the flat StopLossATR
+		// when the range has no edge (entered at/through the boundary).
+		tight, hasEdge := rangeStructuralSLPrice(p, e, bars, entryIdx, atr, isLong)
+		if p.RangeSLCloseConfirm && hasEdge {
+			// Live Phase-2: tight structural level enforced on bar CLOSE only; the
+			// resting exchange stop sits at the wide backstop for intrabar wicks.
+			confirmBoundary = tight
+			backDist := p.RangeSLBackstopATR
+			if backDist <= 0 {
+				backDist = 4.5
+			}
+			slPrice = priceAtDistance(e.EntryPrice, backDist*atr/e.EntryPrice*100, isLong, false /*adverse*/)
+		} else if hasEdge {
+			slPrice = tight
+		} else {
+			slDist := p.slDistancePct(e.EntryPrice, atr)
+			slPrice = priceAtDistance(e.EntryPrice, slDist, isLong, false /*adverse*/)
+		}
+	} else {
+		slDist := p.slDistancePct(e.EntryPrice, atr)
+		slPrice = priceAtDistance(e.EntryPrice, slDist, isLong, false /*adverse*/)
+	}
 
 	type tpLevel struct {
 		price float64
@@ -52,17 +97,27 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 		fired bool
 	}
 	tps := make([]tpLevel, 0, len(p.TPLegs))
-	for _, leg := range p.TPLegs {
-		d := legDistancePct(leg, p.Unit, e.EntryPrice, atr)
-		tps = append(tps, tpLevel{
-			price: priceAtDistance(e.EntryPrice, d, isLong, true /*favorable*/),
-			frac:  leg.CloseRatioPct / 100.0,
-		})
+	if p.Unit == UnitStructural && e.Structural != nil && len(e.Structural.TPLegs) > 0 {
+		for _, leg := range e.Structural.TPLegs {
+			if leg.Price <= 0 {
+				continue
+			}
+			tps = append(tps, tpLevel{price: leg.Price, frac: leg.CloseRatioPct / 100.0})
+		}
+	} else {
+		for _, leg := range p.TPLegs {
+			d := legDistancePct(leg, p.Unit, e.EntryPrice, atr)
+			tps = append(tps, tpLevel{
+				price: priceAtDistance(e.EntryPrice, d, isLong, true /*favorable*/),
+				frac:  leg.CloseRatioPct / 100.0,
+			})
+		}
 	}
 
 	remaining := 1.0
-	peak := 0.0
-	beStop := 0.0 // 0 = not armed
+	peak := 0.0      // peak PnL% (percent-give-back model)
+	peakPrice := 0.0 // peak favorable PRICE (ATR-give-back model)
+	beStop := 0.0    // 0 = not armed
 	beArmedTier := -1
 	ddFired := make([]bool, len(p.DDRules))
 
@@ -124,6 +179,19 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 			continue
 		}
 
+		// --- close-confirm structural stop: fires only when a bar CLOSES beyond
+		// the tight boundary (fill at close), modelling live runStructuralSLGuard.
+		// The wide backstop above already covers intrabar catastrophes. Only while
+		// the full structural stop is in force (BE not yet armed).
+		if confirmBoundary > 0 && beStop == 0 {
+			confirmed := (isLong && bar.Close < confirmBoundary) || (!isLong && bar.Close > confirmBoundary)
+			if confirmed {
+				addExit(bar.Close, remaining)
+				res.CloseReasons = append(res.CloseReasons, "structural_sl")
+				continue
+			}
+		}
+
 		// --- favorable extreme: take-profit legs ---
 		for ti := range tps {
 			if tps[ti].fired {
@@ -150,6 +218,16 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 		if closePnL > peak {
 			peak = closePnL
 		}
+		// Track peak favorable PRICE for the ATR give-back model.
+		if isLong {
+			if peakPrice == 0 || bar.Close > peakPrice {
+				peakPrice = bar.Close
+			}
+		} else {
+			if peakPrice == 0 || bar.Close < peakPrice {
+				peakPrice = bar.Close
+			}
+		}
 
 		// BE arming: highest tier whose trigger is met.
 		for ti := range p.BELegs {
@@ -161,18 +239,71 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 			}
 		}
 
-		// DD: close ratio when profit>=min and giveback from peak>=max.
+		// DD: close ratio when profit>=min and give-back from peak>=max.
+		// Two give-back models:
+		//   - ATR (MaxDrawdownATR>0): peak→current PRICE retrace ≥ k×ATR, matching
+		//     live drawdown_trailing_convert (callback=(k*atr)/refPrice). Tracks
+		//     the peak PRICE, not peak PnL%.
+		//   - percent (legacy): give-back ≥ MaxDrawdownPct as a % of peak PnL.
 		if peak > 0 {
-			giveback := (peak - closePnL) / peak * 100
+			givebackPctOfPeak := (peak - closePnL) / peak * 100
 			for di := range p.DDRules {
 				if ddFired[di] {
 					continue
 				}
 				minP := ddMinProfitPct(p.DDRules[di], p.Unit, e.EntryPrice, atr)
-				if closePnL >= minP && giveback >= p.DDRules[di].MaxDrawdownPct {
+				if closePnL < minP {
+					continue
+				}
+				triggered := false
+				if p.DDRules[di].MaxDrawdownATR > 0 && atr > 0 && peakPrice > 0 {
+					// price retrace from peak in ATR multiples
+					var retrace float64
+					if isLong {
+						retrace = peakPrice - bar.Close
+					} else {
+						retrace = bar.Close - peakPrice
+					}
+					if retrace >= p.DDRules[di].MaxDrawdownATR*atr {
+						triggered = true
+					}
+				} else if givebackPctOfPeak >= p.DDRules[di].MaxDrawdownPct {
+					triggered = true
+				}
+				if triggered {
 					ddFired[di] = true
 					addExit(bar.Close, p.DDRules[di].CloseRatioPct/100.0)
 					res.CloseReasons = append(res.CloseReasons, "drawdown")
+				}
+			}
+		}
+
+		// --- non-price close proxy: time-stop / max-hold / AI-discretionary ---
+		// These fire at bar close on the FULL remainder, mirroring the live
+		// code-enforced stops the raw replay otherwise ignores.
+		if cp := p.CloseProxy; cp.Enabled {
+			heldHours := float64(res.BarsHeld) * cp.TimeframeHours
+			// time-stop: held long enough AND still losing worse than threshold.
+			if cp.TimeStopHours > 0 && heldHours >= cp.TimeStopHours &&
+				cp.TimeStopLossPct < 0 && closePnL <= cp.TimeStopLossPct {
+				addExit(bar.Close, remaining)
+				res.CloseReasons = append(res.CloseReasons, "time_stop")
+				continue
+			}
+			// max-hold: held long enough, not a profitable runner.
+			if cp.MaxHoldHours > 0 && heldHours >= cp.MaxHoldHours &&
+				closePnL < cp.MaxHoldProfitExemptPct {
+				addExit(bar.Close, remaining)
+				res.CloseReasons = append(res.CloseReasons, "max_hold")
+				continue
+			}
+			// AI/discretionary proxy: after a runup ≥ arm, close on give-back.
+			if cp.AIPeakArmPct > 0 && peak >= cp.AIPeakArmPct && cp.AIGiveBackPct > 0 {
+				giveback := (peak - closePnL) / peak * 100
+				if giveback >= cp.AIGiveBackPct {
+					addExit(bar.Close, remaining)
+					res.CloseReasons = append(res.CloseReasons, "ai_proxy")
+					continue
 				}
 			}
 		}

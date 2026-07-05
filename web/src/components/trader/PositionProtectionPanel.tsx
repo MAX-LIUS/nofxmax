@@ -12,16 +12,46 @@ interface PositionProtectionPanelProps {
   onSymbolClick?: (symbol: string) => void
 }
 
+// ProtectionFamily groups every close-triggering mechanism into a color family so
+// the panel reads as one map: where (and by what) the position will close.
+//   liquidation — exchange hard floor (never should be hit)
+//   sl          — stop-loss orders (full/ladder/fallback)
+//   be          — break-even stop
+//   tp          — take-profit orders (full/ladder)
+//   dynamic     — trailing / managed-drawdown / runner (price moves with peak)
+//   structural  — range-anchored structural stop (boundary + backstop)
+type ProtectionFamily =
+  | 'liquidation'
+  | 'sl'
+  | 'be'
+  | 'tp'
+  | 'dynamic'
+  | 'structural'
+
 type ProtectionRow = {
   zone: string
+  family: ProtectionFamily
   price: number
   sortPrice: number
   deltaPct: number
+  atrMult: number
   ratioPct: number
+  usdValue: number
   status: string
   statusCls: string
   detail?: string
   isCurrentPrice?: boolean
+}
+
+// FAMILY_CLS maps a family to its Tailwind text+border classes. Kept in one place
+// so the legend and the rows never drift apart.
+const FAMILY_CLS: Record<ProtectionFamily, string> = {
+  liquidation: 'text-red-400 border-red-500/50',
+  sl: 'text-orange-300 border-orange-400/30',
+  be: 'text-amber-300 border-amber-400/30',
+  tp: 'text-nofx-green border-emerald-400/30',
+  dynamic: 'text-purple-300 border-purple-400/30',
+  structural: 'text-blue-300 border-blue-400/40',
 }
 
 interface ScheduledTier {
@@ -33,6 +63,8 @@ interface ScheduledTier {
   activation_price: number
   planned_quantity: number
   is_satisfied: boolean
+  is_armed?: boolean
+  is_activated?: boolean
   is_triggered: boolean
   stage_name: string
   reason_anchor: string
@@ -124,22 +156,31 @@ function buildProtectionRows(
   const rt = position.protection_runtime
   const peakPnlPct = Number(rt?.drawdown_peak_pnl_pct ?? 0)
   const scheduledTiers = (rt?.scheduled_tiers || []) as ScheduledTier[]
+  const atrAtEntry = Number(rt?.atr_at_entry ?? 0)
+  const atrEntryPct =
+    entryPrice > 0 && atrAtEntry > 0 ? (atrAtEntry / entryPrice) * 100 : 0
+  // toAtrMult converts a delta% distance into ATR multiples using entry-frozen ATR.
+  const toAtrMult = (deltaPct: number) =>
+    atrEntryPct > 0 ? deltaPct / atrEntryPct : 0
 
   // Build DD rows from scheduled_tiers (authoritative source)
   for (const tier of scheduledTiers) {
     const tierIdx = tier.index || 0
     const zone = `DD-${tierIdx}`
     const callbackRate = tier.callback_rate || 0
+    // Activation/armed are distinct: is_activated means the peak reached the
+    // trigger so the trailing stop is live and tracking the peak; is_armed means
+    // an order rests on the exchange but price has not yet reached activation.
+    // Fall back to is_satisfied for older backends that only sent that field.
+    const isActivated = tier.is_activated ?? tier.is_satisfied ?? false
+    const isArmed = tier.is_armed ?? false
 
-    // Calculate trigger price from peak and callback when tier is active
-    // If peak is 0 (new position), show the activation price instead
+    // Trigger price = peak * (1 - callback) ONLY once the stop is genuinely
+    // activated (tracking the peak). Before activation the meaningful number is
+    // the activation price, not a peak-derived level (which would otherwise
+    // render a misleading below-entry "trigger").
     let triggerPrice = 0
-    if (
-      peakPnlPct > 0 &&
-      entryPrice > 0 &&
-      callbackRate > 0 &&
-      tier.is_satisfied
-    ) {
+    if (isActivated && peakPnlPct > 0 && entryPrice > 0 && callbackRate > 0) {
       const peakPrice =
         side === 'LONG'
           ? entryPrice * (1 + peakPnlPct / 100)
@@ -158,40 +199,78 @@ function buildProtectionRows(
         : 0
     const deltaPct = rawDelta * dirMul
     const ratioPct = tier.close_ratio_pct || 0
+    const tierQty = tier.planned_quantity || (entryQty * ratioPct) / 100
+    const usdValue =
+      tierQty > 0 && triggerPrice > 0 ? tierQty * triggerPrice : 0
 
     let status: string
     let statusCls: string
     if (tier.is_triggered) {
       status = language === 'zh' ? '已触发' : 'Triggered'
       statusCls = 'text-nofx-red'
-    } else if (tier.is_satisfied) {
+    } else if (isActivated) {
       status = language === 'zh' ? '已激活' : 'Active'
       statusCls = 'text-emerald-300'
+    } else if (isArmed) {
+      status = language === 'zh' ? '已布单' : 'Armed'
+      statusCls = 'text-amber-300'
     } else {
       status = language === 'zh' ? '待满足' : 'Waiting'
       statusCls = 'text-nofx-text-muted'
     }
 
+    // Detail: once activated show the live peak + callback distance; otherwise
+    // show the configured activation/callback distances (callback % == price
+    // retracement % under the unified trailing semantics).
     let detail: string
-    if (tier.is_satisfied && peakPnlPct > 0) {
+    if (isActivated && peakPnlPct > 0) {
       detail = `peak${formatPct(peakPnlPct, 1)} cb${(callbackRate * 100).toFixed(1)}%`
     } else {
-      detail = `min${tier.min_profit_pct.toFixed(1)}% dd${tier.max_drawdown_pct.toFixed(0)}%`
+      detail = `min${tier.min_profit_pct.toFixed(1)}% dd${tier.max_drawdown_pct.toFixed(1)}%`
     }
 
     rows.push({
       zone,
+      family: 'dynamic',
       price: triggerPrice,
       sortPrice: triggerPrice > 0 ? triggerPrice : markPrice,
       deltaPct,
+      atrMult: toAtrMult(deltaPct),
       ratioPct,
+      usdValue,
       status,
       statusCls,
       detail,
     })
   }
 
-  // Build rows from exchange orders (BE + Ladder only, skip trailing since DD comes from tiers)
+  // Runner stop: an explicit stop parked under a profit runner (distinct from the
+  // trailing tiers above). Shown as its own dynamic-family row when present.
+  if (rt?.runner_mode_active && Number(rt?.runner_stop_price ?? 0) > 0) {
+    const rsp = Number(rt.runner_stop_price)
+    const rawDelta =
+      entryPrice > 0 ? ((rsp - entryPrice) / entryPrice) * 100 : 0
+    const deltaPct = rawDelta * dirMul
+    rows.push({
+      zone: 'Runner',
+      family: 'dynamic',
+      price: rsp,
+      sortPrice: rsp,
+      deltaPct,
+      atrMult: toAtrMult(deltaPct),
+      ratioPct: 100 - Number(rt.runner_keep_pct ?? 0),
+      usdValue: 0,
+      status: language === 'zh' ? '跟随中' : 'Runner',
+      statusCls: 'text-purple-300',
+      detail:
+        typeof rt.runner_keep_pct === 'number'
+          ? `keep ${rt.runner_keep_pct}%`
+          : undefined,
+    })
+  }
+
+  // Build rows from exchange orders (BE + Ladder + fallback, skip trailing since
+  // DD comes from tiers). Family is inferred from zone + profit direction.
   let beIndex = 0
   for (const order of orders) {
     const type = String(order.type || '').toUpperCase()
@@ -209,9 +288,24 @@ function buildProtectionRows(
     let zone = classifyZone(order, entryPrice, side)
     if (zone === 'DD') continue
 
+    const id = String(order.client_order_id || '').toLowerCase()
+    const isTP =
+      type.includes('TAKE_PROFIT') || type.includes('TP') || id.includes('_tp')
+    const isFallback = id.includes('fallback') || id.includes('maxloss')
+
+    let family: ProtectionFamily
     if (zone === 'BE') {
       beIndex++
       zone = `BE-${beIndex}`
+      family = 'be'
+    } else if (isFallback) {
+      zone = 'Fallback'
+      family = 'sl'
+    } else if (isTP) {
+      family = 'tp'
+    } else {
+      // A profit-side stop that isn't tagged BE is still a stop (ladder/full SL).
+      family = 'sl'
     }
 
     const status = language === 'zh' ? '委托中' : 'Live'
@@ -219,12 +313,95 @@ function buildProtectionRows(
 
     rows.push({
       zone,
+      family,
       price: triggerPrice,
       sortPrice: triggerPrice,
       deltaPct,
+      atrMult: toAtrMult(deltaPct),
       ratioPct,
+      usdValue: order.quantity > 0 ? order.quantity * triggerPrice : 0,
       status,
       statusCls,
+    })
+  }
+
+  // Structural stop-loss (range-anchored) — auto-shown when enabled. Two levels:
+  // the frozen boundary (Phase 2, close-confirm) and the wide backstop (Phase 1).
+  const structEnabled = Boolean(rt?.structural_sl_enabled)
+  if (structEnabled) {
+    const boundary = Number(rt?.structural_boundary_price ?? 0)
+    if (boundary > 0) {
+      const rawDelta =
+        entryPrice > 0 ? ((boundary - entryPrice) / entryPrice) * 100 : 0
+      rows.push({
+        zone: 'Struct',
+        family: 'structural',
+        price: boundary,
+        sortPrice: boundary,
+        deltaPct: rawDelta * dirMul,
+        atrMult: toAtrMult(rawDelta * dirMul),
+        ratioPct: 100,
+        usdValue: 0,
+        status: rt?.structural_close_confirm
+          ? language === 'zh'
+            ? '收盘确认'
+            : 'Close-confirm'
+          : language === 'zh'
+            ? '已布单'
+            : 'Armed',
+        statusCls: 'text-blue-300',
+        detail:
+          language === 'zh'
+            ? '结构位:K线收盘跌破边界即平'
+            : 'Structural: closes on bar close beyond boundary',
+      })
+    }
+    const backstop = Number(rt?.structural_backstop_price ?? 0)
+    if (backstop > 0) {
+      const rawDelta =
+        entryPrice > 0 ? ((backstop - entryPrice) / entryPrice) * 100 : 0
+      rows.push({
+        zone: 'Backstop',
+        family: 'structural',
+        price: backstop,
+        sortPrice: backstop,
+        deltaPct: rawDelta * dirMul,
+        atrMult: toAtrMult(rawDelta * dirMul),
+        ratioPct: 100,
+        usdValue: 0,
+        status: language === 'zh' ? '安全网' : 'Backstop',
+        statusCls: 'text-blue-300',
+        detail:
+          language === 'zh'
+            ? '安全网止损(挂交易所,防宕机/跳空)'
+            : 'Resting safety-net stop (downtime/gap cover)',
+      })
+    }
+  }
+
+  // Liquidation — the exchange hard floor. Always last-resort; render if present.
+  const liqPrice = Number(position.liquidation_price ?? 0)
+  if (liqPrice > 0 && entryPrice > 0) {
+    const rawDelta = ((liqPrice - entryPrice) / entryPrice) * 100
+    rows.push({
+      zone: 'Liq',
+      family: 'liquidation',
+      price: liqPrice,
+      sortPrice: liqPrice,
+      deltaPct: rawDelta * dirMul,
+      // Liquidation distance in ATR multiples is meaningless: for a cross-margin
+      // or small position the exchange liq price sits enormously far away, yielding
+      // absurd figures like -135×. Suppress the ×ATR for liq (0 hides it at both
+      // render sites) and keep only the % distance, which is the meaningful metric.
+      atrMult: 0,
+      ratioPct: 100,
+      usdValue: 0,
+      status: language === 'zh' ? '强平线' : 'Liquidation',
+      statusCls: 'text-red-400',
+      detail:
+        language === 'zh'
+          ? '交易所强制平仓价(最后底线)'
+          : 'Exchange forced-liquidation price (hard floor)',
     })
   }
 
@@ -236,10 +413,13 @@ function buildProtectionRows(
         : 0
     rows.push({
       zone: '',
+      family: 'dynamic',
       price: markPrice,
       sortPrice: markPrice,
       deltaPct: markDelta,
+      atrMult: toAtrMult(markDelta),
       ratioPct: 0,
+      usdValue: 0,
       status: '',
       statusCls: '',
       isCurrentPrice: true,
@@ -279,6 +459,15 @@ const PositionCard = memo(function PositionCard({
   )
   const peakPnlPct = Number(rt?.drawdown_peak_pnl_pct ?? currentPnlPct)
   const currentDrawdownPct = Number(rt?.current_drawdown_pct ?? 0)
+  const atrAtEntry = Number(rt?.atr_at_entry ?? 0)
+  const currentATR = Number(rt?.current_atr ?? 0)
+  const atrTimeframe = String(rt?.atr_timeframe ?? '')
+  const atrEntryPct =
+    entryPrice > 0 && atrAtEntry > 0 ? (atrAtEntry / entryPrice) * 100 : 0
+  const atrDriftPct =
+    atrAtEntry > 0 && currentATR > 0
+      ? ((currentATR - atrAtEntry) / atrAtEntry) * 100
+      : 0
 
   // Real overall result of the position: accumulated realized (from partial closes)
   // + current unrealized - total fees. Falls back to raw unrealized when net_pnl absent.
@@ -390,6 +579,45 @@ const PositionCard = memo(function PositionCard({
             </span>
           </span>
         )}
+        {atrAtEntry > 0 && (
+          <span>
+            ATR{atrTimeframe ? ` ${atrTimeframe}` : ''}{' '}
+            <span className="text-nofx-text-muted">
+              {language === 'zh' ? '开仓' : 'entry'}
+            </span>{' '}
+            <span className="font-mono text-nofx-text-main">
+              {formatPrice(atrAtEntry)}
+            </span>
+            {atrEntryPct > 0 && (
+              <span className="text-nofx-text-muted">
+                {' '}
+                ({atrEntryPct.toFixed(2)}%)
+              </span>
+            )}
+            {currentATR > 0 && (
+              <>
+                <span className="text-nofx-text-muted mx-0.5">→</span>
+                <span className="text-nofx-text-muted">
+                  {language === 'zh' ? '当前' : 'now'}
+                </span>{' '}
+                <span className="font-mono text-nofx-text-main">
+                  {formatPrice(currentATR)}
+                </span>
+                {Math.abs(atrDriftPct) >= 1 && (
+                  <span
+                    className={`font-mono ${
+                      atrDriftPct > 0 ? 'text-nofx-red' : 'text-nofx-green'
+                    }`}
+                  >
+                    {' '}
+                    {atrDriftPct > 0 ? '+' : ''}
+                    {atrDriftPct.toFixed(0)}%
+                  </span>
+                )}
+              </>
+            )}
+          </span>
+        )}
       </div>
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
@@ -436,118 +664,186 @@ const PositionCard = memo(function PositionCard({
       </div>
 
       {rows.length > 0 ? (
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="text-nofx-text-muted border-b border-white/10">
-                <th className="text-left py-1 pr-2 font-medium">
-                  {language === 'zh' ? '层级' : 'Zone'}
-                </th>
-                <th className="text-right py-1 px-2 font-medium">
-                  {language === 'zh' ? '触发价' : 'Trigger'}
-                </th>
-                <th className="text-right py-1 px-2 font-medium">Δ%</th>
-                <th className="text-right py-1 px-2 font-medium">
-                  {language === 'zh' ? '仓位' : 'Ratio'}
-                </th>
-                <th className="text-center py-1 px-2 font-medium">
-                  {language === 'zh' ? '状态' : 'Status'}
-                </th>
-                <th className="text-left py-1 pl-2 font-medium">
-                  {language === 'zh' ? '参数' : 'Detail'}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, ri) => {
-                if (row.isCurrentPrice) {
-                  return (
-                    <tr
-                      key={`price-line-${ri}`}
-                      className="border-y border-cyan-500/40"
-                    >
-                      <td colSpan={6} className="py-0.5">
-                        <div className="flex items-center gap-2">
-                          <div className="flex-1 h-px bg-cyan-500/40" />
-                          <span className="text-[10px] font-mono text-cyan-300 whitespace-nowrap">
-                            ▸ {formatPrice(row.price)} (
-                            {formatPct(row.deltaPct)})
-                          </span>
-                          <div className="flex-1 h-px bg-cyan-500/40" />
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                }
-
-                const deltaColor =
-                  row.deltaPct > 0
-                    ? 'text-nofx-green'
-                    : row.deltaPct < 0
-                      ? 'text-nofx-red'
-                      : 'text-nofx-text-muted'
-                const zoneCls = row.zone.startsWith('DD')
-                  ? 'text-purple-300'
-                  : row.zone.startsWith('BE')
-                    ? 'text-amber-300'
-                    : 'text-blue-300'
-
+        <div className="overflow-x-auto pb-1">
+          <div className="flex items-stretch gap-1.5 min-w-min">
+            {rows.map((row, ri) => {
+              if (row.isCurrentPrice) {
                 return (
-                  <tr
-                    key={`row-${ri}`}
-                    className="border-b border-white/5 hover:bg-white/5"
+                  <div
+                    key={`price-line-${ri}`}
+                    className="flex flex-col items-center justify-center px-2 rounded border border-cyan-500/40 bg-cyan-500/5 shrink-0"
                   >
-                    <td className="py-1 pr-2">
-                      <span className={`font-medium ${zoneCls}`}>
-                        {row.zone}
-                      </span>
-                    </td>
-                    <td className="py-1 px-2 text-right font-mono text-nofx-text-main">
-                      {row.price > 0 ? formatPrice(row.price) : '—'}
-                    </td>
-                    <td
-                      className={`py-1 px-2 text-right font-mono ${deltaColor}`}
-                    >
-                      {row.price > 0 ? formatPct(row.deltaPct) : '—'}
-                    </td>
-                    <td className="py-1 px-2 text-right font-mono text-nofx-text-main">
-                      {row.ratioPct > 0 ? `${row.ratioPct.toFixed(0)}%` : '—'}
-                    </td>
-                    <td className="py-1 px-2 text-center">
-                      <span
-                        className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium border ${row.statusCls} ${
-                          row.statusCls.includes('emerald')
-                            ? 'bg-emerald-500/10 border-emerald-500/20'
-                            : row.statusCls.includes('amber')
-                              ? 'bg-amber-500/10 border-amber-500/20'
-                              : row.statusCls.includes('red')
-                                ? 'bg-red-500/10 border-red-500/20'
-                                : 'bg-white/5 border-white/10'
-                        }`}
-                      >
-                        {row.status}
-                      </span>
-                    </td>
-                    <td
-                      className="py-1 pl-2 text-nofx-text-muted truncate max-w-[180px]"
-                      title={row.detail || ''}
-                    >
-                      {row.detail || '—'}
-                    </td>
-                  </tr>
+                    <span className="text-[9px] text-cyan-300/70 uppercase tracking-wider">
+                      {language === 'zh' ? '现价' : 'Now'}
+                    </span>
+                    <span className="text-[11px] font-mono font-bold text-cyan-300 whitespace-nowrap">
+                      {formatPrice(row.price)}
+                    </span>
+                    <span className="text-[10px] font-mono text-cyan-300/80 whitespace-nowrap">
+                      {formatPct(row.deltaPct)}
+                      {row.atrMult !== 0
+                        ? ` / ${row.atrMult >= 0 ? '+' : ''}${row.atrMult.toFixed(1)}×`
+                        : ''}
+                    </span>
+                  </div>
                 )
-              })}
-            </tbody>
-          </table>
+              }
+
+              const deltaColor =
+                row.deltaPct > 0
+                  ? 'text-nofx-green'
+                  : row.deltaPct < 0
+                    ? 'text-nofx-red'
+                    : 'text-nofx-text-muted'
+              const zoneCls = FAMILY_CLS[row.family] || FAMILY_CLS.dynamic
+              const statusDot = row.statusCls.includes('emerald')
+                ? 'bg-emerald-400'
+                : row.statusCls.includes('amber')
+                  ? 'bg-amber-400'
+                  : row.statusCls.includes('red')
+                    ? 'bg-red-400'
+                    : 'bg-white/30'
+
+              return (
+                <div
+                  key={`row-${ri}`}
+                  className={`flex flex-col px-2 py-1 rounded border bg-black/20 hover:bg-white/5 shrink-0 min-w-[78px] ${zoneCls}`}
+                  title={row.detail || ''}
+                >
+                  <div className="flex items-center justify-between gap-1">
+                    <span
+                      className={`text-[10px] font-bold ${zoneCls.split(' ')[0]}`}
+                    >
+                      {row.zone}
+                    </span>
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${statusDot}`}
+                      title={row.status}
+                    />
+                  </div>
+                  <span className="text-[11px] font-mono font-semibold text-nofx-text-main whitespace-nowrap">
+                    {row.price > 0 ? formatPrice(row.price) : '—'}
+                  </span>
+                  <span
+                    className={`text-[10px] font-mono whitespace-nowrap ${deltaColor}`}
+                  >
+                    {row.price > 0 ? formatPct(row.deltaPct) : '—'}
+                    {row.price > 0 && row.atrMult !== 0
+                      ? ` / ${row.atrMult >= 0 ? '+' : ''}${row.atrMult.toFixed(1)}×`
+                      : ''}
+                  </span>
+                  <span className="text-[10px] font-mono text-nofx-text-muted whitespace-nowrap">
+                    {row.ratioPct > 0 ? (
+                      <>
+                        {row.ratioPct.toFixed(0)}%
+                        {row.usdValue > 0
+                          ? ` ${formatUsd(row.usdValue).replace('+', '')}`
+                          : ''}
+                      </>
+                    ) : (
+                      '—'
+                    )}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
         </div>
       ) : (
         <div className="text-xs text-nofx-text-muted border border-white/10 rounded px-3 py-2">
           {language === 'zh' ? '无保护委托' : 'No protection orders'}
         </div>
       )}
+
+      <ConditionTriggers rt={rt} language={language} />
     </div>
   )
 })
+
+// ConditionTriggers renders the close mechanisms that have NO fixed price — they
+// fire on elapsed time / loss conditions, not a level. Kept visually separate
+// (gray) from the price ladder so the user does not read them as price lines.
+function ConditionTriggers({
+  rt,
+  language,
+}: {
+  rt: Position['protection_runtime']
+  language: Language
+}) {
+  const chips: { label: string; title: string }[] = []
+  const tsh = Number(rt?.time_stop_hours ?? 0)
+  const tsl = Number(rt?.time_stop_loss_pct ?? 0)
+  if (tsh > 0) {
+    chips.push({
+      label:
+        language === 'zh'
+          ? `时间止损 ${tsh}h${tsl ? ` / 亏损<${tsl}%` : ''}`
+          : `Time-stop ${tsh}h${tsl ? ` / loss<${tsl}%` : ''}`,
+      title:
+        language === 'zh'
+          ? `持仓超过 ${tsh} 小时且仍亏损差于 ${tsl}% 时强制平仓`
+          : `Force-close when held > ${tsh}h and still in loss worse than ${tsl}%`,
+    })
+  }
+  const mhh = Number(rt?.max_hold_hours ?? 0)
+  const mhe = Number(rt?.max_hold_profit_exempt_pct ?? 0)
+  if (mhh > 0) {
+    chips.push({
+      label:
+        language === 'zh'
+          ? `超时平仓 ${mhh}h${mhe ? ` / 盈利≥${mhe}%豁免` : ''}`
+          : `Max-hold ${mhh}h${mhe ? ` / exempt≥${mhe}%` : ''}`,
+      title:
+        language === 'zh'
+          ? `持仓超过 ${mhh} 小时强制平仓,除非盈利≥${mhe}%(盈利runner豁免)`
+          : `Force-close after ${mhh}h unless profit ≥ ${mhe}% (runner exempt)`,
+    })
+  }
+  if (chips.length === 0) return null
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 pt-1">
+      <span className="text-[10px] uppercase tracking-wider text-nofx-text-muted">
+        {language === 'zh'
+          ? '条件触发(无固定价位)'
+          : 'Condition triggers (no price)'}
+      </span>
+      {chips.map((c, i) => (
+        <span
+          key={i}
+          className="rounded border border-white/15 bg-white/5 px-1.5 py-0.5 text-[10px] text-nofx-text-muted"
+          title={c.title}
+        >
+          {c.label}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+// ProtectionLegend explains the color families once at the top so every price
+// row below is self-describing.
+function ProtectionLegend({ language }: { language: Language }) {
+  const items: { family: ProtectionFamily; zh: string; en: string }[] = [
+    { family: 'tp', zh: '止盈', en: 'TP' },
+    { family: 'be', zh: '保本', en: 'BE' },
+    { family: 'sl', zh: '止损/兜底', en: 'SL/Fallback' },
+    { family: 'dynamic', zh: '移动/回撤', en: 'Trailing/DD' },
+    { family: 'structural', zh: '结构位', en: 'Structural' },
+    { family: 'liquidation', zh: '强平', en: 'Liq' },
+  ]
+  return (
+    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 mb-3 text-[10px] text-nofx-text-muted">
+      {items.map((it) => (
+        <span key={it.family} className="inline-flex items-center gap-1">
+          <span
+            className={`inline-block w-2 h-2 rounded-sm border ${FAMILY_CLS[it.family]}`}
+          />
+          {language === 'zh' ? it.zh : it.en}
+        </span>
+      ))}
+    </div>
+  )
+}
 
 export function PositionProtectionPanel({
   traderId,
@@ -622,6 +918,8 @@ export function PositionProtectionPanel({
           <span className="text-[10px] text-nofx-text-muted ml-2">⟳</span>
         )}
       </h2>
+
+      <ProtectionLegend language={language} />
 
       <div className="space-y-4">
         {positions.map((position, index) => (

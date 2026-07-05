@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"nofx/httpx"
+	"nofx/market"
 	"strconv"
 	"strings"
 	"time"
@@ -78,9 +80,12 @@ func getOKXTickerPrice(symbol string) (float64, error) {
 }
 
 func getBinanceTickerPrice(symbol string) (float64, error) {
+	// The dashboard may pass a bare base ("BTC"); Binance needs the full pair
+	// ("BTCUSDT"). Normalize to match the OKX path (which maps via instId).
+	symbol = market.Normalize(symbol)
 	url := fmt.Sprintf("https://fapi.binance.com/fapi/v1/ticker/price?symbol=%s", symbol)
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := httpx.NewBinanceClient(3 * time.Second)
 	resp, err := client.Get(url)
 	if err != nil {
 		return 0, err

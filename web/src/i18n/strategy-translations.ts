@@ -634,6 +634,16 @@ export const riskControl = {
     en: 'Execution Constraints',
     es: 'Restricciones de Ejecución',
   },
+  binanceUsdcMaker: {
+    zh: 'Binance USDC 挂单模式',
+    en: 'Binance USDC Maker Mode',
+    es: 'Modo Maker USDC de Binance',
+  },
+  binanceUsdcMakerDesc: {
+    zh: '仅 Binance：有 USDC 永续的币自动改用 USDC 交易对（挂单0手续费），止盈改为 post-only 挂单成交。行情与内部记录仍用 USDT。需账户开启多资产模式或持有 USDC 保证金。默认对 Binance 开启。',
+    en: 'Binance only: route bases with a USDC perp to USDC pairs (zero maker fee) and place take-profit as post-only maker orders. Market data and internal records stay USDT. Requires multi-asset mode or USDC margin. On by default for Binance.',
+    es: 'Solo Binance: enruta a pares USDC (comisión maker cero) y coloca take-profit como órdenes maker post-only. Requiere modo multi-activo o margen USDC. Activado por defecto para Binance.',
+  },
   entryCooldown: {
     zh: '止损后冷却 (分钟)',
     en: 'Post-loss cooldown (min)',
@@ -1173,6 +1183,40 @@ export const preEntryGate = {
   squeezeMinConf: { zh: '挤压行情最低置信度', en: 'Squeeze min confidence' },
   squeezeMinRR: { zh: '挤压行情最低 RR', en: 'Squeeze min RR' },
   minRewardAtr: { zh: '最小TP距离 (ATR×)', en: 'Min TP distance (ATR×)' },
+  maxTargetAtr: { zh: '最大TP距离 (ATR×)', en: 'Max TP distance (ATR×)' },
+  maxTargetAtrDesc: {
+    zh: '目标距离超过该 ATR 倍数则拦截：远目标够不着，全样本回测(781单,样本外验证)显示 >5×ATR 时期望收益转负、目标仅~12%达成。默认 5.0，设 0 关闭。',
+    en: 'Reject entries whose first_target exceeds this ATR multiple: far targets are unreachable. Full-sample backtest (781 trades, OOS-validated) shows EV turns negative and targets hit only ~12% of the time beyond 5×ATR. Default 5.0, set 0 to disable.',
+  },
+  targetReachabilityMode: { zh: '远目标处理方式', en: 'Far-target handling' },
+  targetReachabilityModeDesc: {
+    zh: '当 first_target 超过最大TP距离时：「压缩(cap)」把目标改写到可达上限并重算RR、保留这笔交易(默认)；「拒绝(reject)」直接拦掉(旧行为)。回测174笔远目标单54%其实跑过≥1倍风险利润只是没到远目标就折返——压缩+早锁盈能救回大部分。全组合：拒绝+28.7% vs 压缩+37.0%。',
+    en: 'When first_target exceeds the max TP distance: "cap" rewrites it to the reachable ceiling and recomputes RR, keeping the trade (default); "reject" hard-blocks it (legacy). Backtest of 174 far-target trades: 54% actually ran ≥1× risk in profit but reverted before the unreachable target — cap+early-lock recovers most of it. Full-portfolio: reject +28.7% vs cap +37.0%.',
+  },
+  realisticTargetRiskMul: {
+    zh: '首档锁盈 (×风险)',
+    en: 'First-lock tier (×risk)',
+  },
+  realisticTargetRiskMulDesc: {
+    zh: '喂给AI的首个止盈/保本档位距离，按止损风险的倍数(默认0.8，更容易落袋——被拦的盈利单105/174能到0.8×风险 vs 94能到1.0×)。由最小回报(1.8×ATR)兜底，确保锁盈档不落进波动噪声带被扫出。',
+    en: 'First take-profit / break-even tier distance fed to the AI, as a multiple of stop-risk (default 0.8, easier to bank — 105/174 blocked winners reach 0.8× risk vs 94 at 1.0×). Floored by min-reward (1.8× ATR) so the lock tier clears the noise band and is not scanned out.',
+  },
+  blockLongInHtfDowntrend: {
+    zh: '拦截1h+4h确认下跌做多',
+    en: 'Block long in 1h+4h downtrend',
+  },
+  blockLongInHtfDowntrendDesc: {
+    zh: '当1h和4h均确认下跌趋势时禁止做多。真实2026数据：4h确认的下跌做多15单净-4.7%(真下跌)，1h单独下跌16单净+1.7%(牛市回踩)。多时间框架确认过滤真下跌，保留盈利回踩机会。默认启用。',
+    en: 'Block open_long when both 1h and 4h confirm downtrend. Real 2026: 4h-confirmed down×LONG 15 trades -4.7% (true downtrend), 1h-only 16 trades +1.7% (bull-market dips). Multi-TF confirmation filters toxic downtrends while preserving profitable dip-buys. Default enabled.',
+  },
+  blockShortInHtfUptrend: {
+    zh: '拦截1h+4h确认上涨做空',
+    en: 'Block short in 1h+4h uptrend',
+  },
+  blockShortInHtfUptrendDesc: {
+    zh: '当1h和4h均确认上涨趋势时禁止做空。真实2026数据：4h确认的上涨做空9单净-4.9%(真上涨)，1h单独上涨7单净+6.6%(熊市反弹)。牛市模拟：快牛上涨做空-970%，慢牛-328%。多时间框架门控拦截真上涨做空，保留盈利熊市反弹空单。默认启用。',
+    en: 'Block open_short when both 1h and 4h confirm uptrend. Real 2026: 4h-confirmed up×SHORT 9 trades -4.9% (true uptrend), 1h-only 7 trades +6.6% (bear bounces). Bull sim: up×SHORT -970% in fast bulls, -328% in slow bulls. Multi-TF gate blocks toxic real-uptrend shorts while preserving profitable bear-bounce fades. Default enabled.',
+  },
 }
 
 // ============================================================================

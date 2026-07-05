@@ -11,6 +11,7 @@ import type {
   ProtectionConfig,
   FullTPSLConfig,
   LadderTPSLConfig,
+  StructuralSLConfig,
   DrawdownTakeProfitConfig,
   BreakEvenStopConfig,
   LadderTPSLRule,
@@ -18,6 +19,10 @@ import type {
   BreakEvenStopRule,
   ProtectionMode,
   ProtectionValueSource,
+  GivebackGuardConfig,
+  TrendReversalConfig,
+  ATRProtectionConfig,
+  ProtectionDistanceUnit,
 } from '../../types'
 import { ProtectionArbitrationBanner } from './ProtectionArbitrationBanner'
 
@@ -26,6 +31,8 @@ interface ProtectionEditorProps {
   onChange: (config: ProtectionConfig) => void
   disabled?: boolean
   language: string
+  atrConfig?: ATRProtectionConfig
+  onAtrChange?: (config: ATRProtectionConfig) => void
 }
 
 export const defaultProtectionConfig: ProtectionConfig = {
@@ -92,6 +99,35 @@ export const defaultProtectionConfig: ProtectionConfig = {
     block_high_volatility: false,
     max_atr14_pct: 3,
     require_trend_alignment: false,
+  },
+  giveback_guard: {
+    enabled: false,
+    dry_run: false,
+    // Breadth breaker — cross-validated production preset (min4 / f70% / ATR0.9
+    // / cut100 / no cooldown). Per-symbol monitoring + majority-retrace gate,
+    // cuts only losing positions (winners ride break-even). Leverage-free, so
+    // 0.5%-at-10x noise can't knock the book out.
+    breadth_enabled: false,
+    breadth_min_pos: 4,
+    breadth_frac: 0.7,
+    breadth_loser_cut_pct: 100,
+    breadth_use_atr: true,
+    breadth_atr_mult: 0.9,
+    breadth_giveback_pct: 3,
+    breadth_vel_eps: 0,
+    breadth_vel_window: 6,
+    breadth_cooldown_bars: 0,
+    breadth_cut_winners: false,
+  },
+  // Trend reversal: fleet default is enabled + live for every trader. The UI shows
+  // these as overrides; defaults mirror the fleet so the toggles read true on a
+  // fresh strategy. min_confidence 75 / min_position_age_hours 6 are the backtest
+  // optima. disabled / force_dry_run are the per-trader escape hatches.
+  trend_reversal: {
+    disabled: false,
+    force_dry_run: false,
+    min_confidence: 75,
+    min_position_age_hours: 6,
   },
 }
 
@@ -175,6 +211,14 @@ export const normalizeProtectionConfig = (
     ...defaultProtectionConfig.regime_filter,
     ...(config?.regime_filter || {}),
   },
+  giveback_guard: {
+    ...defaultProtectionConfig.giveback_guard,
+    ...(config?.giveback_guard || {}),
+  },
+  trend_reversal: {
+    ...defaultProtectionConfig.trend_reversal,
+    ...(config?.trend_reversal || {}),
+  },
 })
 
 export function ProtectionEditor({
@@ -182,8 +226,27 @@ export function ProtectionEditor({
   onChange,
   disabled,
   language,
+  atrConfig,
+  onAtrChange,
 }: ProtectionEditorProps) {
   const isZh = language === 'zh'
+
+  // Global ATR settings (timeframe / period / clamp). Individual TP/SL/DD/BE
+  // fields opt into ATR via their own per-field unit toggle.
+  const atr: ATRProtectionConfig = atrConfig || {
+    enabled: false,
+    timeframe: '1h',
+    atr_period: 14,
+    min_eff_pct: 0.3,
+    max_eff_pct: 20,
+  }
+  const updateAtr = <K extends keyof ATRProtectionConfig>(
+    key: K,
+    value: ATRProtectionConfig[K]
+  ) => {
+    if (disabled || !onAtrChange) return
+    onAtrChange({ ...atr, [key]: value })
+  }
 
   const inputStyle = {
     background: '#1E2329',
@@ -267,9 +330,43 @@ export function ProtectionEditor({
     })
   }
 
+  const giveback = config.giveback_guard || {}
+
+  const updateGiveback = <K extends keyof GivebackGuardConfig>(
+    key: K,
+    value: GivebackGuardConfig[K]
+  ) => {
+    if (disabled) return
+    onChange({
+      ...config,
+      giveback_guard: { ...giveback, [key]: value },
+    })
+  }
+
+  const flip = config.trend_reversal || {}
+
+  const updateFlip = <K extends keyof TrendReversalConfig>(
+    key: K,
+    value: TrendReversalConfig[K]
+  ) => {
+    if (disabled) return
+    onChange({
+      ...config,
+      trend_reversal: { ...flip, [key]: value },
+    })
+  }
+
   const drawdownRules = config.drawdown_take_profit.rules || []
   const ladderRules = config.ladder_tp_sl.rules || []
   const breakEvenRules = config.break_even_stop.rules || []
+
+  const structuralSL = config.ladder_tp_sl.structural_sl || {}
+  const anySLStructural = ladderRules.some(
+    (r) => r.stop_loss_unit === 'structural'
+  )
+  const updateStructuralSL = (patch: Partial<StructuralSLConfig>) => {
+    updateLadder('structural_sl', { ...structuralSL, ...patch })
+  }
 
   const addLadderRule = () => {
     const nextRule: LadderTPSLRule = {
@@ -408,6 +505,41 @@ export function ProtectionEditor({
       </div>
     </div>
   )
+
+  // unitToggle renders a compact percent|ATR-multiple selector for a single
+  // distance field. ATR mode resolves at runtime as value × ATR / entry × 100.
+  const unitToggle = (
+    value: ProtectionDistanceUnit | undefined,
+    onSelect: (unit: ProtectionDistanceUnit) => void,
+    allowStructural = false
+  ) => {
+    const current: ProtectionDistanceUnit =
+      value === 'atr'
+        ? 'atr'
+        : value === 'structural'
+          ? 'structural'
+          : 'percent'
+    return (
+      <select
+        value={current}
+        onChange={(e) => onSelect(e.target.value as ProtectionDistanceUnit)}
+        disabled={disabled}
+        className="rounded px-1.5 py-1 text-xs"
+        style={inputStyle}
+        title={
+          isZh
+            ? '单位：% = 固定百分比；ATR = ATR倍数（按波动自适应）；结构位 = 锚定入场前震荡区边界'
+            : 'Unit: % = fixed percent; ATR = ATR multiple; Structural = anchored to pre-entry range boundary'
+        }
+      >
+        <option value="percent">%</option>
+        <option value="atr">ATR×</option>
+        {allowStructural && (
+          <option value="structural">{isZh ? '结构位' : 'Struct'}</option>
+        )}
+      </select>
+    )
+  }
 
   const statusChip = (active: boolean, label: string) => (
     <span
@@ -1244,12 +1376,23 @@ export function ProtectionEditor({
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div>
-                    <label
-                      className="block text-xs mb-1"
-                      style={{ color: '#848E9C' }}
-                    >
-                      {isZh ? '止盈触发 %' : 'TP Trigger %'}
-                    </label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label
+                        className="block text-xs"
+                        style={{ color: '#848E9C' }}
+                      >
+                        {rule.take_profit_unit === 'atr'
+                          ? isZh
+                            ? '止盈触发 (ATR倍数)'
+                            : 'TP Trigger (ATR×)'
+                          : isZh
+                            ? '止盈触发 %'
+                            : 'TP Trigger %'}
+                      </label>
+                      {unitToggle(rule.take_profit_unit, (u) =>
+                        updateLadderRule(index, { take_profit_unit: u })
+                      )}
+                    </div>
                     {config.ladder_tp_sl.take_profit_price.mode === 'manual' ? (
                       <input
                         type="number"
@@ -1312,12 +1455,29 @@ export function ProtectionEditor({
                     )}
                   </div>
                   <div>
-                    <label
-                      className="block text-xs mb-1"
-                      style={{ color: '#848E9C' }}
-                    >
-                      {isZh ? '止损触发 %' : 'SL Trigger %'}
-                    </label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label
+                        className="block text-xs"
+                        style={{ color: '#848E9C' }}
+                      >
+                        {rule.stop_loss_unit === 'structural'
+                          ? isZh
+                            ? '止损触发 (结构位·倍数为兜底)'
+                            : 'SL Trigger (Structural · value=fallback)'
+                          : rule.stop_loss_unit === 'atr'
+                            ? isZh
+                              ? '止损触发 (ATR倍数)'
+                              : 'SL Trigger (ATR×)'
+                            : isZh
+                              ? '止损触发 %'
+                              : 'SL Trigger %'}
+                      </label>
+                      {unitToggle(
+                        rule.stop_loss_unit,
+                        (u) => updateLadderRule(index, { stop_loss_unit: u }),
+                        true
+                      )}
+                    </div>
                     {config.ladder_tp_sl.stop_loss_price.mode === 'manual' ? (
                       <input
                         type="number"
@@ -1382,6 +1542,129 @@ export function ProtectionEditor({
                 </div>
               </div>
             ))}
+
+            {/* Structural SL config — shown when any SL rule uses the structural unit */}
+            {anySLStructural && (
+              <div
+                className="mt-3 p-3 rounded-lg space-y-3"
+                style={helpCardStyle}
+              >
+                <div
+                  className="text-xs font-semibold"
+                  style={{ color: '#EAECEF' }}
+                >
+                  {isZh
+                    ? '结构位止损设置（锚定入场前震荡区边界）'
+                    : 'Structural Stop-Loss (anchored to pre-entry range boundary)'}
+                </div>
+                <div className="text-xs" style={{ color: '#AAB2BD' }}>
+                  {isZh
+                    ? '止损放在入场前震荡区边界外（多头=区间低点，空头=区间高点），按下方倍数钳制。窄幅震荡里更紧（突破损失更小），地板防插针。回测：在现有TP/BE/DD上替换固定4.5ATR止损,全盘约+60、震荡区约+58,突破捕获不变。'
+                    : 'Places the stop just beyond the pre-entry range boundary (swing low for long / high for short), clamped by the multiples below. Backtest: replacing the fixed 4.5 ATR stop on the current stack gains ~+60 overall / ~+58 in the ranging regime, breakout unchanged.'}
+                </div>
+                <label
+                  className="flex items-center gap-2 text-xs"
+                  style={{ color: '#EAECEF' }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={structuralSL.enabled ?? false}
+                    onChange={(e) =>
+                      updateStructuralSL({ enabled: e.target.checked })
+                    }
+                    disabled={disabled}
+                  />
+                  {isZh ? '启用结构位止损' : 'Enable structural stop-loss'}
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <label
+                      className="block text-[11px] mb-1"
+                      style={{ color: '#848E9C' }}
+                    >
+                      {isZh ? '地板 (ATR倍数)' : 'Floor (ATR×)'}
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={structuralSL.floor_atr_mul ?? 1.5}
+                      onChange={(e) =>
+                        updateStructuralSL({
+                          floor_atr_mul: parseFloat(e.target.value) || 0,
+                        })
+                      }
+                      disabled={disabled}
+                      className="w-full px-2 py-1.5 rounded text-xs"
+                      style={inputStyle}
+                    />
+                  </div>
+                  <div>
+                    <label
+                      className="block text-[11px] mb-1"
+                      style={{ color: '#848E9C' }}
+                    >
+                      {isZh ? '兜底上限 (ATR倍数)' : 'Backstop (ATR×)'}
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={structuralSL.backstop_atr_mul ?? 4.5}
+                      onChange={(e) =>
+                        updateStructuralSL({
+                          backstop_atr_mul: parseFloat(e.target.value) || 0,
+                        })
+                      }
+                      disabled={disabled}
+                      className="w-full px-2 py-1.5 rounded text-xs"
+                      style={inputStyle}
+                    />
+                  </div>
+                  <div>
+                    <label
+                      className="block text-[11px] mb-1"
+                      style={{ color: '#848E9C' }}
+                    >
+                      {isZh ? '回看K线数' : 'Lookback bars'}
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={structuralSL.lookback_bars ?? 24}
+                      onChange={(e) =>
+                        updateStructuralSL({
+                          lookback_bars: parseInt(e.target.value, 10) || 0,
+                        })
+                      }
+                      disabled={disabled}
+                      className="w-full px-2 py-1.5 rounded text-xs"
+                      style={inputStyle}
+                    />
+                  </div>
+                </div>
+                <label
+                  className="flex items-start gap-2 text-xs"
+                  style={{ color: '#EAECEF' }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={structuralSL.close_confirm ?? false}
+                    onChange={(e) =>
+                      updateStructuralSL({ close_confirm: e.target.checked })
+                    }
+                    disabled={disabled}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    {isZh
+                      ? '收盘确认（第二期）：仅当K线收盘跌破结构位才平仓（防插针）。交易所挂单移到兜底上限做宕机保命，紧止损由引擎轮询执行。'
+                      : 'Close-confirm (Phase 2): exit only when a bar CLOSES beyond the boundary (anti stop-hunt). Resting stop parks at the backstop as a downtime net; the tight stop runs via engine poll.'}
+                  </span>
+                </label>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -1762,29 +2045,40 @@ export function ProtectionEditor({
                         className="block text-xs"
                         style={{ color: '#848E9C' }}
                       >
-                        {isZh
-                          ? '峰值触发 %（利润达到此值开始追踪）'
-                          : 'Peak Trigger % (start tracking at this profit)'}
+                        {rule.min_profit_unit === 'atr'
+                          ? isZh
+                            ? '峰值触发 (ATR倍数，利润达到此值开始追踪)'
+                            : 'Peak Trigger (ATR×, start tracking at this profit)'
+                          : isZh
+                            ? '峰值触发 %（利润达到此值开始追踪）'
+                            : 'Peak Trigger % (start tracking at this profit)'}
                       </label>
-                      <select
-                        value={rule.min_profit_mode || 'manual'}
-                        onChange={(e) =>
-                          updateDrawdownRule(index, {
-                            min_profit_mode: e.target.value as 'manual' | 'ai',
-                          })
-                        }
-                        disabled={
-                          disabled ||
-                          config.drawdown_take_profit.mode === 'disabled'
-                        }
-                        className="px-2 py-1 rounded text-xs"
-                        style={inputStyle}
-                      >
-                        <option value="manual">
-                          {isZh ? '手动' : 'Manual'}
-                        </option>
-                        <option value="ai">{isZh ? 'AI 决定' : 'AI'}</option>
-                      </select>
+                      <div className="flex items-center gap-1">
+                        {unitToggle(rule.min_profit_unit, (u) =>
+                          updateDrawdownRule(index, { min_profit_unit: u })
+                        )}
+                        <select
+                          value={rule.min_profit_mode || 'manual'}
+                          onChange={(e) =>
+                            updateDrawdownRule(index, {
+                              min_profit_mode: e.target.value as
+                                | 'manual'
+                                | 'ai',
+                            })
+                          }
+                          disabled={
+                            disabled ||
+                            config.drawdown_take_profit.mode === 'disabled'
+                          }
+                          className="px-2 py-1 rounded text-xs"
+                          style={inputStyle}
+                        >
+                          <option value="manual">
+                            {isZh ? '手动' : 'Manual'}
+                          </option>
+                          <option value="ai">{isZh ? 'AI 决定' : 'AI'}</option>
+                        </select>
+                      </div>
                     </div>
                     {(rule.min_profit_mode || 'manual') === 'manual' && (
                       <input
@@ -1824,31 +2118,40 @@ export function ProtectionEditor({
                         className="block text-xs"
                         style={{ color: '#848E9C' }}
                       >
-                        {isZh
-                          ? '回撤幅度 %（从该级峰值回撤此比例触发平仓）'
-                          : 'Drawdown % (close when drawdown from tier peak exceeds this)'}
+                        {rule.max_drawdown_unit === 'atr'
+                          ? isZh
+                            ? '回撤幅度 (ATR倍数，从该级峰值回撤此距离触发平仓)'
+                            : 'Drawdown (ATR×, close when giveback from tier peak exceeds this)'
+                          : isZh
+                            ? '回撤幅度 %（从该级峰值回撤此比例触发平仓）'
+                            : 'Drawdown % (close when drawdown from tier peak exceeds this)'}
                       </label>
-                      <select
-                        value={rule.max_drawdown_mode || 'manual'}
-                        onChange={(e) =>
-                          updateDrawdownRule(index, {
-                            max_drawdown_mode: e.target.value as
-                              | 'manual'
-                              | 'ai',
-                          })
-                        }
-                        disabled={
-                          disabled ||
-                          config.drawdown_take_profit.mode === 'disabled'
-                        }
-                        className="px-2 py-1 rounded text-xs"
-                        style={inputStyle}
-                      >
-                        <option value="manual">
-                          {isZh ? '手动' : 'Manual'}
-                        </option>
-                        <option value="ai">{isZh ? 'AI 决定' : 'AI'}</option>
-                      </select>
+                      <div className="flex items-center gap-1">
+                        {unitToggle(rule.max_drawdown_unit, (u) =>
+                          updateDrawdownRule(index, { max_drawdown_unit: u })
+                        )}
+                        <select
+                          value={rule.max_drawdown_mode || 'manual'}
+                          onChange={(e) =>
+                            updateDrawdownRule(index, {
+                              max_drawdown_mode: e.target.value as
+                                | 'manual'
+                                | 'ai',
+                            })
+                          }
+                          disabled={
+                            disabled ||
+                            config.drawdown_take_profit.mode === 'disabled'
+                          }
+                          className="px-2 py-1 rounded text-xs"
+                          style={inputStyle}
+                        >
+                          <option value="manual">
+                            {isZh ? '手动' : 'Manual'}
+                          </option>
+                          <option value="ai">{isZh ? 'AI 决定' : 'AI'}</option>
+                        </select>
+                      </div>
                     </div>
                     {(rule.max_drawdown_mode || 'manual') === 'manual' && (
                       <input
@@ -2089,12 +2392,26 @@ export function ProtectionEditor({
                       </select>
                     </div>
                     <div>
-                      <label
-                        className="block text-xs mb-1"
-                        style={{ color: '#848E9C' }}
-                      >
-                        {isZh ? '触发值' : 'Trigger Value'}
-                      </label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label
+                          className="block text-xs"
+                          style={{ color: '#848E9C' }}
+                        >
+                          {rule.trigger_unit === 'atr'
+                            ? isZh
+                              ? '触发值 (ATR倍数)'
+                              : 'Trigger (ATR×)'
+                            : isZh
+                              ? '触发值'
+                              : 'Trigger Value'}
+                        </label>
+                        {(rule.trigger_mode ||
+                          config.break_even_stop.trigger_mode) ===
+                          'profit_pct' &&
+                          unitToggle(rule.trigger_unit, (u) =>
+                            updateBreakEvenRule(index, { trigger_unit: u })
+                          )}
+                      </div>
                       <input
                         type="number"
                         value={rule.trigger_value}
@@ -2115,12 +2432,17 @@ export function ProtectionEditor({
                         className="block text-xs mb-1"
                         style={{ color: '#848E9C' }}
                       >
-                        {isZh ? '止损偏移 %' : 'Stop Offset %'}
+                        {rule.trigger_unit === 'atr'
+                          ? isZh
+                            ? '止损偏移 (ATR倍数,可负)'
+                            : 'Stop Offset (ATR×, can be negative)'
+                          : isZh
+                            ? '止损偏移 %(可负)'
+                            : 'Stop Offset % (can be negative)'}
                       </label>
                       <input
                         type="number"
                         value={rule.offset_pct}
-                        min={0}
                         step={0.1}
                         onChange={(e) =>
                           updateBreakEvenRule(index, {
@@ -2159,6 +2481,466 @@ export function ProtectionEditor({
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Global ATR settings — shared by every field switched to ATR× units */}
+      {onAtrChange && (
+        <div className="p-4 rounded-lg space-y-3" style={sectionStyle}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Activity className="w-4 h-4" style={{ color: '#F0B90B' }} />
+              <span
+                className="text-sm font-medium"
+                style={{ color: '#EAECEF' }}
+              >
+                {isZh ? 'ATR 全局设置' : 'ATR Global Settings'}
+              </span>
+            </div>
+            <label
+              className="flex items-center gap-2 text-xs"
+              style={{ color: '#848E9C' }}
+            >
+              {isZh ? '启用 ATR 自适应' : 'Enable ATR-adaptive'}
+              <input
+                type="checkbox"
+                checked={!!atr.enabled}
+                onChange={(e) => updateAtr('enabled', e.target.checked)}
+                disabled={disabled}
+                className="h-4 w-4 accent-orange-500"
+              />
+            </label>
+          </div>
+          {infoBlock(
+            isZh
+              ? '按波动率自适应的保护距离'
+              : 'Volatility-adaptive protection distances',
+            isZh
+              ? '这些是公共参数：当某个 TP/SL/DD/BE 字段的单位切到「ATR×」时，系统按 该字段值 × ATR(周期) / 开仓价 × 100 计算出有效百分比，并裁剪到下方上下限之间。保持「%」的字段不受影响。'
+              : 'Shared parameters: when any TP/SL/DD/BE field is switched to "ATR×", its effective percent is computed as fieldValue × ATR(period) / entryPrice × 100, clamped to the min/max below. Fields left on "%" are unaffected.',
+            isZh
+              ? '推荐：1h 周期、ATR(14)、有效区间 0.3% ~ 20%。需先在上方把对应字段切到 ATR×。'
+              : 'Recommended: 1h timeframe, ATR(14), effective range 0.3%–20%. Switch a field to ATR× above to use it.'
+          )}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {isZh ? 'K线周期' : 'Timeframe'}
+              </label>
+              <select
+                value={atr.timeframe || '1h'}
+                onChange={(e) => updateAtr('timeframe', e.target.value)}
+                disabled={disabled || !atr.enabled}
+                className="w-full px-3 py-2 rounded"
+                style={inputStyle}
+              >
+                {['5m', '15m', '30m', '1h', '4h', '1d'].map((tf) => (
+                  <option key={tf} value={tf}>
+                    {tf}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {isZh ? 'ATR 周期' : 'ATR Period'}
+              </label>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={atr.atr_period ?? 14}
+                onChange={(e) =>
+                  updateAtr('atr_period', parseInt(e.target.value) || 14)
+                }
+                disabled={disabled || !atr.enabled}
+                className="w-full px-3 py-2 rounded"
+                style={inputStyle}
+              />
+            </div>
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {isZh ? '有效下限 %' : 'Min Eff %'}
+              </label>
+              <input
+                type="number"
+                min={0}
+                step={0.1}
+                value={atr.min_eff_pct ?? 0.3}
+                onChange={(e) =>
+                  updateAtr('min_eff_pct', parseFloat(e.target.value) || 0)
+                }
+                disabled={disabled || !atr.enabled}
+                className="w-full px-3 py-2 rounded"
+                style={inputStyle}
+              />
+            </div>
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {isZh ? '有效上限 %' : 'Max Eff %'}
+              </label>
+              <input
+                type="number"
+                min={0}
+                step={0.1}
+                value={atr.max_eff_pct ?? 20}
+                onChange={(e) =>
+                  updateAtr('max_eff_pct', parseFloat(e.target.value) || 0)
+                }
+                disabled={disabled || !atr.enabled}
+                className="w-full px-3 py-2 rounded"
+                style={inputStyle}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Breadth breaker — the sole portfolio guard */}
+      <div className="p-4 rounded-lg space-y-3" style={sectionStyle}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4" style={{ color: '#0ECB81' }} />
+            <label className="block text-sm" style={{ color: '#EAECEF' }}>
+              {isZh ? '广度熔断（按币种监控）' : 'Breadth Breaker (per-symbol)'}
+            </label>
+          </div>
+          <input
+            type="checkbox"
+            checked={!!giveback.breadth_enabled}
+            onChange={(e) =>
+              updateGiveback('breadth_enabled', e.target.checked)
+            }
+            disabled={disabled}
+            className="h-4 w-4 accent-orange-500"
+          />
+        </div>
+        {infoBlock(
+          isZh
+            ? '相关性逆转探测 + 只砍亏损仓'
+            : 'Correlation-reversal gate + cut losers only',
+          isZh
+            ? '逐个币种监控自身回撤（杠杆无关），当大多数持仓同时回撤时判定为相关性逆转：只砍正在回撤的亏损仓，盈利仓不动、由保本止损(BE)保护继续跑。这是唯一的组合级熔断，取代了旧的账户权益熔断——后者用账户权益%触发，10倍杠杆下权益跌5%只是单币0.5%波动，噪声就被打掉。'
+            : 'Monitors each symbol’s own retracement (leverage-free). When a MAJORITY of positions retrace together it reads a correlated reversal: cut only the LOSING retracing positions; winners are left to ride their break-even stop. This is the sole portfolio breaker, replacing the old account-equity breakers, which triggered on account-equity% where a 5% equity drop at 10x is only a 0.5% price move (noise).',
+          isZh
+            ? '交叉验证预设：最少持仓4 / 回撤占比70% / ATR回撤0.9倍 / 亏损仓全砍 / 无冷却。先 dry-run 观察。'
+            : 'Cross-validated preset: min4 / frac70% / ATR0.9 / full loser cut / no cooldown. Use dry-run first.'
+        )}
+        <div className="flex items-center justify-between">
+          <label className="block text-xs" style={{ color: '#848E9C' }}>
+            {isZh ? 'Dry-run（只记录不下单）' : 'Dry-run (log only, no orders)'}
+          </label>
+          <input
+            type="checkbox"
+            checked={!!giveback.dry_run}
+            onChange={(e) => updateGiveback('dry_run', e.target.checked)}
+            disabled={disabled}
+            className="h-4 w-4 accent-orange-500"
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs mb-1" style={{ color: '#848E9C' }}>
+              {isZh ? '最少持仓数(法定人数)' : 'Min positions (quorum)'}
+            </label>
+            <input
+              type="number"
+              step="1"
+              min="2"
+              value={giveback.breadth_min_pos ?? 4}
+              onChange={(e) =>
+                updateGiveback('breadth_min_pos', Number(e.target.value))
+              }
+              disabled={disabled}
+              className="w-full px-2 py-2 rounded"
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <label className="block text-xs mb-1" style={{ color: '#848E9C' }}>
+              {isZh ? '回撤占比触发(0-1)' : 'Retrace fraction (0-1)'}
+            </label>
+            <input
+              type="number"
+              step="0.05"
+              min="0.1"
+              max="1"
+              value={giveback.breadth_frac ?? 0.7}
+              onChange={(e) =>
+                updateGiveback('breadth_frac', Number(e.target.value))
+              }
+              disabled={disabled}
+              className="w-full px-2 py-2 rounded"
+              style={inputStyle}
+            />
+          </div>
+        </div>
+        {/* BREADTH_ROW_2 */}
+        <div className="flex items-center justify-between">
+          <label className="block text-xs" style={{ color: '#848E9C' }}>
+            {isZh
+              ? '回撤按 ATR 计(否则按盈亏%)'
+              : 'Measure retrace in ATR (else pnl%)'}
+          </label>
+          <input
+            type="checkbox"
+            checked={!!giveback.breadth_use_atr}
+            onChange={(e) =>
+              updateGiveback('breadth_use_atr', e.target.checked)
+            }
+            disabled={disabled}
+            className="h-4 w-4 accent-orange-500"
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          {giveback.breadth_use_atr ? (
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {isZh ? 'ATR回撤倍数(从峰值)' : 'ATR-from-peak mult'}
+              </label>
+              <input
+                type="number"
+                step="0.1"
+                min="0.1"
+                value={giveback.breadth_atr_mult ?? 0.9}
+                onChange={(e) =>
+                  updateGiveback('breadth_atr_mult', Number(e.target.value))
+                }
+                disabled={disabled}
+                className="w-full px-2 py-2 rounded"
+                style={inputStyle}
+              />
+            </div>
+          ) : (
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {isZh ? '回吐%(从峰值)' : 'Giveback% (from peak)'}
+              </label>
+              <input
+                type="number"
+                step="0.5"
+                min="0.5"
+                value={giveback.breadth_giveback_pct ?? 3}
+                onChange={(e) =>
+                  updateGiveback('breadth_giveback_pct', Number(e.target.value))
+                }
+                disabled={disabled}
+                className="w-full px-2 py-2 rounded"
+                style={inputStyle}
+              />
+            </div>
+          )}
+          <div>
+            <label className="block text-xs mb-1" style={{ color: '#848E9C' }}>
+              {isZh ? '亏损仓砍%(全砍=100)' : 'Loser cut% (100=full)'}
+            </label>
+            <input
+              type="number"
+              step="5"
+              min="1"
+              max="100"
+              value={giveback.breadth_loser_cut_pct ?? 100}
+              onChange={(e) =>
+                updateGiveback('breadth_loser_cut_pct', Number(e.target.value))
+              }
+              disabled={disabled}
+              className="w-full px-2 py-2 rounded"
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <label className="block text-xs mb-1" style={{ color: '#848E9C' }}>
+              {isZh ? '速率窗口(根K线)' : 'Velocity window (bars)'}
+            </label>
+            <input
+              type="number"
+              step="1"
+              min="2"
+              value={giveback.breadth_vel_window ?? 6}
+              onChange={(e) =>
+                updateGiveback('breadth_vel_window', Number(e.target.value))
+              }
+              disabled={disabled}
+              className="w-full px-2 py-2 rounded"
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <label className="block text-xs mb-1" style={{ color: '#848E9C' }}>
+              {isZh ? '冷却(根K线,0=关)' : 'Cooldown (bars, 0=off)'}
+            </label>
+            <input
+              type="number"
+              step="1"
+              min="0"
+              value={giveback.breadth_cooldown_bars ?? 0}
+              onChange={(e) =>
+                updateGiveback('breadth_cooldown_bars', Number(e.target.value))
+              }
+              disabled={disabled}
+              className="w-full px-2 py-2 rounded"
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <label className="block text-xs mb-1" style={{ color: '#848E9C' }}>
+              {isZh ? '速率阈值(ATR/根,0=关)' : 'Velocity eps (ATR/bar, 0=off)'}
+            </label>
+            <input
+              type="number"
+              step="0.05"
+              min="0"
+              value={giveback.breadth_vel_eps ?? 0}
+              onChange={(e) =>
+                updateGiveback('breadth_vel_eps', Number(e.target.value))
+              }
+              disabled={disabled}
+              className="w-full px-2 py-2 rounded"
+              style={inputStyle}
+            />
+          </div>
+        </div>
+        <div
+          className="flex items-start justify-between gap-3 p-3 rounded-lg"
+          style={{ background: '#1E2329', border: '1px solid #F6465D44' }}
+        >
+          <div>
+            <label
+              className="block text-xs font-medium"
+              style={{ color: '#F6465D' }}
+            >
+              {isZh
+                ? '盈利盘也杀（全局清仓熔断）'
+                : 'Cut winners too (full deleverage breaker)'}
+            </label>
+            <p className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+              {isZh
+                ? '默认关闭：熔断只砍回撤中的亏损仓，盈利仓由 BE 保护继续跑。开启后熔断触发时连回撤中的盈利仓一起砍，等于在相关性暴跌时全局清仓避险——保护力度最强，但会牺牲盈利仓的后续机会。建议先 dry-run 观察触发频率再实盘开启。'
+                : 'Default off: only retracing losers are cut; winners ride break-even. When on, a fired gate also cuts retracing winners — a system-wide "go to cash on a correlated crash" policy. Strongest protection but sacrifices winner upside. Dry-run first.'}
+            </p>
+          </div>
+          <input
+            type="checkbox"
+            checked={!!giveback.breadth_cut_winners}
+            onChange={(e) =>
+              updateGiveback('breadth_cut_winners', e.target.checked)
+            }
+            disabled={disabled}
+            className="h-4 w-4 mt-0.5 accent-red-500"
+          />
+        </div>
+      </div>
+
+      {/* Trend-reversal flip — fleet-default ON + LIVE, per-trader overrides here */}
+      <div className="p-4 rounded-lg space-y-3" style={sectionStyle}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <RotateCcw className="w-4 h-4" style={{ color: '#F0B90B' }} />
+            <label className="block text-sm" style={{ color: '#EAECEF' }}>
+              {isZh ? '趋势反转翻仓' : 'Trend-Reversal Flip'}
+            </label>
+          </div>
+          <input
+            type="checkbox"
+            checked={!flip.disabled}
+            onChange={(e) => updateFlip('disabled', !e.target.checked)}
+            disabled={disabled}
+            className="h-4 w-4 accent-orange-500"
+          />
+        </div>
+        {infoBlock(
+          isZh
+            ? 'AI 高确信反向信号 → 平原仓 + 反向开仓'
+            : 'High-conviction opposite AI signal → close + reverse',
+          isZh
+            ? '当 AI 在已持仓币种上给出方向相反的高确信信号、且该仓位已持有足够时长时，系统平掉原仓并反向开仓（单次翻仓，翻后不再被反向翻，天然抗来回打脸）。回测在三个实盘 trader 上均为正向、6 小时持仓门、确信度 75 为最优组合。原设计的广度/枯竭门经回测证明有害或无效已移除。'
+            : 'When the AI issues a high-conviction opposite-direction signal on an already-held symbol that has aged enough, the system closes the original and opens the reverse (single flip per entry — a flipped position is never re-flipped, inherently anti-whipsaw). Backtest is net-positive across all three live traders; 6h hold gate + confidence 75 is the optimum. The original breadth/exhaustion gates were dropped (backtest showed them harmful or inert).',
+          isZh
+            ? '舰队默认：全员开启 + 实盘。这里是按 trader 的覆盖项。回测最优：确信度≥75 / 持仓≥6h。'
+            : 'Fleet default: ON + LIVE for all traders. These are per-trader overrides. Backtest optimum: confidence ≥75 / hold ≥6h.'
+        )}
+        {/* FLIP_BODY_PLACEHOLDER */}
+        <div
+          className="flex items-start justify-between gap-3 p-3 rounded-lg"
+          style={{ background: '#1E2329', border: '1px solid #F0B90B44' }}
+        >
+          <div>
+            <label
+              className="block text-xs font-medium"
+              style={{ color: '#F0B90B' }}
+            >
+              {isZh
+                ? 'Dry-run（只观察不下单）'
+                : 'Dry-run (observe only, no orders)'}
+            </label>
+            <p className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+              {isZh
+                ? '开启后此 trader 只记录翻仓判定到观察账本、不真正平仓/反向开仓，用于隔离单个 trader 观察 AI 反转信号质量，而无需关闭整个功能。舰队默认实盘（关闭此项）。'
+                : 'When on, this trader only logs flip decisions to the observation ledger without closing/reversing — used to quarantine one trader and review AI reversal-signal quality without disabling the feature. Fleet default is live (this off).'}
+            </p>
+          </div>
+          <input
+            type="checkbox"
+            checked={!!flip.force_dry_run}
+            onChange={(e) => updateFlip('force_dry_run', e.target.checked)}
+            disabled={disabled || !!flip.disabled}
+            className="h-4 w-4 mt-0.5 accent-orange-500"
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs mb-1" style={{ color: '#848E9C' }}>
+              {isZh ? '确信度门槛(0-100)' : 'Confidence floor (0-100)'}
+            </label>
+            <input
+              type="number"
+              step="1"
+              min="0"
+              max="100"
+              value={flip.min_confidence ?? 75}
+              onChange={(e) =>
+                updateFlip('min_confidence', Number(e.target.value))
+              }
+              disabled={disabled || !!flip.disabled}
+              className="w-full px-2 py-2 rounded"
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <label className="block text-xs mb-1" style={{ color: '#848E9C' }}>
+              {isZh ? '最短持仓时长(小时)' : 'Min hold age (hours)'}
+            </label>
+            <input
+              type="number"
+              step="0.5"
+              min="0"
+              value={flip.min_position_age_hours ?? 6}
+              onChange={(e) =>
+                updateFlip('min_position_age_hours', Number(e.target.value))
+              }
+              disabled={disabled || !!flip.disabled}
+              className="w-full px-2 py-2 rounded"
+              style={inputStyle}
+            />
           </div>
         </div>
       </div>

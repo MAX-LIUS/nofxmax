@@ -10,6 +10,8 @@ import { DecisionCard } from '../components/trader/DecisionCard'
 import { PositionProtectionPanel } from '../components/trader/PositionProtectionPanel'
 import { ExpectancyPanel } from '../components/trader/ExpectancyPanel'
 import { CloseAttributionPanel } from '../components/trader/CloseAttributionPanel'
+import { FlipObservationsPanel } from '../components/trader/FlipObservationsPanel'
+import { BreakerHistoryPanel } from '../components/trader/BreakerHistoryPanel'
 import { EvolutionProfilePanel } from '../components/trader/EvolutionProfilePanel'
 import { InsightPanel } from '../components/trader/InsightPanel'
 const PositionHistory = lazy(() =>
@@ -190,6 +192,35 @@ export function TraderDashboardPage({
       positionsCurrentPage * positionsPageSize
     ) || []
 
+  // Long/short notional exposure (USDT) + counts, derived from live positions.
+  // Net value uses USDT notional (qty * mark price), not coin quantity.
+  const sideBreakdown = useMemo(() => {
+    let longNotion = 0
+    let shortNotion = 0
+    let longCount = 0
+    let shortCount = 0
+    for (const p of positions || []) {
+      const px = Number(p.mark_price || p.entry_price || 0)
+      const notion = Number(p.quantity || 0) * px
+      if (String(p.side).toUpperCase() === 'LONG') {
+        longNotion += notion
+        longCount++
+      } else {
+        shortNotion += notion
+        shortCount++
+      }
+    }
+    return { longNotion, shortNotion, longCount, shortCount }
+  }, [positions])
+
+  // Multi-select state for batch close.
+  const [selectedPositions, setSelectedPositions] = useState<Set<string>>(
+    new Set()
+  )
+  const [batchClosing, setBatchClosing] = useState(false)
+  const positionKey = (symbol: string, side: string) =>
+    `${symbol}__${String(side).toUpperCase()}`
+
   // Reset page when positions change
   useEffect(() => {
     setPositionsCurrentPage(1)
@@ -350,6 +381,78 @@ export function TraderDashboardPage({
     } finally {
       setClosingPosition(null)
     }
+  }
+
+  // Batch close selected positions at market (sequential to keep error handling
+  // per-position; refreshes once at the end).
+  const handleBatchClose = async () => {
+    if (!selectedTraderId || selectedPositions.size === 0) return
+    const targets = (positions || []).filter((p) =>
+      selectedPositions.has(positionKey(p.symbol, p.side))
+    )
+    if (targets.length === 0) return
+
+    const confirmed = await confirmToast(
+      t('traderDashboard.confirmBatchClose', language, {
+        count: targets.length,
+      }),
+      {
+        title: t('traderDashboard.confirmClose', language),
+        okText: t('traderDashboard.confirm', language),
+        cancelText: t('traderDashboard.cancel', language),
+      }
+    )
+    if (!confirmed) return
+
+    setBatchClosing(true)
+    let ok = 0
+    let failed = 0
+    for (const p of targets) {
+      try {
+        await api.closePosition(
+          selectedTraderId,
+          p.symbol,
+          String(p.side).toUpperCase()
+        )
+        ok++
+      } catch {
+        failed++
+      }
+    }
+    await Promise.all([
+      mutate(`positions-${selectedTraderId}`),
+      mutate(`account-${selectedTraderId}`),
+    ])
+    setSelectedPositions(new Set())
+    setBatchClosing(false)
+    if (failed === 0) {
+      notify.success(
+        t('traderDashboard.batchCloseDone', language, { count: ok })
+      )
+    } else {
+      notify.error(
+        t('traderDashboard.batchClosePartial', language, { ok, failed })
+      )
+    }
+  }
+
+  const toggleSelectPosition = (symbol: string, side: string) => {
+    const key = positionKey(symbol, side)
+    setSelectedPositions((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const toggleSelectAll = () => {
+    setSelectedPositions((prev) => {
+      if (prev.size === (positions?.length || 0)) return new Set()
+      return new Set(
+        (positions || []).map((p) => positionKey(p.symbol, p.side))
+      )
+    })
   }
 
   // If API failed with error, show empty state (likely backend not running)
@@ -851,7 +954,7 @@ export function TraderDashboardPage({
         )}
 
         {/* Account Overview */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-4">
           <StatCard
             title={t('totalEquity', language)}
             value={`${account?.total_equity?.toFixed(2) || '0.00'}`}
@@ -874,6 +977,16 @@ export function TraderDashboardPage({
             change={account?.total_pnl_pct || 0}
             positive={(account?.total_pnl ?? 0) >= 0}
             icon="📈"
+          />
+          <SideSplitCard
+            longNotion={sideBreakdown.longNotion}
+            shortNotion={sideBreakdown.shortNotion}
+            longCount={sideBreakdown.longCount}
+            shortCount={sideBreakdown.shortCount}
+            velIndex={status?.breadth_vel_index}
+            peakIndex={status?.breadth_peak_index}
+            traderId={selectedTraderId}
+            language={language}
           />
           <StatCard
             title={t('positions', language)}
@@ -955,10 +1068,43 @@ export function TraderDashboardPage({
               </div>
               {positions && positions.length > 0 ? (
                 <div>
+                  <div className="flex items-center gap-3 mb-3">
+                    <label className="flex items-center gap-1.5 text-xs text-nofx-text-muted cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={
+                          selectedPositions.size === positions.length &&
+                          positions.length > 0
+                        }
+                        onChange={toggleSelectAll}
+                        className="accent-nofx-gold w-3.5 h-3.5"
+                      />
+                      {t('traderDashboard.selectAll', language)}
+                    </label>
+                    {selectedPositions.size > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleBatchClose}
+                        disabled={batchClosing}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-semibold transition-all hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed bg-nofx-red/15 text-nofx-red border border-nofx-red/40 hover:bg-nofx-red/25"
+                      >
+                        {batchClosing ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <LogOut className="w-3 h-3" />
+                        )}
+                        {t('traderDashboard.closeSelected', language)} (
+                        {selectedPositions.size})
+                      </button>
+                    )}
+                  </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs">
                       <thead className="text-left border-b border-white/5">
                         <tr>
+                          <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center w-6">
+                            <span className="sr-only">select</span>
+                          </th>
                           <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-left">
                             {t('symbol', language)}
                           </th>
@@ -1028,6 +1174,21 @@ export function TraderDashboardPage({
                               }
                             }}
                           >
+                            <td
+                              className="px-1 py-3 text-center"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selectedPositions.has(
+                                  positionKey(pos.symbol, pos.side)
+                                )}
+                                onChange={() =>
+                                  toggleSelectPosition(pos.symbol, pos.side)
+                                }
+                                className="accent-nofx-gold w-3.5 h-3.5"
+                              />
+                            </td>
                             <td className="px-1 py-3 font-mono font-semibold whitespace-nowrap text-left text-nofx-text-main group-hover/row:text-white transition-colors">
                               {pos.symbol}
                             </td>
@@ -1354,6 +1515,18 @@ export function TraderDashboardPage({
               traderId={selectedTraderId}
               language={language}
             />
+
+            {/* Trend-reversal flip observations (dry-run + live) */}
+            <FlipObservationsPanel
+              traderId={selectedTraderId}
+              language={language}
+            />
+
+            {/* Circuit-breaker / breadth-guard close history */}
+            <BreakerHistoryPanel
+              traderId={selectedTraderId}
+              language={language}
+            />
           </div>
         </details>
 
@@ -1389,6 +1562,247 @@ export function TraderDashboardPage({
         )}
       </div>
     </DeepVoidBackground>
+  )
+}
+
+// SideSplitCard shows live long/short notional exposure (USDT) plus a 12h curve
+// of each side's share of total exposure (long% and short%, summing to 100%,
+// bounded 0..100% with explicit axis labels).
+// BreadthGauge renders a single 0–100 breadth circuit-breaker pressure index as
+// a compact vertical bar. Color escalates with urgency: <50 green, 50–70 amber,
+// 70–85 orange, 85–<100 red, 100 solid red (= breaker fire threshold reached).
+// 0 = no risk / no position retracing on that path.
+function BreadthGauge({
+  value,
+  label,
+  title,
+}: {
+  value: number
+  label: string
+  title: string
+}) {
+  const v = Math.max(0, Math.min(100, value))
+  const color =
+    v >= 100
+      ? '#F6465D'
+      : v >= 85
+        ? '#FF5C39'
+        : v >= 70
+          ? '#FF8A00'
+          : v >= 50
+            ? '#F0B90B'
+            : '#0ECB81'
+  const trackH = 28
+  return (
+    <div className="flex flex-col items-center gap-0.5" title={title}>
+      <div
+        className="relative w-2 rounded-sm overflow-hidden bg-white/10"
+        style={{ height: trackH }}
+      >
+        {/* threshold ticks at 50 / 70 / 85 */}
+        {[50, 70, 85].map((m) => (
+          <div
+            key={m}
+            className="absolute left-0 right-0"
+            style={{
+              bottom: `${m}%`,
+              height: 1,
+              background: 'rgba(255,255,255,0.25)',
+            }}
+          />
+        ))}
+        <div
+          className="absolute bottom-0 left-0 right-0 transition-[height] duration-500"
+          style={{ height: `${v}%`, background: color }}
+        />
+      </div>
+      <span className="text-[8px] font-mono leading-none" style={{ color }}>
+        {Math.round(v)}
+      </span>
+      <span className="text-[7px] font-mono uppercase text-nofx-text-muted/60 leading-none">
+        {label}
+      </span>
+    </div>
+  )
+}
+
+function SideSplitCard({
+  longNotion,
+  shortNotion,
+  longCount,
+  shortCount,
+  velIndex,
+  peakIndex,
+  traderId,
+  language,
+}: {
+  longNotion: number
+  shortNotion: number
+  longCount: number
+  shortCount: number
+  velIndex?: number
+  peakIndex?: number
+  traderId: string | null | undefined
+  language: string
+}) {
+  const [series, setSeries] = useState<
+    { longShare: number; shortShare: number }[]
+  >([])
+
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      if (!traderId) return
+      try {
+        const resp = await api.getSidePnLSeries(traderId, 12)
+        if (cancelled) return
+        const pts = (resp.series || []).map((b) => {
+          const total = b.long_notion + b.short_notion
+          if (total <= 0) return { longShare: 50, shortShare: 50 }
+          return {
+            longShare: (b.long_notion / total) * 100,
+            shortShare: (b.short_notion / total) * 100,
+          }
+        })
+        setSeries(pts)
+      } catch {
+        // silent
+      }
+    }
+    load()
+    const timer = window.setInterval(load, 60000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [traderId])
+
+  // Two share lines on a fixed 0..100% scale (bounds always visible).
+  const spark = useMemo(() => {
+    if (series.length < 2) return null
+    const w = 96
+    const h = 28
+    const x = (i: number) => (i / (series.length - 1)) * w
+    const y = (pct: number) => h - (pct / 100) * h
+    const line = (key: 'longShare' | 'shortShare') =>
+      series
+        .map((p, i) => `${x(i).toFixed(1)},${y(p[key]).toFixed(1)}`)
+        .join(' ')
+    return {
+      w,
+      h,
+      long: line('longShare'),
+      short: line('shortShare'),
+      midY: y(50),
+    }
+  }, [series])
+
+  const totalNotion = longNotion + shortNotion
+  const longSharePct = totalNotion > 0 ? (longNotion / totalNotion) * 100 : 0
+  const shortSharePct = totalNotion > 0 ? (shortNotion / totalNotion) * 100 : 0
+  const fmtNotion = (v: number) =>
+    v >= 1000 ? `$${(v / 1000).toFixed(1)}k` : `$${v.toFixed(0)}`
+
+  return (
+    <div className="group nofx-glass p-3 rounded-lg transition-all duration-300 hover:bg-white/5 hover:translate-y-[-2px] border border-white/5 hover:border-nofx-gold/20 relative overflow-hidden">
+      <div className="text-[10px] mb-1 font-mono uppercase tracking-wider text-nofx-text-muted">
+        {language === 'zh' ? '多空净值 (USDT)' : 'Long/Short Value'}
+      </div>
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex items-baseline gap-2">
+          <span
+            className="text-sm font-bold font-mono text-nofx-green"
+            title={language === 'zh' ? '做多名义价值' : 'Long notional'}
+          >
+            L {fmtNotion(longNotion)}
+          </span>
+          <span
+            className="text-sm font-bold font-mono text-nofx-red"
+            title={language === 'zh' ? '做空名义价值' : 'Short notional'}
+          >
+            S {fmtNotion(shortNotion)}
+          </span>
+        </div>
+        {/* Two breadth circuit-breaker pressure gauges: velocity + from-peak.
+            0 = no risk; 100 = that close condition reached the fire threshold. */}
+        <div className="flex items-end gap-1.5">
+          <BreadthGauge
+            value={velIndex ?? 0}
+            label="VEL"
+            title={
+              language === 'zh'
+                ? `回撤熔断·速度路指数 ${Math.round(velIndex ?? 0)}/100（0=无风险，100=达平仓标准）`
+                : `Breadth velocity-path index ${Math.round(velIndex ?? 0)}/100 (0=safe, 100=cut)`
+            }
+          />
+          <BreadthGauge
+            value={peakIndex ?? 0}
+            label="PEAK"
+            title={
+              language === 'zh'
+                ? `回撤熔断·回撤幅度路指数 ${Math.round(peakIndex ?? 0)}/100（0=无风险，100=达平仓标准）`
+                : `Breadth from-peak-path index ${Math.round(peakIndex ?? 0)}/100 (0=safe, 100=cut)`
+            }
+          />
+        </div>
+      </div>
+      <div className="flex items-center justify-between mt-1 gap-2">
+        <div className="flex flex-col text-[10px] font-mono text-nofx-text-muted leading-tight">
+          <span>
+            {longCount}L / {shortCount}S
+          </span>
+          <span>
+            <span className="text-nofx-green">{longSharePct.toFixed(0)}%</span>
+            {' / '}
+            <span className="text-nofx-red">{shortSharePct.toFixed(0)}%</span>
+          </span>
+        </div>
+        {spark && (
+          <div className="flex items-stretch gap-1">
+            <div className="flex flex-col justify-between text-[8px] font-mono text-nofx-text-muted/60 leading-none py-0.5">
+              <span>100</span>
+              <span>0</span>
+            </div>
+            <svg width={spark.w} height={spark.h} aria-hidden>
+              <line
+                x1={0}
+                y1={0}
+                x2={spark.w}
+                y2={0}
+                stroke="rgba(255,255,255,0.12)"
+              />
+              <line
+                x1={0}
+                y1={spark.h}
+                x2={spark.w}
+                y2={spark.h}
+                stroke="rgba(255,255,255,0.12)"
+              />
+              <line
+                x1={0}
+                y1={spark.midY}
+                x2={spark.w}
+                y2={spark.midY}
+                stroke="rgba(255,255,255,0.1)"
+                strokeDasharray="2 2"
+              />
+              <polyline
+                points={spark.long}
+                fill="none"
+                stroke="#0ECB81"
+                strokeWidth={1.2}
+              />
+              <polyline
+                points={spark.short}
+                fill="none"
+                stroke="#F6465D"
+                strokeWidth={1.2}
+              />
+            </svg>
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 

@@ -19,6 +19,11 @@ export interface SystemStatus {
   ai_decision_mode?: 'conservative' | 'balanced' | 'aggressive'
   strategy_type?: 'ai_trading' | 'grid_trading' | 'breakout_trading'
   grid_symbol?: string
+  // Breadth circuit-breaker pressure indices (0-100) for the two close
+  // conditions. 0 = no risk; 100 = that path reached the breaker fire fraction.
+  breadth_vel_index?: number
+  breadth_peak_index?: number
+  breadth_index_at?: number
 }
 
 export interface AccountInfo {
@@ -95,6 +100,8 @@ export interface ProtectionRuntimeTier {
   basis_type?: string // "structural" | "atr_based" | "percentage" | "fibonacci"
   atr_distance?: number
   is_satisfied?: boolean
+  is_armed?: boolean
+  is_activated?: boolean
   is_triggered?: boolean
   status?: string
 }
@@ -118,9 +125,26 @@ export interface ProtectionRuntime {
   drawdown_execution_mode?: string
   drawdown_config_source?: string
   break_even_execution_mode?: string
+  // Structural stop-loss (range-anchored) surface. Auto-populated when enabled;
+  // boundary is the frozen swing edge enforced on bar close (Phase 2), backstop
+  // is the wide resting exchange stop covering downtime/gaps (Phase 1).
+  structural_sl_enabled?: boolean
+  structural_close_confirm?: boolean
+  structural_boundary_price?: number
+  structural_backstop_price?: number
+  structural_floor_atr_mul?: number
+  structural_backstop_atr_mul?: number
+  // Time / max-hold forced-close conditions (condition-based, no fixed price).
+  time_stop_hours?: number
+  time_stop_loss_pct?: number
+  max_hold_hours?: number
+  max_hold_profit_exempt_pct?: number
   current_pnl_pct?: number
   drawdown_peak_pnl_pct?: number
   current_drawdown_pct?: number
+  atr_at_entry?: number
+  current_atr?: number
+  atr_timeframe?: string
   current_break_even_trigger_pct?: number
   break_even_offset_pct?: number
   next_break_even_gap_pct?: number
@@ -679,7 +703,7 @@ export interface EntryStructureAuditConfig {
 }
 
 export interface PositionCloseEvent {
-  id: number
+  id?: number
   position_id: number
   trader_id: string
   exchange_id: string
@@ -688,10 +712,12 @@ export interface PositionCloseEvent {
   close_reason: string
   execution_source: string
   execution_type: string
+  category?: string
+  mechanism?: string
   protection_status?: string
   decision_cycle?: number
   decision_review?: DecisionReviewRef
-  exchange_order_id: string
+  exchange_order_id?: string
   parent_order_id?: string
   order_id?: number
   related_position_id?: number
@@ -809,6 +835,55 @@ export interface CloseAttributionResponse {
   total_pnl: number
   by_category: AttributionCategoryRow[]
   by_mechanism: AttributionMechanismRow[]
+}
+
+export interface FlipObservation {
+  symbol: string
+  from_side: string
+  to_side: string
+  confidence: number
+  age_hours: number
+  quantity: number
+  decision_cycle: number
+  executed: boolean
+  reasoning: string
+  reverse_realized_pnl: number
+  observed_at: string
+}
+
+export interface FlipObservationsResponse {
+  flips: FlipObservation[]
+  total: number
+  executed_count: number
+  dry_run_count: number
+}
+
+export interface SidePnLBucket {
+  bucket_ms: number
+  long_notion: number
+  short_notion: number
+}
+
+export interface SidePnLSeriesResponse {
+  series: SidePnLBucket[]
+  hours: number
+}
+
+export interface BreakerEvent {
+  symbol: string
+  side: string
+  mechanism: string
+  close_reason: string
+  close_ratio_pct: number
+  realized_pnl: number
+  event_time: string
+}
+
+export interface BreakerHistoryResponse {
+  events: BreakerEvent[]
+  total: number
+  total_pnl: number
+  days: number
 }
 
 // Grid Risk Information for frontend display

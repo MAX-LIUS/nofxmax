@@ -3,6 +3,7 @@ package binance
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,7 +24,7 @@ import (
 // Inherits TraderTestSuite and adds Binance Futures specific mock logic
 type BinanceFuturesTestSuite struct {
 	*testutil.TraderTestSuite // Embeds base test suite
-	mockServer              *httptest.Server
+	mockServer                *httptest.Server
 }
 
 // NewBinanceFuturesTestSuite Creates Binance Futures test suite
@@ -213,6 +214,26 @@ func NewBinanceFuturesTestSuite(t *testing.T) *BinanceFuturesTestSuite {
 		// Mock ListOpenOrders - /fapi/v1/openOrders
 		case path == "/fapi/v1/openOrders":
 			respBody = []map[string]interface{}{}
+
+		// Mock ListOpenAlgoOrders - /fapi/v1/openAlgoOrders
+		// One TRAILING_STOP_MARKET short-close order, used to verify GetOpenOrders
+		// reports native trailing as ActivationStatus="activated" (Binance-only fix
+		// preventing the OKX-oriented phantom-activation misfire).
+		case path == "/fapi/v1/openAlgoOrders":
+			respBody = []map[string]interface{}{
+				{
+					"algoId":       int64(555001),
+					"clientAlgoId": "x-KzrpZaP91700000000001a2b3c",
+					"orderType":    "TRAILING_STOP_MARKET",
+					"symbol":       "BTCUSDT",
+					"side":         "BUY",
+					"positionSide": "SHORT",
+					"quantity":     "0.010",
+					"algoStatus":   "WORKING",
+					"triggerPrice": "50000.00",
+					"price":        "0",
+				},
+			}
 
 		// Mock CancelAllOrders - /fapi/v1/allOpenOrders (DELETE)
 		case path == "/fapi/v1/allOpenOrders" && r.Method == "DELETE":
@@ -418,5 +439,174 @@ func TestGetBrOrderID(t *testing.T) {
 		// Check uniqueness
 		assert.False(t, ids[id], "order ID should be unique")
 		ids[id] = true
+	}
+}
+
+// TestIsMakerTakeProfitLimit locks in the exact signature that distinguishes our
+// post-only maker take-profit from a maker entry limit or a foreign/grid order.
+// Misclassifying an entry as a TP (or vice versa) would corrupt protection
+// attribution, so each discriminating field is covered.
+func TestIsMakerTakeProfitLimit(t *testing.T) {
+	const ours = "x-KzrpZaP91234567890123abcd1234"
+	mk := func(typ futures.OrderType, tif futures.TimeInForceType, side futures.SideType, ps futures.PositionSideType, cid string, ro bool) *futures.Order {
+		return &futures.Order{Type: typ, TimeInForce: tif, Side: side, PositionSide: ps, ClientOrderID: cid, ReduceOnly: ro}
+	}
+	cases := []struct {
+		name string
+		o    *futures.Order
+		want bool
+	}{
+		{"short maker TP (BUY closes short)", mk(futures.OrderTypeLimit, futures.TimeInForceTypeGTX, futures.SideTypeBuy, futures.PositionSideTypeShort, ours, false), true},
+		{"long maker TP (SELL closes long)", mk(futures.OrderTypeLimit, futures.TimeInForceTypeGTX, futures.SideTypeSell, futures.PositionSideTypeLong, ours, false), true},
+		{"short maker ENTRY (SELL opens short) - not TP", mk(futures.OrderTypeLimit, futures.TimeInForceTypeGTX, futures.SideTypeSell, futures.PositionSideTypeShort, ours, false), false},
+		{"long maker ENTRY (BUY opens long) - not TP", mk(futures.OrderTypeLimit, futures.TimeInForceTypeGTX, futures.SideTypeBuy, futures.PositionSideTypeLong, ours, false), false},
+		{"GTC grid limit - not post-only, not TP", mk(futures.OrderTypeLimit, futures.TimeInForceTypeGTC, futures.SideTypeBuy, futures.PositionSideTypeShort, ours, false), false},
+		{"foreign order (no broker prefix) - not TP", mk(futures.OrderTypeLimit, futures.TimeInForceTypeGTX, futures.SideTypeBuy, futures.PositionSideTypeShort, "web_manual_123", false), false},
+		{"non-LIMIT order - not a TP", mk(futures.OrderTypeMarket, futures.TimeInForceTypeGTC, futures.SideTypeBuy, futures.PositionSideTypeShort, ours, false), false},
+		{"nil order", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isMakerTakeProfitLimit(c.o); got != c.want {
+				t.Fatalf("isMakerTakeProfitLimit=%v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestCallbackRateNormalization documents the -2007 fix: Binance callbackRate
+// must be in [0.1,5] with a 0.1 step. This mirrors the clamp+round applied in
+// SetTrailingStopLoss so the invariant is locked even though the network call
+// itself isn't exercised here.
+func TestCallbackRateNormalization(t *testing.T) {
+	norm := func(cb float64) string {
+		if cb < 0.1 {
+			cb = 0.1
+		}
+		if cb > 5 {
+			cb = 5
+		}
+		cb = math.Round(cb*10) / 10
+		return fmt.Sprintf("%.1f", cb)
+	}
+	cases := []struct {
+		in   float64
+		want string
+	}{
+		{1.0089, "1.0"}, // ETH full-path value that hit -2007
+		{3.4147, "3.4"}, // WLD value that hit -2007
+		{1.2000, "1.2"}, // previously-successful value, unchanged
+		{0.0500, "0.1"}, // below min -> floor
+		{7.5000, "5.0"}, // above max -> ceil
+		{0.1499, "0.1"}, // rounds down to step
+		{0.1500, "0.2"}, // rounds up to step
+	}
+	for _, c := range cases {
+		if got := norm(c.in); got != c.want {
+			t.Errorf("norm(%.4f)=%s, want %s", c.in, got, c.want)
+		}
+	}
+}
+
+// TestIsUnknownAlgoOrder verifies the -2011 detection that routes a failed algo
+// cancel to the regular order-cancel endpoint. Maker take-profit orders are
+// regular LIMIT orders, so the algo endpoint rejects their ID with -2011 and the
+// reconciler must fall back to cancel them the normal way.
+func TestIsUnknownAlgoOrder(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"code -2011", fmt.Errorf("<APIError> code=-2011, msg=Unknown order sent."), true},
+		{"unknown order text", fmt.Errorf("failed: Unknown order sent"), true},
+		{"unrelated api error", fmt.Errorf("<APIError> code=-4045, msg=Reach max stop order limit."), false},
+		{"post-only reject", fmt.Errorf("<APIError> code=-5022, msg=GTX rejected"), false},
+	}
+	for _, c := range cases {
+		if got := isUnknownAlgoOrder(c.err); got != c.want {
+			t.Errorf("%s: isUnknownAlgoOrder=%v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestGetOpenOrders_NativeTrailingActivated verifies the Binance-only fix that
+// reports a live native TRAILING_STOP_MARKET as ActivationStatus="activated".
+// The shared drawdown reconciler (auto_trader_risk.go) only treats a trailing
+// order as a "phantom" (and force-converts it to a MANAGED full-close) when
+// ActivationStatus != "activated". That field is populated by OKX; on Binance it
+// was always empty, so every in-profit position looked phantom and got auto-closed
+// then re-armed every cycle. Binance activates native trailing reliably once price
+// passes the activation price, so an order still present in the open list is armed.
+func TestGetOpenOrders_NativeTrailingActivated(t *testing.T) {
+	suite := NewBinanceFuturesTestSuite(t)
+	defer suite.Cleanup()
+
+	trader, ok := suite.Trader.(*FuturesTrader)
+	if !ok {
+		t.Fatalf("expected *FuturesTrader")
+	}
+
+	orders, err := trader.GetOpenOrders("BTCUSDT")
+	if err != nil {
+		t.Fatalf("GetOpenOrders error: %v", err)
+	}
+
+	var found bool
+	for _, o := range orders {
+		if !strings.Contains(strings.ToUpper(o.Type), "TRAILING") {
+			continue
+		}
+		found = true
+		if o.ActivationStatus != "activated" {
+			t.Errorf("native trailing ActivationStatus=%q, want \"activated\" (prevents phantom force-close)", o.ActivationStatus)
+		}
+		if o.ActivationPrice != 50000.00 {
+			t.Errorf("native trailing ActivationPrice=%.4f, want 50000.0000 (falls back to triggerPrice)", o.ActivationPrice)
+		}
+	}
+	if !found {
+		t.Fatalf("expected a TRAILING order in GetOpenOrders result, got none")
+	}
+}
+
+// TestGetOpenOrders_AlgoClientIDPropagated verifies that the algo-order branch of
+// GetOpenOrders copies the exchange clientAlgoId into OpenOrder.ClientOrderID.
+// Binance stop-loss/take-profit are ALGO orders placed with
+// ClientAlgoId(getBrOrderID()), so the broker-tag prefix (x-KzrpZaP9) lives on
+// clientAlgoId. Dropping it made every Binance stop look manual/foreign to the
+// shared reconciler's isLikelyBotProtectionOrder, so stale stops were preserved
+// forever and accumulated across re-entries until Binance's max stop-order limit
+// (-4045) deadlocked the reconciler's stage-before-cleanup path.
+func TestGetOpenOrders_AlgoClientIDPropagated(t *testing.T) {
+	suite := NewBinanceFuturesTestSuite(t)
+	defer suite.Cleanup()
+
+	trader, ok := suite.Trader.(*FuturesTrader)
+	if !ok {
+		t.Fatalf("expected *FuturesTrader")
+	}
+
+	orders, err := trader.GetOpenOrders("BTCUSDT")
+	if err != nil {
+		t.Fatalf("GetOpenOrders error: %v", err)
+	}
+
+	var found bool
+	for _, o := range orders {
+		if o.OrderID != "555001" {
+			continue
+		}
+		found = true
+		if o.ClientOrderID != "x-KzrpZaP91700000000001a2b3c" {
+			t.Errorf("algo order ClientOrderID=%q, want the broker-tagged clientAlgoId (needed for stale-stop cleanup)", o.ClientOrderID)
+		}
+		if !strings.HasPrefix(o.ClientOrderID, "x-KzrpZaP9") {
+			t.Errorf("algo order ClientOrderID=%q lost the broker prefix; reconciler will misread it as manual/foreign", o.ClientOrderID)
+		}
+	}
+	if !found {
+		t.Fatalf("expected algo order 555001 in GetOpenOrders result, got none")
 	}
 }

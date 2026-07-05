@@ -380,6 +380,58 @@ export function RiskControlEditor({
           </div>
         </div>
       </div>
+
+      {/* Binance USDC Maker Mode (Binance-only feature) */}
+      <div>
+        <div
+          className="p-3 rounded-lg"
+          style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex-1">
+              <label
+                className="block text-sm mb-1"
+                style={{ color: '#EAECEF' }}
+              >
+                {ts(riskControl.binanceUsdcMaker, language)}
+              </label>
+              <p className="text-[11px]" style={{ color: '#848E9C' }}>
+                {ts(riskControl.binanceUsdcMakerDesc, language)}
+              </p>
+            </div>
+            <label
+              className="relative inline-flex items-center cursor-pointer shrink-0"
+              style={{ opacity: disabled ? 0.5 : 1 }}
+            >
+              <input
+                type="checkbox"
+                className="sr-only peer"
+                checked={config.binance_usdc_maker !== false}
+                disabled={disabled}
+                onChange={(e) =>
+                  updateField('binance_usdc_maker', e.target.checked)
+                }
+              />
+              <div
+                className="w-11 h-6 rounded-full transition-colors peer-checked:bg-[#0ECB81]"
+                style={{
+                  background:
+                    config.binance_usdc_maker !== false ? '#0ECB81' : '#2B3139',
+                }}
+              />
+              <div
+                className="absolute left-0.5 top-0.5 w-5 h-5 rounded-full bg-white transition-transform"
+                style={{
+                  transform:
+                    config.binance_usdc_maker !== false
+                      ? 'translateX(20px)'
+                      : 'translateX(0)',
+                }}
+              />
+            </label>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

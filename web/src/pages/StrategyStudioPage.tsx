@@ -51,7 +51,6 @@ import {
   defaultProtectionConfig,
   normalizeProtectionConfig,
 } from '../components/strategy/ProtectionEditor'
-import { ATRProtectionEditor } from '../components/strategy/ATRProtectionEditor'
 import { normalizeEntryStructureConfig } from '../components/strategy/EntryStructureEditor'
 import { PreEntryGateEditor } from '../components/strategy/PreEntryGateEditor'
 import { EntryPipelinePanel } from '../components/strategy/EntryPipelinePanel'
@@ -813,12 +812,8 @@ export function StrategyStudioPage() {
             onChange={(protection) => updateConfig('protection', protection)}
             disabled={selectedStrategy?.is_default}
             language={language}
-          />
-          <ATRProtectionEditor
-            config={editingConfig.atr_protection}
-            onChange={(atr) => updateConfig('atr_protection', atr)}
-            disabled={selectedStrategy?.is_default}
-            language={language === 'en' ? 'en' : 'zh'}
+            atrConfig={editingConfig.atr_protection}
+            onAtrChange={(atr) => updateConfig('atr_protection', atr)}
           />
         </>
       ),

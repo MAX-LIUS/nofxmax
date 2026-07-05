@@ -42,3 +42,34 @@ func TestMatchDrawdownRuleByActivation(t *testing.T) {
 		t.Fatalf("expected fallback to highest min_profit=6, got ok=%v rule=%+v", okf, rf)
 	}
 }
+
+// Regression: adjacent SPCXUSDT tiers sit ~1% apart, so both fall inside the 1%
+// tolerance for a given activePx. The old "first-within-tolerance" match could
+// misattribute the 30% partial-lock tier to the neighbouring 100% full-close tier,
+// forcing a full close instead of the strategy's partial reduction. Closest-match
+// must resolve to the exact 30% tier whose activation price equals activePx.
+func TestMatchDrawdownRuleByActivation_ClosestNotFirst(t *testing.T) {
+	entry := 175.26 // SPCX short entry; +6% dd1 ≈ 164.74, +4% lock ≈ 163.05
+	rules := []store.DrawdownTakeProfitRule{
+		// dd1: min_profit=3 → short activation entry*(1-0.03) ≈ 170.0 (far)
+		{MinProfitPct: 3, MaxDrawdownPct: 1.8, CloseRatioPct: 100, StageName: "dd1"},
+		// partial lock: min_profit=4 → short activation entry*(1-0.04) ≈ 168.25
+		{MinProfitPct: 4, MaxDrawdownPct: 1.2, CloseRatioPct: 30, StageName: "partial_profit_lock"},
+	}
+	// activePx exactly at the +4% (30%) tier activation.
+	activePx := entry * (1 - 0.04)
+	r, ok := matchDrawdownRuleByActivation(rules, entry, "short", activePx)
+	if !ok {
+		t.Fatalf("expected a match, got none")
+	}
+	if r.CloseRatioPct != 30 || r.MinProfitPct != 4 {
+		t.Fatalf("expected 30%% partial tier (min_profit=4), got close=%.1f%% min_profit=%.2f — full-close misattribution regressed", r.CloseRatioPct, r.MinProfitPct)
+	}
+
+	// And activePx exactly at the +3% (100%) tier must resolve to that one.
+	activePxFull := entry * (1 - 0.03)
+	rFull, okFull := matchDrawdownRuleByActivation(rules, entry, "short", activePxFull)
+	if !okFull || rFull.CloseRatioPct != 100 {
+		t.Fatalf("expected 100%% tier at its own activation, got close=%.1f%%", rFull.CloseRatioPct)
+	}
+}

@@ -10,6 +10,9 @@ import type {
   EvolutionProfile,
   GateBlockEntry,
   CloseAttributionResponse,
+  FlipObservationsResponse,
+  SidePnLSeriesResponse,
+  BreakerHistoryResponse,
 } from '../../types'
 import { API_BASE, httpClient } from './helpers'
 
@@ -149,6 +152,39 @@ export const dataApi = {
       `${API_BASE}/positions/attribution?trader_id=${traderId}&days=${days}`
     )
     if (!result.success) throw new Error('Failed to fetch close attribution')
+    return result.data!
+  },
+
+  async getSidePnLSeries(
+    traderId: string,
+    hours: number = 12
+  ): Promise<SidePnLSeriesResponse> {
+    const result = await httpClient.get<SidePnLSeriesResponse>(
+      `${API_BASE}/positions/side-pnl-series?trader_id=${traderId}&hours=${hours}`
+    )
+    if (!result.success) throw new Error('Failed to fetch side PnL series')
+    return result.data!
+  },
+
+  async getBreakerHistory(
+    traderId: string,
+    days: number = 7
+  ): Promise<BreakerHistoryResponse> {
+    const result = await httpClient.get<BreakerHistoryResponse>(
+      `${API_BASE}/positions/breaker-history?trader_id=${traderId}&days=${days}`
+    )
+    if (!result.success) throw new Error('Failed to fetch breaker history')
+    return result.data!
+  },
+
+  async getFlipObservations(
+    traderId: string,
+    limit: number = 100
+  ): Promise<FlipObservationsResponse> {
+    const result = await httpClient.get<FlipObservationsResponse>(
+      `${API_BASE}/positions/flips?trader_id=${traderId}&limit=${limit}`
+    )
+    if (!result.success) throw new Error('Failed to fetch flip observations')
     return result.data!
   },
 

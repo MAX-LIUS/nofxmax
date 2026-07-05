@@ -42,9 +42,59 @@ func getBrOrderID() string {
 	return orderID
 }
 
+// brOrderIDPrefix is the broker-tag prefix every order this bot places carries
+// (see getBrOrderID). Used to distinguish our own orders from foreign/manual
+// ones when reading the order book back.
+const brOrderIDPrefix = "x-KzrpZaP9"
+
+// isMakerTakeProfitLimit reports whether a resting LIMIT order is one of our
+// post-only maker take-profits (placeMakerTakeProfit), as opposed to a maker
+// *entry* limit or a foreign/grid order. The signature is exact:
+//   - Type LIMIT with post-only time-in-force (GTX)
+//   - Side is the CLOSING direction for its PositionSide (SHORT→BUY, LONG→SELL);
+//     a maker entry rests in the opening direction, so it is excluded
+//   - carries our broker prefix (our order, not foreign/manual)
+//
+// This lets GetOpenOrders report it as a TAKE_PROFIT so the shared protection
+// reconciler dedups/attributes it instead of re-placing it every cycle. Stop
+// losses are never resting limits in this trader (always algo STOP_MARKET), so
+// a closing-direction post-only LIMIT is unambiguously a take-profit.
+func isMakerTakeProfitLimit(o *futures.Order) bool {
+	if o == nil {
+		return false
+	}
+	if o.Type != futures.OrderTypeLimit || o.TimeInForce != futures.TimeInForceTypeGTX {
+		return false
+	}
+	if !strings.HasPrefix(o.ClientOrderID, brOrderIDPrefix) {
+		return false
+	}
+	switch o.PositionSide {
+	case futures.PositionSideTypeShort:
+		return o.Side == futures.SideTypeBuy
+	case futures.PositionSideTypeLong:
+		return o.Side == futures.SideTypeSell
+	default:
+		// One-way mode (BOTH): fall back to reduceOnly, which our maker TP would
+		// carry only in one-way mode. This trader runs hedge mode, so this branch
+		// is defensive.
+		return o.ReduceOnly
+	}
+}
+
 // FuturesTrader Binance futures trader
 type FuturesTrader struct {
 	client *futures.Client
+
+	// preferUSDC routes trades to <base>USDC perpetuals (zero maker fee) when a
+	// USDC perp exists for the base. Internal symbols stay USDT; conversion is
+	// confined to the API boundary (see symbol_mapping.go). Default false.
+	preferUSDC bool
+
+	// makerTakeProfit places take-profit as post-only reduce-only LIMIT orders
+	// (maker, 0 fee on USDC) instead of trigger-market algo orders. Falls back to
+	// algo TP if post-only would cross. SL/BE/trailing are unaffected. Default false.
+	makerTakeProfit bool
 
 	// Balance cache
 	cachedBalance     map[string]interface{}
@@ -58,6 +108,19 @@ type FuturesTrader struct {
 
 	// Cache validity period (15 seconds)
 	cacheDuration time.Duration
+}
+
+// SetExecutionPreferences configures USDC routing and maker take-profit. Called
+// right after construction by the caller that has the strategy config. Safe to
+// call with both false (identical to legacy behaviour). When preferUSDC is
+// enabled it eagerly warms the USDC-perp base cache.
+func (t *FuturesTrader) SetExecutionPreferences(preferUSDC, makerTakeProfit bool) {
+	t.preferUSDC = preferUSDC
+	t.makerTakeProfit = makerTakeProfit
+	if preferUSDC {
+		t.refreshUSDCPerpBases(true)
+	}
+	logger.Infof("⚙️ Binance execution prefs: preferUSDC=%v makerTakeProfit=%v", preferUSDC, makerTakeProfit)
 }
 
 // NewFuturesTrader creates futures trader

@@ -159,7 +159,156 @@ func classifyTrendDirection(data *market.Data) int {
 // - narrow/standard/wide: both directions allowed (range trading is valid)
 // - volatile: both directions allowed (but other filters may block)
 // - If regime is not directional, fall back to multi-factor scoring
-func isTrendAlignedWithMode(action string, setupType string, data *market.Data, mode store.RegimeTrendAlignmentMode) bool {
+// momentumDivergenceBlocksEntry detects when an entry fights the short-term
+// momentum even though the coarse regime label agrees with the entry direction.
+//
+// Motivation (data-driven, 2026-07-02): a 627-trade audit over 40 days showed that
+// entries where MACD momentum opposed the entry direction ("divergent") lost
+// -0.56/trade (183 trades, -102.2 total) while non-divergent trend-following made
+// +0.15/trade. The coarse regime branch of isTrendAlignedWithMode used to return
+// true unconditionally for "aligned" directions (trending_down+short,
+// trending_up+long), so a market that had already turned (MACD flipped) but still
+// carried a stale trending_* label let counter-momentum entries straight through.
+// The ZEC 2026-07-01 short (MACD=+0.84, chg1h=-0.07%, chg4h=-1.2%) is the canonical
+// case: three noise-level factors outvoted a clearly bullish MACD.
+//
+// Divergence is defined as:
+//   - open_short while MACD > 0 (bullish momentum), or
+//   - open_long  while MACD < 0 (bearish momentum)
+//
+// allowReversalException implements the "narrow window": when true, a divergent
+// entry may still pass if it is an explicit reversal/range-edge setup with
+// structural plausibility (deliberate counter-momentum fade at a level). When
+// false, divergence is a hard block. Both variants are regression-tested against
+// the historical divergent-loss set so the policy can be chosen from evidence.
+func momentumDivergenceBlocksEntry(action string, setup string, data *market.Data, allowReversalException bool) bool {
+	if data == nil {
+		return false
+	}
+	act := strings.ToLower(strings.TrimSpace(action))
+	stp := strings.ToLower(strings.TrimSpace(setup))
+
+	divergent := false
+	if act == "open_short" && data.CurrentMACD > 0 {
+		divergent = true
+	} else if act == "open_long" && data.CurrentMACD < 0 {
+		divergent = true
+	}
+	if !divergent {
+		return false
+	}
+
+	// Narrow window: a deliberate reversal/range-edge fade at a structural level is
+	// the one context where fighting momentum is the intended thesis. Require both
+	// an explicit reversal-type setup AND structural plausibility to let it through.
+	if allowReversalException {
+		isReversalSetup := strings.Contains(stp, "reversal") || strings.Contains(stp, "range")
+		if isReversalSetup && isRangeEdgeReversalStructurallyPlausible(act, data) {
+			return false // exception granted — do not block
+		}
+	}
+	return true // divergent and no exception — block
+}
+
+// higherTimeframeDowntrendBlocksLong blocks open_long entries taken into an
+// established 1h downtrend (EMA20 < EMA50 AND price < EMA50). This is the single
+// most toxic regime×direction cell in the full-sample backtest (137 trades,
+// -59.6% net, 46% win rate; OOS-validated on both time halves). It is largely
+// orthogonal to the MACD-divergence guard: 121 of the 137 have a rising 15m MACD
+// (short-term momentum up) that the divergence guard lets through — i.e. bounce
+// traps inside a higher-timeframe downtrend. Blocking the whole cell is net
+// positive because losers (-126%) vastly outweigh the winners forgone (+67%).
+//
+// REVISED 2026-06-27 to SYMMETRIC + MULTI-TIMEFRAME after bull-market validation:
+// - Original asymmetric design (block down×LONG only) failed in bull markets where
+//   up×SHORT lost -970% (fast bulls) to -328% (slow bulls). The +8.9% up×SHORT in
+//   original backtest was sample bias (2026 data = 45-57% down regime, no sustained bulls).
+// - Multi-TF confirmation (1h+4h both agree) separates toxic counter-trend entries from
+//   profitable structural trades:
+//     * down×LONG: 4h-confirmed -4.7% (真下跌), 1h-only +1.7% (牛市回踩)
+//     * up×SHORT: 4h-confirmed -4.9% (真上涨), 1h-only +6.6% (熊市反弹)
+// - Both directions now blocked when 1h AND 4h agree on trend direction.
+func higherTimeframeDowntrendBlocksLong(action string, data *market.Data) bool {
+	if data == nil {
+		return false
+	}
+	if strings.ToLower(strings.TrimSpace(action)) != "open_long" {
+		return false
+	}
+	// Require BOTH 1h and 4h to confirm downtrend (filters bull-dip longs, preserves real opportunities)
+	series1h := higherTimeframeSeriesFor(data, "1h")
+	series4h := higherTimeframeSeriesFor(data, "4h")
+	if series1h == nil || series4h == nil {
+		return false // missing data → do not block (avoid false positives)
+	}
+	ema20_1h, ema50_1h, price1h := latestEMAStructure(series1h)
+	ema20_4h, ema50_4h, price4h := latestEMAStructure(series4h)
+	if ema20_1h <= 0 || ema50_1h <= 0 || price1h <= 0 || ema20_4h <= 0 || ema50_4h <= 0 || price4h <= 0 {
+		return false
+	}
+	// Block only when BOTH timeframes show established downtrend
+	downtrend1h := ema20_1h < ema50_1h && price1h < ema50_1h
+	downtrend4h := ema20_4h < ema50_4h && price4h < ema50_4h
+	return downtrend1h && downtrend4h
+}
+
+// higherTimeframeUptrendBlocksShort: symmetric counterpart to the long-side block.
+// Prevents open_short into confirmed uptrends (BOTH 1h+4h: EMA20>EMA50 & price>EMA50).
+// Bull-market validation: up×SHORT in fast bulls is -970%, slow bulls -328%; real 2026
+// 4h-confirmed up×SHORT is -4.9% vs +6.6% for bear-bounce shorts (1h-only). Multi-TF
+// gate blocks toxic real-uptrend shorts while preserving profitable bear-bounce fades.
+func higherTimeframeUptrendBlocksShort(action string, data *market.Data) bool {
+	if data == nil {
+		return false
+	}
+	if strings.ToLower(strings.TrimSpace(action)) != "open_short" {
+		return false
+	}
+	series1h := higherTimeframeSeriesFor(data, "1h")
+	series4h := higherTimeframeSeriesFor(data, "4h")
+	if series1h == nil || series4h == nil {
+		return false
+	}
+	ema20_1h, ema50_1h, price1h := latestEMAStructure(series1h)
+	ema20_4h, ema50_4h, price4h := latestEMAStructure(series4h)
+	if ema20_1h <= 0 || ema50_1h <= 0 || price1h <= 0 || ema20_4h <= 0 || ema50_4h <= 0 || price4h <= 0 {
+		return false
+	}
+	uptrend1h := ema20_1h > ema50_1h && price1h > ema50_1h
+	uptrend4h := ema20_4h > ema50_4h && price4h > ema50_4h
+	return uptrend1h && uptrend4h
+}
+
+// higherTimeframeSeriesFor returns the per-timeframe series for tf, or nil.
+func higherTimeframeSeriesFor(data *market.Data, tf string) *market.TimeframeSeriesData {
+	if data == nil || data.TimeframeData == nil {
+		return nil
+	}
+	if s, ok := data.TimeframeData[tf]; ok && s != nil {
+		return s
+	}
+	return nil
+}
+
+// latestEMAStructure extracts the most recent EMA20, EMA50, and close price from
+// a timeframe series. Returns zeros when data is insufficient.
+func latestEMAStructure(s *market.TimeframeSeriesData) (ema20, ema50, price float64) {
+	if s == nil {
+		return 0, 0, 0
+	}
+	if len(s.EMA20Values) > 0 {
+		ema20 = s.EMA20Values[len(s.EMA20Values)-1]
+	}
+	if len(s.EMA50Values) > 0 {
+		ema50 = s.EMA50Values[len(s.EMA50Values)-1]
+	}
+	if len(s.Klines) > 0 {
+		price = s.Klines[len(s.Klines)-1].Close
+	}
+	return ema20, ema50, price
+}
+
+func isTrendAlignedWithMode(action string, setupType string, data *market.Data, mode store.RegimeTrendAlignmentMode, blockLongInHTFDowntrend bool, blockShortInHTFUptrend bool) bool {
 	if data == nil {
 		return true
 	}
@@ -167,6 +316,25 @@ func isTrendAlignedWithMode(action string, setupType string, data *market.Data, 
 	regime := classifyProtectionRegime(data)
 	act := strings.ToLower(action)
 	setup := strings.ToLower(strings.TrimSpace(setupType))
+
+	// Momentum-divergence guard (data-driven, 2026-07-02): even when the regime
+	// label agrees with the entry direction, block entries that fight MACD momentum.
+	// The narrow reversal exception is enabled for the range-edge-reversal mode so
+	// deliberate structural fades can still pass; strict mode hard-blocks divergence.
+	allowReversalException := mode == store.RegimeTrendAlignmentAllowRangeEdgeReversal
+	divergenceBlocks := momentumDivergenceBlocksEntry(act, setup, data, allowReversalException)
+
+	// Higher-timeframe multi-TF guard (data-driven, 2026-06-27): block counter-trend
+	// entries when BOTH 1h+4h confirm the opposing trend direction. Symmetric design
+	// (both longs-into-downtrend and shorts-into-uptrend) validated across bear/bull
+	// regimes. Multi-TF confirmation separates toxic real-trend entries from profitable
+	// structural bounce/dip trades. Orthogonal to MACD guard. No reversal exception.
+	if blockLongInHTFDowntrend && higherTimeframeDowntrendBlocksLong(act, data) {
+		return false
+	}
+	if blockShortInHTFUptrend && higherTimeframeUptrendBlocksShort(act, data) {
+		return false
+	}
 
 	// Downgrade weak trends: if regime is trending but evidence is thin
 	// (4h change < 0.5% AND ATR < 1.2%), treat as standard range instead.
@@ -203,6 +371,11 @@ func isTrendAlignedWithMode(action string, setupType string, data *market.Data, 
 			}
 			return false
 		}
+		// open_long is "aligned" with the uptrend, but still block it when it
+		// fights bearish MACD momentum (stale-label / early-reversal protection).
+		if divergenceBlocks {
+			return false
+		}
 		return true
 
 	case string(market.RegimeLevelTrendingDown):
@@ -215,6 +388,11 @@ func isTrendAlignedWithMode(action string, setupType string, data *market.Data, 
 			}
 			return false
 		}
+		// open_short is "aligned" with the downtrend, but still block it when it
+		// fights bullish MACD momentum (the ZEC 2026-07-01 case).
+		if divergenceBlocks {
+			return false
+		}
 		return true
 
 	case string(market.RegimeLevelTrending):
@@ -223,6 +401,9 @@ func isTrendAlignedWithMode(action string, setupType string, data *market.Data, 
 			return false
 		}
 		if act == "open_short" && data.PriceChange4h > 1 {
+			return false
+		}
+		if divergenceBlocks {
 			return false
 		}
 		return true
@@ -285,7 +466,28 @@ func isStrongCounterTrend(action string, data *market.Data) bool {
 }
 
 func isTrendAligned(action string, data *market.Data) bool {
-	return isTrendAlignedWithMode(action, "", data, store.RegimeTrendAlignmentStrict)
+	return isTrendAlignedWithMode(action, "", data, store.RegimeTrendAlignmentStrict, true, true)
+}
+
+// resolveBlockLongInHTFDowntrend returns the effective toggle for the 1h-downtrend
+// long block. Unset (nil) defaults to true (enabled) since the backtest shows the
+// down×LONG cell is strongly net-negative; an explicit false disables it.
+func resolveBlockLongInHTFDowntrend(cfg store.RegimeFilterConfig) bool {
+	if cfg.BlockLongInHTFDowntrend == nil {
+		return true
+	}
+	return *cfg.BlockLongInHTFDowntrend
+}
+
+// resolveBlockShortInHTFUptrend: symmetric counterpart to the long-side resolver.
+// Unset (nil) defaults to true (enabled) since bull-market validation shows up×SHORT
+// is -970% in fast bulls, -328% in slow bulls; real 2026 4h-confirmed up×SHORT is
+// -4.9%. Explicit false disables it (preserves profitable bear-bounce shorts).
+func resolveBlockShortInHTFUptrend(cfg store.RegimeFilterConfig) bool {
+	if cfg.BlockShortInHTFUptrend == nil {
+		return true
+	}
+	return *cfg.BlockShortInHTFUptrend
 }
 
 // isRangeEdgeReversalStructurallyPlausible allows deliberate support/resistance
@@ -401,7 +603,7 @@ func (at *AutoTrader) evaluateDecisionRegimeGate(decision *kernel.Decision, data
 	}
 
 	if cfg.RequireTrendAlignment {
-		aligned := isTrendAlignedWithMode(decision.Action, decision.SetupType, data, cfg.TrendAlignmentMode)
+		aligned := isTrendAlignedWithMode(decision.Action, decision.SetupType, data, cfg.TrendAlignmentMode, resolveBlockLongInHTFDowntrend(cfg), resolveBlockShortInHTFUptrend(cfg))
 		result.TrendAligned = &aligned
 		if !aligned {
 			result.Allowed = false
@@ -564,7 +766,7 @@ func buildAIProtectionPlan(entryPrice float64, action string, plan *kernel.AIPro
 					RunnerTargetMode:    rule.RunnerTargetMode,
 					RunnerTargetSource:  rule.RunnerTargetSource,
 				}, drawdownCfg)
-			if drawdownRule.CloseRatioPct > 0 {
+				if drawdownRule.CloseRatioPct > 0 {
 					rules = append(rules, drawdownRule)
 				}
 			}

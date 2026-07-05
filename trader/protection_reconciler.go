@@ -182,7 +182,9 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 			// use the configured ladder values as a safety net.
 			// Use ATR-resolved protection so the fallback ladder matches open-time
 			// distances when ATR protection is enabled (no percent/ATR mismatch).
-			resolvedProt, _ := at.resolveATRProtection(entryPrice, symbol)
+			// atEntry=false: reconcile path must NOT compute a fresh structural boundary
+			// (would read a post-entry window). Frozen-at-entry boundary only.
+			resolvedProt, _ := at.resolveATRProtection(entryPrice, symbol, actionFromPositionSide(side), false)
 			ladderCfg := resolvedProt.LadderTPSL
 			if ladderCfg.Enabled && ladderCfg.Mode == store.ProtectionModeAI {
 				if fallbackPlan, fbErr := buildManualLadderProtectionPlan(entryPrice, actionFromPositionSide(side), ladderCfg); fbErr == nil && fallbackPlan != nil {
@@ -1203,6 +1205,28 @@ func (at *AutoTrader) cleanupInactiveProtectionState(active map[string]struct{})
 			logger.Warnf("⚠️ Protection cleanup: failed to cancel orphaned protection orders for %s: %v", symbol, err)
 		} else {
 			logger.Infof("🧹 Protection cleanup: canceled orphaned protection orders for inactive symbol %s", symbol)
+		}
+		// Evict the frozen ATR for the closed position so a future position on
+		// the same symbol re-freezes against its own open-time ATR. Evict every
+		// timeframe variant (1h protection scale + 4h breadth from-peak scale) AND
+		// every side. The key now carries side (LONG/SHORT) so hedge legs freeze
+		// independently; evicting only one side (or the legacy side-less key) would
+		// strand the other. "" covers pre-migration side-less records.
+		for _, tf := range []string{"1h", "4h"} {
+			for _, side := range []string{"LONG", "SHORT", ""} {
+				frozenKey := frozenATRKey(at.id, symbol, tf, side)
+				frozenATRMu.Lock()
+				delete(frozenATRCache, frozenKey)
+				frozenATRMu.Unlock()
+				frozenStructMu.Lock()
+				delete(frozenStructCache, frozenKey)
+				frozenStructMu.Unlock()
+				if at.store != nil {
+					if err := at.store.DeleteFrozenATRRecord(frozenKey); err != nil {
+						logger.Warnf("⚠️ Frozen ATR: failed to evict %s: %v", frozenKey, err)
+					}
+				}
+			}
 		}
 	}
 

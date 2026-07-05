@@ -40,6 +40,19 @@ func (t *BitgetTrader) SetTrailingStopLoss(symbol string, positionSide string, a
 	}
 
 	qtyStr, _ := t.FormatQuantity(symbol, quantity)
+
+	// Immediate activation: Bitget's placeTrailStop requires a triggerPrice, so
+	// "activate now" (activationPrice <= 0) is expressed as the current market
+	// price — the trail begins tracking from the live price immediately.
+	if activationPrice <= 0 {
+		if mp, err := t.GetMarketPrice(symbol); err == nil && mp > 0 {
+			activationPrice = mp
+			logger.Infof("  ℹ️ [Bitget] Immediate trailing activation: using market price %.4f as trigger for %s", mp, symbol)
+		} else {
+			return fmt.Errorf("immediate trailing stop needs market price for %s: %w", symbol, err)
+		}
+	}
+
 	body := map[string]interface{}{
 		"symbol":       symbol,
 		"marginCoin":   "USDT",

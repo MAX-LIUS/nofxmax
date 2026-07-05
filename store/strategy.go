@@ -78,6 +78,17 @@ type StrategyConfig struct {
 
 	// Grid trading configuration (only used when StrategyType == "grid_trading")
 	GridConfig *GridStrategyConfig `json:"grid_config,omitempty"`
+
+	// TimeframeDiscipline controls whether every timeframe-derived setting is
+	// force-aligned to Indicators.Klines.PrimaryTimeframe at parse time. This makes
+	// primary_timeframe the single source of truth: change it and the whole
+	// lifecycle (AI data, ATR protection, structural SL, breakout scan, breadth,
+	// selected/longer timeframes) follows, keeping strict per-trader timeframe
+	// discipline. Values:
+	//   ""             => legacy: fields keep their stored values (backward compatible)
+	//   "follow_primary" => align all timeframe-derived fields to primary at parse time
+	// See AlignToPrimaryTimeframe.
+	TimeframeDiscipline string `json:"timeframe_discipline,omitempty"`
 }
 
 // BreakoutEntryConfig controls the code-level breakout entry engine.
@@ -113,11 +124,30 @@ type EntryStructureConfig struct {
 // EntryGateConfig controls executable entry-quality gates that validate AI open proposals.
 // It is nested under EntryStructure so it composes with existing entry/protection gates.
 type EntryGateConfig struct {
-	Enabled                     bool    `json:"enabled,omitempty"`
-	MinATR14Pct                 float64 `json:"min_atr14_pct,omitempty"`
-	MinRiskDistancePct          float64 `json:"min_risk_distance_pct,omitempty"`
-	MinSLDistanceATRMul         float64 `json:"min_sl_distance_atr_mul,omitempty"`
-	MinRewardATRMul             float64 `json:"min_reward_atr_mul,omitempty"`
+	Enabled             bool    `json:"enabled,omitempty"`
+	MinATR14Pct         float64 `json:"min_atr14_pct,omitempty"`
+	MinRiskDistancePct  float64 `json:"min_risk_distance_pct,omitempty"`
+	MinSLDistanceATRMul float64 `json:"min_sl_distance_atr_mul,omitempty"`
+	MinRewardATRMul     float64 `json:"min_reward_atr_mul,omitempty"`
+	// MaxTargetATRMul rejects entries whose first_target is unreachably far from
+	// entry relative to volatility. Full-sample backtest (781 trades, OOS-validated
+	// on both time halves): target/ATR >= 5 flips EV negative (win rate collapses,
+	// target only hit ~12% of the time). Setups in 2.5-5×ATR are the profitable
+	// sweet spot. Default 5.0. Set 0 to disable.
+	MaxTargetATRMul float64 `json:"max_target_atr_mul,omitempty"`
+	// TargetReachabilityMode controls what happens when first_target exceeds
+	// MaxTargetATRMul: "cap" (default) rewrites first_target to the reachable
+	// ceiling and recomputes RR, keeping the trade with a realistic target;
+	// "reject" hard-blocks the entry (legacy behaviour). Backtest of the 178
+	// >5×ATR trades: 54% actually ran ≥1× risk in profit (net +47.7%) but reverted
+	// before the unreachable target — capping+early-lock recovers most of that.
+	// Full-portfolio: reject → +28.7%, cap(0.8×risk lock, 1.8×ATR floor) → +37.0%.
+	TargetReachabilityMode string `json:"target_reachability_mode,omitempty"`
+	// RealisticTargetRiskMul is the profit-lock ladder/BE tier distance as a
+	// multiple of stop-risk, fed to the AI prompt. Default 0.8 (easier to bank:
+	// 105/174 blocked winners reach it vs 94 at 1.0×). Floored by MinRewardATRMul
+	// so the lock tier never lands inside the ATR noise band and gets scanned out.
+	RealisticTargetRiskMul      float64 `json:"realistic_target_risk_mul,omitempty"`
 	EntryProximityATRMul        float64 `json:"entry_proximity_atr_mul,omitempty"`
 	EntryProximityMinPct        float64 `json:"entry_proximity_min_pct,omitempty"`
 	EntryProximityMaxPct        float64 `json:"entry_proximity_max_pct,omitempty"`
@@ -164,6 +194,17 @@ func (c EntryGateConfig) WithDefaults() EntryGateConfig {
 	}
 	if c.MinRewardATRMul <= 0 {
 		c.MinRewardATRMul = 1.8
+	}
+	if c.MaxTargetATRMul == 0 {
+		c.MaxTargetATRMul = 5.0
+	} else if c.MaxTargetATRMul < 0 {
+		c.MaxTargetATRMul = 0 // negative means explicitly disabled
+	}
+	if c.TargetReachabilityMode == "" {
+		c.TargetReachabilityMode = "cap" // cap unreachable targets by default (reshape > reject)
+	}
+	if c.RealisticTargetRiskMul <= 0 {
+		c.RealisticTargetRiskMul = 0.8 // profit-lock tier at 0.8× risk (easier to bank)
 	}
 	if c.EntryProximityATRMul <= 0 {
 		c.EntryProximityATRMul = 0.6
@@ -243,40 +284,110 @@ type ProtectionConfig struct {
 	BreakEvenStop      BreakEvenStopConfig      `json:"break_even_stop,omitempty"`
 	RegimeFilter       RegimeFilterConfig       `json:"regime_filter,omitempty"`
 	GivebackGuard      GivebackGuardConfig      `json:"giveback_guard,omitempty"`
+	TrendReversal      TrendReversalConfig      `json:"trend_reversal,omitempty"`
 }
 
-// GivebackGuardConfig configures the portfolio giveback guard (L1 per-symbol +
-// L2 portfolio circuit breaker), validated by the gbsim backtest (L1+L2 was the
-// strongest config across short-sample, 12mo, walk-forward, and 18mo tests).
+// TrendReversalConfig configures the trend-reversal position-flip feature. When
+// the AI signals a HIGH-CONVICTION opposite-direction entry on a symbol that
+// already has an aged open position, the system closes the original and opens
+// the reverse (instead of rejecting the same-symbol entry outright).
+//
+// The rule set was distilled from a gbsim backtest over all three live traders'
+// real entries (validated 2026-06): the winning configuration is intentionally
+// minimal — opposite-conviction signal + a minimum hold age + reverse-open. The
+// originally-considered breadth gate and ATR/EMA exhaustion gates were DROPPED
+// because on real (non-mechanical) entries they either blocked every flip
+// (breadth: real positions don't cluster same-side) or filtered out profitable
+// flips (exhaustion gates were net-negative). Flip win rate was >=55% across all
+// three traders; claude (212 entries) turned -7.4 USDT into +72.9 USDT.
+//
+// The architecture flips each position AT MOST ONCE (the reverse is then held to
+// its own exit), which is inherently anti-whipsaw — no cooldown needed.
+//
+// FLEET DEFAULT: the feature is ON for every trader (existing and newly created)
+// and starts in DryRun (records intended flips without placing orders) so live
+// AI reversal-signal quality can be observed before real execution. The backtest
+// proxied AI conviction with a mechanical EMA cross and cannot vouch for the live
+// AI signal itself, hence the dry-run-first rollout. A strategy may override per
+// trader: LiveExecution=true turns on real flips for that trader; Disabled=true
+// turns the feature off entirely; MinConfidence / MinPositionAgeHours override
+// the thresholds. The default thresholds are conviction 75, hold age 6h.
+type TrendReversalConfig struct {
+	// Disabled hard-disables the fleet-default feature for THIS trader.
+	Disabled bool `json:"disabled,omitempty"`
+	// LiveExecution opts THIS trader into real flip execution (turns off dry-run).
+	// Retained for forward-compat; the fleet default is already LIVE.
+	LiveExecution bool `json:"live_execution,omitempty"`
+	// ForceDryRun pins THIS trader back to dry-run (observe only) even though the
+	// fleet default is live — used to quarantine a single trader without disabling.
+	ForceDryRun bool `json:"force_dry_run,omitempty"`
+
+	// MinConfidence is the AI-decision confidence floor (0-100 scale) the opposite
+	// signal must clear to justify flipping an existing position. Default 75.
+	MinConfidence int `json:"min_confidence,omitempty"`
+
+	// MinPositionAgeHours is the minimum hold age before a position may be flipped
+	// (prevents noise flips inside the first trend leg). Backtest optimum: 6h.
+	MinPositionAgeHours float64 `json:"min_position_age_hours,omitempty"`
+}
+
+// GivebackGuardConfig configures the portfolio giveback guard. The sole portfolio
+// breaker is the breadth circuit breaker: per-symbol monitoring + a
+// correlation-reversal gate (cut losers, let winners ride break-even). It was
+// validated by the gbsim backtest and replaced the old L1/L2/L3 account-equity
+// breakers, which measured leverage-contaminated equity drawdown (at 10x a 5%
+// equity drop is only a 0.5% price move, inside noise) and knocked the whole
+// book out on routine wiggles.
 //
 // Zero value = disabled = complete no-op (existing traders unaffected). When
 // DryRun is true the guard only logs the intended trim ("would close X%")
 // without placing any order — used to observe trigger timing before going live.
-//
-// Mechanism (per drawdown-monitor tick):
-//
-//	L2: track portfolio total-unrealized high-water (quote). When the book
-//	    gives back >= L2GivebackPct of that peak AND peak >= L2MinPeakEquityPct
-//	    of account equity, trim L2ClosePct of EACH currently-winning position.
-//	    Ratcheted: fires once per episode, re-arms on a new portfolio high.
-//	L1: per-symbol — when a position gives back >= L1GivebackPct of its own
-//	    peak profit% (after peaking >= L1MinPeakPct), trim L1ClosePct. Ratchet
-//	    re-arms on a new per-position profit peak.
 type GivebackGuardConfig struct {
 	Enabled bool `json:"enabled,omitempty"`
 	DryRun  bool `json:"dry_run,omitempty"`
 
-	// L2 portfolio circuit breaker.
-	L2Enabled          bool    `json:"l2_enabled,omitempty"`
-	L2GivebackPct      float64 `json:"l2_giveback_pct,omitempty"`        // e.g. 50
-	L2MinPeakEquityPct float64 `json:"l2_min_peak_equity_pct,omitempty"` // e.g. 1.0 = peak unreal >= 1% of equity
-	L2ClosePct         float64 `json:"l2_close_pct,omitempty"`           // e.g. 50
+	// --- Breadth breaker (per-symbol monitoring + correlation-reversal gate) ---
+	// Instead of one global equity-drawdown trigger, it monitors EACH position and
+	// acts only when a MAJORITY of held symbols retrace together (a correlated
+	// reversal, not single-symbol noise).
+	//
+	// Trigger: fire when retracingCount/total >= BreadthFrac AND total >=
+	// BreadthMinPos (a "majority" needs a quorum). A position counts as retracing
+	// when its adverse move from peak exceeds BreadthATRMult ATRs (BreadthUseATR,
+	// volatility-normalized, the cross-validated default) or, in pnl% mode, when
+	// its peak-to-current giveback exceeds BreadthGivebackPct, or its pnl-velocity
+	// is negative.
+	//
+	// Action (surgical): cut LOSING positions (profit% < 0) that are retracing by
+	// BreadthLoserCutPct (default 100 = full). WINNING positions are left alone —
+	// they ride their break-even stop. Cross-validated production preset:
+	// min4 / f70% / ATR0.9 / cut100 / no cooldown.
+	BreadthEnabled     bool    `json:"breadth_enabled,omitempty"`
+	BreadthMinPos      int     `json:"breadth_min_pos,omitempty"`       // quorum: min open positions before the gate can fire
+	BreadthFrac        float64 `json:"breadth_frac,omitempty"`          // fraction (0..1) of positions retracing that fires the gate
+	BreadthLoserCutPct float64 `json:"breadth_loser_cut_pct,omitempty"` // % of each losing+retracing position to cut (default 100)
+	BreadthUseATR      bool    `json:"breadth_use_atr,omitempty"`       // true => retrace measured in ATR-from-peak units
+	BreadthATRMult     float64 `json:"breadth_atr_mult,omitempty"`      // adverse-from-peak in ATR units that counts as retracing
+	// BreadthFromPeakTimeframe is the ATR timeframe used to normalize the
+	// from-peak path ONLY. The from-peak path measures a position's cumulative
+	// peak-to-current giveback, which spans many 1h bars; scaling it by a single
+	// 1h ATR makes the ratio systematically inflated (scale period < judgment
+	// period). Empirically ~70% of 1h from-peak "votes" disappear when rescaled
+	// to a timeframe-matched ATR. Default "4h" (≈1.57x the 1h ATR for crypto);
+	// the velocity path keeps the 1h ATR since it samples per-1h-bar. When set,
+	// BreadthATRMult is interpreted against THIS timeframe's ATR (so the matching
+	// threshold is ~1.0 for 4h vs ~1.5 for 1h). Empty => "1h" (legacy behaviour).
+	BreadthFromPeakTimeframe string  `json:"breadth_from_peak_timeframe,omitempty"`
+	BreadthGivebackPct       float64 `json:"breadth_giveback_pct,omitempty"`  // peak-to-current giveback% that counts as retracing (pnl% mode)
+	BreadthVelEps            float64 `json:"breadth_vel_eps,omitempty"`       // velocity threshold in ATR-units/bar (giveback% per ATR per bar); below -eps counts as retracing. ATR-normalized so the same value behaves consistently across low- and high-volatility symbols.
+	BreadthVelWindow         int     `json:"breadth_vel_window,omitempty"`    // bars of look-back for pnl-velocity (0 => default 6)
+	BreadthCooldownBars      int     `json:"breadth_cooldown_bars,omitempty"` // min bars between fires (0 => disabled, the validated default)
 
-	// L1 per-symbol velocity guard.
-	L1Enabled     bool    `json:"l1_enabled,omitempty"`
-	L1GivebackPct float64 `json:"l1_giveback_pct,omitempty"` // e.g. 40
-	L1MinPeakPct  float64 `json:"l1_min_peak_pct,omitempty"` // e.g. 3 (position profit %)
-	L1ClosePct    float64 `json:"l1_close_pct,omitempty"`    // e.g. 50
+	// BreadthCutWinners turns the breadth breaker into a full deleveraging circuit
+	// breaker: when the gate fires, retracing WINNING positions are cut too (not
+	// just losers). Default false = surgical (losers only, winners ride break-even).
+	// Enable for a system-wide "go to cash on a correlated crash" policy.
+	BreadthCutWinners bool `json:"breadth_cut_winners,omitempty"`
 
 	// Monitor cadence floor (seconds); 0 => reuse drawdown monitor cadence.
 	PollIntervalSeconds int `json:"poll_interval_seconds,omitempty"`
@@ -297,6 +408,67 @@ const (
 	ProtectionValueModeManual   ProtectionValueMode = "manual"
 	ProtectionValueModeAI       ProtectionValueMode = "ai"
 )
+
+// ProtectionDistanceUnit selects how a protection distance/trigger VALUE is
+// interpreted at placement and runtime. This replaces the former standalone ATR
+// overlay: instead of a separate panel rewriting every distance, each field
+// chooses its own unit. "percent" = the value is a percent-of-entry distance
+// (the legacy behaviour); "atr" = the value is an ATR MULTIPLE, converted to an
+// effective percent at use time via value * ATR(period) / entryPrice * 100
+// (clamped to the ATRProtection min/max bounds). Empty defaults to "percent".
+type ProtectionDistanceUnit string
+
+const (
+	ProtectionUnitPercent ProtectionDistanceUnit = "percent"
+	ProtectionUnitATR     ProtectionDistanceUnit = "atr"
+	// ProtectionUnitStructural: the stop distance is derived from the pre-entry
+	// price-structure boundary (swing low for long / swing high for short) instead of
+	// a fixed distance. Resolved to an effective percent at entry, clamped to the
+	// StructuralSL floor/backstop ATR multiples. See LadderTPSLConfig.StructuralSL.
+	ProtectionUnitStructural ProtectionDistanceUnit = "structural"
+)
+
+// StructuralSLConfig controls the structural (range-anchored) full stop-loss.
+// When a ladder SL rule uses StopLossUnit=="structural", the stop is placed just
+// beyond the pre-entry range boundary rather than at a fixed ATR/percent distance.
+// This tightens the stop in narrow ranges (smaller loss on a genuine breakout) while
+// the backstop caps how wide it can ever be and the floor guards against whipsaw.
+//
+// Backtest support (extended-replay, reversal-inclusive, n=1033 closed positions):
+// on the live TP/BE/DD stack, swapping the fixed 4.5 ATR full stop for this
+// structural stop improved net PnL by ~+60 overall and ~+58 in the ranging regime
+// (which is 92% of positions), with breakout capture unchanged.
+type StructuralSLConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// FloorATRMul: minimum structural stop distance in ATR multiples (whipsaw guard).
+	// If the range boundary is closer than this, the stop widens to the floor.
+	FloorATRMul float64 `json:"floor_atr_mul,omitempty"`
+	// BackstopATRMul: maximum structural stop distance in ATR multiples. Also the
+	// distance of the resting exchange stop when CloseConfirm is on (the safety net).
+	BackstopATRMul float64 `json:"backstop_atr_mul,omitempty"`
+	// LookbackBars: how many pre-entry bars (on the ATR timeframe) define the range.
+	LookbackBars int `json:"lookback_bars,omitempty"`
+	// CloseConfirm: Phase 2. When true the structural stop is enforced by an engine
+	// poll that fires only when a bar CLOSES beyond the boundary (kills stop-hunt /
+	// false-break whipsaw); the resting exchange stop is parked at BackstopATRMul as a
+	// bot-downtime safety net. When false (Phase 1) the resting stop sits at the
+	// structural distance and fires on an intrabar touch.
+	CloseConfirm bool `json:"close_confirm,omitempty"`
+}
+
+// WithDefaults fills unset structural-SL fields with safe, backtested defaults.
+func (c StructuralSLConfig) WithDefaults() StructuralSLConfig {
+	if c.FloorATRMul <= 0 {
+		c.FloorATRMul = 1.5
+	}
+	if c.BackstopATRMul <= 0 {
+		c.BackstopATRMul = 4.5
+	}
+	if c.LookbackBars <= 0 {
+		c.LookbackBars = 24
+	}
+	return c
+}
 
 type ProtectionValueSource struct {
 	Mode  ProtectionValueMode `json:"mode,omitempty"`
@@ -368,6 +540,9 @@ type LadderTPSLConfig struct {
 	StopLossSize      ProtectionValueSource `json:"stop_loss_size,omitempty"`
 	Rules             []LadderTPSLRule      `json:"rules,omitempty"`
 	FallbackMaxLoss   ProtectionValueSource `json:"fallback_max_loss,omitempty"`
+	// StructuralSL configures the range-anchored full stop used when any SL rule sets
+	// StopLossUnit=="structural". Ignored otherwise.
+	StructuralSL StructuralSLConfig `json:"structural_sl,omitempty"`
 }
 
 type LadderTPSLRule struct {
@@ -375,6 +550,12 @@ type LadderTPSLRule struct {
 	TakeProfitCloseRatioPct float64 `json:"take_profit_close_ratio_pct,omitempty"`
 	StopLossPct             float64 `json:"stop_loss_pct,omitempty"`
 	StopLossCloseRatioPct   float64 `json:"stop_loss_close_ratio_pct,omitempty"`
+
+	// Per-field distance unit (percent|atr). When "atr", the corresponding *Pct
+	// value is an ATR MULTIPLE resolved to an effective percent at use time.
+	// Empty => percent (legacy). Replaces the standalone ATR overlay.
+	TakeProfitUnit ProtectionDistanceUnit `json:"take_profit_unit,omitempty"`
+	StopLossUnit   ProtectionDistanceUnit `json:"stop_loss_unit,omitempty"`
 }
 
 type DrawdownEngineMode string
@@ -463,6 +644,18 @@ type DrawdownTakeProfitRule struct {
 	CloseRatioMode  ProtectionValueMode `json:"close_ratio_mode,omitempty"`
 	MinProfitMode   ProtectionValueMode `json:"min_profit_mode,omitempty"`
 	MaxDrawdownMode ProtectionValueMode `json:"max_drawdown_mode,omitempty"`
+
+	// MinProfitUnit selects how MinProfitPct (the arm threshold) is interpreted:
+	// percent-of-entry (legacy) or ATR multiple. "atr" resolves to an effective
+	// percent at runtime so the open-time and arm-time thresholds stay consistent
+	// (fixes the prior overlay mismatch where DD armed on the raw percent).
+	MinProfitUnit ProtectionDistanceUnit `json:"min_profit_unit,omitempty"`
+
+	// MaxDrawdownUnit selects how MaxDrawdownPct (the giveback-from-peak trigger)
+	// is interpreted: percent (legacy) or ATR multiple. "atr" makes the giveback
+	// distance volatility-adaptive, matching MinProfitUnit so both the arm and the
+	// trigger scale with ATR instead of one tracking volatility and the other not.
+	MaxDrawdownUnit ProtectionDistanceUnit `json:"max_drawdown_unit,omitempty"`
 }
 
 type BreakEvenTriggerMode string
@@ -487,6 +680,11 @@ type BreakEvenStopRule struct {
 	OffsetPct     float64              `json:"offset_pct,omitempty"`
 	CloseRatioPct float64              `json:"close_ratio_pct,omitempty"`
 	StageName     string               `json:"stage_name,omitempty"`
+
+	// TriggerUnit selects how TriggerValue is interpreted when TriggerMode is
+	// profit_pct: percent-of-entry (legacy) or ATR multiple. "atr" resolves to an
+	// effective percent at both open and arm time so they stay consistent.
+	TriggerUnit ProtectionDistanceUnit `json:"trigger_unit,omitempty"`
 }
 
 // DrawdownTierAllocation records the fixed position allocation for each drawdown tier,
@@ -519,6 +717,21 @@ type RegimeFilterConfig struct {
 	MaxATR14Pct           float64                  `json:"max_atr14_pct,omitempty"`
 	RequireTrendAlignment bool                     `json:"require_trend_alignment"`
 	TrendAlignmentMode    RegimeTrendAlignmentMode `json:"trend_alignment_mode,omitempty"`
+	// BlockLongInHTFDowntrend hard-blocks open_long into an established downtrend
+	// when BOTH 1h and 4h agree (EMA20<EMA50 & price<EMA50 on both timeframes).
+	// Real 2026 data: 4h-confirmed down×LONG is 15 trades, -4.7% net, 40% win;
+	// 1h-only down (bull-dip longs) is 16 trades, +1.7%, 44% win. Multi-timeframe
+	// confirmation filters true downtrends while preserving profitable dip-buys.
+	// Pointer distinguishes unset (=default true) from explicit false.
+	BlockLongInHTFDowntrend *bool `json:"block_long_in_htf_downtrend,omitempty"`
+	// BlockShortInHTFUptrend: symmetric counterpart to the long-side block. Prevents
+	// open_short into a confirmed uptrend (BOTH 1h+4h: EMA20>EMA50 & price>EMA50).
+	// Real 2026 data: 4h-confirmed up×SHORT is 9 trades, -4.9% net, 44% win (toxic);
+	// bear-bounce shorts (1h-only up) is 7 trades, +6.6%, 71% win (profitable).
+	// Bull-market sim: up×SHORT in fast bulls is -970%, slow bulls -328%. Symmetric
+	// multi-TF gate allows profitable bear-bounce shorts while blocking real uptrend.
+	// Pointer distinguishes unset (=default true) from explicit false.
+	BlockShortInHTFUptrend *bool `json:"block_short_in_htf_uptrend,omitempty"`
 	// Coin momentum gate — blocks entries on coins with insufficient or excessive momentum
 	MomentumGateEnabled    bool    `json:"momentum_gate_enabled"`
 	MomentumStaleChg1h     float64 `json:"momentum_stale_chg1h,omitempty"`     // abs(chg1h) below this = stale (default 0.15)
@@ -768,6 +981,14 @@ type RiskControlConfig struct {
 	MaxHoldHours           float64 `json:"max_hold_hours,omitempty"`             // e.g. 18
 	MaxHoldProfitExemptPct float64 `json:"max_hold_profit_exempt_pct,omitempty"` // positive, e.g. 2.0
 
+	// Bar-count holds (optional, timeframe-disciplined). When TimeframeDiscipline
+	// is "follow_primary" and these are > 0, they OVERRIDE the *Hours fields by
+	// converting bars→hours against the primary timeframe, so a "hold N bars"
+	// intent stays constant in bar count across any primary timeframe (e.g. 72
+	// bars = 18h on 15m, 3h on 1m, 72h on 1h). 0/unset = fall back to *Hours.
+	TimeStopBars int `json:"time_stop_bars,omitempty"`
+	MaxHoldBars  int `json:"max_hold_bars,omitempty"`
+
 	// Trailing take-profit (CODE ENFORCED): once unrealized pnl reaches TrailingActivatePct,
 	// track the peak; if pnl gives back TrailingGivebackPct of that peak, close the remaining
 	// position. This converts the "cut winners short / let losers run" payoff (claude 0.67) into
@@ -800,6 +1021,26 @@ type RiskControlConfig struct {
 	MakerEntryOffsetTicks    int  `json:"maker_entry_offset_ticks,omitempty"`    // ticks inside best bid/ask, default 0 (at touch)
 	MakerEntryFallbackMarket bool `json:"maker_entry_fallback_market,omitempty"` // if unfilled, cross with market
 
+	// BinanceUSDCMaker is a single tri-state toggle (Binance only) binding two
+	// zero-fee behaviours together:
+	//   - route trades to <base>USDC perpetuals when a USDC perp exists (captures
+	//     Binance's zero maker-fee USDC promo), and
+	//   - place take-profit as post-only reduce-only LIMIT (maker), falling back to
+	//     trigger-market algo TP when the post-only would cross.
+	// Market data and all internal identity stay on USDT; conversion is confined to
+	// the exchange API boundary. Bases without a USDC perp fall back to USDT.
+	// Stop-loss / break-even / trailing are unaffected (protective taker).
+	//
+	// Tri-state: nil = auto (ON for Binance traders, ignored by other exchanges);
+	// *true = force ON; *false = force OFF. Requires USDC margin or multi-asset mode
+	// on the account. Non-Binance exchanges never read this.
+	BinanceUSDCMaker *bool `json:"binance_usdc_maker,omitempty"`
+
+	// Deprecated: superseded by BinanceUSDCMaker. Retained for backward-compatible
+	// decoding of older strategy JSON; no longer written by the UI.
+	PreferUSDCPairs bool `json:"prefer_usdc_pairs,omitempty"`
+	MakerTakeProfit bool `json:"maker_take_profit,omitempty"`
+
 	// Strong-signal position replacement (CODE ENFORCED): when at MaxPositions and a new
 	// high-conviction entry arrives, close the weakest existing position to free a slot instead
 	// of dropping the signal. Victims are ranked by (smaller notional + longer hold + weaker pnl);
@@ -813,6 +1054,23 @@ type RiskControlConfig struct {
 	ReplaceMinHoldMinutes      int     `json:"replace_min_hold_minutes,omitempty"`      // victim must be held at least this long, e.g. 30
 	ReplaceMaxVictimProfitPct  float64 `json:"replace_max_victim_profit_pct,omitempty"` // never cut a winner above this pnl%, e.g. 1.0
 	ReplaceMinConfidenceMargin int     `json:"replace_min_confidence_margin,omitempty"` // new conf must beat victim entry conf by this, e.g. 5
+}
+
+// ResolveBinanceUSDCMaker returns whether the USDC-pair + maker-TP feature should
+// be active for a Binance trader using this config. Tri-state semantics:
+//   - explicit override (BinanceUSDCMaker non-nil) wins;
+//   - otherwise auto: ON for Binance (nil defaults on), honouring the legacy
+//     PreferUSDCPairs/MakerTakeProfit flags if either was set by older configs.
+//
+// Non-Binance exchanges never call this; the Binance trader is the only consumer.
+func (c RiskControlConfig) ResolveBinanceUSDCMaker() bool {
+	if c.BinanceUSDCMaker != nil {
+		return *c.BinanceUSDCMaker
+	}
+	if c.PreferUSDCPairs || c.MakerTakeProfit {
+		return true // legacy explicit opt-in
+	}
+	return true // auto-default ON for Binance
 }
 
 // NewStrategyStore creates a new StrategyStore
@@ -1161,6 +1419,9 @@ func (s *Strategy) ParseConfig() (*StrategyConfig, error) {
 		return nil, fmt.Errorf("failed to parse strategy configuration: %w", err)
 	}
 	config.Indicators.FillSentimentDefaults()
+	// Enforce timeframe discipline: when enabled, every timeframe-derived field
+	// is aligned to primary_timeframe so the whole lifecycle stays self-consistent.
+	config.AlignToPrimaryTimeframe()
 	return &config, nil
 }
 

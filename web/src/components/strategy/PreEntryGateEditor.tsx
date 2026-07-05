@@ -169,7 +169,7 @@ export function PreEntryGateEditor({
 
   const updateEntryGate = (
     key: keyof EntryGateConfig,
-    value: number | boolean
+    value: number | boolean | string
   ) => {
     if (disabled) return
     update('entry_structure', {
@@ -389,6 +389,58 @@ export function PreEntryGateEditor({
                 : 'Allow range_edge support/resistance reversal exception'}
             </label>
           )}
+          {config.require_trend_alignment && (
+            <label
+              className="flex items-center gap-2 text-sm"
+              style={{ color: '#EAECEF' }}
+            >
+              <input
+                type="checkbox"
+                checked={config.block_long_in_htf_downtrend !== false}
+                onChange={(e) =>
+                  update('block_long_in_htf_downtrend', e.target.checked)
+                }
+                disabled={disabled}
+                className="h-4 w-4 accent-sky-500"
+              />
+              {ts(preEntryGate.blockLongInHtfDowntrend, language)}
+            </label>
+          )}
+          {config.require_trend_alignment &&
+            config.block_long_in_htf_downtrend !== false && (
+              <div
+                className="text-[11px] leading-relaxed"
+                style={{ color: '#848E9C' }}
+              >
+                {ts(preEntryGate.blockLongInHtfDowntrendDesc, language)}
+              </div>
+            )}
+          {config.require_trend_alignment && (
+            <label
+              className="flex items-center gap-2 text-sm"
+              style={{ color: '#EAECEF' }}
+            >
+              <input
+                type="checkbox"
+                checked={config.block_short_in_htf_uptrend !== false}
+                onChange={(e) =>
+                  update('block_short_in_htf_uptrend', e.target.checked)
+                }
+                disabled={disabled}
+                className="h-4 w-4 accent-sky-500"
+              />
+              {ts(preEntryGate.blockShortInHtfUptrend, language)}
+            </label>
+          )}
+          {config.require_trend_alignment &&
+            config.block_short_in_htf_uptrend !== false && (
+              <div
+                className="text-[11px] leading-relaxed"
+                style={{ color: '#848E9C' }}
+              >
+                {ts(preEntryGate.blockShortInHtfUptrendDesc, language)}
+              </div>
+            )}
           {config.require_trend_alignment &&
             (config.trend_alignment_mode || 'strict') ===
               'allow_range_edge_reversal' && (
@@ -819,6 +871,77 @@ export function PreEntryGateEditor({
             }
             onChange={(v) => updateEntryGate('min_reward_atr_mul', v)}
           />
+          <EntryGateInput
+            label={ts(preEntryGate.maxTargetAtr, language)}
+            value={
+              config.entry_structure?.entry_gate?.max_target_atr_mul ?? 5.0
+            }
+            step={0.5}
+            disabled={
+              disabled ||
+              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
+              config.entry_structure?.entry_gate?.stop_quality_enabled === false
+            }
+            onChange={(v) => updateEntryGate('max_target_atr_mul', v)}
+          />
+          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+            {ts(preEntryGate.maxTargetAtrDesc, language)}
+          </div>
+          <label
+            className="flex items-center gap-2 text-sm mt-2"
+            style={{ color: '#EAECEF' }}
+          >
+            <input
+              type="checkbox"
+              checked={
+                (config.entry_structure?.entry_gate?.target_reachability_mode ||
+                  'cap') === 'reject'
+              }
+              onChange={(e) =>
+                updateEntryGate(
+                  'target_reachability_mode',
+                  e.target.checked ? 'reject' : 'cap'
+                )
+              }
+              disabled={
+                disabled ||
+                !(config.entry_structure?.entry_gate?.enabled ?? false) ||
+                config.entry_structure?.entry_gate?.stop_quality_enabled ===
+                  false
+              }
+              className="h-4 w-4 accent-amber-500"
+            />
+            {ts(preEntryGate.targetReachabilityMode, language)}
+            {' — '}
+            {(config.entry_structure?.entry_gate?.target_reachability_mode ||
+              'cap') === 'reject'
+              ? isZh
+                ? '拒绝(旧)'
+                : 'reject (legacy)'
+              : isZh
+                ? '压缩(默认)'
+                : 'cap (default)'}
+          </label>
+          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+            {ts(preEntryGate.targetReachabilityModeDesc, language)}
+          </div>
+          <EntryGateInput
+            label={ts(preEntryGate.realisticTargetRiskMul, language)}
+            value={
+              config.entry_structure?.entry_gate?.realistic_target_risk_mul ??
+              0.8
+            }
+            step={0.1}
+            disabled={
+              disabled ||
+              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
+              config.entry_structure?.entry_gate?.stop_quality_enabled === false
+            }
+            onChange={(v) => updateEntryGate('realistic_target_risk_mul', v)}
+          />
+          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+            {ts(preEntryGate.realisticTargetRiskMulDesc, language)}
+          </div>
         </EntryGateGroup>
 
         {/* Group D: Path Clarity */}

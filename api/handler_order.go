@@ -306,7 +306,7 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 	}
 
 	// Determine enrichment level
-	doFullEnrich := enrich == "full" || (enrich == "auto" && len(positions) <= 30)
+	doFullEnrich := enrich == "full" || (enrich == "auto" && len(positions) <= 100)
 
 	type decisionReviewRef struct {
 		DecisionRecordID   int64                  `json:"decision_record_id"`
@@ -443,22 +443,10 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 		}
 
 		closeEvents := make([]map[string]interface{}, 0)
-		if doFullEnrich {
-			if eventStore := traderStore.PositionClose(); eventStore != nil {
-				if events, err := eventStore.ListByPositionID(pos.ID); err == nil {
-					for _, ev := range events {
-						orderID := int64(0)
-						fillCount := 0
-						if orderStore := traderStore.Order(); orderStore != nil && ev.ExchangeOrderID != "" {
-							if ord, err := orderStore.GetOrderByExchangeID(ev.ExchangeID, ev.ExchangeOrderID); err == nil && ord != nil {
-								orderID = ord.ID
-								if fills, err := orderStore.GetOrderFills(ord.ID); err == nil {
-									fillCount = len(fills)
-								}
-							}
-						}
-					closeEvents = append(closeEvents, map[string]interface{}{
-						"id":                  ev.ID,
+		if eventStore := traderStore.PositionClose(); eventStore != nil {
+			if events, err := eventStore.ListByPositionIDAggregated(pos.ID); err == nil {
+				for _, ev := range events {
+					eventMap := map[string]interface{}{
 						"position_id":         ev.PositionID,
 						"trader_id":           ev.TraderID,
 						"exchange_id":         ev.ExchangeID,
@@ -467,26 +455,28 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 						"close_reason":        ev.CloseReason,
 						"execution_source":    ev.ExecutionSource,
 						"execution_type":      ev.ExecutionType,
+						"category":            ev.Category,
+						"mechanism":           ev.Mechanism,
 						"protection_status":   ev.ProtectionStatus,
 						"decision_cycle":      ev.DecisionCycle,
-						"decision_review":     buildDecisionReviewRef(ev.DecisionCycle, ev.Symbol, ev.CloseReason),
-						"exchange_order_id":   ev.ExchangeOrderID,
 						"parent_order_id":     ev.ParentOrderID,
-						"order_id":            orderID,
-						"related_position_id": ev.PositionID,
-						"fill_count":          fillCount,
+						"fill_count":          ev.FillCount,
 						"close_quantity":      ev.CloseQuantity,
 						"close_ratio_pct":     ev.CloseRatioPct,
-						"execution_price":     ev.ExecutionPrice,
+						"execution_price":     ev.AvgExecutionPrice,
 						"close_value_usdt":    ev.CloseValueUSDT,
 						"realized_pnl_delta":  ev.RealizedPnLDelta,
 						"fee_delta":           ev.FeeDelta,
 						"event_time":          time.UnixMilli(ev.EventTime).UTC().Format(time.RFC3339),
-					})
+					}
+					if doFullEnrich {
+						eventMap["decision_review"] = buildDecisionReviewRef(ev.DecisionCycle, ev.Symbol, ev.CloseReason)
+					}
+					closeEvents = append(closeEvents, eventMap)
 				}
 			}
 		}
-		}
+
 
 		enrichedPos := map[string]interface{}{
 			"id":                   pos.ID,
@@ -834,5 +824,176 @@ func (s *Server) handleCloseAttribution(c *gin.Context) {
 		"total_pnl":    totalPnL,
 		"by_category":  categories,
 		"by_mechanism": rows,
+	})
+}
+
+// handleFlipObservations returns the trend-reversal flip decisions (dry-run and
+// live) recorded for a trader, most-recent first, for review of live AI
+// reversal-signal quality before enabling real flip execution.
+func (s *Server) handleFlipObservations(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		SafeBadRequest(c, "Invalid trader ID")
+		return
+	}
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		SafeNotFound(c, "Trader")
+		return
+	}
+	traderStore := trader.GetStore()
+	if traderStore == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Store not available"})
+		return
+	}
+
+	limit := 100
+	if l, perr := strconv.Atoi(c.DefaultQuery("limit", "100")); perr == nil && l > 0 && l <= 500 {
+		limit = l
+	}
+
+	// Lazy outcome backfill: fill reverse-position PnL for executed flips that
+	// have since closed, so the panel shows realized flip outcomes. Best-effort.
+	if _, berr := traderStore.FlipObservation().BackfillOutcomes(trader.GetID()); berr != nil {
+		logger.Warnf("flip outcome backfill: %v", berr)
+	}
+
+	rows, err := traderStore.FlipObservation().ListByTrader(trader.GetID(), limit)
+	if err != nil {
+		SafeInternalError(c, "Flip observations", err)
+		return
+	}
+
+	flips := make([]map[string]interface{}, 0, len(rows))
+	var executedCount, dryRunCount int
+	for _, r := range rows {
+		if r.Executed {
+			executedCount++
+		} else {
+			dryRunCount++
+		}
+		flips = append(flips, map[string]interface{}{
+			"symbol":               r.Symbol,
+			"from_side":            r.FromSide,
+			"to_side":              r.ToSide,
+			"confidence":           r.Confidence,
+			"age_hours":            r.AgeHours,
+			"quantity":             r.Quantity,
+			"decision_cycle":       r.DecisionCycle,
+			"executed":             r.Executed,
+			"reasoning":            r.Reasoning,
+			"reverse_realized_pnl": r.ReverseRealizedPnL,
+			"observed_at":          time.UnixMilli(r.ObservedAt).UTC().Format(time.RFC3339),
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"flips":          flips,
+		"total":          len(flips),
+		"executed_count": executedCount,
+		"dry_run_count":  dryRunCount,
+	})
+}
+
+// handleSidePnLSeries returns hourly long/short NOTIONAL EXPOSURE (USDT) over the
+// recent window (default 12h) so the header can render the long/short ratio
+// curve (each side's share of total exposure, bounded 0..100%).
+func (s *Server) handleSidePnLSeries(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		SafeBadRequest(c, "Invalid trader ID")
+		return
+	}
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		SafeNotFound(c, "Trader")
+		return
+	}
+	traderStore := trader.GetStore()
+	if traderStore == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Store not available"})
+		return
+	}
+
+	hours := 12
+	if h, perr := strconv.Atoi(c.DefaultQuery("hours", "12")); perr == nil && h > 0 && h <= 168 {
+		hours = h
+	}
+	sinceMs := time.Now().UTC().Add(-time.Duration(hours) * time.Hour).UnixMilli()
+
+	buckets, err := traderStore.Position().GetSideExposureSeries(trader.GetID(), sinceMs, 3600000)
+	if err != nil {
+		SafeInternalError(c, "Side exposure series", err)
+		return
+	}
+
+	series := make([]map[string]interface{}, 0, len(buckets))
+	for _, b := range buckets {
+		series = append(series, map[string]interface{}{
+			"bucket_ms":    b.BucketMs,
+			"long_notion":  b.LongNotion,
+			"short_notion": b.ShortNotion,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"series": series,
+		"hours":  hours,
+	})
+}
+
+// handleBreakerHistory returns recent circuit-breaker / breadth-guard close
+// events for the advanced panel.
+func (s *Server) handleBreakerHistory(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		SafeBadRequest(c, "Invalid trader ID")
+		return
+	}
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		SafeNotFound(c, "Trader")
+		return
+	}
+	traderStore := trader.GetStore()
+	if traderStore == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Store not available"})
+		return
+	}
+
+	days := 7
+	if d, perr := strconv.Atoi(c.DefaultQuery("days", "7")); perr == nil && d > 0 && d <= 90 {
+		days = d
+	}
+	limit := 200
+	if l, perr := strconv.Atoi(c.DefaultQuery("limit", "200")); perr == nil && l > 0 && l <= 500 {
+		limit = l
+	}
+	sinceMs := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
+
+	events, err := traderStore.PositionClose().ListBreakerEvents(trader.GetID(), sinceMs, limit)
+	if err != nil {
+		SafeInternalError(c, "Breaker history", err)
+		return
+	}
+
+	out := make([]map[string]interface{}, 0, len(events))
+	var totalPnL float64
+	for _, ev := range events {
+		totalPnL += ev.RealizedPnL
+		out = append(out, map[string]interface{}{
+			"symbol":          ev.Symbol,
+			"side":            ev.Side,
+			"mechanism":       ev.Mechanism,
+			"close_reason":    ev.CloseReason,
+			"close_ratio_pct": ev.CloseRatioPct,
+			"realized_pnl":    ev.RealizedPnL,
+			"event_time":      time.UnixMilli(ev.EventTime).UTC().Format(time.RFC3339),
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"events":    out,
+		"total":     len(out),
+		"total_pnl": totalPnL,
+		"days":      days,
 	})
 }

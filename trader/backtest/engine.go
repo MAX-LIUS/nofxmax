@@ -110,6 +110,51 @@ func pnlPct(side string, entry, price float64) float64 {
 	return (entry - price) / entry * 100
 }
 
+// resolveStructuralSLPrice returns the absolute stop price for an entry under
+// structural mode. Variant A (StructBufferATR<=0): use the AI's buffered SLPrice
+// as-is. Variant B (StructBufferATR>0): re-derive from the bare anchor as
+// anchor ± k×ATR. The result is clamped to [StructMinSLPct, StructMaxSLPct] of
+// entry when those are set. Returns (price, ok). ok=false means no usable
+// structural stop (caller should skip or fall back).
+func resolveStructuralSLPrice(p ProtectionParams, e Entry, atr float64) (float64, bool) {
+	if e.Structural == nil {
+		return 0, false
+	}
+	isLong := strings.EqualFold(e.Side, "long")
+	var sl float64
+	if p.StructBufferATR > 0 && e.Structural.SLAnchor > 0 && atr > 0 {
+		// Buffer the bare anchor away from price in the adverse direction.
+		if isLong {
+			sl = e.Structural.SLAnchor - p.StructBufferATR*atr
+		} else {
+			sl = e.Structural.SLAnchor + p.StructBufferATR*atr
+		}
+	} else {
+		sl = e.Structural.SLPrice
+	}
+	if sl <= 0 {
+		return 0, false
+	}
+	// Clamp the stop distance to configured guardrails.
+	dist := pnlPct(e.Side, e.EntryPrice, sl) // negative = stop is adverse
+	adverseDistPct := -dist                   // positive number = how far adverse
+	if adverseDistPct <= 0 {
+		// Degenerate: stop on the wrong side of entry. Reject.
+		return 0, false
+	}
+	clamped := adverseDistPct
+	if p.StructMinSLPct > 0 && clamped < p.StructMinSLPct {
+		clamped = p.StructMinSLPct
+	}
+	if p.StructMaxSLPct > 0 && clamped > p.StructMaxSLPct {
+		clamped = p.StructMaxSLPct
+	}
+	if clamped != adverseDistPct {
+		sl = priceAtDistance(e.EntryPrice, clamped, isLong, false /*adverse*/)
+	}
+	return sl, true
+}
+
 // klineHighsLowsCloses extracts OHLC slices up to (and including) index i.
 func sliceOHLC(bars []market.Kline, upto int) (highs, lows, closes []float64) {
 	highs = make([]float64, upto+1)

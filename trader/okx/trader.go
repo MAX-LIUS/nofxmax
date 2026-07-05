@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"nofx/logger"
 	"nofx/trader/types"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -447,4 +448,57 @@ func (t *OKXTrader) formatSize(sz float64, inst *OKXInstrument) string {
 
 	format := fmt.Sprintf("%%.%df", precision)
 	return fmt.Sprintf(format, sz)
+}
+
+// closeSizeDecision is the outcome of resolving how many contracts to actually
+// send on a (possibly partial) close, given exchange lot-size constraints.
+type closeSizeDecision struct {
+	SzStr  string // formatted sz to send (empty when Dust)
+	Skip   bool   // true = do not send any order
+	Dust   bool   // true = the FULL remaining position is below lotSz (uncloseable)
+	Bumped bool   // true = requested partial rounded below lotSz, bumped up
+	Reason string // human-readable explanation for logs
+}
+
+// resolveCloseSize decides the sz to send when closing `wantContracts` out of a
+// position whose full remaining size is `fullContracts`. It fixes the sz=0 bug:
+// a sub-lot partial close is bumped up to the minimum lot (capped at the full
+// remaining), and a full remaining position that is itself below lotSz is flagged
+// as Dust so callers stop retrying instead of spamming sz=0 rejects.
+func (t *OKXTrader) resolveCloseSize(wantContracts, fullContracts float64, inst *OKXInstrument) closeSizeDecision {
+	lot := inst.LotSz
+	if lot <= 0 {
+		lot = inst.MinSz
+	}
+	// Whole remaining position is below one lot -> genuine dust, can't be closed
+	// by a standard lot-aligned order. Tell the caller to stop retrying.
+	if lot > 0 && fullContracts > 0 && fullContracts < lot {
+		return closeSizeDecision{Skip: true, Dust: true,
+			Reason: fmt.Sprintf("full remaining %.8f < lotSz %.8f (sub-lot dust, uncloseable)", fullContracts, lot)}
+	}
+	if wantContracts <= 0 {
+		return closeSizeDecision{Skip: true, Reason: "want<=0"}
+	}
+	// Cap the requested close at the full remaining.
+	if wantContracts > fullContracts {
+		wantContracts = fullContracts
+	}
+	send := wantContracts
+	bumped := false
+	// Requested partial rounds below one lot -> bump up to one lot (still <= full).
+	if lot > 0 && send < lot {
+		send = lot
+		bumped = true
+		if send > fullContracts {
+			send = fullContracts
+		}
+	}
+	szStr := t.formatSize(send, inst)
+	// Final guard: never emit a non-positive sz.
+	if v, err := strconv.ParseFloat(szStr, 64); err != nil || v <= 0 {
+		return closeSizeDecision{Skip: true, Dust: true,
+			Reason: fmt.Sprintf("formatted sz=%q non-positive (contracts=%.8f lotSz=%.8f)", szStr, send, lot)}
+	}
+	return closeSizeDecision{SzStr: szStr, Bumped: bumped,
+		Reason: fmt.Sprintf("send %.8f contracts (lotSz=%.8f bumped=%v)", send, lot, bumped)}
 }

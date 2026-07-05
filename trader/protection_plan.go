@@ -256,9 +256,8 @@ func buildConfiguredBreakEvenPlan(be store.BreakEvenStopConfig) *ProtectionPlan 
 		return nil
 	}
 	cfg := be
-	if cfg.OffsetPct < 0 {
-		cfg.OffsetPct = 0
-	}
+	// Negative OffsetPct is allowed: parks the break-even stop slightly on the
+	// losing side (cover fees + noise buffer) rather than at exact break-even.
 	return &ProtectionPlan{Mode: string(store.ProtectionModeManual), BreakEvenConfig: &cfg}
 }
 
@@ -281,7 +280,9 @@ func (at *AutoTrader) BuildConfiguredProtectionPlanForSymbol(entryPrice float64,
 	if at.config.StrategyConfig == nil {
 		return nil, nil
 	}
-	protection, _ := at.resolveATRProtection(entryPrice, symbol)
+	// atEntry=true: this is the position-open path, so a structural boundary may be
+	// computed fresh from the (now genuinely pre-entry) window and frozen.
+	protection, _ := at.resolveATRProtection(entryPrice, symbol, action, true)
 	return at.buildConfiguredProtectionPlanWith(entryPrice, action, protection)
 }
 

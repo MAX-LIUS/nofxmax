@@ -9,7 +9,7 @@ import (
 
 func validEntryProtectionForTest(action string) *AIEntryProtectionRationale {
 	base := &AIEntryProtectionRationale{
-		TimeframeContext: AIEntryTimeframeContext{Primary: "15m", Lower: []string{"5m"}, Higher: []string{"1h"}},
+		TimeframeContext:     AIEntryTimeframeContext{Primary: "15m", Lower: []string{"5m"}, Higher: []string{"1h"}},
 		VolatilityAdjustment: AIEntryVolatilityAdjustment{ATR14Pct: 3.0},
 		KeyLevels: AIEntryKeyLevels{
 			Support:    []float64{99},
@@ -166,11 +166,11 @@ func TestValidateAIDecisionsWithStrategyAllowsBufferedInvalidationAgainstStructu
 		PositionSizeUSD: 34,
 		Reasoning:       "buffered invalidation should be accepted",
 		EntryProtection: &AIEntryProtectionRationale{
-			TimeframeContext: AIEntryTimeframeContext{Primary: "15m", Lower: []string{"3m"}, Higher: []string{"1h"}},
-			KeyLevels: AIEntryKeyLevels{Support: []float64{0.0709, 0.0718}, Resistance: []float64{0.0735, 0.0751, 0.0777}},
-			Anchors: []AIEntryProtectionAnchor{{Type: "support", Timeframe: "15m", Price: 0.0709, Reason: "invalidation anchor"}, {Type: "resistance", Timeframe: "15m", Price: 0.0777, Reason: "target anchor"}},
+			TimeframeContext:    AIEntryTimeframeContext{Primary: "15m", Lower: []string{"3m"}, Higher: []string{"1h"}},
+			KeyLevels:           AIEntryKeyLevels{Support: []float64{0.0709, 0.0718}, Resistance: []float64{0.0735, 0.0751, 0.0777}},
+			Anchors:             []AIEntryProtectionAnchor{{Type: "support", Timeframe: "15m", Price: 0.0709, Reason: "invalidation anchor"}, {Type: "resistance", Timeframe: "15m", Price: 0.0777, Reason: "target anchor"}},
 			StructuralKeyLevels: []AIStructuralKeyLevel{{Price: 0.0709, Type: "support", Timeframe: "15m", Source: "swing_point", UsedFor: "invalidation"}, {Price: 0.0703, Type: "support", Timeframe: "15m", Source: "support_buffer_with_atr", UsedFor: "stop_loss"}, {Price: 0.0777, Type: "resistance", Timeframe: "15m", Source: "fibonacci", UsedFor: "take_profit"}},
-			RiskReward: AIRiskRewardRationale{Entry: 0.0719, Invalidation: 0.0703, FirstTarget: 0.0777, GrossEstimatedRR: 3.63, NetEstimatedRR: 3.42, MinRequiredRR: 2.5, Passed: true},
+			RiskReward:          AIRiskRewardRationale{Entry: 0.0719, Invalidation: 0.0703, FirstTarget: 0.0777, GrossEstimatedRR: 3.63, NetEstimatedRR: 3.42, MinRequiredRR: 2.5, Passed: true},
 		},
 	}}
 
@@ -230,6 +230,10 @@ func TestValidateAIDecisionsWithStrategyRejectsLongInvalidationFarFromSupport(t 
 	cfg := &store.StrategyConfig{}
 	cfg.RiskControl.MinRiskRewardRatio = 1.5
 	cfg.EntryStructure = store.EntryStructureConfig{Enabled: true, RequireSupportResistance: true, RequireStructuralAnchors: true}
+	// This fixture intentionally uses a wide stop (risk=12) which forces a far
+	// target to keep RR>=1.5; disable the target-reachability gate so the test
+	// isolates the invalidation-far-from-support structural check it targets.
+	cfg.EntryStructure.EntryGate.MaxTargetATRMul = -1
 
 	ep := validTighterLongEntryProtectionForTest()
 	// support=99 passes proximity; support=80 is the structural anchor for invalidation

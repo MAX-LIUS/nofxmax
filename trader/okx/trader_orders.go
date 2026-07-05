@@ -229,10 +229,29 @@ func (t *OKXTrader) closeLongWithTag(symbol string, quantity float64, reasonTag 
 	// Convert quantity (base asset) to contract count
 	// contracts = quantity / ctVal
 	contracts := quantity / inst.CtVal
-	szStr := t.formatSize(contracts, inst)
+	fullContracts := actualQty / inst.CtVal
 
-	logger.Infof("🔻 OKX close long: symbol=%s, instId=%s, quantity=%.6f, ctVal=%.6f, contracts=%.2f, szStr=%s, posMode=%s, mgnMode=%s",
-		symbol, instId, quantity, inst.CtVal, contracts, szStr, t.positionMode, posMgnMode)
+	// Resolve a lot-aligned, non-zero close size. Handles the sz=0 rejection
+	// (sCode 51000) by bumping sub-lot wants up to one lot, and surfaces true
+	// sub-lot "dust" positions as a terminal POSITION_DUST status instead of
+	// retrying forever.
+	dec := t.resolveCloseSize(contracts, fullContracts, inst)
+	if dec.Skip {
+		logger.Warnf("⚠️ OKX close long skipped: symbol=%s, wantContracts=%.4f, fullContracts=%.4f, lotSz=%.4f, reason=%s",
+			symbol, contracts, fullContracts, inst.LotSz, dec.Reason)
+		status := "SKIPPED"
+		if dec.Dust {
+			status = "POSITION_DUST"
+		}
+		return map[string]interface{}{
+			"status":  status,
+			"message": fmt.Sprintf("close long skipped for %s: %s", symbol, dec.Reason),
+		}, nil
+	}
+	szStr := dec.SzStr
+
+	logger.Infof("🔻 OKX close long: symbol=%s, instId=%s, quantity=%.6f, ctVal=%.6f, contracts=%.2f, fullContracts=%.2f, szStr=%s, bumped=%v, posMode=%s, mgnMode=%s",
+		symbol, instId, quantity, inst.CtVal, contracts, fullContracts, szStr, dec.Bumped, t.positionMode, posMgnMode)
 
 	body := map[string]interface{}{
 		"instId":  instId,
@@ -348,10 +367,29 @@ func (t *OKXTrader) closeShortWithTag(symbol string, quantity float64, reasonTag
 	// Convert quantity (base asset) to contract count
 	// contracts = quantity / ctVal
 	contracts := quantity / inst.CtVal
-	szStr := t.formatSize(contracts, inst)
+	fullContracts := actualQty / inst.CtVal
 
-	logger.Infof("🔻 OKX close short: symbol=%s, quantity=%.6f, ctVal=%.6f, contracts=%.2f, szStr=%s, posMode=%s, mgnMode=%s",
-		symbol, quantity, inst.CtVal, contracts, szStr, t.positionMode, posMgnMode)
+	// Resolve a lot-aligned, non-zero close size. Handles the sz=0 rejection
+	// (sCode 51000) by bumping sub-lot wants up to one lot, and surfaces true
+	// sub-lot "dust" positions as a terminal POSITION_DUST status instead of
+	// retrying forever.
+	dec := t.resolveCloseSize(contracts, fullContracts, inst)
+	if dec.Skip {
+		logger.Warnf("⚠️ OKX close short skipped: symbol=%s, wantContracts=%.4f, fullContracts=%.4f, lotSz=%.4f, reason=%s",
+			symbol, contracts, fullContracts, inst.LotSz, dec.Reason)
+		status := "SKIPPED"
+		if dec.Dust {
+			status = "POSITION_DUST"
+		}
+		return map[string]interface{}{
+			"status":  status,
+			"message": fmt.Sprintf("close short skipped for %s: %s", symbol, dec.Reason),
+		}, nil
+	}
+	szStr := dec.SzStr
+
+	logger.Infof("🔻 OKX close short: symbol=%s, quantity=%.6f, ctVal=%.6f, contracts=%.2f, fullContracts=%.2f, szStr=%s, bumped=%v, posMode=%s, mgnMode=%s",
+		symbol, quantity, inst.CtVal, contracts, fullContracts, szStr, dec.Bumped, t.positionMode, posMgnMode)
 
 	body := map[string]interface{}{
 		"instId":  instId,

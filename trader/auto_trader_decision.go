@@ -97,6 +97,15 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 		}
 	}
 
+	// Breadth circuit-breaker pressure indices (0–100) for the two close conditions
+	// (velocity path + from-peak path). 0 = no risk; 100 = that path has reached the
+	// fraction-of-positions that fires the breaker. Last computed at gbBreadthIndexAt.
+	at.gbGuardMutex.Lock()
+	result["breadth_vel_index"] = at.gbBreadthVelIndex
+	result["breadth_peak_index"] = at.gbBreadthPeakIndex
+	result["breadth_index_at"] = at.gbBreadthIndexAt
+	at.gbGuardMutex.Unlock()
+
 	return result
 }
 
@@ -819,6 +828,25 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 	peakPnLPct := 0.0
 	drawdownPct := 0.0
 	markPrice, _ := at.getPositionMarkPrice(symbol, side)
+
+	// ATR context for the UI: frozen value at entry (used to convert ATR-multiple
+	// thresholds to prices) and the current live ATR (shows volatility drift).
+	atrAtEntry := 0.0
+	currentATR := 0.0
+	atrTimeframe := ""
+	if at.config.StrategyConfig != nil {
+		acfg := at.config.StrategyConfig.ATRProtection
+		if acfg.Enabled {
+			atrTimeframe = acfg.WithDefaults().Timeframe
+			if v, ok := at.frozenATRForPosition(symbol, side, entryPrice, acfg); ok {
+				atrAtEntry = v
+			}
+			if v, ok := at.atrForProtection(symbol, acfg); ok {
+				currentATR = v
+			}
+		}
+	}
+
 	if entryPrice > 0 && markPrice > 0 {
 		currentPnLPct = calculatePositionPnLPct(side, entryPrice, markPrice)
 		peakPnLPct = currentPnLPct
@@ -830,6 +858,67 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 		if peakPnLPct > 0 && currentPnLPct < peakPnLPct {
 			drawdownPct = ((peakPnLPct - currentPnLPct) / peakPnLPct) * 100
 		}
+	}
+
+	// Structural stop-loss (range-anchored) surface for the UI. Two price levels:
+	//   Phase 2 boundary  — the frozen pre-entry swing edge; a bar CLOSE beyond it
+	//                       triggers the tight structural close (the real "structural
+	//                       stop"). Read-only here (allowCompute=false) so the panel
+	//                       never fabricates a boundary — it shows exactly what the
+	//                       guard enforces, or nothing when none was frozen.
+	//   Phase 1 backstop  — the wide resting exchange stop (entry ∓ BackstopATRMul×ATR)
+	//                       that covers bot downtime / catastrophic gaps.
+	isLong := strings.EqualFold(side, "LONG")
+	structuralSLEnabled := false
+	structuralCloseConfirm := false
+	structuralBoundaryPrice := 0.0
+	structuralBackstopPrice := 0.0
+	structuralFloorATRMul := 0.0
+	structuralBackstopATRMul := 0.0
+	if at.config.StrategyConfig != nil {
+		ladderCfg := at.config.StrategyConfig.Protection.LadderTPSL
+		sscfg := ladderCfg.StructuralSL
+		if sscfg.Enabled {
+			structuralSLEnabled = true
+			ss := sscfg.WithDefaults()
+			structuralCloseConfirm = ss.CloseConfirm
+			structuralFloorATRMul = ss.FloorATRMul
+			structuralBackstopATRMul = ss.BackstopATRMul
+			acfg := at.config.StrategyConfig.ATRProtection
+			if b, ok := at.frozenStructBoundaryForPosition(symbol, entryPrice, isLong, false, sscfg, acfg); ok && b > 0 {
+				// Show the CLAMPED boundary (what the guard actually enforces), never
+				// the raw swing — otherwise the panel shows a Struct level beyond the
+				// backstop that can never fire.
+				structuralBoundaryPrice = b
+				if fa, aok := at.frozenATRForPosition(symbol, side, entryPrice, acfg); aok && fa > 0 {
+					if clamped, cok := clampStructuralBoundary(entryPrice, b, fa, isLong, sscfg); cok {
+						structuralBoundaryPrice = clamped
+					}
+				}
+			}
+			// Backstop price mirrors the resting stop distance (entry ∓ backstop×ATR).
+			if atrAtEntry > 0 && entryPrice > 0 && ss.BackstopATRMul > 0 {
+				dist := ss.BackstopATRMul * atrAtEntry
+				if isLong {
+					structuralBackstopPrice = entryPrice - dist
+				} else {
+					structuralBackstopPrice = entryPrice + dist
+				}
+			}
+		}
+	}
+
+	// Time / max-hold forced-close conditions (no fixed price — condition-based).
+	timeStopHours := 0.0
+	timeStopLossPct := 0.0
+	maxHoldHours := 0.0
+	maxHoldProfitExemptPct := 0.0
+	if at.config.StrategyConfig != nil {
+		rc := at.config.StrategyConfig.RiskControl
+		timeStopHours = rc.TimeStopHours
+		timeStopLossPct = rc.TimeStopLossPct
+		maxHoldHours = rc.MaxHoldHours
+		maxHoldProfitExemptPct = rc.MaxHoldProfitExemptPct
 	}
 
 	be := at.getActiveBreakEvenConfigForPlan(nil)
@@ -862,6 +951,13 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 			drawdownRules = at.restoreAIDrawdownRulesForPositionWithEntry(symbol, side, entryPrice)
 		}
 	}
+	// Resolve ATR-unit min-profit / max-drawdown distances to effective percent
+	// using the position's frozen open-time ATR, exactly as the runtime arming
+	// path does (auto_trader_risk.go). Without this the displayed activation /
+	// callback would treat ATR multiples as raw percents (e.g. 3 ATR shown as
+	// +3% activation, 1.2 ATR shown as 1.2% callback), diverging from the live
+	// exchange order which is placed with ATR-resolved values.
+	drawdownRules = at.resolveDrawdownRulesATR(drawdownRules, symbol, side, entryPrice)
 	drawdownSource := at.getDrawdownConfigSource(symbol, side)
 	runnerState := at.getDrawdownRunnerState(symbol, side)
 	drawdownCfg := store.DrawdownTakeProfitConfig{}
@@ -1125,28 +1221,38 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 				}
 			}
 			tier := map[string]interface{}{
-				"index":                             idx + 1,
-				"stage_name":                        rule.StageName,
-				"timeframe":                         rule.Timeframe,
-				"reason_anchor":                     rule.ReasonAnchor,
-				"min_profit_pct":                    rule.MinProfitPct,
-				"max_drawdown_pct":                  rule.MaxDrawdownPct,
-				"max_drawdown_abs_profit_pct":       rule.MaxDrawdownAbsPct,
-				"close_ratio_pct":                   rule.CloseRatioPct,
-				"runner_keep_pct":                   rule.RunnerKeepPct,
-				"runner_stop_mode":                  rule.RunnerStopMode,
-				"runner_stop_source":                rule.RunnerStopSource,
-				"runner_target_mode":                rule.RunnerTargetMode,
-				"runner_target_source":              rule.RunnerTargetSource,
-				"activation_price":                  activationPrice,
-				"planned_activation_price":          plannedActivationPrice,
-				"activation_source":                 activationSource,
-				"callback_rate":                     callbackRate,
-				"callback_source":                   callbackSource,
-				"planned_quantity":                  quantity * rule.CloseRatioPct / 100.0,
-				"source":                            source,
-				"execution_mode":                    executionMode,
-				"is_satisfied":                      matchedLive || peakPnLPct >= rule.MinProfitPct || isTierSatisfied(idx, currentPnLPct, rule.MinProfitPct, tierAllocs, len(trailingOrders) > 0),
+				"index":                       idx + 1,
+				"stage_name":                  rule.StageName,
+				"timeframe":                   rule.Timeframe,
+				"reason_anchor":               rule.ReasonAnchor,
+				"min_profit_pct":              rule.MinProfitPct,
+				"max_drawdown_pct":            rule.MaxDrawdownPct,
+				"max_drawdown_abs_profit_pct": rule.MaxDrawdownAbsPct,
+				"close_ratio_pct":             rule.CloseRatioPct,
+				"runner_keep_pct":             rule.RunnerKeepPct,
+				"runner_stop_mode":            rule.RunnerStopMode,
+				"runner_stop_source":          rule.RunnerStopSource,
+				"runner_target_mode":          rule.RunnerTargetMode,
+				"runner_target_source":        rule.RunnerTargetSource,
+				"activation_price":            activationPrice,
+				"planned_activation_price":    plannedActivationPrice,
+				"activation_source":           activationSource,
+				"callback_rate":               callbackRate,
+				"callback_source":             callbackSource,
+				"planned_quantity":            quantity * rule.CloseRatioPct / 100.0,
+				"source":                      source,
+				"execution_mode":              executionMode,
+				// is_armed: a trailing order for this tier exists on the exchange
+				// (or a managed tier is tracking) — i.e. protection is in place but
+				// not necessarily activated. is_activated: the peak profit actually
+				// reached the activation threshold so the trailing stop is live and
+				// tracking the peak. The two are distinct: an order can rest on the
+				// exchange (armed) long before price reaches activation (activated).
+				"is_armed":     matchedLive || isTierSatisfied(idx, currentPnLPct, rule.MinProfitPct, tierAllocs, len(trailingOrders) > 0),
+				"is_activated": peakPnLPct >= rule.MinProfitPct,
+				// is_satisfied now means genuinely activated (drives the green
+				// "已激活" dot); placement-only state shows as "已布单/待满足".
+				"is_satisfied":                      peakPnLPct >= rule.MinProfitPct,
 				"is_triggered":                      currentPnLPct >= rule.MinProfitPct && isDrawdownThresholdMet(currentPnLPct, drawdownPct, rule),
 				"legacy_drawdown_semantics_warning": legacyWarning,
 				"native_trailing_rejected_reason":   nativeRejectedReason,
@@ -1402,6 +1508,9 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 		"current_pnl_pct":                     currentPnLPct,
 		"drawdown_peak_pnl_pct":               peakPnLPct,
 		"current_drawdown_pct":                drawdownPct,
+		"atr_at_entry":                        atrAtEntry,
+		"current_atr":                         currentATR,
+		"atr_timeframe":                       atrTimeframe,
 		"current_break_even_trigger_pct":      breakEvenTrigger,
 		"break_even_offset_pct":               breakEvenOffset,
 		"next_break_even_gap_pct":             nextBreakEvenGap,
@@ -1439,5 +1548,17 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 		"active_orders":                         activeOrders,
 		"active_trailing_orders":                trailingOrders,
 		"scheduled_tiers":                       tiers,
+		// Structural stop-loss (range-anchored) surface — auto-populated when enabled.
+		"structural_sl_enabled":       structuralSLEnabled,
+		"structural_close_confirm":    structuralCloseConfirm,
+		"structural_boundary_price":   structuralBoundaryPrice,
+		"structural_backstop_price":   structuralBackstopPrice,
+		"structural_floor_atr_mul":    structuralFloorATRMul,
+		"structural_backstop_atr_mul": structuralBackstopATRMul,
+		// Time / max-hold forced-close conditions (condition-based, no fixed price).
+		"time_stop_hours":            timeStopHours,
+		"time_stop_loss_pct":         timeStopLossPct,
+		"max_hold_hours":             maxHoldHours,
+		"max_hold_profit_exempt_pct": maxHoldProfitExemptPct,
 	}
 }

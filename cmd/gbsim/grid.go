@@ -8,6 +8,44 @@ import (
 
 func msNow() int64 { return time.Now().UnixMilli() }
 
+// adaptiveCloseGrid tests trend-adaptive L2 close ratios on top of the live L1.
+// Two competing hypotheses, tested empirically (not assumed):
+//   - "let trends run": strong trend (ADX>=thr) => trim LESS (trend<chop), to
+//     recover the ~28% PnL haircut the flat guard inflicts on trend regimes.
+//   - "lock trend tops": strong trend => trim MORE (trend>chop), the sim's
+//     original premise that reversals in strong trends are real tops.
+//
+// L2ClosePctTrend applies when portfolio avg ADX >= TrendADXThreshold; chop
+// otherwise. Crossing trend × chop covers both directions. Live L1 (gb40 mp3
+// cl50) + live L2 gate (gb50 mq3) underneath. Row #0 is the flat live anchor.
+func adaptiveCloseGrid() []backtest.GuardParams {
+	out := []backtest.GuardParams{
+		// Anchor: current flat live config (L1 + flat-50 L2).
+		{
+			Enabled: true,
+			L1Enabled: true, L1GivebackPct: 40, L1MinPeakPct: 3, L1ClosePct: 50,
+			L2Enabled: true, L2GivebackPct: 50, L2MinPeakQuote: 3, L2ClosePct: 50,
+		},
+	}
+	for _, adx := range []float64{20, 25, 30} {
+		for _, trend := range []float64{25, 40, 55} {
+			for _, chop := range []float64{25, 40, 55, 70} {
+				if trend == chop {
+					continue // equal => no adaptivity, already covered by anchor
+				}
+				out = append(out, backtest.GuardParams{
+					Enabled:   true,
+					L1Enabled: true, L1GivebackPct: 40, L1MinPeakPct: 3, L1ClosePct: 50,
+					L2Enabled: true, L2GivebackPct: 50, L2MinPeakQuote: 3, L2ClosePct: 50,
+					AdaptiveClose: true, TrendADXThreshold: adx,
+					L2ClosePctTrend: trend, L2ClosePctChop: chop,
+				})
+			}
+		}
+	}
+	return out
+}
+
 // l1StudyGrid isolates the question: should sub-3% profit/cost giveback be
 // controlled? It sweeps ONLY the L1 min-peak arm threshold while holding the
 // other L1 knobs fixed at the live values (gb40 cl50). Two families:
@@ -49,6 +87,34 @@ func l1StudyGrid() []backtest.GuardParams {
 	}
 
 	return out
+}
+
+// liveConfigGrid emits ONLY the currently-deployed guard config so the sweep
+// prints a clean baseline-vs-live decomposition: PnLCost (profit given up),
+// DDCut (drawdown reduced), GuardTrims (how many winners were trimmed). This
+// answers "what is the guard's negative impact on profit growth" directly,
+// using the exact shipped parameters L1[gb40 mp3 cl50] + L2[gb50 mq3 cl50].
+//
+// (L2MinPeakQuote=3 mirrors the prior cross-validated winner; live uses
+// L2MinPeakEquityPct=1.0 which scales to equity at runtime — both gate L2 to
+// only meaningful portfolio peaks, so 3 is the established backtest proxy.)
+func liveConfigGrid() []backtest.GuardParams {
+	return []backtest.GuardParams{
+		{
+			Enabled:        true,
+			L1Enabled:      true,
+			L1GivebackPct:  40,
+			L1MinPeakPct:   3,
+			L1ClosePct:     50,
+			L2Enabled:      true,
+			L2GivebackPct:  50,
+			L2MinPeakQuote: 3,
+			L2ClosePct:     50,
+		},
+		// Also include each layer alone, to attribute the cost to L1 vs L2.
+		{Enabled: true, L1Enabled: true, L1GivebackPct: 40, L1MinPeakPct: 3, L1ClosePct: 50},
+		{Enabled: true, L2Enabled: true, L2GivebackPct: 50, L2MinPeakQuote: 3, L2ClosePct: 50},
+	}
 }
 
 // guardGrid enumerates the giveback-guard parameter space to sweep. This is the

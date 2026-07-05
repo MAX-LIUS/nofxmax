@@ -48,3 +48,51 @@ func TestStrategyConfig_BackwardCompatJSON(t *testing.T) {
 		t.Fatalf("ATRProtection must default to disabled (no-op)")
 	}
 }
+
+func TestStructuralSLConfig_WithDefaults(t *testing.T) {
+	got := StructuralSLConfig{}.WithDefaults()
+	if got.FloorATRMul != 1.5 {
+		t.Fatalf("floor default want 1.5, got %.3f", got.FloorATRMul)
+	}
+	if got.BackstopATRMul != 4.5 {
+		t.Fatalf("backstop default want 4.5, got %.3f", got.BackstopATRMul)
+	}
+	if got.LookbackBars != 24 {
+		t.Fatalf("lookback default want 24, got %d", got.LookbackBars)
+	}
+	// Explicit values are preserved.
+	custom := StructuralSLConfig{FloorATRMul: 2.0, BackstopATRMul: 5.0, LookbackBars: 12}.WithDefaults()
+	if custom.FloorATRMul != 2.0 || custom.BackstopATRMul != 5.0 || custom.LookbackBars != 12 {
+		t.Fatalf("explicit values not preserved: %+v", custom)
+	}
+}
+
+// Structural SL config must round-trip and default to disabled (no-op) for legacy JSON.
+func TestStructuralSL_JSONRoundTripAndDefault(t *testing.T) {
+	legacy := `{"protection":{"ladder_tp_sl":{"enabled":true}}}`
+	var cfg StrategyConfig
+	if err := json.Unmarshal([]byte(legacy), &cfg); err != nil {
+		t.Fatalf("legacy ladder config must parse: %v", err)
+	}
+	if cfg.Protection.LadderTPSL.StructuralSL.Enabled {
+		t.Fatalf("StructuralSL must default disabled")
+	}
+	// Round-trip with structural enabled + a structural SL rule.
+	cfg.Protection.LadderTPSL.StructuralSL = StructuralSLConfig{Enabled: true, FloorATRMul: 1.5, BackstopATRMul: 4.5, LookbackBars: 24, CloseConfirm: true}
+	cfg.Protection.LadderTPSL.Rules = []LadderTPSLRule{{StopLossPct: 4.5, StopLossUnit: ProtectionUnitStructural, StopLossCloseRatioPct: 100}}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back StrategyConfig
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	ss := back.Protection.LadderTPSL.StructuralSL
+	if !ss.Enabled || !ss.CloseConfirm || ss.FloorATRMul != 1.5 || ss.BackstopATRMul != 4.5 {
+		t.Fatalf("structural SL not preserved: %+v", ss)
+	}
+	if back.Protection.LadderTPSL.Rules[0].StopLossUnit != ProtectionUnitStructural {
+		t.Fatalf("structural SL unit not preserved")
+	}
+}
