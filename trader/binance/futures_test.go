@@ -508,6 +508,29 @@ func TestCallbackRateNormalization(t *testing.T) {
 	}
 }
 
+// TestIsUnknownAlgoOrder verifies the -2011 detection that routes a failed algo
+// cancel to the regular order-cancel endpoint. Maker take-profit orders are
+// regular LIMIT orders, so the algo endpoint rejects their ID with -2011 and the
+// reconciler must fall back to cancel them the normal way.
+func TestIsUnknownAlgoOrder(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"code -2011", fmt.Errorf("<APIError> code=-2011, msg=Unknown order sent."), true},
+		{"unknown order text", fmt.Errorf("failed: Unknown order sent"), true},
+		{"unrelated api error", fmt.Errorf("<APIError> code=-4045, msg=Reach max stop order limit."), false},
+		{"post-only reject", fmt.Errorf("<APIError> code=-5022, msg=GTX rejected"), false},
+	}
+	for _, c := range cases {
+		if got := isUnknownAlgoOrder(c.err); got != c.want {
+			t.Errorf("%s: isUnknownAlgoOrder=%v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // TestGetOpenOrders_NativeTrailingActivated verifies the Binance-only fix that
 // reports a live native TRAILING_STOP_MARKET as ActivationStatus="activated".
 // The shared drawdown reconciler (auto_trader_risk.go) only treats a trailing

@@ -620,24 +620,46 @@ func (t *FuturesTrader) CancelOrder(symbol, orderID string) error {
 // incomplete" every cycle while the stops accumulated. Implementing it here lets
 // Binance's own stale stops actually be removed.
 //
-// The algoID string is the AlgoId GetOpenOrders reported as OpenOrder.OrderID
-// (fmt.Sprintf("%d", algoOrder.AlgoId)).
-func (t *FuturesTrader) CancelAlgoOrderByID(symbol string, algoID string) error {
+// The id string is what GetOpenOrders reported as OpenOrder.OrderID. That is the
+// AlgoId for algo stops (fmt.Sprintf("%d", algoOrder.AlgoId)) BUT the regular
+// exchange OrderID for maker take-profit orders — those are placed as post-only
+// reduce-direction LIMIT orders (placeMakerTakeProfit), not algo orders. The
+// shared reconciler cannot tell the two apart from the ID alone, so this method
+// tries the algo endpoint first and, when the exchange reports the order does not
+// exist there (-2011 Unknown order sent), falls back to the regular order-cancel
+// endpoint. Without the fallback, stale maker-TP LIMIT orders could never be
+// cleaned (the reconciler churned "stale duplicate cleanup incomplete" forever on
+// e.g. XAGUSDT's leftover TP orders after re-entries).
+func (t *FuturesTrader) CancelAlgoOrderByID(symbol string, id string) error {
 	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
-	algoIDInt, err := strconv.ParseInt(algoID, 10, 64)
+	idInt, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid algo order ID %q: %w", algoID, err)
+		return fmt.Errorf("invalid order ID %q: %w", id, err)
 	}
 
-	_, err = t.client.NewCancelAlgoOrderService().
-		AlgoID(algoIDInt).
+	_, algoErr := t.client.NewCancelAlgoOrderService().
+		AlgoID(idInt).
 		Do(context.Background())
-	if err != nil {
-		return fmt.Errorf("failed to cancel algo order %d: %w", algoIDInt, err)
+	if algoErr == nil {
+		logger.Infof("✓ [Binance] Cancelled algo order: %s/%d", symbol, idInt)
+		return nil
 	}
 
-	logger.Infof("✓ [Binance] Cancelled algo order: %s/%d", symbol, algoIDInt)
-	return nil
+	// Not in the algo system — likely a regular LIMIT protection order (maker TP).
+	// Retry via the regular order-cancel endpoint before giving up.
+	if isUnknownAlgoOrder(algoErr) {
+		_, regErr := t.client.NewCancelOrderService().
+			Symbol(symbol).
+			OrderID(idInt).
+			Do(context.Background())
+		if regErr == nil {
+			logger.Infof("✓ [Binance] Cancelled order (algo fallback): %s/%d", symbol, idInt)
+			return nil
+		}
+		return fmt.Errorf("failed to cancel order %d via algo and regular endpoints: algo=%w; regular=%v", idInt, algoErr, regErr)
+	}
+
+	return fmt.Errorf("failed to cancel algo order %d: %w", idInt, algoErr)
 }
 
 // GetOrderBook gets the order book for a symbol
@@ -1045,6 +1067,18 @@ func isPostOnlyCrossRejection(err error) bool {
 	m := err.Error()
 	return contains(m, "-5022") || contains(m, "-2021") ||
 		contains(m, "GTX") || contains(m, "immediately") || contains(m, "post only") || contains(m, "post-only")
+}
+
+// isUnknownAlgoOrder reports whether a cancel error means the ID is not a live
+// algo order (-2011 Unknown order sent). Used to decide whether to fall back to
+// the regular order-cancel endpoint — a maker take-profit is a regular LIMIT
+// order, so the algo endpoint rejects its ID with -2011.
+func isUnknownAlgoOrder(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := err.Error()
+	return contains(m, "-2011") || contains(m, "Unknown order")
 }
 
 // GetOrderStatus gets order status
