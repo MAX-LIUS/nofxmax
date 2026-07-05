@@ -886,7 +886,15 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 			structuralBackstopATRMul = ss.BackstopATRMul
 			acfg := at.config.StrategyConfig.ATRProtection
 			if b, ok := at.frozenStructBoundaryForPosition(symbol, entryPrice, isLong, false, sscfg, acfg); ok && b > 0 {
+				// Show the CLAMPED boundary (what the guard actually enforces), never
+				// the raw swing — otherwise the panel shows a Struct level beyond the
+				// backstop that can never fire.
 				structuralBoundaryPrice = b
+				if fa, aok := at.frozenATRForPosition(symbol, side, entryPrice, acfg); aok && fa > 0 {
+					if clamped, cok := clampStructuralBoundary(entryPrice, b, fa, isLong, sscfg); cok {
+						structuralBoundaryPrice = clamped
+					}
+				}
 			}
 			// Backstop price mirrors the resting stop distance (entry ∓ backstop×ATR).
 			if atrAtEntry > 0 && entryPrice > 0 && ss.BackstopATRMul > 0 {

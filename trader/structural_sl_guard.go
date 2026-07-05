@@ -73,6 +73,17 @@ func (at *AutoTrader) evaluateStructuralSLClose(symbol, side string, entry, qty 
 	if !ok || boundary <= 0 {
 		return // no structural edge for this position; resting backstop covers it
 	}
+	// Clamp the raw swing boundary to [floor, backstop] ATR — the SAME clamp the
+	// resting backstop order uses (structuralSLPercent). Without this, a swing low
+	// farther than BackstopATRMul would leave the guard's trigger BEYOND the wide
+	// resting stop: the backstop fires first and the close-confirm guard could
+	// never trigger, silently degrading the structural stop. Clamping keeps the
+	// guard trigger at/inside the backstop so the tight close-confirm actually works.
+	if frozenATR, aok := at.frozenATRForPosition(symbol, side, entry, acfg); aok && frozenATR > 0 {
+		if clamped, cok := clampStructuralBoundary(entry, boundary, frozenATR, isLong, sscfg); cok {
+			boundary = clamped
+		}
+	}
 
 	c := acfg.WithDefaults()
 	// Need at least 2 bars: the last element is the still-forming bar, the one before

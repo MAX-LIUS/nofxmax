@@ -389,7 +389,11 @@ function buildProtectionRows(
       price: liqPrice,
       sortPrice: liqPrice,
       deltaPct: rawDelta * dirMul,
-      atrMult: toAtrMult(rawDelta * dirMul),
+      // Liquidation distance in ATR multiples is meaningless: for a cross-margin
+      // or small position the exchange liq price sits enormously far away, yielding
+      // absurd figures like -135×. Suppress the ×ATR for liq (0 hides it at both
+      // render sites) and keep only the % distance, which is the meaningful metric.
+      atrMult: 0,
       ratioPct: 100,
       usdValue: 0,
       status: language === 'zh' ? '强平线' : 'Liquidation',

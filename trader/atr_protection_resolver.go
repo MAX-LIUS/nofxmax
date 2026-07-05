@@ -301,6 +301,36 @@ func structuralSLPercent(entryPrice, boundary, atr float64, sscfg store.Structur
 	return acfg.EffectivePercent(mult, atr, entryPrice)
 }
 
+// clampStructuralBoundary maps a RAW pre-entry swing boundary to the ACTUAL
+// price the structural stop enforces, by clamping the entry→boundary distance to
+// [FloorATRMul, BackstopATRMul] ATR — the same clamp structuralSLPercent applies
+// to the resting order. Both the close-confirm guard and the UI must use THIS,
+// not the raw swing, so the tight structural level never sits BEYOND the wide
+// backstop (which would make the guard unreachable and the panel misleading).
+// Returns (clampedPrice, true) when inputs are valid; otherwise (raw, false).
+func clampStructuralBoundary(entryPrice, rawBoundary, atr float64, isLong bool, sscfg store.StructuralSLConfig) (float64, bool) {
+	if entryPrice <= 0 || rawBoundary <= 0 || atr <= 0 {
+		return rawBoundary, false
+	}
+	ss := sscfg.WithDefaults()
+	dist := entryPrice - rawBoundary
+	if dist < 0 {
+		dist = -dist
+	}
+	mult := dist / atr
+	if mult < ss.FloorATRMul {
+		mult = ss.FloorATRMul
+	}
+	if mult > ss.BackstopATRMul {
+		mult = ss.BackstopATRMul
+	}
+	clampedDist := mult * atr
+	if isLong {
+		return entryPrice - clampedDist, true
+	}
+	return entryPrice + clampedDist, true
+}
+
 // wilderATRLast computes Wilder ATR(period) and returns the last value.
 func wilderATRLast(highs, lows, closes []float64, period int) float64 {
 	n := len(closes)

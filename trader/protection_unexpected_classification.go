@@ -154,7 +154,14 @@ func isLikelyBotProtectionOrder(order OpenOrder) bool {
 		"ladder_",
 		"full_",
 		"fallback",
-		"4c363c81edc5bcde",
+		"4c363c81edc5bcde", // OKX broker tag prefix
+		"x-kzrpzap9",        // Binance broker tag prefix (see binance.getBrOrderID);
+		// Binance client IDs carry ONLY this broker prefix + timestamp/random — the
+		// semantic reasonTag is NOT applied there (see binance SetStopLossTagged), so
+		// without this marker every Binance protection order was misread as
+		// manual/foreign and preserved forever, accumulating stale stop orders across
+		// re-entries. Matching the broker prefix lets the reconciler recognize and
+		// clean its own stale Binance stops.
 		"be-stop",
 		"new-tier",
 		"stale-",
