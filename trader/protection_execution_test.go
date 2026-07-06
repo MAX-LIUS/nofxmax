@@ -140,7 +140,7 @@ func TestValidateProtectionPlanExecutionDropsNonExecutableLadderTiers(t *testing
 
 	// Fake OKX min-size enforcement via explicit protection quantity validation on tiny split qty.
 	fakeTrader.validateQtyErrBelow = 0.06
-	validated, err := at.validateProtectionPlanExecution("TRUMPUSDT", "LONG", 0.1, plan)
+	validated, err := at.validateProtectionPlanExecution("TRUMPUSDT", "LONG", 0.1, plan, false)
 	if err != nil {
 		t.Fatalf("expected validation success, got %v", err)
 	}
@@ -165,7 +165,7 @@ func TestValidateProtectionPlanExecutionDropsNonExecutableTakeProfitLadderTiers(
 	}
 
 	fakeTrader.validateQtyErrBelow = 0.06
-	validated, err := at.validateProtectionPlanExecution("TRUMPUSDT", "LONG", 0.1, plan)
+	validated, err := at.validateProtectionPlanExecution("TRUMPUSDT", "LONG", 0.1, plan, false)
 	if err != nil {
 		t.Fatalf("expected validation success, got %v", err)
 	}
@@ -196,7 +196,7 @@ func TestValidateProtectionPlanExecutionDropsBothLaddersAndUsesFullFallbacks(t *
 	}
 
 	fakeTrader.validateQtyErrBelow = 0.06
-	validated, err := at.validateProtectionPlanExecution("TRUMPUSDT", "LONG", 0.1, plan)
+	validated, err := at.validateProtectionPlanExecution("TRUMPUSDT", "LONG", 0.1, plan, false)
 	if err != nil {
 		t.Fatalf("expected validation success, got %v", err)
 	}
@@ -225,7 +225,7 @@ func TestValidateProtectionPlanExecutionKeepsOnlyExecutableLadderTiers(t *testin
 	}
 
 	fakeTrader.validateQtyErrBelow = 0.05
-	validated, err := at.validateProtectionPlanExecution("TRUMPUSDT", "LONG", 0.1, plan)
+	validated, err := at.validateProtectionPlanExecution("TRUMPUSDT", "LONG", 0.1, plan, false)
 	if err != nil {
 		t.Fatalf("expected validation success, got %v", err)
 	}
@@ -259,7 +259,7 @@ func TestValidateProtectionPlanExecutionDropsNonExecutableLadderPricesAgainstMar
 		},
 	}
 
-	validated, err := at.validateProtectionPlanExecution("XAGUSDT", "LONG", 0.48, plan)
+	validated, err := at.validateProtectionPlanExecution("XAGUSDT", "LONG", 0.48, plan, false)
 	if err != nil {
 		t.Fatalf("expected validation success, got %v", err)
 	}
@@ -286,7 +286,7 @@ func TestValidateProtectionPlanExecutionDropsNonExecutableFullStopAgainstMark(t 
 		StopLossPrice: 75.56375,
 	}
 
-	validated, err := at.validateProtectionPlanExecution("XAGUSDT", "LONG", 0.48, plan)
+	validated, err := at.validateProtectionPlanExecution("XAGUSDT", "LONG", 0.48, plan, false)
 	if err != nil {
 		t.Fatalf("expected validation success, got %v", err)
 	}
