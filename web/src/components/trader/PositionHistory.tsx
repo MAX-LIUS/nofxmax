@@ -1265,18 +1265,90 @@ function matchCloseEventToPlan(
   return best
 }
 
+// planItemKey uniquely identifies a plan tier by its mechanism + its position in
+// the plan array, so a per-tier fired signal can distinguish TP1 from TP4 even
+// though they share the mechanism `ladder_tp`.
+function planItemKey(item: PlanItem, idx: number): string {
+  return `${item.mechanism}#${idx}`
+}
+
+// resolveLadderFiring attributes each close event to the concrete plan tier that
+// actually executed, by consuming the closed ratio against the tiers of that
+// mechanism in the order price reaches them (nearest-to-entry first). This fixes
+// two display errors a naive match makes:
+//   (1) one fired ladder mechanism lighting up EVERY tier of that kind — e.g. a
+//       single 20% TP fill marking TP1..TP4 all ✓ when price never reached TP3/4
+//   (2) a fill mapped to the wrong tier by nearest price when the traded ratio
+//       proves which tier executed — e.g. a 20%-ratio fill is TP1 (20%), not TP2
+//       (18%), regardless of which trigger price is numerically closest.
+// Single-tier mechanisms (full_sl, break_even, ...) stay 1:1. Returns the set of
+// fired tier keys and a per-event map to the owning tier.
+function resolveLadderFiring(
+  events: PositionCloseEvent[],
+  plan: PlanItem[]
+): { firedKeys: Set<string>; eventKeyToPlan: Map<string, PlanItem> } {
+  const firedKeys = new Set<string>()
+  const eventKeyToPlan = new Map<string, PlanItem>()
+  const tiersByMech = new Map<string, { item: PlanItem; key: string }[]>()
+  plan.forEach((item, idx) => {
+    const arr = tiersByMech.get(item.mechanism) || []
+    arr.push({ item, key: planItemKey(item, idx) })
+    tiersByMech.set(item.mechanism, arr)
+  })
+  tiersByMech.forEach((arr) =>
+    arr.sort(
+      (a, b) => Math.abs(a.item.triggerPct) - Math.abs(b.item.triggerPct)
+    )
+  )
+  const consumed = new Map<string, number>()
+  events.forEach((event, idx) => {
+    const mech =
+      event.mechanism ||
+      classifyMechanism(event.close_reason || event.execution_source)
+    const eventKey = `${event.parent_order_id}-${event.event_time}-${idx}`
+    const tiers = tiersByMech.get(mech)
+    if (!tiers || tiers.length === 0) return
+    if (tiers.length === 1) {
+      firedKeys.add(tiers[0].key)
+      eventKeyToPlan.set(eventKey, tiers[0].item)
+      return
+    }
+    const before = consumed.get(mech) || 0
+    const ratio = event.close_ratio_pct || 0
+    const mid = before + ratio / 2
+    let acc = 0
+    let owner = tiers[tiers.length - 1]
+    for (const t of tiers) {
+      const tierRatio = t.item.closeRatioPct || 0
+      const start = acc
+      const end = acc + tierRatio
+      if (before + ratio > start + 1e-6 && before < end - 1e-6) {
+        firedKeys.add(t.key)
+      }
+      if (mid >= start - 1e-6 && mid < end + 1e-6) {
+        owner = t
+      }
+      acc = end
+    }
+    eventKeyToPlan.set(eventKey, owner.item)
+    consumed.set(mech, before + ratio)
+  })
+  return { firedKeys, eventKeyToPlan }
+}
+
 // EntryProtectionPlan renders the price-anchored protection plan captured at
 // entry: every ladder TP/SL tier, break-even arm point, and drawdown floor with
-// its concrete trigger price and close ratio. `firedMechanisms` highlights the
-// levels that actually fired so the plan and the outcome read as one story.
+// its concrete trigger price and close ratio. `firedKeys` (mechanism#index)
+// highlights only the tiers that actually fired so the plan and the outcome read
+// as one story — a single 20% TP fill marks TP1 only, not the whole ladder.
 function EntryProtectionPlan({
   plan,
   language,
-  firedMechanisms,
+  firedKeys,
 }: {
   plan: PlanItem[]
   language: string
-  firedMechanisms: Set<string>
+  firedKeys: Set<string>
 }) {
   if (plan.length === 0) return null
   const kindColor = PLAN_KIND_COLOR
@@ -1289,7 +1361,7 @@ function EntryProtectionPlan({
       <div className="flex flex-wrap gap-1.5">
         {plan.map((item, idx) => {
           const c = kindColor[item.kind]
-          const fired = firedMechanisms.has(item.mechanism)
+          const fired = firedKeys.has(planItemKey(item, idx))
           return (
             <div
               key={`${item.mechanism}-${idx}`}
@@ -1391,12 +1463,12 @@ function PositionRow({
     position.entry_decision_review?.protection_snapshot ||
     position.protection_snapshot
   const protectionPlan = buildProtectionPlan(planSnapshot, entryPrice, isLong)
-  const firedMechanisms = new Set<string>(
-    (position.close_events || []).map(
-      (ev) =>
-        ev.mechanism ||
-        classifyMechanism(ev.close_reason || ev.execution_source)
-    )
+  // Per-tier firing: attribute each close to the exact tier that executed so a
+  // single fired ladder tier does not light up its whole mechanism, and each
+  // fill is labeled by the tier its traded ratio proves (not nearest price).
+  const { firedKeys, eventKeyToPlan } = resolveLadderFiring(
+    position.close_events || [],
+    protectionPlan
   )
   const entryReviewSummary = position.entry_review_summary
   const entryTf = entryReviewSummary?.timeframe_context as
@@ -1834,7 +1906,7 @@ function PositionRow({
                 <EntryProtectionPlan
                   plan={protectionPlan}
                   language={language}
-                  firedMechanisms={firedMechanisms}
+                  firedKeys={firedKeys}
                 />
               )}
 
@@ -1910,10 +1982,14 @@ function PositionRow({
                                 )
                               const eventCat = categoryOf(eventMech)
                               const catMeta = categoryMeta(eventCat)
-                              const matchedPlan = matchCloseEventToPlan(
-                                event,
-                                protectionPlan
-                              )
+                              // Prefer the ratio-consuming resolver (labels each
+                              // fill by the tier its traded ratio proves); fall
+                              // back to nearest-price match if unresolved.
+                              const matchedPlan =
+                                eventKeyToPlan.get(
+                                  `${event.parent_order_id}-${event.event_time}-${idx}`
+                                ) ||
+                                matchCloseEventToPlan(event, protectionPlan)
                               const pnl = event.realized_pnl_delta || 0
                               const pnlColor = pnl >= 0 ? '#0ECB81' : '#F6465D'
                               return (
