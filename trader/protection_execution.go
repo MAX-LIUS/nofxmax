@@ -1,6 +1,7 @@
 package trader
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -718,6 +719,23 @@ func (at *AutoTrader) placeAndVerifyLadderProtection(symbol, positionSide string
 		return fmt.Errorf("failed to inspect existing ladder protection orders: %w", err)
 	}
 
+	// CRITICAL (2026-06-27): every ladder tier must be placed at open in a single
+	// pass. A per-tier failure must NOT abort the remaining tiers — otherwise a
+	// transient/single-tier reject silently drops the rest of the ladder (e.g. WLD
+	// short lost TP2/TP3/TP4 after TP1 and had only the wide structural backstop
+	// left). We attempt EVERY tier, collect per-tier errors, and surface an
+	// aggregate error at the end so the retry wrapper re-runs; the placement is
+	// idempotent because hasExistingEquivalentProtection skips already-placed tiers.
+	var placeErrs []error
+	slSetter, slTaggedOK := at.trader.(interface {
+		SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error
+		SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) error
+	})
+	tpSetter, tpTaggedOK := at.trader.(interface {
+		SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error
+		SetTakeProfitTagged(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) error
+	})
+
 	for _, order := range plan.StopLossOrders {
 		orderQty := quantity * order.CloseRatioPct / 100.0
 		if orderQty <= 0 {
@@ -726,16 +744,15 @@ func (at *AutoTrader) placeAndVerifyLadderProtection(symbol, positionSide string
 		if hasExistingEquivalentProtection(existingOrders, positionSide, false, order.Price, orderQty) {
 			continue
 		}
-		if setter, ok := at.trader.(interface {
-			SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error
-			SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) error
-		}); ok {
-			if err := setter.SetStopLossTagged(symbol, positionSide, orderQty, order.Price, "ladder_sl"); err != nil {
-				return fmt.Errorf("failed to set ladder stop loss %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err)
+		if slTaggedOK {
+			if err := slSetter.SetStopLossTagged(symbol, positionSide, orderQty, order.Price, "ladder_sl"); err != nil {
+				placeErrs = append(placeErrs, fmt.Errorf("ladder stop loss %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err))
+				continue
 			}
 			at.recordProtectionIntent(symbol, positionSide, "ladder_sl", orderQty, order.Price)
 		} else if err := at.trader.SetStopLoss(symbol, positionSide, orderQty, order.Price); err != nil {
-			return fmt.Errorf("failed to set ladder stop loss %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err)
+			placeErrs = append(placeErrs, fmt.Errorf("ladder stop loss %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err))
+			continue
 		}
 	}
 	for _, order := range plan.TakeProfitOrders {
@@ -746,17 +763,22 @@ func (at *AutoTrader) placeAndVerifyLadderProtection(symbol, positionSide string
 		if hasExistingEquivalentProtection(existingOrders, positionSide, true, order.Price, orderQty) {
 			continue
 		}
-		if setter, ok := at.trader.(interface {
-			SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error
-			SetTakeProfitTagged(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) error
-		}); ok {
-			if err := setter.SetTakeProfitTagged(symbol, positionSide, orderQty, order.Price, "ladder_tp"); err != nil {
-				return fmt.Errorf("failed to set ladder take profit %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err)
+		if tpTaggedOK {
+			if err := tpSetter.SetTakeProfitTagged(symbol, positionSide, orderQty, order.Price, "ladder_tp"); err != nil {
+				placeErrs = append(placeErrs, fmt.Errorf("ladder take profit %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err))
+				continue
 			}
 			at.recordProtectionIntent(symbol, positionSide, "ladder_tp", orderQty, order.Price)
 		} else if err := at.trader.SetTakeProfit(symbol, positionSide, orderQty, order.Price); err != nil {
-			return fmt.Errorf("failed to set ladder take profit %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err)
+			placeErrs = append(placeErrs, fmt.Errorf("ladder take profit %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err))
+			continue
 		}
+	}
+	if len(placeErrs) > 0 {
+		// Surface as one aggregate error: every tier was still attempted, so no
+		// tier is silently skipped, and the retry wrapper re-runs the whole ladder.
+		logger.Warnf("  ⚠️ Ladder placement had %d tier error(s) for %s %s; every tier was still attempted, remaining tiers not abandoned", len(placeErrs), symbol, positionSide)
+		return fmt.Errorf("ladder protection placement: %d tier(s) failed: %w", len(placeErrs), errors.Join(placeErrs...))
 	}
 
 	// Retry verification with delay to handle exchange propagation latency.

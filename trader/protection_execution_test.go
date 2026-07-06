@@ -27,6 +27,7 @@ type fakeOrderProtectionTrader struct {
 	formatQuantityErrBelow float64
 	validateQtyErrBelow    float64
 	positions              []map[string]interface{}
+	failTakeProfitAtPrice  float64 // if >0, SetTakeProfit(Tagged) for this price returns an error
 }
 
 func (f *fakeOrderProtectionTrader) GetBalance() (map[string]interface{}, error) { return nil, nil }
@@ -74,6 +75,9 @@ func (f *fakeOrderProtectionTrader) SetStopLoss(symbol string, positionSide stri
 func (f *fakeOrderProtectionTrader) SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error {
 	if f.setTakeProfitErr != nil {
 		return f.setTakeProfitErr
+	}
+	if f.failTakeProfitAtPrice > 0 && takeProfitPrice == f.failTakeProfitAtPrice {
+		return fmt.Errorf("simulated transient reject for tier @%.6f", takeProfitPrice)
 	}
 	f.takeProfitOrders = append(f.takeProfitOrders, struct {
 		symbol, positionSide string
@@ -634,5 +638,45 @@ func TestGenerateStructuralLadderRulesSplitsStopAroundNearestStructure(t *testin
 	}
 	if sl[2].CloseRatioPct > 25 {
 		t.Fatalf("expected far tier <=25%%, got %+v", sl)
+	}
+}
+
+// TestLadderPlacementDoesNotAbandonTiersAfterMidTierFailure locks in the
+// 2026-06-27 fix: a single failing tier must NOT stop the remaining tiers from
+// being placed. Previously placeAndVerifyLadderProtection returned on the first
+// tier error, so a transient reject on TP2 silently dropped TP3/TP4 (the WLD
+// short lost its upper ladder and had only the wide structural backstop left).
+func TestLadderPlacementDoesNotAbandonTiersAfterMidTierFailure(t *testing.T) {
+	fakeTrader := &fakeOrderProtectionTrader{
+		failTakeProfitAtPrice: 102, // TP2 fails; TP1/TP3/TP4 must still be placed
+	}
+	at := &AutoTrader{trader: fakeTrader, exchange: "binance"}
+	plan := &ProtectionPlan{
+		NeedsTakeProfit: true,
+		TakeProfitOrders: []ProtectionOrder{
+			{Price: 101, CloseRatioPct: 20},
+			{Price: 102, CloseRatioPct: 18}, // this one is rejected
+			{Price: 103, CloseRatioPct: 15},
+			{Price: 104, CloseRatioPct: 12},
+		},
+	}
+
+	err := at.placeAndVerifyLadderProtection("WLDUSDT", "LONG", 1000, plan)
+	if err == nil {
+		t.Fatalf("expected aggregate error surfacing the failed tier, got nil")
+	}
+
+	// The three good tiers must all have been placed despite TP2 failing.
+	gotPrices := map[float64]bool{}
+	for _, o := range fakeTrader.takeProfitOrders {
+		gotPrices[o.price] = true
+	}
+	for _, want := range []float64{101, 103, 104} {
+		if !gotPrices[want] {
+			t.Fatalf("tier @%.0f was abandoned after mid-tier failure; placed=%+v", want, fakeTrader.takeProfitOrders)
+		}
+	}
+	if gotPrices[102] {
+		t.Fatalf("tier @102 was supposed to fail but was recorded as placed")
 	}
 }
