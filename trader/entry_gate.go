@@ -1057,6 +1057,39 @@ func evaluateConfidenceRiskGate(input entryGateInput) []EntryGateCheck {
 		checks = append(checks, check)
 	}
 
+	// 3g. Entry-quality hard blocks (backtest: 1190 closed positions, rolling
+	// 5-fold walk-forward, bootstrap P(improve)=98.8%, max-DD -134→-92).
+	if input.StrategyConfig != nil {
+		gate := input.StrategyConfig.EntryStructure.EntryGate.WithDefaults()
+
+		// breakout_retest is net-negative in every time third — hard block.
+		if gate.BlockBreakoutRetest != nil && *gate.BlockBreakoutRetest &&
+			strings.EqualFold(strings.TrimSpace(d.SetupType), "breakout_retest") {
+			checks = append(checks, EntryGateCheck{
+				Code:     "breakout_retest_blocked",
+				Stage:    string(EntryGateStageConfidenceRisk),
+				Passed:   false,
+				Enforced: true,
+				Detail:   "setup_type=breakout_retest is net-negative across all backtest periods (early/mid/late) — hard-blocked",
+				Values:   fmt.Sprintf("setup=%s", d.SetupType),
+			})
+		}
+
+		// Over-promised RR: net_rr above ceiling has ~52% win rate, far targets
+		// rarely hit — the mirror of MaxTargetATRMul on the RR axis. Hard block.
+		if gate.MaxNetRR > 0 && d.EntryProtection != nil && d.EntryProtection.RiskReward.NetEstimatedRR > gate.MaxNetRR {
+			netRR := d.EntryProtection.RiskReward.NetEstimatedRR
+			checks = append(checks, EntryGateCheck{
+				Code:     "net_rr_above_max",
+				Stage:    string(EntryGateStageConfidenceRisk),
+				Passed:   false,
+				Enforced: true,
+				Detail:   fmt.Sprintf("net RR %.2f > max %.2f — over-promised targets are rarely hit (net-negative in backtest)", netRR, gate.MaxNetRR),
+				Values:   fmt.Sprintf("net_rr=%.2f max_net_rr=%.2f", netRR, gate.MaxNetRR),
+			})
+		}
+	}
+
 	// 3x. AI hesitation/self-contradiction in chain of thought
 	if cot := input.ChainOfThought; cot != "" {
 		hesitationSignals := 0

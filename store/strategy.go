@@ -178,6 +178,19 @@ type EntryGateConfig struct {
 	// When SL distance < (MinSLDistanceATRMul + VolatilityBufferATRMul) × ATR and
 	// RR still holds after widening, backend auto-widens SL to meet the threshold.
 	VolatilityBufferATRMul float64 `json:"volatility_buffer_atr_mul,omitempty"`
+
+	// BlockBreakoutRetest hard-blocks entries tagged setup_type=breakout_retest.
+	// Entry-quality study (1190 closed positions, rolling 5-fold walk-forward +
+	// bootstrap p=98.8%): breakout_retest is net-negative in every time third
+	// (early -11.5, mid -28.6, late -4.0) and removing it improves net and lowers
+	// max drawdown. Pointer to distinguish an explicit false (allow) from unset.
+	BlockBreakoutRetest *bool `json:"block_breakout_retest,omitempty"`
+
+	// MaxNetRR hard-blocks entries whose AI-promised net risk/reward exceeds this
+	// ceiling. Same study: net_rr>2.8 entries are net-negative (win rate ~52%,
+	// far targets rarely hit) — the mirror of MaxTargetATRMul on the RR axis.
+	// Default 2.8. Set <0 to disable, 0 uses the default.
+	MaxNetRR float64 `json:"max_net_rr,omitempty"`
 }
 
 func (c EntryGateConfig) WithDefaults() EntryGateConfig {
@@ -199,6 +212,15 @@ func (c EntryGateConfig) WithDefaults() EntryGateConfig {
 		c.MaxTargetATRMul = 5.0
 	} else if c.MaxTargetATRMul < 0 {
 		c.MaxTargetATRMul = 0 // negative means explicitly disabled
+	}
+	if c.BlockBreakoutRetest == nil {
+		defaultBlock := true // entry-quality study: breakout_retest is net-negative
+		c.BlockBreakoutRetest = &defaultBlock
+	}
+	if c.MaxNetRR == 0 {
+		c.MaxNetRR = 2.8
+	} else if c.MaxNetRR < 0 {
+		c.MaxNetRR = 0 // negative means explicitly disabled
 	}
 	if c.TargetReachabilityMode == "" {
 		c.TargetReachabilityMode = "cap" // cap unreachable targets by default (reshape > reject)
