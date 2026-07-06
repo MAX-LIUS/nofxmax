@@ -102,6 +102,13 @@ export interface EntryGateConfig {
   short_non_downtrend_min_confidence?: number
   squeeze_min_confidence?: number
   squeeze_min_rr?: number
+  // Entry-quality hard blocks (backtest: 1190 closed positions, rolling 5-fold
+  // walk-forward, bootstrap P(improve)=98.8%).
+  // Hard-block setup_type=breakout_retest (net-negative in every time third). Default true.
+  block_breakout_retest?: boolean
+  // Hard-block entries whose AI-promised net RR exceeds this ceiling (over-promised
+  // targets rarely hit, ~52% win rate). Default 2.8, <0 disables.
+  max_net_rr?: number
   // Legacy compat
   entry_proximity_min_pct?: number
   invalidation_structure_min_pct?: number

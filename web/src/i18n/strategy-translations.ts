@@ -1201,6 +1201,19 @@ export const preEntryGate = {
     zh: '喂给AI的首个止盈/保本档位距离，按止损风险的倍数(默认0.8，更容易落袋——被拦的盈利单105/174能到0.8×风险 vs 94能到1.0×)。由最小回报(1.8×ATR)兜底，确保锁盈档不落进波动噪声带被扫出。',
     en: 'First take-profit / break-even tier distance fed to the AI, as a multiple of stop-risk (default 0.8, easier to bank — 105/174 blocked winners reach 0.8× risk vs 94 at 1.0×). Floored by min-reward (1.8× ATR) so the lock tier clears the noise band and is not scanned out.',
   },
+  blockBreakoutRetest: {
+    zh: '拦截 breakout_retest 形态',
+    en: 'Block breakout_retest setup',
+  },
+  blockBreakoutRetestDesc: {
+    zh: '硬拦截 setup_type=breakout_retest 的入场。入场质量研究(1190笔平仓单，滚动5折前进验证，bootstrap改善概率98.8%)显示该形态在每个时间段都是净负(早-11.5/中-28.6/晚-4.0)，剔除后净值+44、最大回撤下降。默认启用。',
+    en: 'Hard-block entries tagged setup_type=breakout_retest. Entry-quality study (1190 closed positions, rolling 5-fold walk-forward, bootstrap P(improve)=98.8%) shows this setup is net-negative in every time third (early -11.5 / mid -28.6 / late -4.0); removing it adds +44 to net and lowers max drawdown. Default enabled.',
+  },
+  maxNetRr: { zh: '最大净RR', en: 'Max net RR' },
+  maxNetRrDesc: {
+    zh: 'AI承诺的净风险回报超过该上限则拦截：过度承诺的远目标很少达成(胜率~52%)，是 MaxTP距离 在RR轴上的镜像。同一研究显示 net_rr>2.8 净负，剔除后净值+58.8。默认2.8，设 0 用默认，设负数关闭。',
+    en: 'Reject entries whose AI-promised net risk/reward exceeds this ceiling: over-promised far targets are rarely hit (~52% win rate) — the RR-axis mirror of Max TP distance. Same study: net_rr>2.8 is net-negative, removing it adds +58.8. Default 2.8, 0 uses default, negative disables.',
+  },
   blockLongInHtfDowntrend: {
     zh: '拦截1h+4h确认下跌做多',
     en: 'Block long in 1h+4h downtrend',
