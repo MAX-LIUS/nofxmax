@@ -125,7 +125,7 @@ func (t *FuturesTrader) resolveBinanceClose(
 	// triggered algo order spawns a NEW fill order id that the placement never saw.
 	if out.reason == "" && (out.realType == "" || out.realType == "MARKET") && st != nil && trade.Price > 0 {
 		if ci := st.CloseIntent(); ci != nil {
-			if intent, err := ci.MatchByTriggerPriceAndConsume(traderID, symbol, positionSide, trade.Price, 0.15); err == nil && intent != nil && intent.Reason != "" {
+			if intent, err := ci.MatchByTriggerPriceAndConsume(traderID, symbol, positionSide, trade.Price, 3.5); err == nil && intent != nil && intent.Reason != "" {
 				out.reason = intent.Reason
 				if out.realType == "" || out.realType == "MARKET" {
 					out.realType = "MARKET"

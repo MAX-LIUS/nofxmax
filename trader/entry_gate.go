@@ -60,6 +60,9 @@ type entryGateInput struct {
 	ConstraintSnap       *ExecutionConstraintsSnapshot
 	ProtectionAlign      *store.DecisionActionProtectionAlignment
 	LastSameDirectionTrade *store.RecentTrade
+	// RecentCloseStats is the trader's own finished-close toxicity in the trailing
+	// throttle window (causal: only closes before this entry). nil when unavailable.
+	RecentCloseStats     *store.RecentCloseStats
 	ChainOfThought       string
 }
 
@@ -503,6 +506,30 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 					Values:   fmt.Sprintf("new_entry=%.4f, last_entry=%.4f", entryPrice, lastTrade.EntryPrice),
 				})
 			}
+		}
+	}
+
+	// 1.9 Correlated-adverse throttle — block a new entry when the trader's OWN
+	// recent finished closes are clustering into losses (toxic/correlated-adverse
+	// regime). Causal: RecentCloseStats counts only closes before this entry.
+	// Validated as the sole entry lever positive out-of-sample and after crash-day
+	// removal; it removes negative-EV entries while keeping the positive ones.
+	if input.StrategyConfig != nil && input.RecentCloseStats != nil {
+		gate := input.StrategyConfig.EntryStructure.EntryGate
+		if gate.CorrelatedAdverseThrottleEnabled() {
+			gd := gate.WithDefaults()
+			rc := input.RecentCloseStats
+			toxic := rc.Count >= gd.ThrottleMinCloses && rc.LossRate >= gd.ThrottleLossRate
+			checks = append(checks, EntryGateCheck{
+				Code:     "correlated_adverse_throttle",
+				Stage:    string(EntryGateStageMarketState),
+				Passed:   !toxic,
+				Enforced: true,
+				Detail: fmt.Sprintf("recent closes toxicity: %d closes / %d losses (%.0f%%) in %.0fh window; block ≥%.0f%% (min %d closes)",
+					rc.Count, rc.Losses, rc.LossRate*100, gd.ThrottleWindowHours, gd.ThrottleLossRate*100, gd.ThrottleMinCloses),
+				Values: fmt.Sprintf("count=%d losses=%d loss_rate=%.2f thresh=%.2f min_closes=%d window_h=%.0f",
+					rc.Count, rc.Losses, rc.LossRate, gd.ThrottleLossRate, gd.ThrottleMinCloses, gd.ThrottleWindowHours),
+			})
 		}
 	}
 

@@ -191,6 +191,34 @@ type EntryGateConfig struct {
 	// far targets rarely hit) — the mirror of MaxTargetATRMul on the RR axis.
 	// Default 2.8. Set <0 to disable, 0 uses the default.
 	MaxNetRR float64 `json:"max_net_rr,omitempty"`
+
+	// CorrelatedAdverseThrottle skips a NEW entry when the trader's OWN recently
+	// closed positions are clustering into losses (a toxic/correlated-adverse
+	// regime). Fully causal: it reads only closes that FINISHED before this entry,
+	// so there is no look-ahead.
+	//
+	// DEFAULT OFF (opt-in). On the 63-day live dataset it was the sole entry lever
+	// positive out-of-sample (holdout +6.5, bootstrap P(delta>0)=96%, positive in
+	// leave-one-trader-out). BUT a multi-year (2022-2026, 15-coin) proxy-strategy
+	// backtest FAILED to confirm it generalises: full-sample delta −72.7, positive
+	// in only 2/5 years, with a chaotic sign-flipping parameter surface. The reason:
+	// the throttle's real edge is not loss-clustering itself (present in both) but
+	// whether a toxic window PREDICTS the next loss — a +9.8pp conditional lift in
+	// the live data vs ~0 in the proxy. That predictive lift is strategy- and
+	// period-specific and unconfirmed beyond the 63-day live window, so the throttle
+	// is shipped OFF by default and enabled per-trader only after the live
+	// conditional lift is re-observed. Pointer distinguishes explicit true/false
+	// from unset (default off).
+	CorrelatedAdverseThrottle *bool `json:"correlated_adverse_throttle,omitempty"`
+	// ThrottleWindowHours is the trailing window of FINISHED closes used to assess
+	// toxicity. Default 12 (best-validated; the whole 12h neighbourhood is positive).
+	ThrottleWindowHours float64 `json:"throttle_window_hours,omitempty"`
+	// ThrottleMinCloses is the minimum number of finished closes required in the
+	// window before the throttle may fire (avoids acting on tiny samples). Default 3.
+	ThrottleMinCloses int `json:"throttle_min_closes,omitempty"`
+	// ThrottleLossRate is the loss-rate in the window at/above which new entries are
+	// blocked. Default 0.6 (i.e. ≥60% of recent closes were losers). Range (0,1].
+	ThrottleLossRate float64 `json:"throttle_loss_rate,omitempty"`
 }
 
 func (c EntryGateConfig) WithDefaults() EntryGateConfig {
@@ -269,7 +297,29 @@ func (c EntryGateConfig) WithDefaults() EntryGateConfig {
 	if c.VolatilityBufferATRMul > 1.5 {
 		c.VolatilityBufferATRMul = 1.5
 	}
+	if c.ThrottleWindowHours <= 0 {
+		c.ThrottleWindowHours = 12
+	}
+	if c.ThrottleMinCloses <= 0 {
+		c.ThrottleMinCloses = 3
+	}
+	if c.ThrottleLossRate <= 0 {
+		c.ThrottleLossRate = 0.6
+	} else if c.ThrottleLossRate > 1 {
+		c.ThrottleLossRate = 1
+	}
 	return c
+}
+
+// CorrelatedAdverseThrottleEnabled reports whether the throttle is active,
+// defaulting to FALSE when unset: the multi-year proxy backtest did not confirm
+// the throttle generalises, so it is opt-in per trader. An explicit true enables
+// it; an explicit false (or unset) disables it.
+func (c EntryGateConfig) CorrelatedAdverseThrottleEnabled() bool {
+	if c.CorrelatedAdverseThrottle == nil {
+		return false
+	}
+	return *c.CorrelatedAdverseThrottle
 }
 
 type StrategyControlPolicyMode string

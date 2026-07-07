@@ -109,6 +109,14 @@ export interface EntryGateConfig {
   // Hard-block entries whose AI-promised net RR exceeds this ceiling (over-promised
   // targets rarely hit, ~52% win rate). Default 2.8, <0 disables.
   max_net_rr?: number
+  // Correlated-adverse entry throttle: skip a NEW entry when the trader's own
+  // recent finished closes cluster into losses (toxic regime). Validated (1273
+  // closed positions) as the sole entry lever positive out-of-sample and after
+  // crash-day removal. Default on.
+  correlated_adverse_throttle?: boolean
+  throttle_window_hours?: number
+  throttle_min_closes?: number
+  throttle_loss_rate?: number
   // Legacy compat
   entry_proximity_min_pct?: number
   invalidation_structure_min_pct?: number

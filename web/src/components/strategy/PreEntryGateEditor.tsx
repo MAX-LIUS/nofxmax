@@ -982,6 +982,79 @@ export function PreEntryGateEditor({
           <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
             {ts(preEntryGate.blockBreakoutRetestDesc, language)}
           </div>
+          <label
+            className="flex items-center gap-2 text-sm mt-3"
+            style={{ color: '#EAECEF' }}
+          >
+            <input
+              type="checkbox"
+              checked={
+                config.entry_structure?.entry_gate
+                  ?.correlated_adverse_throttle ?? false
+              }
+              onChange={(e) =>
+                updateEntryGate('correlated_adverse_throttle', e.target.checked)
+              }
+              disabled={
+                disabled ||
+                !(config.entry_structure?.entry_gate?.enabled ?? false)
+              }
+              className="h-4 w-4 accent-amber-500"
+            />
+            {ts(preEntryGate.correlatedAdverseThrottle, language)}
+          </label>
+          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+            {ts(preEntryGate.correlatedAdverseThrottleDesc, language)}
+          </div>
+          <EntryGateInput
+            label={ts(preEntryGate.throttleWindowHours, language)}
+            value={
+              config.entry_structure?.entry_gate?.throttle_window_hours ?? 12
+            }
+            step={1}
+            disabled={
+              disabled ||
+              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
+              config.entry_structure?.entry_gate
+                ?.correlated_adverse_throttle === false
+            }
+            onChange={(v) => updateEntryGate('throttle_window_hours', v)}
+          />
+          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+            {ts(preEntryGate.throttleWindowHoursDesc, language)}
+          </div>
+          <EntryGateInput
+            label={ts(preEntryGate.throttleMinCloses, language)}
+            value={config.entry_structure?.entry_gate?.throttle_min_closes ?? 3}
+            step={1}
+            disabled={
+              disabled ||
+              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
+              config.entry_structure?.entry_gate
+                ?.correlated_adverse_throttle === false
+            }
+            onChange={(v) => updateEntryGate('throttle_min_closes', v)}
+          />
+          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+            {ts(preEntryGate.throttleMinClosesDesc, language)}
+          </div>
+          <EntryGateInput
+            label={ts(preEntryGate.throttleLossRate, language)}
+            value={
+              config.entry_structure?.entry_gate?.throttle_loss_rate ?? 0.6
+            }
+            step={0.05}
+            disabled={
+              disabled ||
+              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
+              config.entry_structure?.entry_gate
+                ?.correlated_adverse_throttle === false
+            }
+            onChange={(v) => updateEntryGate('throttle_loss_rate', v)}
+          />
+          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+            {ts(preEntryGate.throttleLossRateDesc, language)}
+          </div>
         </EntryGateGroup>
 
         {/* Group D: Path Clarity */}

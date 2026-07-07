@@ -456,6 +456,18 @@ func (at *AutoTrader) runCycle() error {
 		if side := directionFromAction(d.Action); side != "" {
 			lastSameDirTrade, _ = at.store.Position().GetLastClosedTradeByDirection(at.id, d.Symbol, side)
 		}
+		// Correlated-adverse throttle input: the trader's own finished-close
+		// toxicity in the trailing window (causal — closes before now only).
+		var recentCloseStats *store.RecentCloseStats
+		if at.config.StrategyConfig != nil {
+			gd := at.config.StrategyConfig.EntryStructure.EntryGate.WithDefaults()
+			if at.config.StrategyConfig.EntryStructure.EntryGate.CorrelatedAdverseThrottleEnabled() {
+				windowMs := int64(gd.ThrottleWindowHours * 3600 * 1000)
+				if rc, err := at.store.Position().GetRecentCloseStats(at.id, time.Now().UTC().UnixMilli(), windowMs); err == nil {
+					recentCloseStats = &rc
+				}
+			}
+		}
 		gateResult := evaluateEntryGate(entryGateInput{
 			Decision:               &d,
 			MarketData:             ctx.MarketDataMap[d.Symbol],
@@ -466,6 +478,7 @@ func (at *AutoTrader) runCycle() error {
 			ConstraintSnap:        constraintSnapshot,
 			ProtectionAlign:       protectionAlignment,
 			LastSameDirectionTrade: lastSameDirTrade,
+			RecentCloseStats:      recentCloseStats,
 			ChainOfThought:        record.CoTTrace,
 		})
 		gateResult.Regime = classifyProtectionRegime(ctx.MarketDataMap[d.Symbol])

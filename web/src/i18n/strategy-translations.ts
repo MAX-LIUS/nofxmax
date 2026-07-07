@@ -1214,6 +1214,29 @@ export const preEntryGate = {
     zh: 'AI承诺的净风险回报超过该上限则拦截：过度承诺的远目标很少达成(胜率~52%)，是 MaxTP距离 在RR轴上的镜像。同一研究显示 net_rr>2.8 净负，剔除后净值+58.8。默认2.8，设 0 用默认，设负数关闭。',
     en: 'Reject entries whose AI-promised net risk/reward exceeds this ceiling: over-promised far targets are rarely hit (~52% win rate) — the RR-axis mirror of Max TP distance. Same study: net_rr>2.8 is net-negative, removing it adds +58.8. Default 2.8, 0 uses default, negative disables.',
   },
+  correlatedAdverseThrottle: {
+    zh: '相关性逆境节流',
+    en: 'Correlated-adverse throttle',
+  },
+  correlatedAdverseThrottleDesc: {
+    zh: '当本交易员自己近期已平仓单集中转亏(毒性/相关性逆境)时，暂停新开仓。完全因果(只读本次入场之前已完成的平仓，无未来函数)。【默认关闭，按需开启】：在63天实盘(1273笔)上是唯一样本外(holdout +6.5、bootstrap P>0=96%、留一交易员全正)为正的入场杠杆；但2022-2026多年15币代理策略回测未能证实其可推广(全样本-72.7、仅2/5年为正、参数面混乱翻号)。原因是其真实edge并非"亏损成簇"本身，而是"毒性窗口能否预测下一笔亏损"——实盘该条件提升+9.8pp、代理里≈0。该预测力依赖策略与时期，仅在63天实盘窗口观测到，故默认关闭，待实盘重新确认后再按交易员启用。',
+    en: "Pause new entries when the trader's OWN recently closed positions cluster into losses (toxic/correlated-adverse regime). Fully causal — reads only closes finished before this entry, no look-ahead. [DEFAULT OFF, opt-in]: on the 63-day live data (1273 trades) it was the sole entry lever positive out-of-sample (holdout +6.5, bootstrap P>0=96%, positive in leave-one-trader-out); but a multi-year (2022-2026, 15-coin) proxy-strategy backtest did NOT confirm it generalises (full-sample -72.7, positive in only 2/5 years, chaotic sign-flipping parameter surface). Its real edge is not loss-clustering itself but whether a toxic window PREDICTS the next loss — +9.8pp conditional lift in live vs ~0 in the proxy. That predictive lift is strategy/period-specific and only observed in the 63-day live window, so it ships OFF by default; enable per-trader after the live lift is re-confirmed.",
+  },
+  throttleWindowHours: { zh: '节流窗口(小时)', en: 'Throttle window (hours)' },
+  throttleWindowHoursDesc: {
+    zh: '评估毒性的近期已平仓单回看窗口(小时)。默认12(最优验证值，整个12h邻域均为正)。',
+    en: 'Trailing window of finished closes used to assess toxicity. Default 12 (best-validated; the whole 12h neighbourhood is positive).',
+  },
+  throttleMinCloses: { zh: '节流最少平仓数', en: 'Throttle min closes' },
+  throttleMinClosesDesc: {
+    zh: '窗口内至少需有多少笔已完成平仓，节流才可能触发(避免小样本误判)。默认3。',
+    en: 'Minimum finished closes required in the window before the throttle may fire (avoids acting on tiny samples). Default 3.',
+  },
+  throttleLossRate: { zh: '节流亏损率阈值', en: 'Throttle loss-rate' },
+  throttleLossRateDesc: {
+    zh: '窗口内亏损率达到或超过该值即拦截新开仓。默认0.6(近期平仓中≥60%为亏损)。范围(0,1]。',
+    en: 'Loss-rate in the window at/above which new entries are blocked. Default 0.6 (≥60% of recent closes were losers). Range (0,1].',
+  },
   blockLongInHtfDowntrend: {
     zh: '拦截1h+4h确认下跌做多',
     en: 'Block long in 1h+4h downtrend',

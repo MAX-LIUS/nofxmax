@@ -116,14 +116,44 @@ func (s *CloseIntentStore) RecordProtection(traderID, exchangeID, symbol, side, 
 	return s.db.Create(intent).Error
 }
 
+// intentIsStop reports whether a protection intent's reason is a stop-loss
+// family (SL/break-even/fallback-maxloss) as opposed to a take-profit family.
+// Used for direction gating in the trigger-price match.
+func intentIsStop(reason string) bool {
+	r := strings.ToLower(reason)
+	return strings.Contains(r, "sl") || strings.Contains(r, "stop")
+}
+
+// intentIsTakeProfit reports whether a protection intent's reason is a
+// take-profit family (ladder_tp / full_tp).
+func intentIsTakeProfit(reason string) bool {
+	r := strings.ToLower(reason)
+	return strings.Contains(r, "tp") || strings.Contains(r, "take_profit")
+}
+
+// wrongSideTolPct is how far a fill may sit on the "impossible" side of a
+// trigger and still be accepted (rounding / a hair-early fill). It is
+// intentionally tiny: real slippage always pushes a fill to the ADVERSE side of
+// a trigger (a LONG stop fills at/below its price, a LONG TP fills at/above),
+// never meaningfully to the favourable side. A close that lands well on the
+// favourable side of a stop is NOT that stop firing (it is a mid-price/AI close)
+// and must never be mislabeled as protection.
+const wrongSideTolPct = 0.2
+
 // MatchByTriggerPriceAndConsume resolves the protection intent for
-// trader+symbol+side whose trigger_price is closest to fillPrice within
-// tolerancePct (relative). This is the aged-order-survivable attribution path for
-// Binance native protection: a triggered STOP/TP fills AT its trigger, so the
-// fill price pins the exact mechanism even when GetOrder(origType) has failed.
-// Only intents with a trigger_price>0 (protection placements) are considered, so
-// bot MARKET-close intents (order-id keyed) are never grabbed here. Returns nil
-// when nothing matches within tolerance.
+// trader+symbol+side whose trigger_price is closest to fillPrice, with DIRECTION
+// GATING: a triggered STOP/TP fills on a KNOWN side of its trigger (slippage is
+// always adverse), so tolerancePct is applied only on the adverse (slippage)
+// side while the favourable side is clamped to a tiny rounding allowance. This
+// lets the match survive real Binance stop slippage (measured ~3% past trigger)
+// without mislabeling a favourable-side mid-price close as protection.
+//
+// This is the aged-order-survivable attribution path for Binance native
+// protection: a triggered STOP/TP fills near its trigger, so the fill price pins
+// the exact mechanism even when GetOrder(origType) has failed. Only intents with
+// trigger_price>0 (protection placements) are considered, so bot MARKET-close
+// intents (order-id keyed) are never grabbed here. Returns nil when nothing
+// matches.
 func (s *CloseIntentStore) MatchByTriggerPriceAndConsume(traderID, symbol, side string, fillPrice, tolerancePct float64) (*CloseIntent, error) {
 	if s.db == nil || traderID == "" || fillPrice <= 0 {
 		return nil, nil
@@ -142,6 +172,43 @@ func (s *CloseIntentStore) MatchByTriggerPriceAndConsume(traderID, symbol, side 
 	if len(candidates) == 0 {
 		return nil, nil
 	}
+	// Direction gate: keep only candidates whose fill sits on the physically
+	// possible side of the trigger. For a LONG stop the fill is at/below trigger
+	// (price fell through it); a LONG TP fills at/above; SHORT mirrors. The
+	// favourable side is allowed only within wrongSideTolPct for rounding.
+	up := strings.ToUpper(side)
+	wrongBand := fillPrice * wrongSideTolPct / 100.0
+	var gated []CloseIntent
+	for i := range candidates {
+		trig := candidates[i].TriggerPrice
+		reason := candidates[i].Reason
+		ok := false
+		switch {
+		case intentIsStop(reason):
+			if up == "LONG" {
+				// adverse (slippage) side: fill <= trigger; favourable: fill up to trigger+wrongBand
+				ok = fillPrice <= trig+wrongBand
+			} else {
+				ok = fillPrice >= trig-wrongBand
+			}
+		case intentIsTakeProfit(reason):
+			if up == "LONG" {
+				ok = fillPrice >= trig-wrongBand
+			} else {
+				ok = fillPrice <= trig+wrongBand
+			}
+		default:
+			// Unclassified protection reason: keep prior behaviour (no gate).
+			ok = true
+		}
+		if ok {
+			gated = append(gated, candidates[i])
+		}
+	}
+	if len(gated) == 0 {
+		return nil, nil
+	}
+	candidates = gated
 	// Closest trigger price wins (ties resolve to the newest by the DESC order).
 	best := &candidates[0]
 	bestDist := absFloat(best.TriggerPrice - fillPrice)

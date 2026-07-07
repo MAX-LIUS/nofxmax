@@ -190,6 +190,63 @@ func TestCloseIntentTriggerPriceMatch(t *testing.T) {
 	}
 }
 
+// Slippage tolerance: a Binance native stop slips ~3% past its trigger before
+// the market fill lands. A wide tolerance (3.5%) on the ADVERSE side must still
+// resolve the stop, so the close is attributed instead of dumped in sync_external.
+func TestCloseIntentTriggerPriceSlippageAdverseSide(t *testing.T) {
+	s := newIntentStore(t)
+	ci := s.CloseIntent()
+	// LONG ladder_sl trigger at 100; a real stop fills BELOW it (adverse slippage).
+	if err := ci.RecordProtection("t", "ex", "SOLUSDT", "LONG", "ladder_sl", 1.0, 100.0, 1, ""); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	// Fill at 97.0 (3% below trigger) — must match at 3.5% tolerance.
+	got, err := ci.MatchByTriggerPriceAndConsume("t", "SOLUSDT", "LONG", 97.0, 3.5)
+	if err != nil || got == nil || got.Reason != "ladder_sl" {
+		t.Fatalf("adverse-side slippage fill should match ladder_sl, got=%+v err=%v", got, err)
+	}
+}
+
+// Direction gate: a LONG stop fill that lands well ABOVE the stop trigger (the
+// favourable side) is NOT that stop firing — it is a mid-price/AI close — and
+// must NOT be mislabeled as the stop even inside the wide tolerance band. This
+// is the mislabel case proven from real data (ETH SHORT filled below its SL).
+func TestCloseIntentTriggerPriceDirectionGateRejectsWrongSide(t *testing.T) {
+	s := newIntentStore(t)
+	ci := s.CloseIntent()
+	// LONG ladder_sl trigger at 100. A fill at 103 (3% ABOVE the stop) is on the
+	// impossible side for a stop — reject despite being within 3.5% distance.
+	if err := ci.RecordProtection("t", "ex", "SOLUSDT", "LONG", "ladder_sl", 1.0, 100.0, 1, ""); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "SOLUSDT", "LONG", 103.0, 3.5); got != nil {
+		t.Fatalf("favourable-side fill must NOT be mislabeled as the stop, got=%+v", got)
+	}
+	// SHORT mirror: a SHORT stop trigger at 100 fills ABOVE it; a fill BELOW (97)
+	// is the favourable side and must be rejected.
+	if err := ci.RecordProtection("t", "ex", "ETHUSDT", "SHORT", "ladder_sl", 1.0, 100.0, 1, ""); err != nil {
+		t.Fatalf("record short: %v", err)
+	}
+	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "ETHUSDT", "SHORT", 97.0, 3.5); got != nil {
+		t.Fatalf("SHORT favourable-side fill must NOT be mislabeled as the stop, got=%+v", got)
+	}
+}
+
+// Direction gate on take-profit: a LONG TP fills at/above its trigger; a wide
+// tolerance must still accept the adverse (slightly-below) side for rounding but
+// the primary case is the favourable side being valid.
+func TestCloseIntentTriggerPriceTakeProfitDirection(t *testing.T) {
+	s := newIntentStore(t)
+	ci := s.CloseIntent()
+	if err := ci.RecordProtection("t", "ex", "BCHUSDT", "LONG", "ladder_tp", 0.5, 100.0, 1, ""); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	// LONG TP fills at/above trigger — 102 (2% above) is valid.
+	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "BCHUSDT", "LONG", 102.0, 3.5); got == nil || got.Reason != "ladder_tp" {
+		t.Fatalf("LONG TP fill above trigger should match, got=%+v", got)
+	}
+}
+
 // Side isolation: a LONG protection intent must never be grabbed by a SHORT fill.
 func TestCloseIntentTriggerPriceSideIsolation(t *testing.T) {
 	s := newIntentStore(t)
