@@ -459,6 +459,13 @@ const PositionCard = memo(function PositionCard({
   )
   const peakPnlPct = Number(rt?.drawdown_peak_pnl_pct ?? currentPnlPct)
   const currentDrawdownPct = Number(rt?.current_drawdown_pct ?? 0)
+  // Excursion (MFE/MAE) tracked server-side and persisted: favorable peak + adverse
+  // trough profit%, each in open-time ATR multiples. Shown so the running envelope
+  // (and the worst adverse dip a position weathered) is visible, not just current PnL.
+  const excPeakPct = Number(position.peak_pnl_pct ?? 0)
+  const excTroughPct = Number(position.trough_pnl_pct ?? 0)
+  const excPeakAtr = Number(position.peak_atr_mult ?? 0)
+  const excTroughAtr = Number(position.trough_atr_mult ?? 0)
   const atrAtEntry = Number(rt?.atr_at_entry ?? 0)
   const currentATR = Number(rt?.current_atr ?? 0)
   const atrTimeframe = String(rt?.atr_timeframe ?? '')
@@ -571,6 +578,31 @@ const PositionCard = memo(function PositionCard({
             </>
           )}
         </span>
+        {(excPeakPct !== 0 || excTroughPct !== 0) && (
+          <span>
+            {language === 'zh' ? '峰/谷' : 'MFE/MAE'}{' '}
+            <span className="font-mono text-nofx-green">
+              {formatPct(excPeakPct)}
+            </span>
+            {excPeakAtr !== 0 && (
+              <span className="font-mono text-nofx-text-muted">
+                {' '}
+                {excPeakAtr > 0 ? '+' : ''}
+                {excPeakAtr.toFixed(1)}×
+              </span>
+            )}
+            <span className="text-nofx-text-muted mx-0.5">/</span>
+            <span className="font-mono text-nofx-red">
+              {formatPct(excTroughPct)}
+            </span>
+            {excTroughAtr !== 0 && (
+              <span className="font-mono text-nofx-text-muted">
+                {' '}
+                {excTroughAtr.toFixed(1)}×
+              </span>
+            )}
+          </span>
+        )}
         {entryTimeMs && entryTimeMs > 0 && (
           <span>
             {language === 'zh' ? '持仓' : 'Held'}{' '}

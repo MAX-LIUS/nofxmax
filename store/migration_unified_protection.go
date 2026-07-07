@@ -129,6 +129,20 @@ func MigrateUnifiedProtection(db *sql.DB) error {
 		}
 	}
 
+	// Excursion columns on peak_pnl_states: adverse trough + ATR multiples so the full
+	// MFE/MAE survives a restart, not just the favorable peak. Idempotent via PRAGMA.
+	for _, col := range []struct{ name, ddl string }{
+		{"trough_pnl_pct", "ALTER TABLE peak_pnl_states ADD COLUMN trough_pnl_pct REAL DEFAULT 0"},
+		{"peak_atr_mult", "ALTER TABLE peak_pnl_states ADD COLUMN peak_atr_mult REAL DEFAULT 0"},
+		{"trough_atr_mult", "ALTER TABLE peak_pnl_states ADD COLUMN trough_atr_mult REAL DEFAULT 0"},
+	} {
+		if !columnExists(db, "peak_pnl_states", col.name) {
+			if _, err := db.Exec(col.ddl); err != nil {
+				return fmt.Errorf("add column %s failed: %w", col.name, err)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -269,8 +283,18 @@ func (s *Store) SaveTrailingTPState(traderID, positionID string, isActive bool, 
 	return err
 }
 
+// ExcursionState is one position's full favorable/adverse excursion snapshot:
+// the high-water and low-water profit% and each extreme in open-time ATR multiples.
+type ExcursionState struct {
+	PeakPnlPct    float64
+	TroughPnlPct  float64
+	PeakAtrMult   float64
+	TroughAtrMult float64
+}
+
 // SavePeakPnL 持久化某仓位的峰值盈亏百分比（high-water）。
-// posKey 与内存缓存键一致（symbol_side）。
+// posKey 与内存缓存键一致（symbol_side）。保留旧签名：只更新峰值列，其余列
+// 由 ON CONFLICT 保留原值（新插入时取默认 0）。
 func (s *Store) SavePeakPnL(traderID, posKey string, peakPnLPct float64) error {
 	_, err := s.db.Exec(`
 		INSERT INTO peak_pnl_states (trader_id, pos_key, peak_pnl_pct, updated_at)
@@ -279,6 +303,23 @@ func (s *Store) SavePeakPnL(traderID, posKey string, peakPnLPct float64) error {
 			peak_pnl_pct = excluded.peak_pnl_pct,
 			updated_at = datetime('now')
 	`, traderID, posKey, peakPnLPct)
+
+	return err
+}
+
+// SaveExcursion 持久化某仓位完整的浮盈峰值 + 浮亏谷值 + 两者的 ATR 倍数（MFE/MAE）。
+// 一次写全四列，供实盘每 poll 更新与重启恢复。
+func (s *Store) SaveExcursion(traderID, posKey string, ex ExcursionState) error {
+	_, err := s.db.Exec(`
+		INSERT INTO peak_pnl_states (trader_id, pos_key, peak_pnl_pct, trough_pnl_pct, peak_atr_mult, trough_atr_mult, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+		ON CONFLICT(trader_id, pos_key) DO UPDATE SET
+			peak_pnl_pct = excluded.peak_pnl_pct,
+			trough_pnl_pct = excluded.trough_pnl_pct,
+			peak_atr_mult = excluded.peak_atr_mult,
+			trough_atr_mult = excluded.trough_atr_mult,
+			updated_at = datetime('now')
+	`, traderID, posKey, ex.PeakPnlPct, ex.TroughPnlPct, ex.PeakAtrMult, ex.TroughAtrMult)
 
 	return err
 }
@@ -305,6 +346,31 @@ func (s *Store) LoadPeakPnLForTrader(traderID string) (map[string]float64, error
 			return nil, scanErr
 		}
 		result[posKey] = peak
+	}
+	return result, rows.Err()
+}
+
+// LoadExcursionForTrader 加载某 trader 的全部浮盈/浮亏 excursion 记录（含 ATR 倍数），
+// 用于启动时恢复内存缓存。COALESCE 保证老库缺列/NULL 安全归零。
+func (s *Store) LoadExcursionForTrader(traderID string) (map[string]ExcursionState, error) {
+	rows, err := s.db.Query(`
+		SELECT pos_key,
+		       COALESCE(peak_pnl_pct,0), COALESCE(trough_pnl_pct,0),
+		       COALESCE(peak_atr_mult,0), COALESCE(trough_atr_mult,0)
+		FROM peak_pnl_states WHERE trader_id = ?`, traderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]ExcursionState)
+	for rows.Next() {
+		var posKey string
+		var ex ExcursionState
+		if scanErr := rows.Scan(&posKey, &ex.PeakPnlPct, &ex.TroughPnlPct, &ex.PeakAtrMult, &ex.TroughAtrMult); scanErr != nil {
+			return nil, scanErr
+		}
+		result[posKey] = ex
 	}
 	return result, rows.Err()
 }

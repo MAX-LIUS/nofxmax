@@ -123,6 +123,18 @@ type TraderPosition struct {
 	CloseReason       string  `gorm:"column:close_reason;default:''" json:"close_reason"`
 	Source            string  `gorm:"column:source;default:system" json:"source"`
 	EntrySceneTags    string  `gorm:"column:entry_scene_tags;default:''" json:"entry_scene_tags"` // JSON: trend_phase, ema20_deviation, regime, chg4h at entry
+
+	// Excursion tracking (MFE/MAE): running favorable peak and adverse trough of the
+	// position's profit%, plus each extreme in frozen-open-time ATR multiples. Updated
+	// live on the drawdown poll and frozen onto the row at close so closed positions
+	// stay fully reconstructable for review/backtest reverse-lookup. PeakPnlPct is the
+	// high-water profit%; TroughPnlPct the low-water (most adverse) profit%. Peak/Trough
+	// AtrMult = |extreme profit% distance from entry| / ATR% at entry.
+	PeakPnlPct    float64 `gorm:"column:peak_pnl_pct;default:0" json:"peak_pnl_pct"`
+	TroughPnlPct  float64 `gorm:"column:trough_pnl_pct;default:0" json:"trough_pnl_pct"`
+	PeakAtrMult   float64 `gorm:"column:peak_atr_mult;default:0" json:"peak_atr_mult"`
+	TroughAtrMult float64 `gorm:"column:trough_atr_mult;default:0" json:"trough_atr_mult"`
+
 	CreatedAt         int64   `gorm:"column:created_at" json:"created_at"`                       // Unix milliseconds UTC
 	UpdatedAt         int64   `gorm:"column:updated_at" json:"updated_at"`                       // Unix milliseconds UTC
 }
@@ -741,6 +753,44 @@ func (s *PositionStore) UpdatePositionExchangeInfo(id int64, exchangeID, exchang
 	}).Error
 }
 
+// stampExcursionOntoUpdates freezes the position's final favorable-peak / adverse-
+// trough profit% + ATR multiples onto the close Updates map, read from the live
+// peak_pnl_states row. This preserves the full MFE/MAE trail on the closed history
+// row before ClearPeakPnLCache deletes the transient state. Best-effort: a missing
+// row (e.g. position never polled) leaves the columns at their existing values.
+// pos_key matching is case-insensitive because the live cache uses exchange-reported
+// side casing (OKX "long") while the DB row stores uppercase ("LONG").
+func (s *PositionStore) stampExcursionOntoUpdates(pos *TraderPosition, updates map[string]interface{}) {
+	if pos == nil || s.db == nil || pos.TraderID == "" {
+		return
+	}
+	posKey := pos.Symbol + "_" + pos.Side
+	var ex struct {
+		PeakPnlPct    float64
+		TroughPnlPct  float64
+		PeakAtrMult   float64
+		TroughAtrMult float64
+	}
+	row := s.db.Raw(`
+		SELECT COALESCE(peak_pnl_pct,0)   AS peak_pnl_pct,
+		       COALESCE(trough_pnl_pct,0) AS trough_pnl_pct,
+		       COALESCE(peak_atr_mult,0)  AS peak_atr_mult,
+		       COALESCE(trough_atr_mult,0) AS trough_atr_mult
+		FROM peak_pnl_states
+		WHERE trader_id = ? AND lower(pos_key) = lower(?)
+		LIMIT 1`, pos.TraderID, posKey).Row()
+	if row == nil {
+		return
+	}
+	if err := row.Scan(&ex.PeakPnlPct, &ex.TroughPnlPct, &ex.PeakAtrMult, &ex.TroughAtrMult); err != nil {
+		return // no live excursion row; leave columns unchanged
+	}
+	updates["peak_pnl_pct"] = ex.PeakPnlPct
+	updates["trough_pnl_pct"] = ex.TroughPnlPct
+	updates["peak_atr_mult"] = ex.PeakAtrMult
+	updates["trough_atr_mult"] = ex.TroughAtrMult
+}
+
 // ClosePositionFully marks position as fully closed
 // exitTimeMs is Unix milliseconds UTC
 func (s *PositionStore) ClosePositionFully(id int64, exitPrice float64, exitOrderID string, exitTimeMs int64, totalRealizedPnL float64, totalFee float64, closeReason string, executionSource string, executionType string) error {
@@ -755,7 +805,7 @@ func (s *PositionStore) ClosePositionFully(id int64, exitPrice float64, exitOrde
 	}
 	reason, source, execType := s.deriveCloseReason(&pos, exitOrderID, closeReason, pos.Quantity, exitPrice)
 
-	if err := s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(map[string]interface{}{
+	updates := map[string]interface{}{
 		"quantity":            quantity,
 		"exit_price":          exitPrice,
 		"exit_order_id":       exitOrderID,
@@ -766,7 +816,9 @@ func (s *PositionStore) ClosePositionFully(id int64, exitPrice float64, exitOrde
 		"status":              "CLOSED",
 		"close_reason":        reason,
 		"updated_at":          time.Now().UTC().UnixMilli(),
-	}).Error; err != nil {
+	}
+	s.stampExcursionOntoUpdates(&pos, updates)
+	if err := s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 		return err
 	}
 	feeDelta := totalFee - pos.Fee
@@ -1133,7 +1185,7 @@ func (s *PositionStore) CreateOpenPosition(pos *TraderPosition) error {
 // ClosePositionWithAccurateData closes a position with accurate data from exchange
 // exitTimeMs is Unix milliseconds UTC
 func (s *PositionStore) ClosePositionWithAccurateData(id int64, exitPrice float64, exitOrderID string, exitTimeMs int64, realizedPnL float64, fee float64, closeReason string) error {
-	return s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(map[string]interface{}{
+	updates := map[string]interface{}{
 		"exit_price":    exitPrice,
 		"exit_order_id": exitOrderID,
 		"exit_time":     exitTimeMs,
@@ -1142,7 +1194,12 @@ func (s *PositionStore) ClosePositionWithAccurateData(id int64, exitPrice float6
 		"status":        "CLOSED",
 		"close_reason":  closeReason,
 		"updated_at":    time.Now().UTC().UnixMilli(),
-	}).Error
+	}
+	var pos TraderPosition
+	if err := s.db.First(&pos, id).Error; err == nil {
+		s.stampExcursionOntoUpdates(&pos, updates)
+	}
+	return s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(updates).Error
 }
 
 func (s *PositionStore) MarkOpenPositionsAbsentFromExchangeClosed(traderID string, livePositions map[string]float64, closeReason string) (int64, error) {

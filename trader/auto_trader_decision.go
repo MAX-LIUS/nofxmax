@@ -344,6 +344,16 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 			// portions and all fees, which the exchange's unrealized_pnl alone omits.
 			"net_pnl": realizedPnl + unrealizedPnl - accumulatedFee,
 		})
+
+		// Excursion (MFE/MAE): surface the live favorable-peak / adverse-trough profit%
+		// and their open-time ATR multiples so the dashboard and reverse-lookup have the
+		// running envelope, not just the current PnL. Zero-value until the first poll.
+		ex := at.GetExcursion(symbol, side)
+		posMap := result[len(result)-1]
+		posMap["peak_pnl_pct"] = ex.PeakPnlPct
+		posMap["trough_pnl_pct"] = ex.TroughPnlPct
+		posMap["peak_atr_mult"] = ex.PeakAtrMult
+		posMap["trough_atr_mult"] = ex.TroughAtrMult
 	}
 
 	return result, nil

@@ -1448,6 +1448,13 @@ function PositionRow({
 
   const closeRatioPct = position.close_ratio_pct || 0
   const closeValueUsdt = position.close_value_usdt || exitPrice * displayQty
+  // Excursion (MFE/MAE) frozen onto the row at close: favorable peak + adverse trough
+  // profit% and each extreme in open-time ATR multiples. Reverse-lookup / backtest trail.
+  const excPeakPct = Number(position.peak_pnl_pct ?? 0)
+  const excTroughPct = Number(position.trough_pnl_pct ?? 0)
+  const excPeakAtr = Number(position.peak_atr_mult ?? 0)
+  const excTroughAtr = Number(position.trough_atr_mult ?? 0)
+  const hasExcursion = excPeakPct !== 0 || excTroughPct !== 0
   // Position-level canonical mechanism/category from the taxonomy.
   const positionMech = classifyMechanism(
     position.close_reason || position.execution_source
@@ -1723,6 +1730,28 @@ function PositionRow({
                     {`${position.entry_decision_cycle || '—'} / ${position.exit_decision_cycle || '—'}`}
                   </div>
                 </div>
+                {hasExcursion && (
+                  <div>
+                    <div style={{ color: '#848E9C' }}>
+                      {'峰值 / 谷值 (ATR倍数) / MFE / MAE (×ATR)'}
+                    </div>
+                    <div className="font-mono text-[11px]">
+                      <span style={{ color: '#0ECB81' }}>
+                        {`${excPeakPct >= 0 ? '+' : ''}${excPeakPct.toFixed(2)}%`}
+                        {excPeakAtr !== 0
+                          ? ` (${excPeakAtr > 0 ? '+' : ''}${excPeakAtr.toFixed(2)}×)`
+                          : ''}
+                      </span>
+                      <span style={{ color: '#848E9C' }}> / </span>
+                      <span style={{ color: '#F6465D' }}>
+                        {`${excTroughPct >= 0 ? '+' : ''}${excTroughPct.toFixed(2)}%`}
+                        {excTroughAtr !== 0
+                          ? ` (${excTroughAtr.toFixed(2)}×)`
+                          : ''}
+                      </span>
+                    </div>
+                  </div>
+                )}
                 <details className="group">
                   <summary
                     className="cursor-pointer list-none select-none flex items-center gap-1"
