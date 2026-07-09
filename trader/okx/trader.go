@@ -138,6 +138,17 @@ func okxReasonTag(reason string) string {
 	return tag
 }
 
+// clOrdIDForReason returns a client order id that encodes the close mechanism
+// when the reason has a registered code (see reason_codec.go), so the resulting
+// close fill decodes its own reason exactly. Falls back to a plain random id when
+// the reason is unknown/empty, preserving prior behaviour.
+func clOrdIDForReason(reason string) string {
+	if coded := encodeReasonClientID(reason); coded != "" {
+		return coded
+	}
+	return genOkxClOrdID()
+}
+
 // genOkxClOrdID generates OKX order ID
 func genOkxClOrdID() string {
 	timestamp := time.Now().UnixNano() % 10000000000000

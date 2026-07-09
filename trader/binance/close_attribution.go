@@ -109,6 +109,14 @@ func (t *FuturesTrader) resolveBinanceClose(
 			if origType == "LIMIT" && strings.HasPrefix(clientID, brOrderIDPrefix) {
 				out.realType = "TAKE_PROFIT"
 			}
+			// EXACT mechanism from the coded client id we set at placement. All of
+			// BE/ladder_sl/structural_sl/full_sl surface as STOP_MARKET, so origType
+			// alone cannot disambiguate them — the coded id does, with no guessing.
+			// This pre-empts the L2.5 trigger-price match below.
+			if coded := decodeReasonFromClientID(clientID); coded != "" {
+				out.reason = coded
+				logger.Infof("  ✅ BN close %s %s attributed reason=%s via coded client-id=%s (exact 1:1)", symbol, positionSide, coded, clientID)
+			}
 			if origType != "" && origType != "MARKET" {
 				logger.Infof("  🔗 BN close %s %s real origType=%s stop=%.6f (client=%s)", symbol, positionSide, origType, stopPrice, clientID)
 			}

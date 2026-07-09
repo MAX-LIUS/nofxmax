@@ -3,7 +3,6 @@ package okx
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"nofx/logger"
 	"nofx/market"
 	"nofx/store"
@@ -36,45 +35,14 @@ func protectionReasonFromTag(tag string) string {
 	return ""
 }
 
-// protectionCandidate is the minimal view of a locally-recorded protection order
-// used to attribute a close fill to its protection mechanism.
-type protectionCandidate struct {
-	OrderAction string  // full reason, e.g. "managed_drawdown_runner_exit", "ladder_tp", "native_trailing"
-	StopPrice   float64 // trigger/activation price
-	Quantity    float64
-}
-
-// matchProtectionReasonByPrice attributes a close fill to a protection mechanism
-// when the OKX tag/parent lookup could not (the broker tag is 16 chars and leaves
-// no room for a reason, and a triggered algo's fill ordId differs from the stored
-// algoId). It picks the live protection order whose trigger price is closest to the
-// fill price within tolerancePct. It is purely additive: callers only use it when the
-// reason is otherwise empty, so it can never override a known reason.
-//
-// fillPrice must be > 0. Returns "" when no candidate is within tolerance.
-func matchProtectionReasonByPrice(fillPrice float64, candidates []protectionCandidate, tolerancePct float64) string {
-	if fillPrice <= 0 || len(candidates) == 0 {
-		return ""
-	}
-	if tolerancePct <= 0 {
-		tolerancePct = 0.6 // default: 0.6% around the fill price
-	}
-	bestReason := ""
-	bestDistPct := tolerancePct
-	for _, c := range candidates {
-		if c.StopPrice <= 0 || strings.TrimSpace(c.OrderAction) == "" {
-			continue
-		}
-		distPct := math.Abs(c.StopPrice-fillPrice) / fillPrice * 100
-		if distPct <= bestDistPct {
-			bestDistPct = distPct
-			bestReason = strings.TrimSpace(c.OrderAction)
-		}
-	}
-	return bestReason
-}
-
-
+// NOTE: matchProtectionReasonByPrice / protectionCandidate were REMOVED (2026-07).
+// They guessed a close fill's mechanism from the nearest unlabeled live order by
+// price proximity, which produced false attributions (e.g. a loss-side market
+// close mislabeled break_even_stop when BE was never armed). Attribution is now
+// exact-only: coded client id, order-detail algoClOrdId, order-id close-intent, or
+// ledger trigger-price intent (which carries the REAL reason recorded at
+// placement, with direction gating). Unresolved closes stay honestly
+// unattributed rather than guessed.
 
 // OKXTrade represents a trade record from OKX fills history
 type OKXTrade struct {
@@ -94,6 +62,8 @@ type OKXTrade struct {
 	OrderType   string
 	OrderAction string // open_long, open_short, close_long, close_short
 	Tag         string
+	ClientID    string // clOrdId or algoClOrdId we set at placement (may be "")
+	CodedReason string // mechanism decoded from ClientID; "" when not one of ours
 }
 
 // GetTrades retrieves trade/fill records from OKX
@@ -118,19 +88,21 @@ func (t *OKXTrader) GetTrades(startTime time.Time, limit int) ([]OKXTrade, error
 	}
 
 	var fills []struct {
-		InstID   string `json:"instId"`   // e.g., "BTC-USDT-SWAP"
-		TradeID  string `json:"tradeId"`  // Trade ID
-		OrdID    string `json:"ordId"`    // Order ID
-		BillID   string `json:"billId"`   // Bill ID
-		Side     string `json:"side"`     // buy or sell
-		PosSide  string `json:"posSide"`  // long, short, or net
-		FillPx   string `json:"fillPx"`   // Fill price
-		FillSz   string `json:"fillSz"`   // Fill size (contracts)
-		Fee      string `json:"fee"`      // Fee (negative for cost)
-		FeeCcy   string `json:"feeCcy"`   // Fee currency
-		Ts       string `json:"ts"`       // Trade timestamp (ms)
-		ExecType string `json:"execType"` // T: taker, M: maker
-		Tag      string `json:"tag"`      // Order tag
+		InstID      string `json:"instId"`      // e.g., "BTC-USDT-SWAP"
+		TradeID     string `json:"tradeId"`     // Trade ID
+		OrdID       string `json:"ordId"`       // Order ID
+		ClOrdID     string `json:"clOrdId"`     // client order id (market closes we placed)
+		AlgoClOrdID string `json:"algoClOrdId"` // client algo id (protection orders we placed)
+		BillID      string `json:"billId"`      // Bill ID
+		Side        string `json:"side"`        // buy or sell
+		PosSide     string `json:"posSide"`     // long, short, or net
+		FillPx      string `json:"fillPx"`      // Fill price
+		FillSz      string `json:"fillSz"`      // Fill size (contracts)
+		Fee         string `json:"fee"`         // Fee (negative for cost)
+		FeeCcy      string `json:"feeCcy"`      // Fee currency
+		Ts          string `json:"ts"`          // Trade timestamp (ms)
+		ExecType    string `json:"execType"`    // T: taker, M: maker
+		Tag         string `json:"tag"`         // Order tag
 	}
 
 	if err := json.Unmarshal(data, &fills); err != nil {
@@ -186,6 +158,11 @@ func (t *OKXTrader) GetTrades(startTime time.Time, limit int) ([]OKXTrade, error
 			}
 		}
 
+		// Client id we set at placement: algoClOrdId for protection algos, clOrdId
+		// for market closes. Decode the mechanism directly from it (exact, no guess).
+		clientID := firstNonEmpty(fill.AlgoClOrdID, fill.ClOrdID)
+		codedReason := decodeReasonFromClientID(clientID)
+
 		trade := OKXTrade{
 			InstID:      fill.InstID,
 			Symbol:      symbol,
@@ -203,6 +180,8 @@ func (t *OKXTrader) GetTrades(startTime time.Time, limit int) ([]OKXTrade, error
 			OrderType:   "MARKET",
 			OrderAction: orderAction,
 			Tag:         fill.Tag,
+			ClientID:    clientID,
+			CodedReason: codedReason,
 		}
 
 		trades = append(trades, trade)
@@ -474,15 +453,35 @@ func (t *OKXTrader) SyncOrdersFromOKXWithFullCloseHandler(traderID string, excha
 			}
 		}
 		if canonicalAction == "close_long" || canonicalAction == "close_short" {
-			if reason := protectionReasonFromTag(trade.Tag); reason != "" {
-				requestedReason = reason
+			// Highest-priority EXACT source: the mechanism code we embedded in the
+			// client-controlled order id at placement (algoClOrdId / clOrdId). The
+			// fill echoes it back verbatim, so this is a true 1:1 correspondence with
+			// zero guessing and zero race. When present it wins over every other path.
+			if coded := trade.CodedReason; coded != "" {
+				requestedReason = coded
+				logger.Infof("  ✅ Close fill %s %s attributed to reason=%s via coded client-id=%s (exact 1:1)", symbol, canonicalAction, coded, trade.ClientID)
+			}
+			if requestedReason == canonicalAction {
+				if reason := protectionReasonFromTag(trade.Tag); reason != "" {
+					requestedReason = reason
+				}
+			}
+			// EXACT via order-detail: a triggered algo spawns a fresh fill ordId, but
+			// the order-detail endpoint still returns the algoClOrdId we set at
+			// placement, which encodes the mechanism. This is the VERIFIED-available
+			// exact path (does not depend on the fills feed echoing the client id).
+			if requestedReason == canonicalAction && parentOrderID != "" {
+				if reason, rerr := t.GetOrderLinkedReason(symbol, parentOrderID); rerr == nil && reason != "" {
+					requestedReason = reason
+					logger.Infof("  ✅ Close fill %s %s attributed to reason=%s via order-detail algoClOrdId (exact 1:1)", symbol, canonicalAction, reason)
+				}
 			}
 			// Deterministic attribution: when an OKX TP/SL/trailing algo triggers,
 			// it spawns a regular order whose detail carries the originating algoId.
 			// The fill's ordId differs from the stored algoId, so resolve the link
 			// via the order-detail API, then map algoId -> the protection order's
 			// recorded reason. This is exact (not price-proximity). Only runs when
-			// the tag could not resolve the mechanism.
+			// the tag/coded-id could not resolve the mechanism.
 			if requestedReason == canonicalAction && orderStore != nil && parentOrderID != "" {
 				if algoID, aerr := t.GetOrderLinkedAlgoID(symbol, parentOrderID); aerr == nil && algoID != "" {
 					if protOrd, perr := orderStore.GetOrderByExchangeID(exchangeID, algoID); perr == nil && protOrd != nil && protOrd.OrderAction != "" {
@@ -507,28 +506,30 @@ func (t *OKXTrader) SyncOrdersFromOKXWithFullCloseHandler(traderID string, excha
 					}
 				}
 			}
-			// Fallback: tag and algoId both unresolved. Attribute the fill to the
-			// live protection order whose trigger price is closest to the fill
-			// price. Purely additive; only applies when still unresolved.
-			if requestedReason == canonicalAction && orderStore != nil {
-				if live, lerr := orderStore.GetTraderOrdersFiltered(ownerTraderID, symbol, "NEW", 50); lerr == nil && len(live) > 0 {
-					cands := make([]protectionCandidate, 0, len(live))
-					for _, o := range live {
-						if o == nil || !o.ReduceOnly {
-							continue
-						}
-						cands = append(cands, protectionCandidate{
-							OrderAction: o.OrderAction,
-							StopPrice:   o.StopPrice,
-							Quantity:    o.Quantity,
-						})
-					}
-					if matched := matchProtectionReasonByPrice(trade.FillPrice, cands, 0.6); matched != "" {
-						requestedReason = matched
-						logger.Infof("  🔖 Close fill %s %s attributed to protection reason=%s by price match (fill=%.6f)", symbol, canonicalAction, matched, trade.FillPrice)
+			// Ledger-backed trigger-price match: a native SL/TP/BE algo records a
+			// placement-time intent carrying its REAL reason + trigger price (see
+			// recordProtectionIntent). A triggered protection fills AT its trigger, so
+			// a fill whose price ≈ an intent's trigger_price resolves to that intent's
+			// recorded mechanism — with DIRECTION GATING (a fill on the physically
+			// impossible side of the trigger is rejected). This is NOT the old
+			// nearest-live-order guess: the reason comes from what we recorded at
+			// placement, not inferred from an unlabeled resting order. Survives the
+			// algo aging out of the exchange's queryable window.
+			if requestedReason == canonicalAction && trade.FillPrice > 0 {
+				if ci := st.CloseIntent(); ci != nil {
+					if intent, ierr := ci.MatchByTriggerPriceAndConsume(ownerTraderID, symbol, positionSide, trade.FillPrice, 3.5); ierr == nil && intent != nil && intent.Reason != "" {
+						requestedReason = intent.Reason
+						logger.Infof("  🎯 Close fill %s %s attributed to reason=%s via protection-intent (trigger %.6f≈fill %.6f, intentID=%d)", symbol, canonicalAction, requestedReason, intent.TriggerPrice, trade.FillPrice, intent.ID)
 					}
 				}
 			}
+			// Price-proximity guessing (matchProtectionReasonByPrice) is REMOVED as an
+			// attribution source: it inferred a reason from the nearest unlabeled live
+			// order, producing false labels (e.g. a loss-side market close tagged
+			// break_even_stop when BE was never armed). Every order we place now carries
+			// an exact reason via coded id / order-detail / order-id intent / trigger
+			// intent above. If all of those miss, we DO NOT guess — the close stays
+			// honestly unattributed (bare close_long/short) rather than mislabeled.
 			// Last-resort fallback: a system close whose order id was not recorded on
 			// the intent (e.g. order result lacked orderId). Match the newest
 			// unconsumed intent for trader+symbol+side within a tight time window.

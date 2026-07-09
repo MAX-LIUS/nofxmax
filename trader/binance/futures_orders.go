@@ -913,7 +913,10 @@ func (t *FuturesTrader) SetStopLossTagged(symbol string, positionSide string, qu
 		Type(futures.AlgoOrderTypeStopMarket).
 		TriggerPrice(triggerStr).
 		WorkingType(futures.WorkingTypeContractPrice).
-		ClientAlgoId(getBrOrderID())
+		// Encode the mechanism into the client algo id so the eventual close fill
+		// decodes its own reason exactly (BE/ladder_sl/structural_sl/full_sl all
+		// become STOP_MARKET on the exchange; only the coded id disambiguates them).
+		ClientAlgoId(clientIDForReason(reasonTag))
 
 	if quantity > 0 {
 		qtyStr, ferr := t.FormatQuantity(symbol, quantity)
@@ -955,7 +958,7 @@ func (t *FuturesTrader) SetTakeProfitTagged(symbol string, positionSide string, 
 	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 
 	if t.makerTakeProfit && quantity > 0 {
-		if err := t.placeMakerTakeProfit(symbol, positionSide, quantity, takeProfitPrice); err == nil {
+		if err := t.placeMakerTakeProfit(symbol, positionSide, quantity, takeProfitPrice, reasonTag); err == nil {
 			return nil
 		} else if isPostOnlyCrossRejection(err) {
 			logger.Infof("  ↩️ Maker TP would cross for %s @ %.8f; falling back to algo TP", symbol, takeProfitPrice)
@@ -963,7 +966,7 @@ func (t *FuturesTrader) SetTakeProfitTagged(symbol string, positionSide string, 
 			logger.Warnf("  ⚠️ Maker TP failed for %s (%v); falling back to algo TP", symbol, err)
 		}
 	}
-	return t.setAlgoTakeProfit(symbol, positionSide, quantity, takeProfitPrice)
+	return t.setAlgoTakeProfit(symbol, positionSide, quantity, takeProfitPrice, reasonTag)
 }
 
 // placeMakerTakeProfit places a post-only LIMIT order that earns the maker fee
@@ -971,7 +974,7 @@ func (t *FuturesTrader) SetTakeProfitTagged(symbol string, positionSide string, 
 // order, so reduceOnly must NOT be sent (Binance returns -1106); the opposite
 // Side + PositionSide combination is inherently reduce-only. Returns the raw
 // exchange error so callers can classify a post-only cross rejection.
-func (t *FuturesTrader) placeMakerTakeProfit(symbol, positionSide string, quantity, price float64) error {
+func (t *FuturesTrader) placeMakerTakeProfit(symbol, positionSide string, quantity, price float64, reasonTag string) error {
 	var side futures.SideType
 	var posSide futures.PositionSideType
 	if positionSide == "LONG" {
@@ -997,7 +1000,7 @@ func (t *FuturesTrader) placeMakerTakeProfit(symbol, positionSide string, quanti
 		TimeInForce(futures.TimeInForceTypeGTX). // GTX = post-only (maker or reject)
 		Quantity(qtyStr).
 		Price(priceStr).
-		NewClientOrderID(getBrOrderID()).
+		NewClientOrderID(clientIDForReason(reasonTag)).
 		Do(context.Background())
 	if err != nil {
 		return err
@@ -1010,7 +1013,7 @@ func (t *FuturesTrader) placeMakerTakeProfit(symbol, positionSide string, quanti
 // Laddered partial TPs (quantity>0) use explicit quantity (hedge mode allows
 // only one closePosition=true TP per side; see SetStopLossTagged). A
 // full-position TP (quantity<=0) uses closePosition=true.
-func (t *FuturesTrader) setAlgoTakeProfit(symbol, positionSide string, quantity, takeProfitPrice float64) error {
+func (t *FuturesTrader) setAlgoTakeProfit(symbol, positionSide string, quantity, takeProfitPrice float64, reasonTag string) error {
 	var side futures.SideType
 	var posSide futures.PositionSideType
 	if positionSide == "LONG" {
@@ -1034,7 +1037,7 @@ func (t *FuturesTrader) setAlgoTakeProfit(symbol, positionSide string, quantity,
 		Type(futures.AlgoOrderTypeTakeProfitMarket).
 		TriggerPrice(triggerStr).
 		WorkingType(futures.WorkingTypeContractPrice).
-		ClientAlgoId(getBrOrderID())
+		ClientAlgoId(clientIDForReason(reasonTag))
 
 	if quantity > 0 {
 		qtyStr, ferr := t.FormatQuantity(symbol, quantity)
