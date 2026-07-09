@@ -1931,12 +1931,25 @@ function PositionRow({
                   }
                 })()}
 
-              {protectionPlan.length > 0 && (
+              {protectionPlan.length > 0 ? (
                 <EntryProtectionPlan
                   plan={protectionPlan}
                   language={language}
                   firedKeys={firedKeys}
                 />
+              ) : (
+                <div
+                  className="text-xs mb-3 px-3 py-2 rounded"
+                  style={{
+                    color: '#848E9C',
+                    background: '#1E2329',
+                    border: '1px dashed #2B3139',
+                  }}
+                >
+                  {language === 'zh'
+                    ? '历史仓 · 开仓保护计划未记录（此仓建立时未落库真实计划，不显示模板）'
+                    : 'Legacy position · protection plan not recorded (no real plan was persisted at open; template intentionally not shown)'}
+                </div>
               )}
 
               {position.close_events &&
