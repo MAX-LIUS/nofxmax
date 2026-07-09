@@ -541,6 +541,23 @@ func (at *AutoTrader) runCycle() error {
 			attachExecutionQualityToReview(actionRecord.ReviewContext, executionQuality)
 		}
 
+		// ── Shadow entry gates (observation-only, never blocks) ──
+		// Evaluate ALL candidate regime/trend gate rules in parallel and persist
+		// each verdict, joined to positions later by (trader_id, cycle, symbol).
+		// This is dry-run substrate: forward live data ranks every rule before any
+		// is allowed to enforce. Best-effort — failures never touch execution.
+		if directionFromAction(d.Action) != "" {
+			primaryTF := ""
+			if at.config.StrategyConfig != nil {
+				primaryTF = at.config.StrategyConfig.Indicators.Klines.PrimaryTimeframe
+			}
+			if verdicts := evaluateShadowGates(at.id, int64(at.cycleNumber), &d, ctx.MarketDataMap[d.Symbol], primaryTF, gateResult.Allowed); len(verdicts) > 0 && at.store != nil {
+				if err := at.store.ShadowGate().RecordBatch(verdicts); err != nil {
+					logger.Infof("⚠ shadow-gate record failed (non-blocking): %v", err)
+				}
+			}
+		}
+
 		if !gateResult.Allowed {
 			blockReason := entryGateResultToBlockReason(gateResult)
 			actionRecord.Error = blockReason
