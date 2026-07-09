@@ -56,15 +56,20 @@ func main() {
 		 AND p.entry_decision_cycle = v.cycle
 		 AND p.symbol = v.symbol
 		 AND p.status = 'CLOSED'
-		WHERE v.trader_id LIKE ?`, *traderLike)
+		WHERE v.trader_id LIKE ? AND v.cycle > 0
+		  AND p.entry_decision_cycle NOT IN (
+		    SELECT entry_decision_cycle FROM trader_positions
+		    WHERE status='CLOSED' AND entry_price>0
+		    GROUP BY trader_id, entry_decision_cycle, symbol HAVING COUNT(*)>1
+		  )`, *traderLike)
 	if err != nil {
 		fmt.Println("no shadow_gate_verdicts table yet — deploy the shadow-gate build first, let it run, then re-run.")
 		return
 	}
 	defer rows.Close()
 
-	book := map[string]posRow{}         // pkey -> position (unique)
-	blockedBy := map[string][]string{}  // rule -> []pkey it blocks
+	book := map[string]posRow{}              // pkey -> position (unique)
+	blockedSet := map[string]map[string]bool{} // rule -> set of pkeys it blocks (deduped)
 	ruleSet := map[string]bool{}
 	for rows.Next() {
 		var rule, pkey string
@@ -77,7 +82,10 @@ func main() {
 		ruleSet[rule] = true
 		book[pkey] = posRow{pnl: pnl, entryMs: entryMs}
 		if block {
-			blockedBy[rule] = append(blockedBy[rule], pkey)
+			if blockedSet[rule] == nil {
+				blockedSet[rule] = map[string]bool{}
+			}
+			blockedSet[rule][pkey] = true
 		}
 	}
 	if len(book) == 0 {
@@ -114,14 +122,15 @@ func main() {
 		"rule", "blkN", "blkPnL", "blkAvg", "vs-random(PnL/CVaR)", "H1 / H2 (PnL beats rand)")
 	rng := rand.New(rand.NewSource(42))
 	for _, rule := range rules {
-		blocked := blockedBy[rule]
-		bl := map[string]bool{}
+		bl := blockedSet[rule]
+		if bl == nil {
+			bl = map[string]bool{}
+		}
 		var blkPnL float64
-		for _, k := range blocked {
-			bl[k] = true
+		for k := range bl {
 			blkPnL += book[k].pnl
 		}
-		n := len(blocked)
+		n := len(bl)
 		if n < *minN {
 			fmt.Printf("%-26s %5d %9s  (need >=%d blocked to score)\n", rule, n, "-", *minN)
 			continue

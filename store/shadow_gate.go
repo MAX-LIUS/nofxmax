@@ -93,6 +93,10 @@ func (s *ShadowGateStore) RuleStats(traderID string) ([]ShadowRuleStat, error) {
 		args = append(args, traderID)
 	}
 	// LEFT JOIN so unmatched verdicts still surface as pending.
+	// Exclude cycle=0 verdicts and ambiguous (trader,cycle,symbol) keys that map
+	// to >1 position — those fan out the join and corrupt counts. This mirrors the
+	// shadowrank CLI so the monitor page and the authoritative significance tool
+	// report the same book.
 	q := `
 		SELECT v.rule_name, v.would_block,
 		       p.realized_pnl,
@@ -103,7 +107,12 @@ func (s *ShadowGateStore) RuleStats(traderID string) ([]ShadowRuleStat, error) {
 		 AND p.entry_decision_cycle = v.cycle
 		 AND p.symbol = v.symbol
 		 AND p.status = 'CLOSED'
-		WHERE ` + where
+		 AND p.entry_decision_cycle NOT IN (
+		   SELECT entry_decision_cycle FROM trader_positions
+		   WHERE status='CLOSED' AND entry_price>0
+		   GROUP BY trader_id, entry_decision_cycle, symbol HAVING COUNT(*)>1
+		 )
+		WHERE v.cycle > 0 AND ` + where
 	rows, err := s.db.Raw(q, args...).Rows()
 	if err != nil {
 		return nil, err

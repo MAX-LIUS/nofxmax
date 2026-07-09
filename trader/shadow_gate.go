@@ -185,3 +185,47 @@ func evaluateShadowGates(traderID string, cycle int64, d *kernel.Decision, data 
 	}
 	return out
 }
+
+// ── Backfill exports ──
+// These let the offline shadowbackfill tool run the EXACT same rule registry over
+// historical klines, so backfilled verdicts are identical in logic to live ones.
+
+// ShadowBackfillVerdict is the minimal verdict shape for the backfill tool.
+type ShadowBackfillVerdict struct {
+	Rule   string
+	Block  bool
+	Regime string
+	Detail string
+}
+
+// ShadowRuleNames returns the names of all registered candidate rules.
+func ShadowRuleNames() []string {
+	out := make([]string, 0, len(shadowRules))
+	for _, r := range shadowRules {
+		out = append(out, r.name)
+	}
+	return out
+}
+
+// EvaluateShadowGatesForBackfill runs every rule over a causal kline slice (last
+// bar = entry bar) for a given side, returning one verdict per rule. Confidence
+// is unavailable in pure-price backfill, so conf-gated rules see conf=0 (their
+// chop branch still evaluates; the conf<threshold test is simply not satisfied).
+func EvaluateShadowGatesForBackfill(bars []market.Kline, side string) []ShadowBackfillVerdict {
+	if len(bars) < 60 {
+		return nil
+	}
+	h := make([]float64, len(bars))
+	l := make([]float64, len(bars))
+	c := make([]float64, len(bars))
+	for i, b := range bars {
+		h[i], l[i], c[i] = b.High, b.Low, b.Close
+	}
+	ctx := shadowGateCtx{highs: h, lows: l, closes: c, side: side, conf: 0}
+	out := make([]ShadowBackfillVerdict, 0, len(shadowRules))
+	for _, r := range shadowRules {
+		block, regime, detail := r.fn(ctx)
+		out = append(out, ShadowBackfillVerdict{Rule: r.name, Block: block, Regime: regime, Detail: detail})
+	}
+	return out
+}

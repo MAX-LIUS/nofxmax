@@ -58,11 +58,15 @@ const shadowMonitorHTML = `<!DOCTYPE html>
 <body>
 <header>
   <h1>🛡 影子门监控 <span class="mut">Shadow Gate Monitor</span></h1>
-  <input id="tok" placeholder="粘贴 JWT (主站 localStorage.auth_token)" style="min-width:320px"/>
-  <input id="trader" placeholder="trader_id (留空=全部)" style="min-width:180px"/>
-  <button onclick="saveTok()">保存并刷新</button>
-  <label class="mut"><input type="checkbox" id="auto" onchange="toggleAuto()"/> 自动刷新30s</label>
+  <input id="email" placeholder="主站邮箱" style="min-width:170px" autocomplete="username"/>
+  <input id="pw" type="password" placeholder="密码" style="min-width:130px" autocomplete="current-password"/>
+  <button onclick="doLogin()">登录取 token</button>
+  <input id="trader" placeholder="trader_id (留空=全部)" style="min-width:170px"/>
+  <button onclick="saveTok()">刷新</button>
+  <label class="mut"><input type="checkbox" id="auto" onchange="toggleAuto()"/> 自动30s</label>
   <span id="status" class="mut"></span>
+  <details style="width:100%;margin-top:4px"><summary class="mut" style="cursor:pointer;font-size:12px">或手动粘贴 token</summary>
+   <input id="tok" placeholder="粘贴 JWT" style="min-width:420px;margin-top:6px"/></details>
 </header>
 <div class="wrap">
   <div class="tabs">
@@ -80,7 +84,22 @@ const shadowMonitorHTML = `<!DOCTYPE html>
 <script>
 const $=s=>document.querySelector(s);
 let CUR='rules', timer=null;
-function saveTok(){localStorage.setItem('sg_tok',$('#tok').value.trim());localStorage.setItem('sg_trader',$('#trader').value.trim());load();}
+function saveTok(){const t=$('#tok').value.trim();if(t)localStorage.setItem('sg_tok',t);localStorage.setItem('sg_trader',$('#trader').value.trim());load();}
+async function doLogin(){
+  const email=$('#email').value.trim(), pw=$('#pw').value;
+  if(!email||!pw){$('#status').innerHTML='<span class="amb">请输入邮箱和密码</span>';return;}
+  $('#status').textContent='登录中…';
+  try{
+    const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email,password:pw})});
+    const j=await r.json();
+    if(!r.ok||!j.token){throw new Error(j.error||('HTTP '+r.status));}
+    localStorage.setItem('sg_tok',j.token);
+    if($('#tok'))$('#tok').value=j.token;
+    localStorage.setItem('sg_trader',$('#trader').value.trim());
+    $('#status').innerHTML='<span class="pos">登录成功，token 已保存</span>';
+    load();
+  }catch(e){$('#status').innerHTML='<span class="neg">登录失败: '+e.message+'</span>';}
+}
 function tab(t){CUR=t;document.querySelectorAll('.tab').forEach(e=>e.classList.toggle('on',e.dataset.t===t));load();}
 function toggleAuto(){if($('#auto').checked){timer=setInterval(load,30000);}else{clearInterval(timer);}}
 function hdr(){return {'Authorization':'Bearer '+(localStorage.getItem('sg_tok')||'')};}
