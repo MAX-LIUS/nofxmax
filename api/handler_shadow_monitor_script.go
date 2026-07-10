@@ -133,6 +133,102 @@ async function loadInvestor(){
   document.getElementById('view').innerHTML=h;
 }
 
+// Virtual Trader Bench: each candidate gate is a "trader" that trades the SAME
+// real book minus the opens it would have blocked, on shared capital, measured in
+// realized R. Renders a leaderboard + overlaid equity curves so the effect reads
+// like several paper accounts run by different rulebooks side by side.
+async function loadBench(){
+  const d=await api('/shadow-gates/bench');
+  if(!d.ready){
+    document.getElementById('view').innerHTML='<div class="card mut">'
+      +(d.computing?'虚拟对战正在后台计算中（首次约需数十秒），稍后自动刷新…':('暂无结果'+(d.error?('：'+d.error):'')))+'</div>';
+    return;
+  }
+  const r=d.result, base=r.baseline, traders=r.traders||[];
+  const staleMin=Math.round((d.stale_sec||0)/60);
+  let h='<div class="card"><div class="kpis">'
+    +kpi(r.book,'账本总开仓数')
+    +kpi(r.r_eligible,'有初始风险(可计R)')
+    +kpi(r.forward_closed,'前向已平仓(真OOS)')
+    +kpi('<span class="'+cls(base.final_r)+'">'+fmt(base.final_r,1)+'R</span>','基准(全收)累计R')
+    +'</div><div class="hint">R 单位=盈亏/初始风险。虚拟交易员只能"少开"其会拦的单（真实账本子集），'
+    +'不能开系统没开的单；平仓沿用真实保护结果。R分位 P5/P50/P95='
+    +fmt(r.r_p5,2)+' / '+fmt(r.r_p50,2)+' / '+fmt(r.r_p95,2)+'。计算于 '+staleMin+' 分钟前。</div></div>';
+
+  // ---- overlaid equity curves ----
+  h+='<div class="card"><b>累计R权益曲线（基准 vs 各虚拟交易员）</b>'+equitySVG(base,traders)+'</div>';
+
+  // ---- leaderboard ----
+  h+='<div class="card"><b>虚拟交易员计分榜（按累计R排序）</b>'
+    +'<table style="margin-top:10px"><thead><tr>'
+    +'<th>交易员(门)</th><th>开单</th><th>拦单</th><th>累计R</th><th>期望R</th>'
+    +'<th>胜率</th><th>盈亏比</th><th>最大回撤R</th><th>CVaR95</th><th>Sortino</th>'
+    +'<th>vs随机</th><th>H1</th><th>H2</th><th>Boot5%</th><th>裁定</th></tr></thead><tbody>';
+  h+=benchRow(base,true);
+  traders.forEach(t=>h+=benchRow(t,false));
+  h+='</tbody></table>'
+    +'<div class="hint">裁定=PASS 需同时满足：累计R&gt;基准 且 vs随机&gt;95 且 H1&gt;95 且 H2&gt;95 且 Boot5%&gt;0。'
+    +'这是<b>样本内回填</b>结论；真正的样本外裁判是"前向已平仓"随时间累积。</div></div>';
+  document.getElementById('view').innerHTML=h;
+}
+
+function benchRow(t,isBase){
+  const passTag = isBase ? '<span class="mut">基准</span>'
+    : (t.pass?'<span class="pill pas">PASS</span>':'<span class="pill blk">未过</span>');
+  const nm = isBase ? '<b>基准·全收</b>' : t.name;
+  const inf = v => (v===null||v===undefined||!isFinite(v))?'∞':fmt(v,2);
+  return '<tr'+(isBase?' style="background:rgba(255,255,255,.04)"':'')+'>'
+    +'<td style="text-align:left">'+nm+'</td>'
+    +'<td>'+t.n_trades+'</td>'
+    +'<td class="mut">'+(t.n_blocked||0)+'</td>'
+    +'<td class="'+cls(t.final_r)+'">'+fmt(t.final_r,1)+'</td>'
+    +'<td class="'+cls(t.exp_r)+'">'+fmt(t.exp_r,3)+'</td>'
+    +'<td>'+(t.win_rate||0).toFixed(1)+'%</td>'
+    +'<td>'+inf(t.profit_factor)+'</td>'
+    +'<td class="neg">-'+fmt(Math.abs(t.max_dd),1).replace('+','')+'</td>'
+    +'<td class="'+cls(t.cvar95)+'">'+fmt(t.cvar95,2)+'</td>'
+    +'<td>'+inf(t.sortino)+'</td>'
+    +'<td class="'+(isBase?'mut':(t.vs_rand>95?'pos':''))+'">'+(isBase?'—':t.vs_rand.toFixed(0))+'</td>'
+    +'<td class="'+(isBase?'mut':(t.h1>95?'pos':''))+'">'+(isBase?'—':t.h1.toFixed(0))+'</td>'
+    +'<td class="'+(isBase?'mut':(t.h2>95?'pos':''))+'">'+(isBase?'—':t.h2.toFixed(0))+'</td>'
+    +'<td class="'+(isBase?'mut':cls(t.ci_lo))+'">'+(isBase?'—':fmt(t.ci_lo,3))+'</td>'
+    +'<td>'+passTag+'</td></tr>';
+}
+
+// Overlaid cumulative-R curves as inline SVG. Baseline is bold white; each trader
+// a distinct hue. Curves are sampled to a fixed width so long books stay light.
+function equitySVG(base, traders){
+  const W=900,H=280,PADL=44,PADB=22,PADT=12;
+  const series=[{name:'基准',eq:base.equity||[],color:'#e6e6e6',w:2.4}];
+  const palette=['#4ade80','#f472b6','#60a5fa','#fbbf24','#a78bfa','#f87171','#34d399','#fb923c','#22d3ee','#e879f9'];
+  traders.forEach((t,i)=>series.push({name:t.name,eq:t.equity||[],color:palette[i%palette.length],w:1.4}));
+  let lo=0,hi=0,maxLen=0;
+  series.forEach(s=>{s.eq.forEach(v=>{if(v<lo)lo=v;if(v>hi)hi=v;});if(s.eq.length>maxLen)maxLen=s.eq.length;});
+  if(maxLen<2)return '<div class="mut" style="margin-top:8px">样本不足，无法绘制曲线。</div>';
+  if(hi===lo)hi=lo+1;
+  const px=i=>PADL+(W-PADL-6)*(i/(maxLen-1));
+  const py=v=>PADT+(H-PADT-PADB)*(1-(v-lo)/(hi-lo));
+  const path=eq=>{if(!eq.length)return '';let dd='M '+px(0)+' '+py(eq[0]);
+    for(let i=1;i<eq.length;i++)dd+=' L '+px(i)+' '+py(eq[i]);return dd;};
+  let svg='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto;margin-top:8px">';
+  // zero line
+  const zy=py(0);
+  svg+='<line x1="'+PADL+'" y1="'+zy+'" x2="'+(W-6)+'" y2="'+zy+'" stroke="#555" stroke-dasharray="3 3"/>';
+  svg+='<text x="4" y="'+(zy+4)+'" fill="#888" font-size="11">0R</text>';
+  svg+='<text x="4" y="'+(py(hi)+4)+'" fill="#888" font-size="11">'+fmt(hi,0)+'</text>';
+  svg+='<text x="4" y="'+(py(lo)+4)+'" fill="#888" font-size="11">'+fmt(lo,0)+'</text>';
+  series.forEach(s=>{svg+='<path d="'+path(s.eq)+'" fill="none" stroke="'+s.color+'" stroke-width="'+s.w+'" opacity="0.9"/>';});
+  svg+='</svg>';
+  // legend
+  let leg='<div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;font-size:11px">';
+  series.forEach(s=>{const last=s.eq.length?s.eq[s.eq.length-1]:0;
+    leg+='<span style="display:inline-flex;align-items:center;gap:4px">'
+      +'<span style="width:12px;height:3px;background:'+s.color+';display:inline-block"></span>'
+      +s.name+' <span class="'+cls(last)+'">'+fmt(last,1)+'R</span></span>';});
+  leg+='</div>';
+  return svg+leg;
+}
+
 function kpi(v,l){return '<div class="kpi"><div class="v">'+v+'</div><div class="l">'+l+'</div></div>';}
 
 // initial paint

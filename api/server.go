@@ -402,6 +402,7 @@ Returns: {"total_trades":<int>,"winning_trades":<int>,"win_rate":<float>,"total_
 			s.route(protected, "GET", "/gate-blocks", "Recent gate-blocked trades (?trader_id=xxx&limit=50)", s.handleGateBlocks)
 			s.route(protected, "GET", "/shadow-gates/stats", "Shadow entry-gate forward scorecard per rule (?trader_id=xxx)", s.handleShadowGateStats)
 			s.route(protected, "GET", "/shadow-gates/feed", "Recent shadow-gate verdicts live feed (?trader_id=xxx&limit=100)", s.handleShadowGateFeed)
+			s.route(protected, "GET", "/shadow-gates/bench", "Virtual Trader Bench: gate policies as competing traders (equity curves + significance)", s.handleShadowBench)
 
 		}
 	}
@@ -644,6 +645,9 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 
 // Start Start server
 func (s *Server) Start() error {
+	// Background Virtual Trader Bench refresher (read-only, observation-only).
+	s.startShadowBenchRefresher()
+
 	addr := fmt.Sprintf(":%d", s.port)
 	logger.Infof("🌐 API server starting at http://localhost%s", addr)
 	logger.Infof("📊 API Documentation:")
