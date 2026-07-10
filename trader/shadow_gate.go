@@ -121,45 +121,71 @@ func chopLowConf(c shadowGateCtx, minConf float64) (bool, string, string) {
 
 // buildShadowGateCtx extracts a causal OHLC snapshot from MarketData for the
 // primary timeframe. Returns ok=false if insufficient klines.
-func buildShadowGateCtx(d *kernel.Decision, data *market.Data, primaryTF string) (shadowGateCtx, bool) {
-	if data == nil {
-		return shadowGateCtx{}, false
-	}
-	var bars []market.KlineBar
-	if data.TimeframeData != nil {
-		if tf, ok := data.TimeframeData[primaryTF]; ok && tf != nil && len(tf.Klines) >= 60 {
+// minShadowBars is the longest lookback any candidate rule needs
+// (countertrend_slope72 = 72). The decision-context market data is trimmed to
+// PrimaryCount (typically 30) for the AI prompt, which is far too short, so the
+// shadow gate self-fetches a longer causal series when the context is thin.
+const minShadowBars = 72
+
+func buildShadowGateCtx(d *kernel.Decision, data *market.Data, primaryTF, exchange string) (shadowGateCtx, bool) {
+	side := strings.ToUpper(directionFromAction(d.Action))
+
+	// 1) Prefer the in-memory decision context if it already carries enough bars.
+	var highs, lows, closes []float64
+	if data != nil && data.TimeframeData != nil {
+		var bars []market.KlineBar
+		if tf, ok := data.TimeframeData[primaryTF]; ok && tf != nil && len(tf.Klines) >= minShadowBars {
 			bars = tf.Klines
 		} else {
-			// fall back to the longest available timeframe series
-			for _, tf := range data.TimeframeData {
+			for _, tf := range data.TimeframeData { // longest available series
 				if tf != nil && len(tf.Klines) > len(bars) {
 					bars = tf.Klines
 				}
 			}
 		}
+		if len(bars) >= minShadowBars {
+			highs = make([]float64, len(bars))
+			lows = make([]float64, len(bars))
+			closes = make([]float64, len(bars))
+			for i, b := range bars {
+				highs[i], lows[i], closes[i] = b.High, b.Low, b.Close
+			}
+		}
 	}
-	if len(bars) < 60 {
+
+	// 2) Fall back to a best-effort self-fetch of a longer series. Observation-only:
+	// any failure just skips this decision (never touches execution).
+	if len(closes) < minShadowBars && d.Symbol != "" && primaryTF != "" {
+		ex := exchange
+		if ex == "" {
+			ex = "okx"
+		}
+		if kl, err := market.GetKlines(d.Symbol, primaryTF, ex, 120); err == nil && len(kl) >= minShadowBars {
+			highs = make([]float64, len(kl))
+			lows = make([]float64, len(kl))
+			closes = make([]float64, len(kl))
+			for i, k := range kl {
+				highs[i], lows[i], closes[i] = k.High, k.Low, k.Close
+			}
+		}
+	}
+
+	if len(closes) < minShadowBars {
 		return shadowGateCtx{}, false
 	}
-	h := make([]float64, len(bars))
-	l := make([]float64, len(bars))
-	cl := make([]float64, len(bars))
-	for i, b := range bars {
-		h[i], l[i], cl[i] = b.High, b.Low, b.Close
-	}
 	return shadowGateCtx{
-		highs:  h,
-		lows:   l,
-		closes: cl,
-		side:   strings.ToUpper(directionFromAction(d.Action)),
+		highs:  highs,
+		lows:   lows,
+		closes: closes,
+		side:   side,
 		conf:   float64(d.Confidence),
 	}, true
 }
 
 // evaluateShadowGates runs ALL candidate rules for one open decision and returns
 // the verdict rows. Observation-only: never mutates the decision or blocks it.
-func evaluateShadowGates(traderID string, cycle int64, d *kernel.Decision, data *market.Data, primaryTF string, liveAllowed bool) []*store.ShadowGateVerdict {
-	ctx, ok := buildShadowGateCtx(d, data, primaryTF)
+func evaluateShadowGates(traderID string, cycle int64, d *kernel.Decision, data *market.Data, primaryTF, exchange string, liveAllowed bool) []*store.ShadowGateVerdict {
+	ctx, ok := buildShadowGateCtx(d, data, primaryTF, exchange)
 	if !ok {
 		return nil
 	}

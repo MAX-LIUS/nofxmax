@@ -38,7 +38,7 @@ func TestShadowGates_CounterTrendFires(t *testing.T) {
 	// Strong uptrend: shorting should be flagged counter-trend.
 	up := mdWithBars("1h", buildBars(120, 100, 0.5))
 	d := &kernel.Decision{Symbol: "BTCUSDT", Action: "open_short", Confidence: 70}
-	vs := evaluateShadowGates("t1", 5, d, up, "1h", true)
+	vs := evaluateShadowGates("t1", 5, d, up, "1h", "okx", true)
 	if len(vs) != len(shadowRules) {
 		t.Fatalf("expected %d verdicts, got %d", len(shadowRules), len(vs))
 	}
@@ -63,7 +63,7 @@ func TestShadowGates_CounterTrendFires(t *testing.T) {
 func TestShadowGates_DowntrendLongFires(t *testing.T) {
 	dn := mdWithBars("1h", buildBars(120, 200, -0.5))
 	d := &kernel.Decision{Symbol: "ETHUSDT", Action: "open_long", Confidence: 60}
-	vs := evaluateShadowGates("t1", 9, d, dn, "1h", true)
+	vs := evaluateShadowGates("t1", 9, d, dn, "1h", "okx", true)
 	got := map[string]bool{}
 	for _, v := range vs {
 		got[v.RuleName] = v.WouldBlock
@@ -78,9 +78,11 @@ func TestShadowGates_DowntrendLongFires(t *testing.T) {
 
 func TestShadowGates_InsufficientBars(t *testing.T) {
 	short := mdWithBars("1h", buildBars(30, 100, 0.5))
+	// empty primaryTF disables the self-fetch fallback, so this stays offline and
+	// deterministically exercises the pure <minShadowBars guard.
 	d := &kernel.Decision{Symbol: "BTCUSDT", Action: "open_long", Confidence: 70}
-	if vs := evaluateShadowGates("t1", 1, d, short, "1h", true); vs != nil {
-		t.Errorf("expected nil verdicts with <60 bars, got %d", len(vs))
+	if vs := evaluateShadowGates("t1", 1, d, short, "", "okx", true); vs != nil {
+		t.Errorf("expected nil verdicts with <%d bars, got %d", minShadowBars, len(vs))
 	}
 }
 
@@ -89,7 +91,7 @@ func TestShadowGates_NonOpenActionSkipped(t *testing.T) {
 	d := &kernel.Decision{Symbol: "BTCUSDT", Action: "hold"}
 	// side is empty for hold; evaluateShadowGates still runs but side=="" —
 	// the loop-level guard (directionFromAction) prevents the call in prod.
-	vs := evaluateShadowGates("t1", 1, d, up, "1h", true)
+	vs := evaluateShadowGates("t1", 1, d, up, "1h", "okx", true)
 	for _, v := range vs {
 		if v.Side != "" {
 			t.Errorf("hold action should have empty side, got %q", v.Side)

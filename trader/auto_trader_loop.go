@@ -551,7 +551,11 @@ func (at *AutoTrader) runCycle() error {
 			if at.config.StrategyConfig != nil {
 				primaryTF = at.config.StrategyConfig.Indicators.Klines.PrimaryTimeframe
 			}
-			if verdicts := evaluateShadowGates(at.id, int64(at.cycleNumber), &d, ctx.MarketDataMap[d.Symbol], primaryTF, gateResult.Allowed); len(verdicts) > 0 && at.store != nil {
+			shadowExchange := at.exchange
+			if at.config.StrategyConfig != nil && at.config.StrategyConfig.CoinSource.ExchangeSource != "" {
+				shadowExchange = at.config.StrategyConfig.CoinSource.ExchangeSource
+			}
+			if verdicts := evaluateShadowGates(at.id, int64(at.cycleNumber), &d, ctx.MarketDataMap[d.Symbol], primaryTF, shadowExchange, gateResult.Allowed); len(verdicts) > 0 && at.store != nil {
 				if err := at.store.ShadowGate().RecordBatch(verdicts); err != nil {
 					logger.Infof("⚠ shadow-gate record failed (non-blocking): %v", err)
 				}
