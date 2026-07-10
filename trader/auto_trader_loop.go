@@ -37,6 +37,18 @@ func (at *AutoTrader) runCycle() error {
 		at.checkClaw402Balance()
 	}
 
+	// Shadow-gate reconciler (observation-only): link prior forward verdicts to
+	// the positions that materialized since, by time-nearest match. Runs once per
+	// cycle, best-effort — never affects trading. A 15-min window comfortably
+	// covers the seconds-scale gap between an open decision and its synced fill.
+	if at.store != nil {
+		if n, err := at.store.ShadowGate().LinkForwardVerdicts(15 * 60 * 1000); err != nil {
+			logger.Infof("⚠ shadow-link skipped (non-blocking): %v", err)
+		} else if n > 0 {
+			logger.Infof("🔗 shadow-link: attributed %d forward verdict rows to positions", n)
+		}
+	}
+
 	// Create decision record
 	record := &store.DecisionRecord{
 		ExecutionLog:   []string{},

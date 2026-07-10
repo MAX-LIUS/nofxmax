@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strings"
 
 	"gorm.io/gorm"
 )
@@ -74,6 +75,94 @@ func (s *ShadowGateStore) RecordBatch(verdicts []*ShadowGateVerdict) error {
 	return s.db.Create(verdicts).Error
 }
 
+// LinkForwardVerdicts assigns position_id to still-unlinked verdicts
+// (position_id=0) by matching each open decision to the position whose
+// entry_time is nearest its observed_at, within windowMs, per
+// (trader_id,symbol,side). Ambiguous windows (>1 candidate) are skipped so a
+// verdict is never mis-attributed. Idempotent and observation-only: it only
+// fills position_id on shadow rows and never touches positions or trading.
+// Returns the number of verdict rows updated. Safe to call every cycle.
+func (s *ShadowGateStore) LinkForwardVerdicts(windowMs int64) (int, error) {
+	type vrow struct {
+		ID         int64
+		TraderID   string
+		Symbol     string
+		Side       string
+		ObservedAt int64
+	}
+	var vs []vrow
+	if err := s.db.Raw(`SELECT id, trader_id, symbol, side, observed_at
+		FROM shadow_gate_verdicts WHERE position_id = 0`).Scan(&vs).Error; err != nil {
+		return 0, err
+	}
+	if len(vs) == 0 {
+		return 0, nil
+	}
+
+	// group verdict rows into decisions (same trader/symbol/side/observed_at)
+	type decKey struct {
+		trader, symbol, side string
+		obs                  int64
+	}
+	decs := map[decKey][]int64{}
+	for _, v := range vs {
+		k := decKey{v.TraderID, v.Symbol, strings.ToUpper(v.Side), v.ObservedAt}
+		decs[k] = append(decs[k], v.ID)
+	}
+
+	type prow struct {
+		ID       int64
+		TraderID string
+		Symbol   string
+		Side     string
+		EntryTime int64
+	}
+	var ps []prow
+	if err := s.db.Raw(`SELECT id, trader_id, symbol, side, entry_time
+		FROM trader_positions WHERE entry_price > 0 AND entry_quantity > 0`).Scan(&ps).Error; err != nil {
+		return 0, err
+	}
+	posByKey := map[string][]prow{}
+	for _, p := range ps {
+		k := p.TraderID + "|" + p.Symbol + "|" + strings.ToUpper(p.Side)
+		posByKey[k] = append(posByKey[k], p)
+	}
+
+	used := map[int64]bool{}
+	updated := 0
+	for k, vids := range decs {
+		cands := posByKey[k.trader+"|"+k.symbol+"|"+k.side]
+		var bestID int64
+		var bestDiff int64 = 1 << 62
+		within := 0
+		for _, c := range cands {
+			if used[c.ID] {
+				continue
+			}
+			diff := c.EntryTime - k.obs
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff <= windowMs {
+				within++
+				if diff < bestDiff {
+					bestDiff, bestID = diff, c.ID
+				}
+			}
+		}
+		if within != 1 {
+			continue // no match, or ambiguous -> leave unlinked
+		}
+		used[bestID] = true
+		if err := s.db.Exec(`UPDATE shadow_gate_verdicts SET position_id = ? WHERE id IN ?`,
+			bestID, vids).Error; err != nil {
+			return updated, err
+		}
+		updated += len(vids)
+	}
+	return updated, nil
+}
+
 // ShadowRuleStat is the forward-data scorecard for one candidate rule: for the
 // entries it WOULD block vs those it would keep, the realized-PnL profile of the
 // positions that actually opened. Joined by (trader_id, cycle, symbol).
@@ -98,33 +187,23 @@ func (s *ShadowGateStore) RuleStats(traderID string) ([]ShadowRuleStat, error) {
 		where = "v.trader_id = ?"
 		args = append(args, traderID)
 	}
-	// Join each verdict to EXACTLY ONE closed position:
-	//   - backfill rows carry position_id -> join by id (always 1:1, robust to
-	//     non-unique (trader,cycle,symbol) keys);
-	//   - forward-live rows have position_id=0 -> join by the per-decision unique
-	//     (trader,cycle,symbol) with cycle>0, excluding any ambiguous key that
-	//     maps to >1 closed position.
-	// LEFT JOIN so unmatched verdicts still surface as pending.
+	// Join each verdict to EXACTLY ONE closed position by position_id — one
+	// uniform, 1:1 path for both backfill and forward rows. Backfill sets
+	// position_id at replay time; forward rows are recorded before the position
+	// exists (position_id=0) and get it filled in afterward by the shadow-link
+	// reconciler (time-nearest match on trader/symbol/side). The old
+	// (trader,cycle,symbol) fallback was unreliable forward: live positions
+	// arrive via exchange sync with entry_decision_cycle=0, which never matched
+	// the AI cycleNumber the verdict stored. LEFT JOIN so still-unlinked verdicts
+	// surface as pending rather than vanishing.
 	q := `
 		SELECT v.rule_name, v.would_block,
 		       p.realized_pnl,
 		       CASE WHEN p.id IS NULL THEN 0 ELSE 1 END AS matched
 		FROM shadow_gate_verdicts v
 		LEFT JOIN trader_positions p
-		  ON p.status = 'CLOSED'
-		 AND (
-		       (v.position_id > 0 AND p.id = v.position_id)
-		    OR (v.position_id = 0 AND v.cycle > 0
-		        AND p.trader_id = v.trader_id
-		        AND p.entry_decision_cycle = v.cycle
-		        AND p.symbol = v.symbol
-		        AND p.entry_decision_cycle NOT IN (
-		          SELECT entry_decision_cycle FROM trader_positions
-		          WHERE status='CLOSED' AND entry_price>0
-		          GROUP BY trader_id, entry_decision_cycle, symbol HAVING COUNT(*)>1
-		        ))
-		     )
-		WHERE (v.position_id > 0 OR v.cycle > 0) AND ` + where
+		  ON p.status = 'CLOSED' AND v.position_id > 0 AND p.id = v.position_id
+		WHERE v.position_id > 0 AND ` + where
 	rows, err := s.db.Raw(q, args...).Rows()
 	if err != nil {
 		return nil, err
