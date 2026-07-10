@@ -130,11 +130,17 @@ func main() {
 	fmt.Println("  shadowrank -db <db>   (scores the whole matched book incl. backfill)")
 }
 
+// clipBars returns only bars fully CLOSED at entry time (strict no-look-ahead).
+// A 1h bar with OpenTime T closes at T+1h, so it is "closed before entry" only
+// when OpenTime+1h <= entryMs. The bar CONTAINING the entry (still forming) is
+// excluded — using its high/low/close would peek at prices not yet known at the
+// decision moment.
 func clipBars(bars []market.Kline, entryMs int64) []market.Kline {
+	const barMs = int64(3600 * 1000) // 1h
 	lo, hi, ans := 0, len(bars)-1, -1
 	for lo <= hi {
 		m := (lo + hi) / 2
-		if bars[m].OpenTime <= entryMs {
+		if bars[m].OpenTime+barMs <= entryMs {
 			ans = m
 			lo = m + 1
 		} else {
