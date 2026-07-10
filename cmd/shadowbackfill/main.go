@@ -39,11 +39,15 @@ func main() {
 		fmt.Printf("reset: deleted %d prior backfill rows\n", n)
 	}
 
+	// NOTE: filter on entry_quantity, NOT quantity. `quantity` is the CURRENT
+	// open size, which is 0 for every closed position — filtering on it wrongly
+	// drops ~all fully-closed trades (the exact rows we want to score). Use
+	// entry_quantity (size at open) instead.
 	rows, err := db.Query(`
 		SELECT id, trader_id, symbol, side, entry_price, entry_time, realized_pnl,
 		       COALESCE(entry_decision_cycle,0)
 		FROM trader_positions
-		WHERE status='CLOSED' AND entry_price>0 AND quantity>0
+		WHERE status='CLOSED' AND entry_price>0 AND entry_quantity>0
 		ORDER BY entry_time ASC`)
 	must(err)
 
