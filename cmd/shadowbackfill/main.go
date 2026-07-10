@@ -40,7 +40,7 @@ func main() {
 	}
 
 	rows, err := db.Query(`
-		SELECT trader_id, symbol, side, entry_price, entry_time, realized_pnl,
+		SELECT id, trader_id, symbol, side, entry_price, entry_time, realized_pnl,
 		       COALESCE(entry_decision_cycle,0)
 		FROM trader_positions
 		WHERE status='CLOSED' AND entry_price>0 AND quantity>0
@@ -48,6 +48,7 @@ func main() {
 	must(err)
 
 	type pos struct {
+		id                   int64
 		trader, symbol, side string
 		entryPrice, pnl      float64
 		entryMs              int64
@@ -56,7 +57,7 @@ func main() {
 	var all []pos
 	for rows.Next() {
 		var p pos
-		must(rows.Scan(&p.trader, &p.symbol, &p.side, &p.entryPrice, &p.entryMs, &p.pnl, &p.cycle))
+		must(rows.Scan(&p.id, &p.trader, &p.symbol, &p.side, &p.entryPrice, &p.entryMs, &p.pnl, &p.cycle))
 		all = append(all, p)
 	}
 	rows.Close()
@@ -74,12 +75,12 @@ func main() {
 	sort.Strings(syms)
 
 	ins, err := db.Prepare(`INSERT INTO shadow_gate_verdicts
-		(trader_id,cycle,symbol,action,side,rule_name,would_block,regime,confidence,detail,live_allowed,observed_at,created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		(trader_id,cycle,position_id,symbol,action,side,rule_name,would_block,regime,confidence,detail,live_allowed,observed_at,created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	must(err)
 	defer ins.Close()
 
-	written, naSym := 0, 0
+	written, naSym, insertErrs := 0, 0, 0
 	for _, sym := range syms {
 		idxs := bySym[sym]
 		var minT, maxT int64 = 1 << 62, 0
@@ -112,19 +113,28 @@ func main() {
 			verdicts := trader.EvaluateShadowGatesForBackfill(cut, p.side)
 			now := time.Now().UTC().UnixMilli()
 			for _, v := range verdicts {
-				// Real trader_id + real cycle + real symbol => joins to its own
-				// position. observed_at = entry_time (historical) marks it as
-				// backfill vs forward-live rows (which have recent observed_at).
-				_, err := ins.Exec(p.trader, p.cycle, sym, action, p.side, v.Rule,
+				// position_id makes the join exactly 1:1 even when
+				// (trader,cycle,symbol) is not unique. observed_at = entry_time
+				// (historical) marks it as backfill vs forward-live rows.
+				_, err := ins.Exec(p.trader, p.cycle, p.id, sym, action, p.side, v.Rule,
 					boolToInt(v.Block), v.Regime, 0.0, v.Detail, 1, p.entryMs, now)
-				if err == nil {
-					written++
+				if err != nil {
+					insertErrs++
+					if insertErrs <= 3 {
+						fmt.Printf("insert error (pos=%d rule=%s): %v\n", p.id, v.Rule, err)
+					}
+					continue
 				}
+				written++
 			}
 		}
 	}
-	fmt.Printf("wrote %d verdicts across %d rules; %d symbols had no OKX data\n",
-		written, len(trader.ShadowRuleNames()), naSym)
+	fmt.Printf("wrote %d verdicts across %d rules; %d symbols had no OKX data; %d insert errors\n",
+		written, len(trader.ShadowRuleNames()), naSym, insertErrs)
+	if insertErrs > 0 {
+		fmt.Println("WARNING: insert errors occurred — the DB table is likely missing the position_id column.")
+		fmt.Println("Rebuild+redeploy the backend so AutoMigrate adds it, then re-run this backfill.")
+	}
 	fmt.Println("NOTE: backfill rows use REAL trader_id/cycle/symbol (join to their own position),")
 	fmt.Println("and observed_at = entry_time (historical) to distinguish from forward-live rows. Run:")
 	fmt.Println("  shadowrank -db <db>   (scores the whole matched book incl. backfill)")

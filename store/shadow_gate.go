@@ -22,6 +22,12 @@ type ShadowGateVerdict struct {
 	Action   string `gorm:"column:action;not null" json:"action"` // open_long / open_short
 	Side     string `gorm:"column:side;default:''" json:"side"`   // LONG / SHORT
 
+	// PositionID is the exact position this verdict maps to, when known. Backfill
+	// fills it (it iterates real positions) so scoring joins 1:1 even when
+	// (trader,cycle,symbol) is not unique. Forward-live rows leave it 0 (the
+	// position is not open yet at decision time) and rely on the unique per-cycle
+	// (trader,cycle,symbol) join instead.
+	PositionID int64   `gorm:"column:position_id;default:0;index:idx_shadow_posid" json:"position_id"`
 	RuleName   string  `gorm:"column:rule_name;not null;index:idx_shadow_rule" json:"rule_name"`
 	WouldBlock bool    `gorm:"column:would_block;default:false" json:"would_block"`
 	Regime     string  `gorm:"column:regime;default:''" json:"regime"`
@@ -92,27 +98,33 @@ func (s *ShadowGateStore) RuleStats(traderID string) ([]ShadowRuleStat, error) {
 		where = "v.trader_id = ?"
 		args = append(args, traderID)
 	}
+	// Join each verdict to EXACTLY ONE closed position:
+	//   - backfill rows carry position_id -> join by id (always 1:1, robust to
+	//     non-unique (trader,cycle,symbol) keys);
+	//   - forward-live rows have position_id=0 -> join by the per-decision unique
+	//     (trader,cycle,symbol) with cycle>0, excluding any ambiguous key that
+	//     maps to >1 closed position.
 	// LEFT JOIN so unmatched verdicts still surface as pending.
-	// Exclude cycle=0 verdicts and ambiguous (trader,cycle,symbol) keys that map
-	// to >1 position — those fan out the join and corrupt counts. This mirrors the
-	// shadowrank CLI so the monitor page and the authoritative significance tool
-	// report the same book.
 	q := `
 		SELECT v.rule_name, v.would_block,
 		       p.realized_pnl,
 		       CASE WHEN p.id IS NULL THEN 0 ELSE 1 END AS matched
 		FROM shadow_gate_verdicts v
 		LEFT JOIN trader_positions p
-		  ON p.trader_id = v.trader_id
-		 AND p.entry_decision_cycle = v.cycle
-		 AND p.symbol = v.symbol
-		 AND p.status = 'CLOSED'
-		 AND p.entry_decision_cycle NOT IN (
-		   SELECT entry_decision_cycle FROM trader_positions
-		   WHERE status='CLOSED' AND entry_price>0
-		   GROUP BY trader_id, entry_decision_cycle, symbol HAVING COUNT(*)>1
-		 )
-		WHERE v.cycle > 0 AND ` + where
+		  ON p.status = 'CLOSED'
+		 AND (
+		       (v.position_id > 0 AND p.id = v.position_id)
+		    OR (v.position_id = 0 AND v.cycle > 0
+		        AND p.trader_id = v.trader_id
+		        AND p.entry_decision_cycle = v.cycle
+		        AND p.symbol = v.symbol
+		        AND p.entry_decision_cycle NOT IN (
+		          SELECT entry_decision_cycle FROM trader_positions
+		          WHERE status='CLOSED' AND entry_price>0
+		          GROUP BY trader_id, entry_decision_cycle, symbol HAVING COUNT(*)>1
+		        ))
+		     )
+		WHERE (v.position_id > 0 OR v.cycle > 0) AND ` + where
 	rows, err := s.db.Raw(q, args...).Rows()
 	if err != nil {
 		return nil, err

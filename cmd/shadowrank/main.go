@@ -44,24 +44,31 @@ func main() {
 	}
 	defer db.Close()
 
-	// One row per (rule, position). would_block tells us if that rule blocks it.
-	// The position is identified by (trader_id, entry_decision_cycle, symbol).
+	// One row per (rule, position). pkey = the exact position id, so the book is
+	// keyed by real positions (no collapsing of distinct positions that share a
+	// (trader,cycle,symbol) key). Join: backfill rows carry position_id (1:1 by
+	// id); forward-live rows (position_id=0) fall back to the per-decision unique
+	// (trader,cycle,symbol) with cycle>0, excluding ambiguous keys.
 	rows, err := db.Query(`
 		SELECT v.rule_name, v.would_block,
-		       p.trader_id || '|' || p.entry_decision_cycle || '|' || p.symbol AS pkey,
+		       CAST(p.id AS TEXT) AS pkey,
 		       p.realized_pnl, p.entry_time
 		FROM shadow_gate_verdicts v
 		JOIN trader_positions p
-		  ON p.trader_id = v.trader_id
-		 AND p.entry_decision_cycle = v.cycle
-		 AND p.symbol = v.symbol
-		 AND p.status = 'CLOSED'
-		WHERE v.trader_id LIKE ? AND v.cycle > 0
-		  AND p.entry_decision_cycle NOT IN (
-		    SELECT entry_decision_cycle FROM trader_positions
-		    WHERE status='CLOSED' AND entry_price>0
-		    GROUP BY trader_id, entry_decision_cycle, symbol HAVING COUNT(*)>1
-		  )`, *traderLike)
+		  ON p.status = 'CLOSED'
+		 AND (
+		       (v.position_id > 0 AND p.id = v.position_id)
+		    OR (v.position_id = 0 AND v.cycle > 0
+		        AND p.trader_id = v.trader_id
+		        AND p.entry_decision_cycle = v.cycle
+		        AND p.symbol = v.symbol
+		        AND p.entry_decision_cycle NOT IN (
+		          SELECT entry_decision_cycle FROM trader_positions
+		          WHERE status='CLOSED' AND entry_price>0
+		          GROUP BY trader_id, entry_decision_cycle, symbol HAVING COUNT(*)>1
+		        ))
+		     )
+		WHERE v.trader_id LIKE ?`, *traderLike)
 	if err != nil {
 		fmt.Println("no shadow_gate_verdicts table yet — deploy the shadow-gate build first, let it run, then re-run.")
 		return
