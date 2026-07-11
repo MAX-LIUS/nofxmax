@@ -35,6 +35,8 @@ const shadowMonitorHTML = `<!DOCTYPE html>
  .tabs{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
  .tab{padding:7px 14px;border:1px solid var(--bd);border-radius:6px;cursor:pointer;background:var(--card)}
  .tab.on{border-color:var(--acc);color:var(--acc)}
+ .segbtn{padding:5px 12px;margin-right:6px;border:1px solid var(--bd);border-radius:6px;cursor:pointer;background:var(--card);color:inherit;font-size:12px}
+ .segbtn.on{border-color:var(--acc);color:var(--acc);font-weight:600}
  .card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:16px;margin-bottom:16px}
  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
  .kpi{background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:12px}
@@ -85,7 +87,8 @@ const shadowMonitorHTML = `<!DOCTYPE html>
 </div>
 <script>
 const $=s=>document.querySelector(s);
-let CUR='rules', timer=null;
+let CUR='rules', SEG='all', timer=null;
+function setSeg(s){SEG=s;load();}
 function saveTok(){const t=$('#tok').value.trim();if(t)localStorage.setItem('sg_tok',t);localStorage.setItem('sg_trader',$('#trader').value.trim());load();}
 async function doLogin(){
   const email=$('#email').value.trim(), pw=$('#pw').value;

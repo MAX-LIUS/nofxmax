@@ -43,6 +43,7 @@ func main() {
 	trials := flag.Int("trials", 5000, "random-control trials")
 	seed := flag.Int64("seed", 42, "rng seed")
 	cap := flag.Float64("cap", 0, "winsorize realized R to +/-cap (0=off) — robustness vs fat-tail outliers")
+	segment := flag.String("segment", "all", "data segment: all | backfill (pre-deploy in-sample) | forward (live OOS)")
 	flag.Parse()
 
 	db, err := sql.Open("sqlite", "file:"+*dbPath+"?mode=ro&immutable=1")
@@ -56,13 +57,13 @@ func main() {
 		panic(err)
 	}
 	res := shadoweval.Run(trades, shadoweval.RuleNames(trades),
-		shadoweval.Options{Trials: *trials, Cap: *cap, Seed: *seed})
+		shadoweval.Options{Trials: *trials, Cap: *cap, Seed: *seed, Segment: *segment})
 
 	if *cap > 0 {
 		fmt.Printf("[robustness] realized R winsorized to +/-%.1f\n", *cap)
 	}
-	fmt.Printf("book: %d closed trades | R-eligible (stop recovered): %d | forward (OOS): %d\n",
-		res.Book, res.REligible, res.Forward)
+	fmt.Printf("segment=%s | book: %d closed | R-eligible: %d | forward: %d | backfill: %d\n",
+		res.Segment, res.Book, res.REligible, res.Forward, res.Backfill)
 	fmt.Printf("realized R dist: p5 %.2f | p50 %.2f | p95 %.2f (fat tails widen CI)\n",
 		res.RP5, res.RP50, res.RP95)
 	fmt.Println("unit = realized R (pnl / initial risk). fixed 1R per trade => equity is cumulative R.")
@@ -125,7 +126,9 @@ func printRow(s shadoweval.Scorecard) {
 		return fmt.Sprintf("%.0f", v)
 	}
 	tag := ""
-	if s.Pass {
+	if s.ConfInvalid {
+		tag = "n/a (conf gate; use -segment forward)"
+	} else if s.Pass {
 		tag = "✓ PASS"
 	} else if s.NBlocked > 0 {
 		tag = "overfit/weak"

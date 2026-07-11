@@ -11,13 +11,14 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// benchCache holds the latest Virtual Trader Bench result. Computing it scans
-// decision_records (large) + thousands of random-control trials (~tens of
-// seconds), far too slow for a live request, so a background goroutine refreshes
-// it on an interval and the handler serves the cached snapshot instantly.
+// benchCache holds the latest Virtual Trader Bench results, one per data segment
+// (all / backfill / forward). Computing scans decision_records (large) + thousands
+// of random-control trials (~tens of seconds), far too slow for a live request, so
+// a background goroutine refreshes on an interval and the handler serves the cached
+// snapshot instantly. All three segments come from a single Load per refresh.
 type benchCache struct {
 	mu         sync.RWMutex
-	result     *shadoweval.Result
+	results    map[string]*shadoweval.Result // "all" | "backfill" | "forward"
 	computedAt time.Time
 	computing  bool
 	err        string
@@ -70,28 +71,35 @@ func (s *Server) refreshShadowBench() {
 		logger.Infof("⚠ shadow-bench load failed: %v", err)
 		return
 	}
-	res := shadoweval.Run(trades, shadoweval.RuleNames(trades),
-		shadoweval.Options{Trials: 5000, Seed: 42})
+	rules := shadoweval.RuleNames(trades)
+	out := map[string]*shadoweval.Result{}
+	for _, seg := range []string{"all", "backfill", "forward"} {
+		r := shadoweval.Run(trades, rules, shadoweval.Options{Trials: 5000, Seed: 42, Segment: seg})
+		out[seg] = &r
+	}
 
 	shadowBench.mu.Lock()
-	shadowBench.result = &res
+	shadowBench.results = out
 	shadowBench.computedAt = time.Now().UTC()
 	shadowBench.err = ""
 	shadowBench.mu.Unlock()
-	logger.Infof("📊 shadow-bench refreshed: %d trades, %d forward, %d rules",
-		res.Book, res.Forward, len(res.Traders))
+	logger.Infof("📊 shadow-bench refreshed: all=%d bkf=%d fwd=%d, %d rules",
+		out["all"].Book, out["backfill"].Book, out["forward"].Book, len(rules))
 }
 
-// handleShadowBench serves the cached Virtual Trader Bench result. Optional
-// ?cap=3 returns a winsorized (robustness) variant computed on demand for that
-// request only (still fast — reuses the cached trade set is not possible across
-// caps, so this recomputes; guarded to avoid abuse by requiring the base cache).
+// handleShadowBench serves a cached Virtual Trader Bench result for the requested
+// data segment (?segment=all|backfill|forward, default all). Backfill = pre-deploy
+// in-sample history (price/trend gates only; conf gates n/a). Forward = live OOS.
 func (s *Server) handleShadowBench(c *gin.Context) {
+	seg := c.DefaultQuery("segment", "all")
+	if seg != "all" && seg != "backfill" && seg != "forward" {
+		seg = "all"
+	}
 	shadowBench.mu.RLock()
-	res, at, errStr, computing := shadowBench.result, shadowBench.computedAt, shadowBench.err, shadowBench.computing
+	results, at, errStr, computing := shadowBench.results, shadowBench.computedAt, shadowBench.err, shadowBench.computing
 	shadowBench.mu.RUnlock()
 
-	if res == nil {
+	if results == nil || results[seg] == nil {
 		c.JSON(http.StatusOK, gin.H{
 			"ready":     false,
 			"computing": computing,
@@ -102,8 +110,9 @@ func (s *Server) handleShadowBench(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"ready":       true,
+		"segment":     seg,
 		"computed_at": at.Format(time.RFC3339),
 		"stale_sec":   int(time.Since(at).Seconds()),
-		"result":      res,
+		"result":      results[seg],
 	})
 }

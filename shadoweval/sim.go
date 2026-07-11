@@ -26,13 +26,52 @@ type Scorecard struct {
 	CIHi     float64   `json:"ci_hi"`
 	Pass     bool      `json:"pass"`
 	Equity   []float64 `json:"equity"` // cumulative R curve (chronological)
+	// ConfInvalid marks a conf-gated rule whose would_block is meaningless in the
+	// current segment (backfill sees conf=0 so it never fires). UIs should show
+	// its numbers as "n/a for this segment", not a real zero-effect verdict.
+	ConfInvalid bool `json:"conf_invalid"`
 }
 
 // Options controls a bench run.
 type Options struct {
-	Trials int     // random-control trials
-	Cap    float64 // winsorize |R| to Cap (0 = off)
-	Seed   int64
+	Trials  int     // random-control trials
+	Cap     float64 // winsorize |R| to Cap (0 = off)
+	Seed    int64
+	Segment string // "" or "all" = both; "backfill" = pre-deploy only; "forward" = live OOS only
+}
+
+// confDependentRules never fire in the backfill segment: the backfill reconstructs
+// verdicts from price alone with conf=0, and these rules gate on conf>0 && conf<T.
+// Their would_block is therefore always false in backfill and only meaningful in
+// the forward segment. Flagged in Result so analyses don't misread the zeros.
+var confDependentRules = map[string]bool{
+	"chop_lowconf_lt70": true,
+	"chop_lowconf_lt80": true,
+}
+
+// segmentFilter returns the subset of trades belonging to the requested segment.
+// forward = recorded live (Trade.Forward); backfill = the rest.
+func segmentFilter(tr []*Trade, seg string) []*Trade {
+	switch seg {
+	case "forward":
+		out := tr[:0:0]
+		for _, t := range tr {
+			if t.Forward {
+				out = append(out, t)
+			}
+		}
+		return out
+	case "backfill":
+		out := tr[:0:0]
+		for _, t := range tr {
+			if !t.Forward {
+				out = append(out, t)
+			}
+		}
+		return out
+	default:
+		return tr
+	}
 }
 
 // ConfLayer is one AI-confidence bucket's global calibration: does higher AI
@@ -69,9 +108,11 @@ type GateConf struct {
 
 // Result is the full bench output for the API/CLI.
 type Result struct {
-	Book       int         `json:"book"`
-	REligible  int         `json:"r_eligible"`
+	Segment    string      `json:"segment"`    // "all" | "backfill" | "forward"
+	Book       int         `json:"book"`       // trades in this segment
+	REligible  int         `json:"r_eligible"` // with recoverable R in this segment
 	Forward    int         `json:"forward_closed"`
+	Backfill   int         `json:"backfill_closed"`
 	RP5        float64     `json:"r_p5"`
 	RP50       float64     `json:"r_p50"`
 	RP95       float64     `json:"r_p95"`
@@ -90,6 +131,13 @@ func Run(tradesMap map[string]*Trade, rules []string, opt Options) Result {
 	}
 	sort.Slice(tr, func(i, j int) bool { return tr[i].EntryMs < tr[j].EntryMs })
 
+	seg := opt.Segment
+	if seg == "" {
+		seg = "all"
+	}
+	tr = segmentFilter(tr, seg)
+	backfillEval := seg != "forward" // conf gates are only valid when forward is included exclusively
+
 	if opt.Cap > 0 {
 		for _, t := range tr {
 			if t.RMult > opt.Cap {
@@ -104,7 +152,7 @@ func Run(tradesMap map[string]*Trade, rules []string, opt Options) Result {
 	}
 	rng := rand.New(rand.NewSource(opt.Seed))
 
-	var rElig, fwd int
+	var rElig, fwd, bkf int
 	var rvals []float64
 	for _, t := range tr {
 		if t.RiskUSD > 0 {
@@ -113,6 +161,8 @@ func Run(tradesMap map[string]*Trade, rules []string, opt Options) Result {
 		}
 		if t.Forward {
 			fwd++
+		} else {
+			bkf++
 		}
 	}
 	sort.Float64s(rvals)
@@ -124,7 +174,7 @@ func Run(tradesMap map[string]*Trade, rules []string, opt Options) Result {
 	}
 
 	base, _ := simulate("BASELINE(take-all)", tr, nil)
-	res := Result{Book: len(tr), REligible: rElig, Forward: fwd,
+	res := Result{Segment: seg, Book: len(tr), REligible: rElig, Forward: fwd, Backfill: bkf,
 		RP5: pct(0.05), RP50: pct(0.5), RP95: pct(0.95), Baseline: base}
 
 	for _, rule := range rules {
@@ -135,6 +185,9 @@ func Run(tradesMap map[string]*Trade, rules []string, opt Options) Result {
 		sc.H2 = halfVsRand(tr, rule, false, opt.Trials, rng)
 		sc.CILo, sc.CIHi = bootstrapCI(kept, 2000, rng)
 		sc.Pass = sc.RetR > base.RetR && sc.VsRand > 95 && sc.H1 > 95 && sc.H2 > 95 && sc.CILo > 0
+		// A conf-gated rule can't fire when backfill is in the mix (conf=0 there),
+		// so its verdict is only valid in a forward-only run.
+		sc.ConfInvalid = confDependentRules[rule] && backfillEval
 		res.Traders = append(res.Traders, sc)
 	}
 	sort.Slice(res.Traders, func(i, j int) bool { return res.Traders[i].RetR > res.Traders[j].RetR })

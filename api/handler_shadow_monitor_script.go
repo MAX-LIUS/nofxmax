@@ -137,21 +137,33 @@ async function loadInvestor(){
 // real book minus the opens it would have blocked, on shared capital, measured in
 // realized R. Renders a leaderboard + overlaid equity curves so the effect reads
 // like several paper accounts run by different rulebooks side by side.
+// segBar renders the data-segment selector shared by bench + conf tabs.
+// all=both, backfill=pre-deploy in-sample (price/trend gates only), forward=live OOS.
+function segBar(){
+  const b=(s,label,hint)=>'<button class="segbtn'+(SEG===s?' on':'')+'" data-s="'+s+'" onclick="setSeg(\''+s+'\')" title="'+hint+'">'+label+'</button>';
+  return '<div class="card" style="padding:10px"><b>数据段：</b> '
+    +b('all','全部','回填+前向混合，仅看整体方向')
+    +b('backfill','回填(上线前·样本内)','老系统历史成交，样本大；价格/趋势门有效，信心门无效')
+    +b('forward','前向(上线后·真OOS)','实时评估，最终裁判；样本仍在积累')
+    +'<span class="mut" style="margin-left:10px;font-size:12px">回填=样本内(部分规则据此设计，偏乐观)；前向=样本外(含被实盘拒绝的意图评估)</span></div>';
+}
+
 async function loadBench(){
-  const d=await api('/shadow-gates/bench');
+  const d=await api('/shadow-gates/bench?segment='+SEG);
   if(!d.ready){
-    document.getElementById('view').innerHTML='<div class="card mut">'
+    document.getElementById('view').innerHTML=segBar()+'<div class="card mut">'
       +(d.computing?'虚拟对战正在后台计算中（首次约需数十秒），稍后自动刷新…':('暂无结果'+(d.error?('：'+d.error):'')))+'</div>';
     return;
   }
   const r=d.result, base=r.baseline, traders=r.traders||[];
   const staleMin=Math.round((d.stale_sec||0)/60);
-  let h='<div class="card"><div class="kpis">'
-    +kpi(r.book,'账本总开仓数')
+  const segNote = r.segment==='forward'?'（仅前向真样本外）':(r.segment==='backfill'?'（仅回填样本内）':'（回填+前向）');
+  let h=segBar()+'<div class="card"><div class="kpis">'
+    +kpi(r.book,'本段开仓数')
     +kpi(r.r_eligible,'有初始风险(可计R)')
-    +kpi(r.forward_closed,'前向已平仓(真OOS)')
+    +kpi(r.forward_closed+' / '+r.backfill_closed,'前向 / 回填')
     +kpi('<span class="'+cls(base.final_r)+'">'+fmt(base.final_r,1)+'R</span>','基准(全收)累计R')
-    +'</div><div class="hint">R 单位=盈亏/初始风险。虚拟交易员只能"少开"其会拦的单（真实账本子集），'
+    +'</div><div class="hint">当前口径 '+segNote+'。R 单位=盈亏/初始风险。虚拟交易员只能"少开"其会拦的单（真实账本子集），'
     +'不能开系统没开的单；平仓沿用真实保护结果。R分位 P5/P50/P95='
     +fmt(r.r_p5,2)+' / '+fmt(r.r_p50,2)+' / '+fmt(r.r_p95,2)+'。计算于 '+staleMin+' 分钟前。</div></div>';
 
@@ -168,14 +180,16 @@ async function loadBench(){
   traders.forEach(t=>h+=benchRow(t,false));
   h+='</tbody></table>'
     +'<div class="hint">裁定=PASS 需同时满足：累计R&gt;基准 且 vs随机&gt;95 且 H1&gt;95 且 H2&gt;95 且 Boot5%&gt;0。'
-    +'这是<b>样本内回填</b>结论；真正的样本外裁判是"前向已平仓"随时间累积。</div></div>';
+    +(r.segment==='forward'?'当前为<b>前向真样本外</b>，样本少时结论不稳，随时间累积才可信。':'当前含<b>回填样本内</b>，是方向性参考，最终裁判看"前向"段。')
+    +' 标 n/a 的信心门在含回填口径下不触发（回填 conf=0），须切到"前向"段看其真实效果。</div></div>';
   document.getElementById('view').innerHTML=h;
 }
 
 function benchRow(t,isBase){
   const passTag = isBase ? '<span class="mut">基准</span>'
-    : (t.pass?'<span class="pill pas">PASS</span>':'<span class="pill blk">未过</span>');
-  const nm = isBase ? '<b>基准·全收</b>' : t.name;
+    : (t.conf_invalid?'<span class="pill" style="opacity:.6">n/a本段</span>'
+      : (t.pass?'<span class="pill pas">PASS</span>':'<span class="pill blk">未过</span>'));
+  const nm = isBase ? '<b>基准·全收</b>' : (t.conf_invalid?('<span class="mut">'+t.name+' ⚠信心门</span>'):t.name);
   const inf = v => (v===null||v===undefined||!isFinite(v))?'∞':fmt(v,2);
   return '<tr'+(isBase?' style="background:rgba(255,255,255,.04)"':'')+'>'
     +'<td style="text-align:left">'+nm+'</td>'
@@ -234,15 +248,16 @@ function equitySVG(base, traders){
 // a gate actually block the losers (Lift>0)? Both come from /shadow-gates/bench
 // (conf_layers + gate_conf), computed over the full R-eligible book (conf 100%).
 async function loadConf(){
-  const d=await api('/shadow-gates/bench');
+  const d=await api('/shadow-gates/bench?segment='+SEG);
   if(!d.ready){
-    document.getElementById('view').innerHTML='<div class="card mut">'
+    document.getElementById('view').innerHTML=segBar()+'<div class="card mut">'
       +(d.computing?'后台计算中，稍后自动刷新…':('暂无结果'+(d.error?('：'+d.error):'')))+'</div>';
     return;
   }
   const r=d.result, layers=r.conf_layers||[], gc=r.gate_conf||[];
+  const segNote = r.segment==='forward'?'（前向真样本外）':(r.segment==='backfill'?'（回填样本内）':'（回填+前向）');
   // ---- global calibration ----
-  let h='<div class="card"><b>AI 信心校准（全样本 R-eligible，信心取自开仓决策）</b>'
+  let h=segBar()+'<div class="card"><b>AI 信心校准 '+segNote+'（本段 R-eligible，信心取自开仓决策，回填/前向均为真值）</b>'
     +'<table style="margin-top:10px"><thead><tr><th>信心层</th><th>N</th><th>期望R</th><th>胜率</th><th>累计R</th><th>解读</th></tr></thead><tbody>';
   if(!layers.length)h+='<tr><td colspan="6" class="mut">暂无数据</td></tr>';
   // find best-expR layer to comment on monotonicity
