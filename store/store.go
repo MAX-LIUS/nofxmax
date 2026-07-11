@@ -29,6 +29,7 @@ type Store struct {
 	flipObs          *FlipObservationStore
 	breadthEvt       *BreadthEventStore
 	shadowGate       *ShadowGateStore
+	blockedSim       *BlockedSimStore
 	strategy         *StrategyStore
 	equity           *EquityStore
 	equityAdjustment *EquityAdjustmentStore
@@ -167,6 +168,9 @@ func (s *Store) initTables() error {
 	}
 	if err := s.ShadowGate().InitTables(); err != nil {
 		return fmt.Errorf("failed to initialize shadow gate tables: %w", err)
+	}
+	if err := s.BlockedSim().InitTables(); err != nil {
+		return fmt.Errorf("failed to initialize blocked sim tables: %w", err)
 	}
 	if err := s.Strategy().initTables(); err != nil {
 		return fmt.Errorf("failed to initialize strategy tables: %w", err)
@@ -334,6 +338,19 @@ func (s *Store) ShadowGate() *ShadowGateStore {
 		s.shadowGate = NewShadowGateStore(s.gdb)
 	}
 	return s.shadowGate
+}
+
+// BlockedSim gets the blocked-open counterfactual storage. When an enforce-mode
+// regime gate blocks an open, the intent is captured here and later paper-traded
+// through the trader's real protection ladder so we can measure whether the block
+// was right — restoring the counterfactual that enforcing would otherwise lose.
+func (s *Store) BlockedSim() *BlockedSimStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.blockedSim == nil {
+		s.blockedSim = NewBlockedSimStore(s.gdb)
+	}
+	return s.blockedSim
 }
 
 // Evolution gets evolution engine storage

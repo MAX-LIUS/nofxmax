@@ -3,8 +3,10 @@ package trader
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"nofx/kernel"
+	"nofx/logger"
 	"nofx/market"
 	"nofx/store"
 )
@@ -104,4 +106,44 @@ func evaluateEnforceRegimeGates(cfg *store.StrategyConfig, d *kernel.Decision, d
 		}
 	}
 	return hits
+}
+
+// captureBlockedIntent records an enforce-blocked open so it can be paper-traded
+// through the real protection ladder later (blocksim), restoring the
+// counterfactual. Best-effort: never blocks or errors into the live path.
+func (at *AutoTrader) captureBlockedIntent(d *kernel.Decision, data *market.Data, blockedBy string) {
+	if at.store == nil || d == nil || data == nil {
+		return
+	}
+	entry := data.CurrentPrice
+	if entry <= 0 || d.StopLoss <= 0 {
+		return // no usable entry/stop => can't simulate; skip
+	}
+	qty := 0.0
+	if d.PositionSizeUSD > 0 {
+		qty = d.PositionSizeUSD / entry
+	}
+	if qty <= 0 {
+		qty = 1.0 // nominal; R = pnl/risk normalizes size out
+	}
+	now := time.Now().UTC().UnixMilli()
+	o := &store.BlockedSimOutcome{
+		TraderID:   at.id,
+		Cycle:      int64(at.cycleNumber),
+		Symbol:     d.Symbol,
+		Side:       strings.ToUpper(directionFromAction(d.Action)),
+		EntryPrice: entry,
+		StopLoss:   d.StopLoss,
+		TakeProfit: d.TakeProfit,
+		Quantity:   qty,
+		Confidence: float64(d.Confidence),
+		Leverage:   d.Leverage,
+		BlockedBy:  blockedBy,
+		SimStatus:  "pending",
+		ObservedAt: now,
+		CreatedAt:  now,
+	}
+	if err := at.store.BlockedSim().Record(o); err != nil {
+		logger.Infof("⚠ blocksim capture failed (non-blocking): %v", err)
+	}
 }

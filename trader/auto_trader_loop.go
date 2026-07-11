@@ -531,6 +531,10 @@ func (at *AutoTrader) runCycle() error {
 				gateResult.BlockReason = fmt.Sprintf("regime gate(s) [%s] blocked %s %s: %s",
 					strings.Join(cats, ","), d.Symbol, d.Action, hits[0].Detail)
 				gateResult.EnforcedCodes = append(gateResult.EnforcedCodes, gateResult.BlockedBy)
+
+				// Capture the blocked intent for counterfactual replay (blocksim).
+				// Best-effort: a capture failure must never touch the live path.
+				at.captureBlockedIntent(&d, ctx.MarketDataMap[d.Symbol], strings.Join(cats, ","))
 			}
 		}
 
