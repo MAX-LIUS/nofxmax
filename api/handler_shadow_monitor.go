@@ -74,6 +74,7 @@ const shadowMonitorHTML = `<!DOCTYPE html>
     <div class="tab" data-t="feed" onclick="tab('feed')">实时拦截流</div>
     <div class="tab" data-t="investor" onclick="tab('investor')">投资者实战视角</div>
     <div class="tab" data-t="bench" onclick="tab('bench')">虚拟交易员对战</div>
+    <div class="tab" data-t="conf" onclick="tab('conf')">信心分层</div>
   </div>
   <div id="view"></div>
   <div class="hint">
@@ -114,6 +115,7 @@ async function load(){
     if(CUR==='rules')await loadRules();
     else if(CUR==='feed')await loadFeed();
     else if(CUR==='bench')await loadBench();
+    else if(CUR==='conf')await loadConf();
     else await loadInvestor();
     $('#status').textContent='更新于 '+new Date().toLocaleTimeString();
   }catch(e){$('#status').innerHTML='<span class="neg">错误: '+e.message+'（检查 token）</span>';}

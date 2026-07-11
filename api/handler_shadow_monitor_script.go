@@ -229,6 +229,65 @@ function equitySVG(base, traders){
   return svg+leg;
 }
 
+// Confidence layers: (1) global calibration — does higher AI confidence actually
+// earn higher R? (2) each gate × confidence layer — in which confidence band does
+// a gate actually block the losers (Lift>0)? Both come from /shadow-gates/bench
+// (conf_layers + gate_conf), computed over the full R-eligible book (conf 100%).
+async function loadConf(){
+  const d=await api('/shadow-gates/bench');
+  if(!d.ready){
+    document.getElementById('view').innerHTML='<div class="card mut">'
+      +(d.computing?'后台计算中，稍后自动刷新…':('暂无结果'+(d.error?('：'+d.error):'')))+'</div>';
+    return;
+  }
+  const r=d.result, layers=r.conf_layers||[], gc=r.gate_conf||[];
+  // ---- global calibration ----
+  let h='<div class="card"><b>AI 信心校准（全样本 R-eligible，信心取自开仓决策）</b>'
+    +'<table style="margin-top:10px"><thead><tr><th>信心层</th><th>N</th><th>期望R</th><th>胜率</th><th>累计R</th><th>解读</th></tr></thead><tbody>';
+  if(!layers.length)h+='<tr><td colspan="6" class="mut">暂无数据</td></tr>';
+  // find best-expR layer to comment on monotonicity
+  layers.forEach(l=>{
+    let note='';
+    if(l.exp_r<-0.1)note='<span class="neg">期望明显为负</span>';
+    else if(l.exp_r>0)note='<span class="pos">期望为正</span>';
+    else note='<span class="mut">接近盈亏平衡</span>';
+    h+='<tr><td>'+l.name+'</td><td>'+l.n_trades+'</td>'
+      +'<td class="'+cls(l.exp_r)+'">'+fmt(l.exp_r,3)+'</td>'
+      +'<td>'+l.win_rate.toFixed(1)+'%</td>'
+      +'<td class="'+cls(l.sum_r)+'">'+fmt(l.sum_r,1)+'</td>'
+      +'<td style="text-align:left">'+note+'</td></tr>';
+  });
+  h+='</tbody></table><div class="hint">若期望R不随信心单调上升，说明 AI 的高信心并不更可靠——这正是门控要纠正的地方。</div></div>';
+
+  // ---- gate × confidence layer ----
+  h+='<div class="card"><b>各门 × 信心层：在哪个信心带上真正拦对了亏损单</b>'
+    +'<table style="margin-top:10px"><thead><tr>'
+    +'<th>门</th><th>信心层</th><th>拦N</th><th>拦·均值R</th><th>留·均值R</th>'
+    +'<th>Edge(留-拦)</th><th>Lift(留-层基线)</th><th>解读</th></tr></thead><tbody>';
+  if(!gc.length)h+='<tr><td colspan="8" class="mut">暂无数据</td></tr>';
+  gc.forEach(g=>{
+    (g.cells||[]).forEach((c,i)=>{
+      let note='<span class="mut">样本少</span>';
+      if(c.block_n>=10){
+        if(c.lift>0.05)note='<span class="pos">此层纠错强 ✓</span>';
+        else if(c.lift<-0.05)note='<span class="neg">此层拦错(拦到赢家)</span>';
+        else note='<span class="mut">此层影响中性</span>';
+      }
+      h+='<tr>'+(i===0?'<td rowspan="'+g.cells.length+'"><b>'+g.name+'</b></td>':'')
+        +'<td>'+c.layer+'</td><td>'+c.block_n+'</td>'
+        +'<td class="'+cls(c.block_exp_r)+'">'+fmt(c.block_exp_r,3)+'</td>'
+        +'<td class="'+cls(c.keep_exp_r)+'">'+fmt(c.keep_exp_r,3)+'</td>'
+        +'<td class="'+cls(c.edge)+'">'+fmt(c.edge,3)+'</td>'
+        +'<td class="'+cls(c.lift)+'" style="font-weight:600">'+fmt(c.lift,3)+'</td>'
+        +'<td style="text-align:left">'+note+'</td></tr>';
+    });
+  });
+  h+='</tbody></table>'
+    +'<div class="hint">拦·均值R 越负=拦掉的越是亏损单；Lift&gt;0=该门在此信心层能把留下单的期望抬到层基线之上（真正创造价值的地方）。'
+    +'这是样本内回填口径，chop 类在回填期信心可能不全。</div></div>';
+  document.getElementById('view').innerHTML=h;
+}
+
 function kpi(v,l){return '<div class="kpi"><div class="v">'+v+'</div><div class="l">'+l+'</div></div>';}
 
 // initial paint

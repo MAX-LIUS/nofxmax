@@ -35,16 +35,50 @@ type Options struct {
 	Seed   int64
 }
 
+// ConfLayer is one AI-confidence bucket's global calibration: does higher AI
+// confidence actually earn higher R? (Empirically, not always.)
+type ConfLayer struct {
+	Name    string  `json:"name"` // "80~89"
+	NTrades int     `json:"n_trades"`
+	ExpR    float64 `json:"exp_r"`
+	WinRate float64 `json:"win_rate"`
+	SumR    float64 `json:"sum_r"`
+}
+
+// GateConfCell is one (rule × confidence layer) cell. It answers both:
+//
+//	(A) does this gate block the RIGHT trades in this layer? -> BlockExpR/KeepExpR/Edge
+//	(B) if this gate ran ONLY within this layer, does it beat taking the whole
+//	    layer? -> LayerBaseExpR/KeptExpR/Lift
+type GateConfCell struct {
+	Layer         string  `json:"layer"`
+	BlockN        int     `json:"block_n"`
+	BlockExpR     float64 `json:"block_exp_r"`
+	KeepN         int     `json:"keep_n"`
+	KeepExpR      float64 `json:"keep_exp_r"`
+	Edge          float64 `json:"edge"`             // KeepExpR - BlockExpR (>0 = blocked the worse trades)
+	LayerBaseExpR float64 `json:"layer_base_exp_r"` // take-all in this layer
+	Lift          float64 `json:"lift"`             // KeepExpR - LayerBaseExpR (>0 = gate helps in this layer)
+}
+
+// GateConf is one gate's confidence breakdown across layers.
+type GateConf struct {
+	Name  string         `json:"name"`
+	Cells []GateConfCell `json:"cells"`
+}
+
 // Result is the full bench output for the API/CLI.
 type Result struct {
-	Book      int         `json:"book"`
-	REligible int         `json:"r_eligible"`
-	Forward   int         `json:"forward_closed"`
-	RP5       float64     `json:"r_p5"`
-	RP50      float64     `json:"r_p50"`
-	RP95      float64     `json:"r_p95"`
-	Baseline  Scorecard   `json:"baseline"`
-	Traders   []Scorecard `json:"traders"`
+	Book       int         `json:"book"`
+	REligible  int         `json:"r_eligible"`
+	Forward    int         `json:"forward_closed"`
+	RP5        float64     `json:"r_p5"`
+	RP50       float64     `json:"r_p50"`
+	RP95       float64     `json:"r_p95"`
+	Baseline   Scorecard   `json:"baseline"`
+	Traders    []Scorecard `json:"traders"`
+	ConfLayers []ConfLayer `json:"conf_layers"` // global AI-confidence calibration
+	GateConf   []GateConf  `json:"gate_conf"`   // per-gate × confidence-layer effect
 }
 
 // Run simulates the baseline + one virtual trader per rule and returns ranked
@@ -104,7 +138,121 @@ func Run(tradesMap map[string]*Trade, rules []string, opt Options) Result {
 		res.Traders = append(res.Traders, sc)
 	}
 	sort.Slice(res.Traders, func(i, j int) bool { return res.Traders[i].RetR > res.Traders[j].RetR })
+
+	res.ConfLayers = confLayers(tr)
+	res.GateConf = gateConf(tr, rules)
 	return res
+}
+
+// confBucket maps an AI confidence to a fixed layer label. Layers are coarse on
+// purpose so per-cell samples stay meaningful.
+func confBucket(c float64) string {
+	switch {
+	case c <= 0:
+		return "缺失"
+	case c < 60:
+		return "<60"
+	case c < 70:
+		return "60~69"
+	case c < 80:
+		return "70~79"
+	case c < 90:
+		return "80~89"
+	default:
+		return ">=90"
+	}
+}
+
+// confLayerOrder is the display order; only layers with trades are emitted.
+var confLayerOrder = []string{"缺失", "<60", "60~69", "70~79", "80~89", ">=90"}
+
+func confLayers(tr []*Trade) []ConfLayer {
+	sumR := map[string]float64{}
+	n := map[string]int{}
+	wins := map[string]int{}
+	for _, t := range tr {
+		if t.RiskUSD <= 0 {
+			continue
+		}
+		b := confBucket(t.Conf)
+		sumR[b] += t.RMult
+		n[b]++
+		if t.RMult > 0 {
+			wins[b]++
+		}
+	}
+	var out []ConfLayer
+	for _, name := range confLayerOrder {
+		if n[name] == 0 {
+			continue
+		}
+		out = append(out, ConfLayer{Name: name, NTrades: n[name],
+			ExpR: sumR[name] / float64(n[name]), SumR: sumR[name],
+			WinRate: 100 * float64(wins[name]) / float64(n[name])})
+	}
+	return out
+}
+
+func gateConf(tr []*Trade, rules []string) []GateConf {
+	// pre-bucket layer baselines (take-all expR per layer)
+	layerSum := map[string]float64{}
+	layerN := map[string]int{}
+	for _, t := range tr {
+		if t.RiskUSD <= 0 {
+			continue
+		}
+		b := confBucket(t.Conf)
+		layerSum[b] += t.RMult
+		layerN[b]++
+	}
+	var out []GateConf
+	for _, rule := range rules {
+		gc := GateConf{Name: rule}
+		type acc struct {
+			bSum, kSum float64
+			bN, kN     int
+		}
+		m := map[string]*acc{}
+		for _, t := range tr {
+			if t.RiskUSD <= 0 {
+				continue
+			}
+			b := confBucket(t.Conf)
+			a := m[b]
+			if a == nil {
+				a = &acc{}
+				m[b] = a
+			}
+			if t.BlockedBy[rule] {
+				a.bSum += t.RMult
+				a.bN++
+			} else {
+				a.kSum += t.RMult
+				a.kN++
+			}
+		}
+		for _, name := range confLayerOrder {
+			a := m[name]
+			if a == nil || a.bN == 0 { // only layers where this gate actually blocks
+				continue
+			}
+			cell := GateConfCell{Layer: name, BlockN: a.bN, KeepN: a.kN}
+			cell.BlockExpR = a.bSum / float64(a.bN)
+			if a.kN > 0 {
+				cell.KeepExpR = a.kSum / float64(a.kN)
+			}
+			cell.Edge = cell.KeepExpR - cell.BlockExpR
+			if layerN[name] > 0 {
+				cell.LayerBaseExpR = layerSum[name] / float64(layerN[name])
+			}
+			cell.Lift = cell.KeepExpR - cell.LayerBaseExpR
+			gc.Cells = append(gc.Cells, cell)
+		}
+		if len(gc.Cells) > 0 {
+			out = append(out, gc)
+		}
+	}
+	return out
 }
 
 func simulate(name string, tr []*Trade, drop map[string]bool) (Scorecard, []float64) {
