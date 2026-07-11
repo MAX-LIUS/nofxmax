@@ -143,6 +143,37 @@ export interface StrategyConfig {
   grid_config?: GridStrategyConfig
   // Breakout entry configuration (only used when strategy_type is 'breakout_trading')
   breakout_entry?: BreakoutEntryConfig
+  // Regime/trend entry gates promoted from the shadow dry-run bench. Each entry is
+  // one gate keyed by CATEGORY (大类); params differentiate variants within a
+  // category. mode='shadow' only records a counterfactual verdict; mode='enforce'
+  // actually blocks the open (and the blocked intent is replayed for scoring).
+  regime_gates?: RegimeGateConfig[]
+}
+
+// RegimeGateCategory mirrors the backend switch in trader/regime_gate.go.
+export type RegimeGateCategory =
+  | 'counter_trend'
+  | 'trend_direction_only'
+  | 'chop_reject'
+  | 'chop_lowconf'
+  | 'adx_weak'
+  | 'donchian_counter'
+
+export type RegimeGateMode = 'shadow' | 'enforce'
+
+// RegimeGateConfig is one configured regime/trend entry gate. Matches
+// store.RegimeGateConfig on the backend.
+export interface RegimeGateConfig {
+  category: RegimeGateCategory
+  mode: RegimeGateMode
+  enabled: boolean
+  params?: {
+    slope_window?: number // counter_trend / trend_direction_only
+    block_side?: 'LONG' | 'SHORT' // trend_direction_only
+    min_conf?: number // chop_lowconf
+    threshold?: number // adx_weak
+    lookback?: number // donchian_counter
+  }
 }
 
 // BreakoutEntryConfig controls the standalone data-validated breakout engine.
