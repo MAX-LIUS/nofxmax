@@ -79,6 +79,37 @@ func main() {
 	fmt.Println("          AND bootstrap 5% expR > 0. Full-sample-only winners that fail a half are OVERFIT.")
 	fmt.Println("NOTE: virtual traders only REMOVE trades (subset of executed book); gates that would")
 	fmt.Println("OPEN untraded ideas cannot be scored — no ground truth. Backfill chop rules see conf=0.")
+
+	printConf(res)
+}
+
+// printConf shows the AI-confidence crosscuts: global calibration (is higher
+// confidence actually better?) and, for the top gate by final R, where its edge
+// lives across confidence bands.
+func printConf(res shadoweval.Result) {
+	if len(res.ConfLayers) == 0 {
+		return
+	}
+	fmt.Println("\n=== AI-confidence calibration (full R-eligible book) ===")
+	fmt.Printf("%-8s %6s %8s %7s %8s\n", "band", "N", "expR", "win%", "sumR")
+	for _, l := range res.ConfLayers {
+		fmt.Printf("%-8s %6d %+8.3f %6.1f%% %+8.1f\n", l.Name, l.NTrades, l.ExpR, l.WinRate, l.SumR)
+	}
+	if len(res.Traders) == 0 {
+		return
+	}
+	top := res.Traders[0]
+	for _, g := range res.GateConf {
+		if g.Name != top.Name {
+			continue
+		}
+		fmt.Printf("\n=== %s: edge by confidence band (Lift>0 = helps in that band) ===\n", g.Name)
+		fmt.Printf("%-8s %5s %9s %9s %8s\n", "band", "blkN", "blkExpR", "keepExpR", "Lift")
+		for _, c := range g.Cells {
+			fmt.Printf("%-8s %5d %+9.3f %+9.3f %+8.3f\n", c.Layer, c.BlockN, c.BlockExpR, c.KeepExpR, c.Lift)
+		}
+		break
+	}
 }
 
 func printHeader() {
