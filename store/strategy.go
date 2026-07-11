@@ -76,6 +76,13 @@ type StrategyConfig struct {
 	// max positions, position-value cap, configured ladder/runner/time-stop protection).
 	BreakoutEntry BreakoutEntryConfig `json:"breakout_entry,omitempty"`
 
+	// RegimeGates is the configurable regime/trend entry-gate ruleset promoted from
+	// the shadow (dry-run) candidates. Each entry selects a gate CATEGORY, its own
+	// PARAMS, and a MODE (shadow = observe only; enforce = actually block the open).
+	// The full observation-only shadow sweep still runs regardless, so enforcing a
+	// gate never loses the counterfactual record for the others.
+	RegimeGates []RegimeGateConfig `json:"regime_gates,omitempty"`
+
 	// Grid trading configuration (only used when StrategyType == "grid_trading")
 	GridConfig *GridStrategyConfig `json:"grid_config,omitempty"`
 
@@ -100,6 +107,33 @@ type BreakoutEntryConfig struct {
 	// Position size as a fraction of equity (e.g. 0.5 = 50% of equity notional).
 	// 0/unset → fall back to a conservative default.
 	SizeEquityFrac float64 `json:"size_equity_frac,omitempty"`
+}
+
+// RegimeGateConfig is one configured regime/trend entry gate. Gates are organized
+// by CATEGORY (the method), with parameters kept separate so the same category can
+// be instantiated at different settings (e.g. counter_trend at slope window 30 vs
+// 50 are two entries of the same category). Mode controls whether it merely
+// observes (shadow) or actually blocks the open (enforce).
+//
+// Categories and their params:
+//
+//	counter_trend         params: slope_window (30|50|72)   — block entry opposing regression-slope trend
+//	trend_direction_only  params: slope_window, block_side (LONG|SHORT) — block one side against the trend
+//	chop_reject           params: (none)                    — block ALL entries in consensus chop
+//	chop_lowconf          params: min_conf (e.g. 70|80)      — block low-confidence entries in chop
+//	adx_weak              params: threshold (e.g. 20)        — block entries when ADX below threshold
+//	donchian_counter      params: lookback (e.g. 48)         — block entry opposing an N-bar breakout
+type RegimeGateConfig struct {
+	Category string `json:"category"` // see doc above
+	Mode     string `json:"mode"`     // "shadow" (default) | "enforce"
+	Enabled  bool   `json:"enabled"`  // master on/off for this entry
+	Params   struct {
+		SlopeWindow int     `json:"slope_window,omitempty"`
+		BlockSide   string  `json:"block_side,omitempty"` // LONG | SHORT (trend_direction_only)
+		MinConf     float64 `json:"min_conf,omitempty"`
+		Threshold   float64 `json:"threshold,omitempty"`
+		Lookback    int     `json:"lookback,omitempty"`
+	} `json:"params,omitempty"`
 }
 
 type EntryStructureConfig struct {

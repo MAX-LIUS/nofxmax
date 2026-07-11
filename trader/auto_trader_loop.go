@@ -483,15 +483,15 @@ func (at *AutoTrader) runCycle() error {
 		gateResult := evaluateEntryGate(entryGateInput{
 			Decision:               &d,
 			MarketData:             ctx.MarketDataMap[d.Symbol],
-			StrategyConfig:        at.config.StrategyConfig,
-			PolicyMode:            policyMode,
-			MinRR:                 at.getMinRiskRewardRatio(),
-			MinConfidence:         at.getMinConfidence(),
-			ConstraintSnap:        constraintSnapshot,
-			ProtectionAlign:       protectionAlignment,
+			StrategyConfig:         at.config.StrategyConfig,
+			PolicyMode:             policyMode,
+			MinRR:                  at.getMinRiskRewardRatio(),
+			MinConfidence:          at.getMinConfidence(),
+			ConstraintSnap:         constraintSnapshot,
+			ProtectionAlign:        protectionAlignment,
 			LastSameDirectionTrade: lastSameDirTrade,
-			RecentCloseStats:      recentCloseStats,
-			ChainOfThought:        record.CoTTrace,
+			RecentCloseStats:       recentCloseStats,
+			ChainOfThought:         record.CoTTrace,
 		})
 		gateResult.Regime = classifyProtectionRegime(ctx.MarketDataMap[d.Symbol])
 		if ctx.MarketDataMap[d.Symbol] != nil {
@@ -503,6 +503,34 @@ func (at *AutoTrader) runCycle() error {
 			gateResult.EffectiveRR = d.EntryProtection.RiskReward.NetEstimatedRR
 			if gateResult.EffectiveRR <= 0 {
 				gateResult.EffectiveRR = d.EntryProtection.RiskReward.GrossEstimatedRR
+			}
+		}
+
+		// ── Configurable regime gates (enforce mode) ──
+		// Gates promoted from the shadow dry-run and set to enforce actually block
+		// the open here, folding into the same block-handling (audit-only, logging,
+		// blocksim capture) as the built-in gate. The observation-only shadow sweep
+		// below still runs for ALL candidates regardless.
+		if gateResult.Allowed && directionFromAction(d.Action) != "" {
+			rgTF := ""
+			rgEx := at.exchange
+			if at.config.StrategyConfig != nil {
+				rgTF = at.config.StrategyConfig.Indicators.Klines.PrimaryTimeframe
+				if at.config.StrategyConfig.CoinSource.ExchangeSource != "" {
+					rgEx = at.config.StrategyConfig.CoinSource.ExchangeSource
+				}
+			}
+			if hits := evaluateEnforceRegimeGates(at.config.StrategyConfig, &d, ctx.MarketDataMap[d.Symbol], rgTF, rgEx); len(hits) > 0 {
+				cats := make([]string, 0, len(hits))
+				for _, h := range hits {
+					cats = append(cats, h.Category)
+				}
+				gateResult.Allowed = false
+				gateResult.Stage = EntryGateStageMarketState
+				gateResult.BlockedBy = "regime_gate:" + strings.Join(cats, ",")
+				gateResult.BlockReason = fmt.Sprintf("regime gate(s) [%s] blocked %s %s: %s",
+					strings.Join(cats, ","), d.Symbol, d.Action, hits[0].Detail)
+				gateResult.EnforcedCodes = append(gateResult.EnforcedCodes, gateResult.BlockedBy)
 			}
 		}
 
