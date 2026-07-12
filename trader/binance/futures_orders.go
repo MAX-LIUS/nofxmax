@@ -13,6 +13,22 @@ import (
 )
 
 func (t *FuturesTrader) SetTrailingStopLoss(symbol string, positionSide string, activationPrice float64, callbackRate float64, quantity float64) error {
+	_, err := t.setTrailingStopLossCore(symbol, positionSide, activationPrice, callbackRate, quantity, "")
+	return err
+}
+
+// SetTrailingStopLossTaggedWithID places a native trailing stop whose ClientAlgoId
+// encodes the close mechanism (via clientIDForReason), so when Binance triggers the
+// trailing stop the resulting fill decodes its own mechanism 1:1 through the coded
+// client id — bringing Binance native-trailing attribution to OKX parity. Without
+// this, trailing fills carry a plain broker id, decode to "", and fall through to
+// heuristic guessing (which mislabeled them ladder_tp / dumped them to
+// sync_external). Returns the exchange algoId so the caller can cancel it precisely.
+func (t *FuturesTrader) SetTrailingStopLossTaggedWithID(symbol string, positionSide string, activationPrice float64, callbackRate float64, quantity float64, reasonTag string) (string, error) {
+	return t.setTrailingStopLossCore(symbol, positionSide, activationPrice, callbackRate, quantity, reasonTag)
+}
+
+func (t *FuturesTrader) setTrailingStopLossCore(symbol string, positionSide string, activationPrice float64, callbackRate float64, quantity float64, reasonTag string) (string, error) {
 	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	var side futures.SideType
 	var posSide futures.PositionSideType
@@ -25,13 +41,20 @@ func (t *FuturesTrader) SetTrailingStopLoss(symbol string, positionSide string, 
 		posSide = futures.PositionSideTypeShort
 	}
 
+	// Encode the mechanism when a reason is given (falls back to a plain broker id
+	// when the reason has no registered code), so the trailing fill is attributable.
+	clientAlgoID := getBrOrderID()
+	if reasonTag != "" {
+		clientAlgoID = clientIDForReason(reasonTag)
+	}
+
 	service := t.client.NewCreateAlgoOrderService().
 		Symbol(symbol).
 		Side(side).
 		PositionSide(posSide).
 		Type(futures.AlgoOrderTypeTrailingStopMarket).
 		WorkingType(futures.WorkingTypeContractPrice).
-		ClientAlgoId(getBrOrderID())
+		ClientAlgoId(clientAlgoID)
 
 	// Binance rejects closePosition=true for TRAILING_STOP_MARKET with -4136
 	// (Target strategy invalid). Trailing stops require an explicit quantity +
@@ -40,16 +63,16 @@ func (t *FuturesTrader) SetTrailingStopLoss(symbol string, positionSide string, 
 	if quantity <= 0 {
 		amt, err := t.execPositionAmt(symbol, positionSide)
 		if err != nil {
-			return fmt.Errorf("failed to resolve position size for trailing stop: %w", err)
+			return "", fmt.Errorf("failed to resolve position size for trailing stop: %w", err)
 		}
 		if amt <= 0 {
-			return fmt.Errorf("no open %s position on %s to attach trailing stop", positionSide, symbol)
+			return "", fmt.Errorf("no open %s position on %s to attach trailing stop", positionSide, symbol)
 		}
 		quantity = amt
 	}
 	qtyStr, err := t.FormatQuantity(symbol, quantity)
 	if err != nil {
-		return fmt.Errorf("failed to format trailing stop quantity: %w", err)
+		return "", fmt.Errorf("failed to format trailing stop quantity: %w", err)
 	}
 	// Hedge mode (DualSide): PositionSide already fixes the close direction, so
 	// Binance rejects reduceOnly with -1106 (Parameter 'reduceonly' sent when not
@@ -60,7 +83,7 @@ func (t *FuturesTrader) SetTrailingStopLoss(symbol string, positionSide string, 
 		// Tick-align activation price (see SetStopLossTagged) to avoid -1111.
 		actStr, err := t.FormatPrice(symbol, activationPrice)
 		if err != nil {
-			return fmt.Errorf("failed to format trailing activation price: %w", err)
+			return "", fmt.Errorf("failed to format trailing activation price: %w", err)
 		}
 		service = service.ActivationPrice(actStr)
 	}
@@ -83,11 +106,41 @@ func (t *FuturesTrader) SetTrailingStopLoss(symbol string, positionSide string, 
 		callbackRate = cb
 	}
 
-	if _, err := service.Do(context.Background()); err != nil {
-		return fmt.Errorf("failed to set trailing stop-loss: %w", err)
+	resp, err := service.Do(context.Background())
+	if err != nil {
+		return "", fmt.Errorf("failed to set trailing stop-loss: %w", err)
 	}
 
-	logger.Infof("  Trailing stop-loss set (Algo Order): activation=%.4f callback=%.1f%%", activationPrice, callbackRate)
+	algoID := ""
+	if resp != nil && resp.AlgoId != 0 {
+		algoID = strconv.FormatInt(resp.AlgoId, 10)
+	}
+	logger.Infof("  Trailing stop-loss set (Algo Order): activation=%.4f callback=%.1f%% reason=%q algoId=%s", activationPrice, callbackRate, reasonTag, algoID)
+	return algoID, nil
+}
+
+// CancelTrailingStopOrdersByIDs cancels specific trailing/algo orders by their
+// exchange algoId, leaving other algo orders intact. Mirrors the OKX method the
+// trailing re-arm path expects (so a replaced full-trail can drop only the stale
+// order). Unknown/already-gone ids are treated as success.
+func (t *FuturesTrader) CancelTrailingStopOrdersByIDs(symbol string, orderIDs []string) error {
+	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
+	for _, id := range orderIDs {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		algoID, err := strconv.ParseInt(strings.TrimSpace(id), 10, 64)
+		if err != nil {
+			// Not a numeric algoId (e.g. a client id) — skip rather than fail the batch.
+			logger.Infof("  ⚠ Skipping non-numeric trailing algo id %q: %v", id, err)
+			continue
+		}
+		if _, err := t.client.NewCancelAlgoOrderService().AlgoID(algoID).Do(context.Background()); err != nil {
+			if !contains(err.Error(), "no algo") && !contains(err.Error(), "No algo") && !contains(err.Error(), "Unknown order") {
+				return fmt.Errorf("failed to cancel trailing algo order %s: %w", id, err)
+			}
+		}
+	}
 	return nil
 }
 
