@@ -517,7 +517,13 @@ func (t *OKXTrader) SyncOrdersFromOKXWithFullCloseHandler(traderID string, excha
 			// algo aging out of the exchange's queryable window.
 			if requestedReason == canonicalAction && trade.FillPrice > 0 {
 				if ci := st.CloseIntent(); ci != nil {
-					if intent, ierr := ci.MatchByTriggerPriceAndConsume(ownerTraderID, symbol, positionSide, trade.FillPrice, 3.5); ierr == nil && intent != nil && intent.Reason != "" {
+					// Scope to the current position's lifetime so an untriggered tier
+					// from an earlier same-symbol position cannot be borrowed.
+					var notBeforeMs int64
+					if pos, perr := st.Position().GetOpenPositionBySymbol(ownerTraderID, symbol, positionSide); perr == nil && pos != nil {
+						notBeforeMs = pos.EntryTime
+					}
+					if intent, ierr := ci.MatchByTriggerPriceAndConsume(ownerTraderID, symbol, positionSide, trade.FillPrice, 3.5, notBeforeMs); ierr == nil && intent != nil && intent.Reason != "" {
 						requestedReason = intent.Reason
 						logger.Infof("  🎯 Close fill %s %s attributed to reason=%s via protection-intent (trigger %.6f≈fill %.6f, intentID=%d)", symbol, canonicalAction, requestedReason, intent.TriggerPrice, trade.FillPrice, intent.ID)
 					}

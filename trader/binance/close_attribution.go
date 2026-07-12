@@ -133,7 +133,15 @@ func (t *FuturesTrader) resolveBinanceClose(
 	// triggered algo order spawns a NEW fill order id that the placement never saw.
 	if out.reason == "" && (out.realType == "" || out.realType == "MARKET") && st != nil && trade.Price > 0 {
 		if ci := st.CloseIntent(); ci != nil {
-			if intent, err := ci.MatchByTriggerPriceAndConsume(traderID, symbol, positionSide, trade.Price, 3.5); err == nil && intent != nil && intent.Reason != "" {
+			// Scope the trigger-price match to the current position's lifetime so a
+			// stale untriggered tier from an EARLIER same-symbol position cannot be
+			// borrowed (cross-position stringing). Best-effort: if the open position
+			// can't be resolved, notBefore stays 0 (legacy unbounded behaviour).
+			var notBeforeMs int64
+			if pos, perr := st.Position().GetOpenPositionBySymbol(traderID, symbol, positionSide); perr == nil && pos != nil {
+				notBeforeMs = pos.EntryTime
+			}
+			if intent, err := ci.MatchByTriggerPriceAndConsume(traderID, symbol, positionSide, trade.Price, 3.5, notBeforeMs); err == nil && intent != nil && intent.Reason != "" {
 				out.reason = intent.Reason
 				if out.realType == "" || out.realType == "MARKET" {
 					out.realType = "MARKET"

@@ -165,7 +165,7 @@ func TestCloseIntentTriggerPriceMatch(t *testing.T) {
 		t.Fatalf("record sl: %v", err)
 	}
 	// A fill at 472.55 (TP triggered) resolves to the TP tier, not the SL.
-	got, err := ci.MatchByTriggerPriceAndConsume("t", "ZECUSDT", "LONG", 472.55, 0.15)
+	got, err := ci.MatchByTriggerPriceAndConsume("t", "ZECUSDT", "LONG", 472.55, 0.15, 0)
 	if err != nil || got == nil {
 		t.Fatalf("tp match: %v got=%+v", err, got)
 	}
@@ -173,18 +173,18 @@ func TestCloseIntentTriggerPriceMatch(t *testing.T) {
 		t.Fatalf("expected ladder_tp, got %q", got.Reason)
 	}
 	// Consumed: a second fill at the same price must NOT re-grab the TP tier.
-	again, _ := ci.MatchByTriggerPriceAndConsume("t", "ZECUSDT", "LONG", 472.55, 0.15)
+	again, _ := ci.MatchByTriggerPriceAndConsume("t", "ZECUSDT", "LONG", 472.55, 0.15, 0)
 	if again != nil {
 		t.Fatalf("expected nil on consumed tier, got %+v", again)
 	}
 	// A fill far from any trigger (mid-price active close) resolves to nothing —
 	// never fabricate a protection attribution for a mid-price close.
-	none, _ := ci.MatchByTriggerPriceAndConsume("t", "ZECUSDT", "LONG", 460.00, 0.15)
+	none, _ := ci.MatchByTriggerPriceAndConsume("t", "ZECUSDT", "LONG", 460.00, 0.15, 0)
 	if none != nil {
 		t.Fatalf("mid-price fill should not match any protection tier, got %+v", none)
 	}
 	// The SL tier remains matchable by a fill at its trigger.
-	sl, _ := ci.MatchByTriggerPriceAndConsume("t", "ZECUSDT", "LONG", 446.18, 0.15)
+	sl, _ := ci.MatchByTriggerPriceAndConsume("t", "ZECUSDT", "LONG", 446.18, 0.15, 0)
 	if sl == nil || sl.Reason != "full_sl" {
 		t.Fatalf("expected full_sl, got %+v", sl)
 	}
@@ -201,7 +201,7 @@ func TestCloseIntentTriggerPriceSlippageAdverseSide(t *testing.T) {
 		t.Fatalf("record: %v", err)
 	}
 	// Fill at 97.0 (3% below trigger) — must match at 3.5% tolerance.
-	got, err := ci.MatchByTriggerPriceAndConsume("t", "SOLUSDT", "LONG", 97.0, 3.5)
+	got, err := ci.MatchByTriggerPriceAndConsume("t", "SOLUSDT", "LONG", 97.0, 3.5, 0)
 	if err != nil || got == nil || got.Reason != "ladder_sl" {
 		t.Fatalf("adverse-side slippage fill should match ladder_sl, got=%+v err=%v", got, err)
 	}
@@ -219,7 +219,7 @@ func TestCloseIntentTriggerPriceDirectionGateRejectsWrongSide(t *testing.T) {
 	if err := ci.RecordProtection("t", "ex", "SOLUSDT", "LONG", "ladder_sl", 1.0, 100.0, 1, ""); err != nil {
 		t.Fatalf("record: %v", err)
 	}
-	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "SOLUSDT", "LONG", 103.0, 3.5); got != nil {
+	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "SOLUSDT", "LONG", 103.0, 3.5, 0); got != nil {
 		t.Fatalf("favourable-side fill must NOT be mislabeled as the stop, got=%+v", got)
 	}
 	// SHORT mirror: a SHORT stop trigger at 100 fills ABOVE it; a fill BELOW (97)
@@ -227,7 +227,7 @@ func TestCloseIntentTriggerPriceDirectionGateRejectsWrongSide(t *testing.T) {
 	if err := ci.RecordProtection("t", "ex", "ETHUSDT", "SHORT", "ladder_sl", 1.0, 100.0, 1, ""); err != nil {
 		t.Fatalf("record short: %v", err)
 	}
-	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "ETHUSDT", "SHORT", 97.0, 3.5); got != nil {
+	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "ETHUSDT", "SHORT", 97.0, 3.5, 0); got != nil {
 		t.Fatalf("SHORT favourable-side fill must NOT be mislabeled as the stop, got=%+v", got)
 	}
 }
@@ -242,7 +242,7 @@ func TestCloseIntentTriggerPriceTakeProfitDirection(t *testing.T) {
 		t.Fatalf("record: %v", err)
 	}
 	// LONG TP fills at/above trigger — 102 (2% above) is valid.
-	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "BCHUSDT", "LONG", 102.0, 3.5); got == nil || got.Reason != "ladder_tp" {
+	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "BCHUSDT", "LONG", 102.0, 3.5, 0); got == nil || got.Reason != "ladder_tp" {
 		t.Fatalf("LONG TP fill above trigger should match, got=%+v", got)
 	}
 }
@@ -254,10 +254,77 @@ func TestCloseIntentTriggerPriceSideIsolation(t *testing.T) {
 	if err := ci.RecordProtection("t", "ex", "ETHUSDT", "LONG", "ladder_tp", 0.2, 1800.0, 1, ""); err != nil {
 		t.Fatalf("record: %v", err)
 	}
-	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "ETHUSDT", "SHORT", 1800.0, 0.15); got != nil {
+	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "ETHUSDT", "SHORT", 1800.0, 0.15, 0); got != nil {
 		t.Fatalf("SHORT fill must not match LONG protection intent, got %+v", got)
 	}
-	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "ETHUSDT", "LONG", 1800.0, 0.15); got == nil {
+	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "ETHUSDT", "LONG", 1800.0, 0.15, 0); got == nil {
 		t.Fatalf("LONG fill should match LONG protection intent")
+	}
+}
+
+// TestCloseIntentNoBorrowAcrossPositions is the exact BN ZEC 1473 failure mode:
+// an EARLIER position leaves an untriggered ladder_tp tier in the pool; a LATER
+// same-symbol position's close at a price near that stale trigger must NOT borrow
+// it. The notBeforeMs bound (current position's entry time) excludes it.
+func TestCloseIntentNoBorrowAcrossPositions(t *testing.T) {
+	s := newIntentStore(t)
+	ci := s.CloseIntent()
+	// Old position's untriggered TP tier @511.78, recorded "two days ago".
+	if err := ci.RecordProtection("t", "ex", "ZECUSDT", "LONG", "ladder_tp", 0.02, 511.78, 686, "old-algo"); err != nil {
+		t.Fatalf("record old tp: %v", err)
+	}
+	oldTime := time.Now().UTC().UnixMilli() - 2*24*60*60*1000
+	if err := ci.db.Model(&CloseIntent{}).Where("exchange_order_id = ?", "old-algo").
+		Update("intent_time", oldTime).Error; err != nil {
+		t.Fatalf("age old intent: %v", err)
+	}
+	// New position opened "now"; its close fills at 511.41 (≈ the stale trigger).
+	posEntry := time.Now().UTC().UnixMilli()
+	// With the lifetime bound, the stale tier is excluded → no false match.
+	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "ZECUSDT", "LONG", 511.41, 3.5, posEntry); got != nil {
+		t.Fatalf("stale cross-position tier must not match, got reason=%q trig=%.2f", got.Reason, got.TriggerPrice)
+	}
+	// Legacy unbounded call (notBefore=0) still finds it — proves the bound is the
+	// thing that fixes it, not some other filter.
+	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "ZECUSDT", "LONG", 511.41, 3.5, 0); got == nil {
+		t.Fatal("unbounded match should still find the stale tier (control)")
+	}
+}
+
+// TestExpireUnconsumedForPosition verifies leftover untriggered tiers are drained
+// when the position closes, so they cannot fuel a later cross-position string.
+func TestExpireUnconsumedForPosition(t *testing.T) {
+	s := newIntentStore(t)
+	ci := s.CloseIntent()
+	for _, p := range []float64{521.69, 526.33, 532.51} {
+		if err := ci.RecordProtection("t", "ex", "ZECUSDT", "LONG", "ladder_tp", 0.05, p, 802, ""); err != nil {
+			t.Fatalf("record tier %.2f: %v", p, err)
+		}
+	}
+	closeMs := time.Now().UTC().UnixMilli()
+	n, err := ci.ExpireUnconsumedForPosition("t", "ZECUSDT", "LONG", closeMs)
+	if err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("expected 3 tiers expired, got %d", n)
+	}
+	// After expiry, none of the drained tiers can be matched by a later fill.
+	if got, _ := ci.MatchByTriggerPriceAndConsume("t", "ZECUSDT", "LONG", 521.70, 3.5, 0); got != nil {
+		t.Fatalf("expired tier must not match, got %+v", got)
+	}
+	// A newer intent recorded AFTER the close time is untouched by the drain.
+	if err := ci.RecordProtection("t", "ex", "ZECUSDT", "LONG", "ladder_tp", 0.05, 540.0, 803, "new-algo"); err != nil {
+		t.Fatalf("record new: %v", err)
+	}
+	// Stamp it strictly after the close time (a new position opens later); avoids
+	// the same-millisecond boundary in a fast test.
+	if err := ci.db.Model(&CloseIntent{}).Where("exchange_order_id = ?", "new-algo").
+		Update("intent_time", closeMs+1000).Error; err != nil {
+		t.Fatalf("age new intent: %v", err)
+	}
+	n2, _ := ci.ExpireUnconsumedForPosition("t", "ZECUSDT", "LONG", closeMs)
+	if n2 != 0 {
+		t.Fatalf("drain bounded by upToMs should skip the newer intent, expired %d", n2)
 	}
 }

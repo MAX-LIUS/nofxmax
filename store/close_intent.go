@@ -37,8 +37,8 @@ type CloseIntent struct {
 	TriggerPrice float64 `gorm:"column:trigger_price;default:0" json:"trigger_price"`
 	IntentTime   int64   `gorm:"column:intent_time;not null;index:idx_close_intents_match,sort:desc" json:"intent_time"`
 	Consumed     bool    `gorm:"column:consumed;default:false;index:idx_close_intents_match" json:"consumed"`
-	ConsumedAt      int64   `gorm:"column:consumed_at;default:0" json:"consumed_at"`
-	CreatedAt       int64   `gorm:"column:created_at" json:"created_at"`
+	ConsumedAt   int64   `gorm:"column:consumed_at;default:0" json:"consumed_at"`
+	CreatedAt    int64   `gorm:"column:created_at" json:"created_at"`
 }
 
 func (CloseIntent) TableName() string { return "close_intents" }
@@ -154,7 +154,14 @@ const wrongSideTolPct = 0.2
 // trigger_price>0 (protection placements) are considered, so bot MARKET-close
 // intents (order-id keyed) are never grabbed here. Returns nil when nothing
 // matches.
-func (s *CloseIntentStore) MatchByTriggerPriceAndConsume(traderID, symbol, side string, fillPrice, tolerancePct float64) (*CloseIntent, error) {
+//
+// notBeforeMs scopes the search to the CURRENT position's lifetime: only intents
+// recorded at/after the position opened may match, so a stale untriggered tier
+// left by an EARLIER position of the same symbol/side can never be borrowed by a
+// later close (the cross-position, cross-day mis-attribution bug — e.g. a 07-10
+// ladder_tp @511.78 stringing onto a 07-12 position's close). Pass 0 to disable
+// the lower bound (legacy behaviour).
+func (s *CloseIntentStore) MatchByTriggerPriceAndConsume(traderID, symbol, side string, fillPrice, tolerancePct float64, notBeforeMs int64) (*CloseIntent, error) {
 	if s.db == nil || traderID == "" || fillPrice <= 0 {
 		return nil, nil
 	}
@@ -163,9 +170,12 @@ func (s *CloseIntentStore) MatchByTriggerPriceAndConsume(traderID, symbol, side 
 	}
 	band := fillPrice * tolerancePct / 100.0
 	var candidates []CloseIntent
-	err := s.db.Where("trader_id = ? AND symbol = ? AND side = ? AND consumed = ? AND trigger_price > 0 AND trigger_price BETWEEN ? AND ?",
-		traderID, symbol, strings.ToUpper(side), false, fillPrice-band, fillPrice+band).
-		Order("intent_time DESC").Find(&candidates).Error
+	q := s.db.Where("trader_id = ? AND symbol = ? AND side = ? AND consumed = ? AND trigger_price > 0 AND trigger_price BETWEEN ? AND ?",
+		traderID, symbol, strings.ToUpper(side), false, fillPrice-band, fillPrice+band)
+	if notBeforeMs > 0 {
+		q = q.Where("intent_time >= ?", notBeforeMs)
+	}
+	err := q.Order("intent_time DESC").Find(&candidates).Error
 	if err != nil {
 		return nil, err
 	}
@@ -354,5 +364,30 @@ func (s *CloseIntentStore) PruneStale(olderThanMs int64) (int64, error) {
 		return 0, nil
 	}
 	res := s.db.Where("intent_time < ?", olderThanMs).Delete(&CloseIntent{})
+	return res.RowsAffected, res.Error
+}
+
+// ExpireUnconsumedForPosition marks every still-unconsumed protection intent for
+// one trader+symbol+side as consumed once a position fully closes. Only one
+// position per (trader,symbol,side) can be open at a time, so when it closes any
+// leftover untriggered tiers (ladder TP/SL placements that never fired) are dead
+// and must not survive to be borrowed by the NEXT position's close via the
+// trigger-price matcher. This is the deterministic drain that stops the
+// cross-position stringing at its source; the notBeforeMs match bound is the
+// second layer of defence. upToMs bounds the drain to intents recorded at/before
+// the close time so a brand-new position opened microseconds later is untouched.
+// Returns rows expired.
+func (s *CloseIntentStore) ExpireUnconsumedForPosition(traderID, symbol, side string, upToMs int64) (int64, error) {
+	if s.db == nil || traderID == "" {
+		return 0, nil
+	}
+	now := time.Now().UTC().UnixMilli()
+	q := s.db.Model(&CloseIntent{}).
+		Where("trader_id = ? AND symbol = ? AND side = ? AND consumed = ?",
+			traderID, symbol, strings.ToUpper(side), false)
+	if upToMs > 0 {
+		q = q.Where("intent_time <= ?", upToMs)
+	}
+	res := q.Updates(map[string]interface{}{"consumed": true, "consumed_at": now})
 	return res.RowsAffected, res.Error
 }

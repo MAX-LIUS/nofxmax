@@ -135,8 +135,8 @@ type TraderPosition struct {
 	PeakAtrMult   float64 `gorm:"column:peak_atr_mult;default:0" json:"peak_atr_mult"`
 	TroughAtrMult float64 `gorm:"column:trough_atr_mult;default:0" json:"trough_atr_mult"`
 
-	CreatedAt         int64   `gorm:"column:created_at" json:"created_at"`                       // Unix milliseconds UTC
-	UpdatedAt         int64   `gorm:"column:updated_at" json:"updated_at"`                       // Unix milliseconds UTC
+	CreatedAt int64 `gorm:"column:created_at" json:"created_at"` // Unix milliseconds UTC
+	UpdatedAt int64 `gorm:"column:updated_at" json:"updated_at"` // Unix milliseconds UTC
 }
 
 // TableName returns the table name
@@ -823,6 +823,16 @@ func (s *PositionStore) ClosePositionFully(id int64, exitPrice float64, exitOrde
 	}
 	feeDelta := totalFee - pos.Fee
 	realizedPnLDelta := totalRealizedPnL - pos.RealizedPnL
+	// Drain any leftover unconsumed protection intents for this symbol/side: the
+	// position is now closed, so its untriggered ladder tiers must not survive to
+	// be borrowed by the NEXT position's close via the trigger-price matcher
+	// (cross-position stringing). Best-effort; a failure here never blocks the
+	// close. Bounded to intents recorded at/before this close time.
+	if n, err := NewCloseIntentStore(s.db).ExpireUnconsumedForPosition(pos.TraderID, pos.Symbol, pos.Side, exitTimeMs); err != nil {
+		logger.Warnf("⚠️ Failed to expire leftover close-intents for %s %s: %v", pos.Symbol, pos.Side, err)
+	} else if n > 0 {
+		logger.Infof("🧹 Expired %d leftover protection intents for closed %s %s", n, pos.Symbol, pos.Side)
+	}
 	return s.logCloseEvent(&pos, reason, source, execType, exitOrderID, pos.Quantity, exitPrice, feeDelta, realizedPnLDelta, exitTimeMs)
 }
 
