@@ -237,11 +237,18 @@ func (at *AutoTrader) frozenStructBoundaryForPosition(symbol string, entryPrice 
 	return boundary, true
 }
 
-// computeStructuralBoundary fetches the ATR-timeframe bars and returns the swing low
-// (long) / swing high (short) over the lookback window ending at the most recent
-// CLOSED bar (excludes the entry-forming bar). Returns ok=false when the boundary is
-// on the wrong side of entry (e.g. breakout entry above the range) — no structural
-// edge, caller falls back to the fixed backstop.
+// computeStructuralBoundary fetches the ATR-timeframe bars and returns the NEAREST
+// pre-entry swing level BEYOND entry (the closest overhead swing high for a short /
+// the closest swing low below entry for a long), over the lookback window ending at
+// the most recent CLOSED bar (excludes the entry-forming bar). Returns ok=false when
+// no such level is on the correct side of entry (e.g. breakout entry above the range)
+// — no structural edge, caller falls back to the fixed backstop.
+//
+// Why NEAREST swing, not the window ABSOLUTE extreme (fix 2026-07): the absolute
+// extreme can be a distant large-degree spike (e.g. a short entered after a big drop
+// from a peak far above). Anchoring to it pushed the stop out to the backstop
+// (~11%+) even though a much closer, valid invalidation level existed just above
+// entry. The structural stop must be the NEAREST invalidation, not the biggest.
 func (at *AutoTrader) computeStructuralBoundary(symbol string, entryPrice float64, isLong bool, sscfg store.StructuralSLConfig, acfg store.ATRProtectionConfig) (float64, bool) {
 	c := acfg.WithDefaults()
 	ss := sscfg.WithDefaults()
@@ -256,33 +263,133 @@ func (at *AutoTrader) computeStructuralBoundary(symbol string, entryPrice float6
 	if start < 0 {
 		start = 0
 	}
-	lo, hi := 0.0, 0.0
-	for i := start; i < end; i++ {
-		if lo == 0 || bars[i].Low < lo {
-			lo = bars[i].Low
+	window := bars[start:end]
+	k := ss.PivotStrength
+	if k < 1 {
+		k = 1
+	}
+
+	// nearestSwing scans the window for fractal pivots (a bar more extreme than k bars
+	// on each side) on the correct side of entry, and returns the one CLOSEST to entry.
+	// For a short we want swing HIGHS above entry; for a long swing LOWS below entry.
+	nearestSwing := func() (float64, bool) {
+		best := 0.0
+		found := false
+		for i := k; i < len(window)-k; i++ {
+			if !isLong {
+				h := window[i].High
+				if h <= entryPrice {
+					continue
+				}
+				isPivot := true
+				for j := i - k; j <= i+k; j++ {
+					if j != i && window[j].High > h {
+						isPivot = false
+						break
+					}
+				}
+				if isPivot && (!found || h < best) { // closest swing high above entry
+					best, found = h, true
+				}
+			} else {
+				l := window[i].Low
+				if l >= entryPrice {
+					continue
+				}
+				isPivot := true
+				for j := i - k; j <= i+k; j++ {
+					if j != i && window[j].Low < l {
+						isPivot = false
+						break
+					}
+				}
+				if isPivot && (!found || l > best) { // closest swing low below entry
+					best, found = l, true
+				}
+			}
 		}
-		if bars[i].High > hi {
-			hi = bars[i].High
+		return best, found
+	}
+
+	if b, ok := nearestSwing(); ok {
+		return b, true
+	}
+
+	// No qualifying fractal pivot (e.g. very short window or monotonic run). Fall back
+	// to the window's nearest bar extreme on the correct side of entry — still the
+	// CLOSEST level, not the absolute spike.
+	best := 0.0
+	found := false
+	for i := 0; i < len(window); i++ {
+		if !isLong {
+			h := window[i].High
+			if h > entryPrice && (!found || h < best) {
+				best, found = h, true
+			}
+		} else {
+			l := window[i].Low
+			if l < entryPrice && (!found || l > best) {
+				best, found = l, true
+			}
 		}
 	}
-	if lo <= 0 || hi <= 0 {
+	if !found || best <= 0 {
 		return 0, false
 	}
-	if isLong {
-		if lo >= entryPrice { // entered at/below range floor (breakout) — no edge
-			return 0, false
+	return best, true
+}
+
+// ladderMaxTPTargetPct returns the largest take-profit target move (as a percent of
+// entry) across all ladder rules, resolving ATR-unit targets to percent. Used as the
+// reference the fallback structural stop is RR-capped against. Returns 0 when no
+// positive TP target exists.
+func ladderMaxTPTargetPct(rules []store.LadderTPSLRule, atr, entryPrice float64, acfg store.ATRProtectionConfig) float64 {
+	maxPct := 0.0
+	for _, r := range rules {
+		if r.TakeProfitPct <= 0 {
+			continue
 		}
-		return lo, true
+		pct := r.TakeProfitPct
+		if r.TakeProfitUnit == store.ProtectionUnitATR {
+			if p, ok := acfg.EffectivePercent(r.TakeProfitPct, atr, entryPrice); ok {
+				pct = p
+			} else {
+				continue
+			}
+		}
+		if pct > maxPct {
+			maxPct = pct
+		}
 	}
-	if hi <= entryPrice {
-		return 0, false
+	return maxPct
+}
+
+// fallbackMultWithRRCap returns the ATR multiple to use on the NO-NEAR-STRUCTURE
+// when a take-profit target is known, further tightens it so the stop distance stays
+// below FallbackRRCapRatio × TP% (i.e. RR >= 1/ratio). FloorATRMul is re-applied as a
+// hard minimum afterwards so the RR cap never drives the stop into the noise floor.
+func fallbackMultWithRRCap(ss store.StructuralSLConfig, atr, entryPrice, tpTargetPct float64) float64 {
+	mult := ss.FallbackATRMul
+	if ss.FallbackRRCapRatio > 0 && tpTargetPct > 0 && atr > 0 && entryPrice > 0 {
+		atrPct := atr / entryPrice * 100.0 // one ATR expressed as a percent of entry
+		if atrPct > 0 {
+			capMult := (ss.FallbackRRCapRatio * tpTargetPct) / atrPct
+			if capMult < mult {
+				mult = capMult
+			}
+		}
 	}
-	return hi, true
+	if mult < ss.FloorATRMul {
+		mult = ss.FloorATRMul // floor stays a hard minimum vs the RR cap
+	}
+	return mult
 }
 
 // structuralSLPercent converts the frozen boundary into an effective stop-loss
-// percent-of-entry, clamped to [floor, backstop] ATR multiples. Returns (pct, ok).
-func structuralSLPercent(entryPrice, boundary, atr float64, sscfg store.StructuralSLConfig, acfg store.ATRProtectionConfig) (float64, bool) {
+// percent-of-entry, clamped to [floor, backstop] ATR multiples. tpTargetPct is the
+// entry's take-profit target move (%); pass 0 to skip the fallback RR cap. Returns
+// (pct, ok).
+func structuralSLPercent(entryPrice, boundary, atr, tpTargetPct float64, sscfg store.StructuralSLConfig, acfg store.ATRProtectionConfig) (float64, bool) {
 	if entryPrice <= 0 || boundary <= 0 || atr <= 0 {
 		return 0, false
 	}
@@ -296,7 +403,10 @@ func structuralSLPercent(entryPrice, boundary, atr float64, sscfg store.Structur
 		mult = ss.FloorATRMul
 	}
 	if mult > ss.BackstopATRMul {
-		mult = ss.BackstopATRMul
+		// No near structure (nearest invalidation is beyond the backstop). Rather than
+		// park the tight exit at the wide backstop, fall back to FallbackATRMul,
+		// additionally RR-capped against the TP target.
+		mult = fallbackMultWithRRCap(ss, atr, entryPrice, tpTargetPct)
 	}
 	return acfg.EffectivePercent(mult, atr, entryPrice)
 }
@@ -307,8 +417,9 @@ func structuralSLPercent(entryPrice, boundary, atr float64, sscfg store.Structur
 // to the resting order. Both the close-confirm guard and the UI must use THIS,
 // not the raw swing, so the tight structural level never sits BEYOND the wide
 // backstop (which would make the guard unreachable and the panel misleading).
-// Returns (clampedPrice, true) when inputs are valid; otherwise (raw, false).
-func clampStructuralBoundary(entryPrice, rawBoundary, atr float64, isLong bool, sscfg store.StructuralSLConfig) (float64, bool) {
+// tpTargetPct is the entry's take-profit target move (%); pass 0 to skip the
+// fallback RR cap. Returns (clampedPrice, true) when inputs are valid; else (raw, false).
+func clampStructuralBoundary(entryPrice, rawBoundary, atr, tpTargetPct float64, isLong bool, sscfg store.StructuralSLConfig) (float64, bool) {
 	if entryPrice <= 0 || rawBoundary <= 0 || atr <= 0 {
 		return rawBoundary, false
 	}
@@ -322,7 +433,10 @@ func clampStructuralBoundary(entryPrice, rawBoundary, atr float64, isLong bool, 
 		mult = ss.FloorATRMul
 	}
 	if mult > ss.BackstopATRMul {
-		mult = ss.BackstopATRMul
+		// No near structure: fall back to FallbackATRMul (RR-capped against TP),
+		// mirroring structuralSLPercent so the guard trigger and the UI show the same
+		// tighter fallback level, not the wide backstop.
+		mult = fallbackMultWithRRCap(ss, atr, entryPrice, tpTargetPct)
 	}
 	clampedDist := mult * atr
 	if isLong {
@@ -411,11 +525,13 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol, action st
 		copy(rules, base.LadderTPSL.Rules)
 		ss := base.LadderTPSL.StructuralSL.WithDefaults()
 		isLong := action == "open_long"
+		// TP target the fallback structural stop is RR-capped against (max across tiers).
+		tpTargetPct := ladderMaxTPTargetPct(base.LadderTPSL.Rules, atr, entryPrice, acfg)
 		// Resolve the structural stop percent ONCE (shared by all structural SL rules).
 		structPct, structOK := 0.0, false
 		if base.LadderTPSL.StructuralSL.Enabled {
 			if boundary, ok := at.frozenStructBoundaryForPosition(symbol, entryPrice, isLong, atEntry, base.LadderTPSL.StructuralSL, acfg); ok {
-				structPct, structOK = structuralSLPercent(entryPrice, boundary, atr, base.LadderTPSL.StructuralSL, acfg)
+				structPct, structOK = structuralSLPercent(entryPrice, boundary, atr, tpTargetPct, base.LadderTPSL.StructuralSL, acfg)
 			}
 			// Phase 2: when close-confirm is on, the RESTING stop is parked at the wide
 			// backstop (bot-downtime safety net); the tight structural level is enforced

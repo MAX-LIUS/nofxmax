@@ -240,6 +240,15 @@ export interface StructuralSLConfig {
   backstop_atr_mul?: number
   lookback_bars?: number
   close_confirm?: boolean
+  // pivot_strength: fractal strength for nearest-swing detection (bars on each side).
+  // The boundary anchors to the NEAREST swing beyond entry, not the window extreme.
+  pivot_strength?: number
+  // fallback_atr_mul: tighter cap used instead of the backstop when no near structure
+  // exists (nearest swing still beyond the backstop). Must be <= backstop_atr_mul.
+  fallback_atr_mul?: number
+  // fallback_rr_cap_ratio: on the fallback path, the stop must stay below this ratio ×
+  // the TP target move (fallbackSL% <= ratio × TP%), guaranteeing RR >= 1/ratio.
+  fallback_rr_cap_ratio?: number
 }
 
 export interface LadderTPSLConfig {

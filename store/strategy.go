@@ -560,6 +560,27 @@ type StructuralSLConfig struct {
 	// bot-downtime safety net. When false (Phase 1) the resting stop sits at the
 	// structural distance and fires on an intrabar touch.
 	CloseConfirm bool `json:"close_confirm,omitempty"`
+	// PivotStrength: fractal strength for nearest-swing detection — a bar is a swing
+	// high/low if its High/Low is the most extreme among this many bars on EACH side.
+	// The boundary anchors to the NEAREST swing beyond entry (nearest overhead swing
+	// high for a short / nearest swing low below for a long), NOT the window's absolute
+	// extreme. This stops a distant large-degree spike from pushing the stop out to the
+	// backstop when a much closer, valid invalidation level exists. Default 2.
+	PivotStrength int `json:"pivot_strength,omitempty"`
+	// FallbackATRMul: the tighter cap used INSTEAD of BackstopATRMul when the nearest
+	// structural level is still farther than the backstop (i.e. no near structure
+	// exists). Rather than parking the tight exit at the wide backstop, fall back to
+	// this fixed ATR distance so a structure-less entry still has a reasonable stop.
+	// Must be <= BackstopATRMul to have any effect. Default 3.0.
+	FallbackATRMul float64 `json:"fallback_atr_mul,omitempty"`
+	// FallbackRRCapRatio: when the fallback (no near structure) path is taken, the
+	// resulting stop distance must stay BELOW this ratio × the entry's take-profit
+	// target move, i.e. fallbackSL% <= ratio × TP%. This guarantees a minimum
+	// reward:risk of 1/ratio (0.8 => RR >= 1.25) so a structure-less entry never gets
+	// a wide stop that dwarfs its own profit target. FloorATRMul remains a hard
+	// minimum, so the cap never drives the stop tighter than the noise floor.
+	// Set <= 0 to disable the RR cap. Default 0.8.
+	FallbackRRCapRatio float64 `json:"fallback_rr_cap_ratio,omitempty"`
 }
 
 // WithDefaults fills unset structural-SL fields with safe, backtested defaults.
@@ -572,6 +593,19 @@ func (c StructuralSLConfig) WithDefaults() StructuralSLConfig {
 	}
 	if c.LookbackBars <= 0 {
 		c.LookbackBars = 24
+	}
+	if c.PivotStrength <= 0 {
+		c.PivotStrength = 2
+	}
+	if c.FallbackATRMul <= 0 {
+		c.FallbackATRMul = 3.0
+	}
+	// Fallback must never exceed the backstop (it is meant to be the tighter cap).
+	if c.FallbackATRMul > c.BackstopATRMul {
+		c.FallbackATRMul = c.BackstopATRMul
+	}
+	if c.FallbackRRCapRatio <= 0 {
+		c.FallbackRRCapRatio = 0.8
 	}
 	return c
 }

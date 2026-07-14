@@ -901,7 +901,8 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 				// backstop that can never fire.
 				structuralBoundaryPrice = b
 				if fa, aok := at.frozenATRForPosition(symbol, side, entryPrice, acfg); aok && fa > 0 {
-					if clamped, cok := clampStructuralBoundary(entryPrice, b, fa, isLong, sscfg); cok {
+					tpTargetPct := ladderMaxTPTargetPct(ladderCfg.Rules, fa, entryPrice, acfg)
+					if clamped, cok := clampStructuralBoundary(entryPrice, b, fa, tpTargetPct, isLong, sscfg); cok {
 						structuralBoundaryPrice = clamped
 					}
 				}
