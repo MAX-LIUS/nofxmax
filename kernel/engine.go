@@ -13,6 +13,7 @@ import (
 	"nofx/provider/nofxos"
 	"nofx/security"
 	"nofx/store"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -151,6 +152,48 @@ type Decision struct {
 	CloseReason string `json:"close_reason,omitempty"` // structure_break, time_decay, correlation_risk, take_profit
 }
 
+// UnmarshalJSON custom unmarshaler for Decision that tolerates quality_score
+// being either a full object or a bare number (which the AI sometimes emits).
+// Without this, a bare number like "quality_score": 74 causes json.Unmarshal
+// to fail before AIQualityScore.UnmarshalJSON even gets called, because the
+// standard library checks pointer-to-struct vs number compatibility first.
+func (d *Decision) UnmarshalJSON(data []byte) error {
+	// Parse into a generic map to inspect quality_score type before committing.
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	// If quality_score is a bare number, wrap it in {"total": N} so the
+	// AIQualityScore unmarshaler can handle it uniformly.
+	if qs, ok := raw["quality_score"]; ok && qs != nil {
+		switch v := qs.(type) {
+		case float64:
+			// Bare number: wrap it
+			raw["quality_score"] = map[string]interface{}{"total": int(v)}
+		case string:
+			// Numeric string: parse and wrap
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				raw["quality_score"] = map[string]interface{}{"total": int(f)}
+			}
+		// If it's already a map (object form), leave it untouched
+		}
+	}
+
+	// Re-marshal the normalized map and unmarshal into an alias to avoid recursion.
+	normalized, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	type alias Decision
+	var a alias
+	if err := json.Unmarshal(normalized, &a); err != nil {
+		return err
+	}
+	*d = Decision(a)
+	return nil
+}
+
 type AIQualityScore struct {
 	Total              int     `json:"total,omitempty"`
 	TrendAlignment     int     `json:"trend_alignment,omitempty"`
@@ -159,6 +202,40 @@ type AIQualityScore struct {
 	DerivativesContext int     `json:"derivatives_context,omitempty"`
 	TriggerQuality     int     `json:"trigger_quality,omitempty"`
 	NetRR              float64 `json:"net_rr,omitempty"`
+}
+
+// UnmarshalJSON tolerates the two shapes the AI emits for quality_score:
+//   - the full object form ({"total":85,"trend_alignment":18,...})
+//   - a bare scalar the model sometimes returns instead (85 or "85"),
+//     which we treat as the Total and leave the breakdown zeroed.
+//
+// Without this, a bare number crashed decision parsing and tripped SAFE MODE.
+func (q *AIQualityScore) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	// Object form: parse into the struct via an alias to avoid recursion.
+	if data[0] == '{' {
+		type alias AIQualityScore
+		var a alias
+		if err := json.Unmarshal(data, &a); err != nil {
+			return err
+		}
+		*q = AIQualityScore(a)
+		return nil
+	}
+	// Bare number (85) or numeric string ("85"): treat as Total.
+	s := strings.Trim(string(data), `"`)
+	if s == "" {
+		return nil
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return fmt.Errorf("quality_score: unexpected scalar %q: %w", s, err)
+	}
+	q.Total = int(f)
+	return nil
 }
 
 type AIEntryProtectionRationale struct {
