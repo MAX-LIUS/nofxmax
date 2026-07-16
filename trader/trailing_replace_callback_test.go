@@ -65,3 +65,31 @@ func TestShouldReplacePartialTrailingTier_CallbackGuard(t *testing.T) {
 		})
 	}
 }
+
+// TestFindExistingFullTrailingOrder_PreservesActivationStatus guards the second
+// half of the Binance trailing churn fix (2026-07-17): findExistingFullTrailingOrder
+// previously dropped ActivationStatus, so the full-trailing arm path could not tell
+// an already-activated order (whose trigger is a moving trail level) from a resting
+// one, and re-armed it every cycle by comparing the moving level against the fixed
+// planned activation. The status must survive so the arm path can leave activated
+// orders alone.
+func TestFindExistingFullTrailingOrder_PreservesActivationStatus(t *testing.T) {
+	at := &AutoTrader{}
+	openOrders := []OpenOrder{
+		{
+			PositionSide:     "SHORT",
+			Type:             "TRAILING_STOP_MARKET",
+			StopPrice:        128.5, // moving trail level, NOT the fixed activation
+			Quantity:         10,
+			OrderID:          "algo-1",
+			ActivationStatus: "activated",
+		},
+	}
+	got := at.findExistingFullTrailingOrder("short", openOrders)
+	if got == nil {
+		t.Fatal("expected to find the trailing order")
+	}
+	if got.ActivationStatus != "activated" {
+		t.Fatalf("ActivationStatus not preserved: got %q, want \"activated\"", got.ActivationStatus)
+	}
+}

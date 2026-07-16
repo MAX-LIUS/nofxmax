@@ -1514,11 +1514,12 @@ func (at *AutoTrader) findExistingFullTrailingOrder(side string, openOrders []Op
 			continue
 		}
 		return &nativeTrailingOrder{
-			PositionSide: order.PositionSide,
-			StopPrice:    order.StopPrice,
-			CallbackRate: order.CallbackRate,
-			Quantity:     order.Quantity,
-			OrderID:      order.OrderID,
+			PositionSide:     order.PositionSide,
+			StopPrice:        order.StopPrice,
+			CallbackRate:     order.CallbackRate,
+			Quantity:         order.Quantity,
+			OrderID:          order.OrderID,
+			ActivationStatus: order.ActivationStatus,
 		}
 	}
 	return nil
@@ -1779,6 +1780,18 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 				plannedCallbackRate := calculateDrawdownRuleCallbackRatio(entryPrice, side, rule)
 				existing := at.findExistingFullTrailingOrder(side, openOrders)
 				if existing != nil {
+						// Once a native trailing order has ACTIVATED, its exchange-reported
+						// trigger is the MOVING trail level (it trails the market), not the
+						// fixed activation price planned at open. Comparing that moving level
+						// against plannedActivationPrice drifts every cycle as price moves, so
+						// the drift check re-armed forever (Binance SPCX/XAG/XAU churn: 4788
+						// false "drifted" re-arms, 0 genuine missing events). An armed, present
+						// trailing order IS the protection — leave it alone; re-place only when
+						// genuinely missing (else branch below). Pre-activation drift comparison
+						// still applies to venues reporting a resting, not-yet-activated order.
+						if existing.ActivationStatus == "activated" {
+							return true
+						}
 					if !at.shouldReplacePartialTrailingTier(existing, plannedActivationPrice, plannedCallbackRate) {
 						return true
 					}
