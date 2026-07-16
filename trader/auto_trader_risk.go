@@ -1668,8 +1668,23 @@ func (at *AutoTrader) shouldReplacePartialTrailingTier(existing *nativeTrailingO
 		return false
 	}
 	activationDrift := math.Abs(existing.StopPrice-plannedActivationPrice) / math.Max(math.Abs(existing.StopPrice), math.Abs(plannedActivationPrice))
+	if activationDrift > 0.003 {
+		return true
+	}
+	// Callback-drift check is only meaningful when the venue reports the live
+	// order's callback rate. Binance's algo-order list endpoint (and the SDK's
+	// GetAlgoOrderResp) carries NO callback/priceRate field, so OpenOrder.CallbackRate
+	// is left at 0 for every Binance trailing order. Comparing 0 against the planned
+	// ratio (e.g. 0.017) always exceeded the 0.0002 tolerance, so the tier was judged
+	// "drifted from plan" and re-armed EVERY monitor cycle (~7/min on SPCX/XAG/XAU),
+	// which the reconciler then chased as stale duplicates — an endless place/cancel
+	// churn. When CallbackRate is unavailable (<=0) we trust the activation-price match
+	// alone. OKX populates CallbackRate, so it still gets the full comparison.
+	if existing.CallbackRate <= 0 {
+		return false
+	}
 	callbackDrift := math.Abs(existing.CallbackRate - plannedCallbackRate)
-	return activationDrift > 0.003 || callbackDrift > 0.0002
+	return callbackDrift > 0.0002
 }
 
 func findNewestMatchingTrailingOrderID(openOrders []OpenOrder, positionSide string, existingTier *nativeTrailingOrder, qtyTarget, plannedCallbackRate float64) string {
