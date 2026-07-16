@@ -325,16 +325,29 @@ func normalizeSymbolForMatch(sym string) string {
 	return s
 }
 
+// isUnresolvedMechanism reports whether an attribution mechanism is still
+// "unresolved" — i.e. it carries no specific close cause and should trigger the
+// recovery fallbacks (executionSource, close-intent ledger, decision-cycle).
+// Both sync_external (exchange fill with no recorded origin) and the bare
+// unknown_close literal qualify; either should be replaced when a more specific
+// source is available.
+func isUnresolvedMechanism(mech string) bool {
+	return mech == MechSyncExternal || mech == MechUnknownClose
+}
+
 func (s *PositionStore) logCloseEvent(pos *TraderPosition, closeReason, executionSource, executionType, exchangeOrderID string, closeQty, executionPrice, feeDelta, realizedPnLDelta float64, eventTimeMs int64) error {
 	if s.db == nil || pos == nil || closeQty <= 0 {
 		return nil
 	}
 	// Canonical attribution: prefer the most specific reason available. closeReason
 	// carries the resolved mechanism (e.g. managed_drawdown_runner_exit); fall back
-	// to executionSource when closeReason is a bare action.
+	// to executionSource when closeReason is unresolved (sync_external OR the bare
+	// literal "unknown_close"). Previously this only recovered from sync_external, so
+	// a caller passing closeReason="unknown_close" with executionSource="ladder_tp"
+	// was stranded as unknown_close even though the mechanism was recoverable.
 	attrInput := closeReason
-	if ClassifyClose(attrInput).Mechanism == MechSyncExternal && executionSource != "" {
-		if alt := ClassifyClose(executionSource); alt.Mechanism != MechSyncExternal && alt.Mechanism != MechUnknownClose {
+	if isUnresolvedMechanism(ClassifyClose(attrInput).Mechanism) && executionSource != "" {
+		if alt := ClassifyClose(executionSource); !isUnresolvedMechanism(alt.Mechanism) {
 			attrInput = executionSource
 		}
 	}
@@ -368,14 +381,14 @@ func (s *PositionStore) logCloseEvent(pos *TraderPosition, closeReason, executio
 	// written at decision time — well before the fill — so it is immune to that
 	// race. Look it up by the close order id (parent, then the fill's own id) and
 	// adopt its reason. Read-only: order_sync remains the sole intent consumer.
-	if attr.Mechanism == MechSyncExternal && s.db != nil {
+	if isUnresolvedMechanism(attr.Mechanism) && s.db != nil {
 		intentStore := NewCloseIntentStore(s.db)
 		for _, oid := range []string{parentOrderID, exchangeOrderID} {
 			if oid == "" {
 				continue
 			}
 			if intent, ierr := intentStore.LookupByOrderID(pos.TraderID, oid); ierr == nil && intent != nil && intent.Reason != "" {
-				if alt := ClassifyClose(intent.Reason); alt.Mechanism != MechSyncExternal && alt.Mechanism != MechUnknownClose {
+				if alt := ClassifyClose(intent.Reason); !isUnresolvedMechanism(alt.Mechanism) {
 					closeReason = intent.Reason
 					executionSource = intent.Reason
 					attr = alt
@@ -393,7 +406,7 @@ func (s *PositionStore) logCloseEvent(pos *TraderPosition, closeReason, executio
 	// decision_records, the close is deterministically an AI proactive close. This
 	// makes the stored attribution agree with what the review panel already infers
 	// from the decision link, instead of leaving the header as 未归因.
-	if attr.Mechanism == MechSyncExternal && decisionCycle > 0 {
+	if isUnresolvedMechanism(attr.Mechanism) && decisionCycle > 0 {
 		if s.decisionCycleHasAICloseFor(pos.TraderID, decisionCycle, pos.Symbol, pos.Side) {
 			aiReason := "ai_close_long"
 			if strings.EqualFold(pos.Side, "SHORT") {
@@ -642,7 +655,7 @@ func (s *PositionStore) ClosePosition(id int64, exitPrice float64, exitOrderID s
 	if err := s.db.First(&pos, id).Error; err != nil {
 		return err
 	}
-	return s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(map[string]interface{}{
+	if err := s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(map[string]interface{}{
 		"exit_price":          exitPrice,
 		"exit_order_id":       exitOrderID,
 		"exit_decision_cycle": s.GetLatestDecisionCycle(pos.TraderID),
@@ -652,7 +665,15 @@ func (s *PositionStore) ClosePosition(id int64, exitPrice float64, exitOrderID s
 		"status":              "CLOSED",
 		"close_reason":        closeReason,
 		"updated_at":          nowMs,
-	}).Error
+	}).Error; err != nil {
+		return err
+	}
+	// Drain remaining unconsumed protection intents so untriggered tiers from this
+	// position don't linger as residue (see ClosePositionFully). Best-effort.
+	if _, err := NewCloseIntentStore(s.db).ExpireUnconsumedForPosition(pos.TraderID, pos.Symbol, pos.Side, nowMs); err != nil {
+		logger.Warnf("[%s] expire unconsumed intents on ClosePosition failed: %v", pos.Symbol, err)
+	}
+	return nil
 }
 
 // UpdatePositionQuantityAndPrice updates position quantity and recalculates entry price
@@ -727,6 +748,17 @@ func (s *PositionStore) ReducePositionQuantity(id int64, reduceQty float64, exit
 			"updated_at":          nowMs,
 		}).Error; err != nil {
 			return err
+		}
+		// Expire any remaining unconsumed protection intents for this
+		// (trader, symbol, side) up to the close time, so untriggered ladder/BE
+		// tiers from THIS position don't linger as residue. Mirrors
+		// ClosePositionFully; this incremental reduce-to-zero path (used by the
+		// OKX fill-sync) previously left them unconsumed. Bounded by close time so
+		// a brand-new same-symbol position opened later is untouched. Best-effort.
+		if n, err := NewCloseIntentStore(s.db).ExpireUnconsumedForPosition(pos.TraderID, pos.Symbol, pos.Side, nowMs); err != nil {
+			logger.Warnf("[%s] expire unconsumed intents on incremental full-close failed: %v", pos.Symbol, err)
+		} else if n > 0 {
+			logger.Infof("[%s %s] expired %d unconsumed protection intent(s) on full close", pos.Symbol, pos.Side, n)
 		}
 		return s.logCloseEvent(&pos, reason, source, execType, exchangeOrderID, reduceQty, exitPrice, addFee, addPnL, eventTimeMs)
 	}
@@ -1209,7 +1241,18 @@ func (s *PositionStore) ClosePositionWithAccurateData(id int64, exitPrice float6
 	if err := s.db.First(&pos, id).Error; err == nil {
 		s.stampExcursionOntoUpdates(&pos, updates)
 	}
-	return s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(updates).Error
+	if err := s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+		return err
+	}
+	// Drain remaining unconsumed protection intents (see ClosePositionFully).
+	closeMs := exitTimeMs
+	if closeMs <= 0 {
+		closeMs = time.Now().UTC().UnixMilli()
+	}
+	if _, err := NewCloseIntentStore(s.db).ExpireUnconsumedForPosition(pos.TraderID, pos.Symbol, pos.Side, closeMs); err != nil {
+		logger.Warnf("[%s] expire unconsumed intents on ClosePositionWithAccurateData failed: %v", pos.Symbol, err)
+	}
+	return nil
 }
 
 func (s *PositionStore) MarkOpenPositionsAbsentFromExchangeClosed(traderID string, livePositions map[string]float64, closeReason string) (int64, error) {

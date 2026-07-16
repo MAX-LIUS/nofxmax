@@ -100,6 +100,81 @@ func (s *Server) handleShadowGateFeed(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"verdicts": out, "total": len(out)})
 }
 
+// handleShadowGateTimeSeries returns ONE rule's four-category PnL breakdown
+// bucketed by a selectable period (10m/1h/12h/1d), for the four-curve historical
+// chart. Categories: block×loss (correct block), block×win (false block),
+// keep×win (correct keep), keep×loss (bad keep). Blocked entries use the blocksim
+// counterfactual PnL; kept entries use the real closed-position PnL.
+func (s *Server) handleShadowGateTimeSeries(c *gin.Context) {
+	traderID := c.Query("trader_id")
+	rule := c.Query("rule")
+	if rule == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "rule query param is required"})
+		return
+	}
+	period := c.DefaultQuery("period", "1h")
+	switch period {
+	case "10m", "1h", "12h", "1d", "1w", "1mo", "1y":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "period must be one of 10m,1h,12h,1d,1w,1mo,1y"})
+		return
+	}
+	source := c.DefaultQuery("source", "")
+	points, err := s.store.ShadowGate().RuleTimeSeries(traderID, rule, period, source)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to compute time series"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"rule": rule, "period": period, "source": source, "points": points, "total": len(points)})
+}
+
+// handleShadowGateFootprint returns ONE gate's raw per-trade footprint (no
+// bucketing): every resolved open decision as a single (time, pnl, block, quadrant)
+// point, so the UI can plot the actual historical scatter and zoom/pan tick-by-tick.
+// The scatter is identical across gates for the same source — a gate only recolors
+// which points are blocked — which is exactly the "same opening data" comparison.
+func (s *Server) handleShadowGateFootprint(c *gin.Context) {
+	traderID := c.Query("trader_id")
+	rule := c.Query("rule")
+	if rule == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "rule query param is required"})
+		return
+	}
+	source := c.DefaultQuery("source", "all")
+	switch source {
+	case "all", "backfill", "forward":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "source must be one of all,backfill,forward"})
+		return
+	}
+	trades, err := s.store.ShadowGate().RuleFootprint(traderID, rule, source)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to compute footprint"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"rule": rule, "source": source, "trades": trades, "total": len(trades)})
+}
+
+// handleShadowGateMatrix returns the correct/wrong block/keep confusion for EVERY
+// gate over the exact same set of resolved trades from one data source, so all nine
+// gates are compared on identical opening data. Emitted in fixed canonical order.
+func (s *Server) handleShadowGateMatrix(c *gin.Context) {
+	traderID := c.Query("trader_id")
+	source := c.DefaultQuery("source", "all")
+	switch source {
+	case "all", "backfill", "forward":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "source must be one of all,backfill,forward"})
+		return
+	}
+	rows, err := s.store.ShadowGate().GateMatrix(traderID, source)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to compute gate matrix"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"source": source, "gates": rows, "total": len(rows)})
+}
+
 func round1(f float64) float64 { return float64(int(f*10+0.5)) / 10 }
 func round2(f float64) float64 { return float64(int(f*100+0.5)) / 100 }
 func round4(f float64) float64 {

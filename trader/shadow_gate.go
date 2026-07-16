@@ -18,6 +18,11 @@ type shadowGateCtx struct {
 	closes []float64
 	side  string // LONG / SHORT
 	conf  float64
+	// builtinRegime is the label the LIVE built-in regime filter would assign to this
+	// bar (classifyProtectionRegime): trending_up / trending_down / ranging / "".
+	// Captured so the built-in regime filter can be scored as a parallel shadow rule
+	// using its REAL live logic (EMA20/MACD/trend-score) rather than a slope proxy.
+	builtinRegime string
 }
 
 // shadowRule is one candidate gate method. Returns (wouldBlock, regimeLabel, detail).
@@ -86,6 +91,18 @@ var shadowRules = []shadowRule{
 			block = c.side == "LONG"
 		}
 		return block, reg, fmt.Sprintf("donchian48=%s side=%s", reg, c.side)
+	}},
+	// ── Built-in regime filter (the LIVE production directional gate) ──
+	// Scored as a parallel candidate using its REAL classifyProtectionRegime label
+	// (EMA20/MACD/trend-score), not a slope proxy. Blocks a long in trending_down
+	// and a short in trending_up — the same trend-alignment rule the live gate
+	// enforces. Lets the operator compare the built-in gate head-to-head with the
+	// configurable slope/direction gates on one scorecard.
+	{"builtin_regime_filter", func(c shadowGateCtx) (bool, string, string) {
+		reg := c.builtinRegime
+		block := (reg == "trending_down" && c.side == "LONG") ||
+			(reg == "trending_up" && c.side == "SHORT")
+		return block, reg, fmt.Sprintf("regime=%s side=%s", reg, c.side)
 	}},
 }
 
@@ -173,12 +190,19 @@ func buildShadowGateCtx(d *kernel.Decision, data *market.Data, primaryTF, exchan
 	if len(closes) < minShadowBars {
 		return shadowGateCtx{}, false
 	}
+	// Capture the live built-in regime label from the SAME market.Data the live gate
+	// sees, so the built-in regime filter is scored via its real logic, not a proxy.
+	builtinRegime := ""
+	if data != nil {
+		builtinRegime = classifyProtectionRegime(data)
+	}
 	return shadowGateCtx{
 		highs:  highs,
 		lows:   lows,
 		closes: closes,
 		side:   side,
 		conf:   float64(d.Confidence),
+		builtinRegime: builtinRegime,
 	}, true
 }
 
