@@ -536,6 +536,48 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 				}
 				return nil
 			}()
+
+			// Real placed protections (ground truth) + manual-vs-AI structural
+			// deviation. Unlike protection_snapshot (the AI decision plan, which is
+			// skipped entirely in manual protection mode), placed_protection reflects
+			// the protections the bot actually armed at open.
+			//
+			// Source priority:
+			//  1. protection_plan_snapshots — ONE canonical, duplicate-free row captured
+			//     at open (Option B). Preferred: no entry-window heuristic, no dedup.
+			//  2. close_intents lifetime replay — legacy fallback for positions opened
+			//     before snapshotting existed; still deduped + entry-windowed.
+			isLong := strings.EqualFold(pos.Side, "LONG")
+			var placed []placedProtectionItem
+			if snapStore := traderStore.ProtectionPlanSnapshot(); snapStore != nil {
+				if snap, err := snapStore.FindForPosition(pos.TraderID, pos.Symbol, pos.Side, pos.EntryTime, 10*60*1000); err == nil && snap != nil {
+					if tiers, err := snap.Tiers(); err == nil {
+						placed = placedFromSnapshotTiers(tiers)
+					}
+				}
+			}
+			if len(placed) == 0 {
+				if ciStore := traderStore.CloseIntent(); ciStore != nil {
+					upTo := pos.ExitTime
+					if pos.Status == "OPEN" || pos.Status == "open" {
+						upTo = 0 // still open: no upper bound
+					}
+					if intents, err := ciStore.ListForPositionLifetime(pos.TraderID, pos.Symbol, pos.Side, pos.EntryTime, upTo); err == nil && len(intents) > 0 {
+						placed = buildPlacedProtectionPlan(intents, pos.EntryPrice, isLong, pos.EntryTime)
+					}
+				}
+			}
+			if len(placed) > 0 {
+				enrichedPos["placed_protection"] = placed
+				// AI structural SL/TP opinion (present even in manual mode).
+				aiSL, aiTP := 0.0, 0.0
+				if rec, err := traderStore.Decision().GetRecordByCycle(trader.GetID(), pos.EntryDecisionCycle); err == nil && rec != nil {
+					aiSL, aiTP = aiSLTPFromDecisionJSON([]string{rec.DecisionJSON, rec.RawResponse}, pos.Symbol, sideToOpenAction(pos.Side))
+				}
+				if dev := buildProtectionDeviation(placed, aiSL, aiTP, pos.EntryPrice, isLong); dev != nil {
+					enrichedPos["protection_deviation"] = dev
+				}
+			}
 		}
 		enrichedPositions = append(enrichedPositions, enrichedPos)
 	}

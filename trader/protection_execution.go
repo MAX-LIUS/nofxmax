@@ -325,7 +325,29 @@ func (at *AutoTrader) applyNativeProtectionTargetsAfterOpen(req *protectionExecu
 		at.setBreakEvenState(req.Symbol, side, "armed")
 	}
 
+	// Snapshot the fully-resolved plan (ladder/full legs + effective drawdown rules +
+	// effective break-even) as ONE canonical, duplicate-free row. drawdownRules and the
+	// break-even config are final at this point, so the panel reads exactly what was
+	// armed rather than replaying the append-only close_intents ledger.
+	snapPlan := planWithEffectiveBreakEven(plan, at.getActiveBreakEvenConfigForPlan(plan))
+	at.snapshotResolvedPlan(req, snapPlan, drawdownRules)
+
 	return nil
+}
+
+// planWithEffectiveBreakEven returns a shallow copy of plan whose BreakEvenConfig is the
+// effective (strategy/manual-resolved) config, so snapshot tiers match what runtime arms
+// even when the AI plan carried no break-even leg.
+func planWithEffectiveBreakEven(plan *ProtectionPlan, be *store.BreakEvenStopConfig) *ProtectionPlan {
+	if be == nil {
+		return plan
+	}
+	if plan == nil {
+		return &ProtectionPlan{BreakEvenConfig: be}
+	}
+	cp := *plan
+	cp.BreakEvenConfig = be
+	return &cp
 }
 
 func (at *AutoTrader) placeImmediateTrailing(symbol, side string, entryPrice, callbackRatio float64) {

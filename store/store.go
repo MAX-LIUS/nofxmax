@@ -18,26 +18,27 @@ type Store struct {
 	driver *DBDriver // Database driver for abstraction (legacy)
 
 	// Sub-stores (lazy initialization)
-	user             *UserStore
-	aiModel          *AIModelStore
-	exchange         *ExchangeStore
-	trader           *TraderStore
-	decision         *DecisionStore
-	position         *PositionStore
-	positionClose    *PositionCloseEventStore
-	closeIntent      *CloseIntentStore
-	flipObs          *FlipObservationStore
-	breadthEvt       *BreadthEventStore
-	shadowGate       *ShadowGateStore
-	blockedSim       *BlockedSimStore
-	strategy         *StrategyStore
-	equity           *EquityStore
-	equityAdjustment *EquityAdjustmentStore
-	order            *OrderStore
-	grid             *GridStore
-	aiCharge         *AIChargeStore
-	evolution        *EvolutionStore
-	telegramConfig   TelegramConfigStore
+	user                   *UserStore
+	aiModel                *AIModelStore
+	exchange               *ExchangeStore
+	trader                 *TraderStore
+	decision               *DecisionStore
+	position               *PositionStore
+	positionClose          *PositionCloseEventStore
+	closeIntent            *CloseIntentStore
+	protectionPlanSnapshot *ProtectionPlanSnapshotStore
+	flipObs                *FlipObservationStore
+	breadthEvt             *BreadthEventStore
+	shadowGate             *ShadowGateStore
+	blockedSim             *BlockedSimStore
+	strategy               *StrategyStore
+	equity                 *EquityStore
+	equityAdjustment       *EquityAdjustmentStore
+	order                  *OrderStore
+	grid                   *GridStore
+	aiCharge               *AIChargeStore
+	evolution              *EvolutionStore
+	telegramConfig         TelegramConfigStore
 
 	mu sync.RWMutex
 }
@@ -159,6 +160,9 @@ func (s *Store) initTables() error {
 	}
 	if err := s.CloseIntent().InitTables(); err != nil {
 		return fmt.Errorf("failed to initialize close intent tables: %w", err)
+	}
+	if err := s.ProtectionPlanSnapshot().InitTables(); err != nil {
+		return fmt.Errorf("failed to initialize protection plan snapshot tables: %w", err)
 	}
 	if err := s.FlipObservation().InitTables(); err != nil {
 		return fmt.Errorf("failed to initialize flip observation tables: %w", err)
@@ -303,6 +307,18 @@ func (s *Store) CloseIntent() *CloseIntentStore {
 		s.closeIntent = NewCloseIntentStore(s.gdb)
 	}
 	return s.closeIntent
+}
+
+// ProtectionPlanSnapshot gets the per-open resolved-protection-plan snapshot
+// storage. One duplicate-free snapshot is written per position open so the
+// history panel shows the true entry plan instead of the noisy placement ledger.
+func (s *Store) ProtectionPlanSnapshot() *ProtectionPlanSnapshotStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.protectionPlanSnapshot == nil {
+		s.protectionPlanSnapshot = NewProtectionPlanSnapshotStore(s.gdb)
+	}
+	return s.protectionPlanSnapshot
 }
 
 // FlipObservation gets the trend-reversal flip observation storage. Records every
