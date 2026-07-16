@@ -20,6 +20,7 @@ func TestClassifyCloseMechanisms(t *testing.T) {
 		{"native_trailing", CategoryProtection, MechNativeTrailing},
 		{"break_even_stop", CategoryProtection, MechBreakEven},
 		{"full_sl", CategoryProtection, MechFullSL},
+		{"structural_sl", CategoryProtection, MechStructuralSL},
 		{"full_tp", CategoryProtection, MechFullTP},
 		{"ladder_tp", CategoryProtection, MechLadderTP},
 		{"ladder_sl", CategoryProtection, MechLadderSL},

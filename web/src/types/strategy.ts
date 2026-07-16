@@ -102,6 +102,21 @@ export interface EntryGateConfig {
   short_non_downtrend_min_confidence?: number
   squeeze_min_confidence?: number
   squeeze_min_rr?: number
+  // Entry-quality hard blocks (backtest: 1190 closed positions, rolling 5-fold
+  // walk-forward, bootstrap P(improve)=98.8%).
+  // Hard-block setup_type=breakout_retest (net-negative in every time third). Default true.
+  block_breakout_retest?: boolean
+  // Hard-block entries whose AI-promised net RR exceeds this ceiling (over-promised
+  // targets rarely hit, ~52% win rate). Default 2.8, <0 disables.
+  max_net_rr?: number
+  // Correlated-adverse entry throttle: skip a NEW entry when the trader's own
+  // recent finished closes cluster into losses (toxic regime). Validated (1273
+  // closed positions) as the sole entry lever positive out-of-sample and after
+  // crash-day removal. Default on.
+  correlated_adverse_throttle?: boolean
+  throttle_window_hours?: number
+  throttle_min_closes?: number
+  throttle_loss_rate?: number
   // Legacy compat
   entry_proximity_min_pct?: number
   invalidation_structure_min_pct?: number
@@ -128,6 +143,40 @@ export interface StrategyConfig {
   grid_config?: GridStrategyConfig
   // Breakout entry configuration (only used when strategy_type is 'breakout_trading')
   breakout_entry?: BreakoutEntryConfig
+  // Regime/trend entry gates promoted from the shadow dry-run bench. Each entry is
+  // one gate keyed by CATEGORY (大类); params differentiate variants within a
+  // category. mode='shadow' only records a counterfactual verdict; mode='enforce'
+  // actually blocks the open (and the blocked intent is replayed for scoring).
+  regime_gates?: RegimeGateConfig[]
+}
+
+// RegimeGateCategory mirrors the backend switch in trader/regime_gate.go.
+export type RegimeGateCategory =
+  | 'counter_trend'
+  | 'trend_direction_only'
+  | 'chop_reject'
+  | 'chop_lowconf'
+  | 'adx_weak'
+  | 'donchian_counter'
+  | 'chart_trend'
+
+export type RegimeGateMode = 'shadow' | 'enforce'
+
+// RegimeGateConfig is one configured regime/trend entry gate. Matches
+// store.RegimeGateConfig on the backend.
+export interface RegimeGateConfig {
+  category: RegimeGateCategory
+  mode: RegimeGateMode
+  enabled: boolean
+  params?: {
+    slope_window?: number // counter_trend / trend_direction_only / chart_trend
+    block_side?: 'LONG' | 'SHORT' // trend_direction_only
+    min_conf?: number // chop_lowconf
+    threshold?: number // adx_weak
+    lookback?: number // donchian_counter
+    align_min?: number // chart_trend
+    r2_min?: number // chart_trend
+  }
 }
 
 // BreakoutEntryConfig controls the standalone data-validated breakout engine.
@@ -194,6 +243,15 @@ export interface StructuralSLConfig {
   backstop_atr_mul?: number
   lookback_bars?: number
   close_confirm?: boolean
+  // pivot_strength: fractal strength for nearest-swing detection (bars on each side).
+  // The boundary anchors to the NEAREST swing beyond entry, not the window extreme.
+  pivot_strength?: number
+  // fallback_atr_mul: tighter cap used instead of the backstop when no near structure
+  // exists (nearest swing still beyond the backstop). Must be <= backstop_atr_mul.
+  fallback_atr_mul?: number
+  // fallback_rr_cap_ratio: on the fallback path, the stop must stay below this ratio ×
+  // the TP target move (fallbackSL% <= ratio × TP%), guaranteeing RR >= 1/ratio.
+  fallback_rr_cap_ratio?: number
 }
 
 export interface LadderTPSLConfig {

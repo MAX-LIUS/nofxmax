@@ -1,6 +1,7 @@
 package trader
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -448,9 +449,24 @@ func (at *AutoTrader) placeAndVerifyProtectionWithRetry(symbol, positionSide str
 	return fmt.Errorf("protection setup failed after %d attempts: %w", protectionSetupMaxAttempts, lastErr)
 }
 
-func (at *AutoTrader) validateProtectionPlanExecution(symbol, positionSide string, quantity float64, plan *ProtectionPlan) (*ProtectionPlan, error) {
+// validateProtectionPlanExecution filters a plan down to the tiers actually
+// placeable on the exchange (mark-executable + above min-contract). It is used
+// both by the PLACE path and by the reconciler's DETECTION path (to compute
+// which orders are "expected"). When quiet is true the drop/collapse warnings
+// are suppressed: the detection path performs no placement, so logging a
+// "collapsing to full TP" action that never happens is misleading log noise
+// that repeats every reconcile cycle (e.g. a 0.01-contract dust position whose
+// ladder tiers are all below the 1-contract minimum). The place path passes
+// quiet=false so real placement decisions are still logged.
+func (at *AutoTrader) validateProtectionPlanExecution(symbol, positionSide string, quantity float64, plan *ProtectionPlan, quiet bool) (*ProtectionPlan, error) {
 	if plan == nil {
 		return nil, nil
+	}
+	warnf := func(format string, args ...interface{}) {
+		if quiet {
+			return
+		}
+		logger.Warnf(format, args...)
 	}
 
 	adjusted := *plan
@@ -467,14 +483,14 @@ func (at *AutoTrader) validateProtectionPlanExecution(symbol, positionSide strin
 			if isExecutableHeldStopPrice(strings.ToLower(positionSide), order.Price, markPrice) {
 				return true
 			}
-			logger.Warnf("  ⚠️ Protection ladder stop dropped as non-executable against mark: symbol=%s side=%s stop=%.6f mark=%.6f", symbol, positionSide, order.Price, markPrice)
+			warnf("  ⚠️ Protection ladder stop dropped as non-executable against mark: symbol=%s side=%s stop=%.6f mark=%.6f", symbol, positionSide, order.Price, markPrice)
 			return false
 		}
 		isExecutableTP := func(order ProtectionOrder) bool {
 			if isExecutableHeldTakeProfitPrice(strings.ToLower(positionSide), order.Price, markPrice) {
 				return true
 			}
-			logger.Warnf("  ⚠️ Protection ladder take-profit dropped as non-executable against mark: symbol=%s side=%s tp=%.6f mark=%.6f", symbol, positionSide, order.Price, markPrice)
+			warnf("  ⚠️ Protection ladder take-profit dropped as non-executable against mark: symbol=%s side=%s tp=%.6f mark=%.6f", symbol, positionSide, order.Price, markPrice)
 			return false
 		}
 		adjusted.StopLossOrders = filterProtectionOrders(adjusted.StopLossOrders, isExecutableStop)
@@ -486,12 +502,12 @@ func (at *AutoTrader) validateProtectionPlanExecution(symbol, positionSide strin
 			adjusted.TakeProfitPrice = 0
 		}
 		if adjusted.StopLossPrice > 0 && !isExecutableHeldStopPrice(strings.ToLower(positionSide), adjusted.StopLossPrice, markPrice) {
-			logger.Warnf("  ⚠️ Protection full stop dropped as non-executable against mark: symbol=%s side=%s stop=%.6f mark=%.6f", symbol, positionSide, adjusted.StopLossPrice, markPrice)
+			warnf("  ⚠️ Protection full stop dropped as non-executable against mark: symbol=%s side=%s stop=%.6f mark=%.6f", symbol, positionSide, adjusted.StopLossPrice, markPrice)
 			adjusted.StopLossPrice = 0
 			adjusted.NeedsStopLoss = len(adjusted.StopLossOrders) > 0 || adjusted.FallbackMaxLossPrice > 0
 		}
 		if adjusted.TakeProfitPrice > 0 && !isExecutableHeldTakeProfitPrice(strings.ToLower(positionSide), adjusted.TakeProfitPrice, markPrice) {
-			logger.Warnf("  ⚠️ Protection full take-profit dropped as non-executable against mark: symbol=%s side=%s tp=%.6f mark=%.6f", symbol, positionSide, adjusted.TakeProfitPrice, markPrice)
+			warnf("  ⚠️ Protection full take-profit dropped as non-executable against mark: symbol=%s side=%s tp=%.6f mark=%.6f", symbol, positionSide, adjusted.TakeProfitPrice, markPrice)
 			adjusted.TakeProfitPrice = 0
 			adjusted.NeedsTakeProfit = len(adjusted.TakeProfitOrders) > 0
 		}
@@ -511,7 +527,7 @@ func (at *AutoTrader) validateProtectionPlanExecution(symbol, positionSide strin
 					continue
 				}
 				if err := okxTrader.ValidateProtectionQuantity(symbol, orderQty); err != nil {
-					logger.Warnf("  ⚠️ Protection tier dropped as non-executable: symbol=%s side=%s price=%.6f qty=%.6f err=%v", symbol, positionSide, order.Price, orderQty, err)
+					warnf("  ⚠️ Protection tier dropped as non-executable: symbol=%s side=%s price=%.6f qty=%.6f err=%v", symbol, positionSide, order.Price, orderQty, err)
 					continue
 				}
 				filtered = append(filtered, order)
@@ -528,15 +544,15 @@ func (at *AutoTrader) validateProtectionPlanExecution(symbol, positionSide strin
 			// tightest tier so the remaining position keeps stop coverage instead of
 			// losing it entirely (fix 2026-06-07).
 			if adjusted.StopLossPrice > 0 {
-				logger.Warnf("  ⚠️ Ladder stop-loss tiers all below exchange minimum; using full stop @%.6f for %s %s", adjusted.StopLossPrice, symbol, positionSide)
+				warnf("  ⚠️ Ladder stop-loss tiers all below exchange minimum; using full stop @%.6f for %s %s", adjusted.StopLossPrice, symbol, positionSide)
 			} else if collapsePrice := tightestLadderStopPrice(plan.StopLossOrders, strings.ToLower(positionSide)); collapsePrice > 0 {
 				// Only collapse to a stop that is still executable against current mark.
 				// A stop already breached by price would be rejected by the exchange and
 				// loop forever (fix 2026-06-09).
 				if hasMarkPrice && !isExecutableHeldStopPrice(strings.ToLower(positionSide), collapsePrice, markPrice) {
-					logger.Warnf("  ⚠️ Ladder stop collapse price %.6f already breached vs mark %.6f for %s %s; leaving stop to fallback/existing protection", collapsePrice, markPrice, symbol, positionSide)
+					warnf("  ⚠️ Ladder stop collapse price %.6f already breached vs mark %.6f for %s %s; leaving stop to fallback/existing protection", collapsePrice, markPrice, symbol, positionSide)
 				} else {
-					logger.Warnf("  ⚠️ Ladder stop-loss tiers all below exchange minimum; collapsing to full stop @%.6f for %s %s", collapsePrice, symbol, positionSide)
+					warnf("  ⚠️ Ladder stop-loss tiers all below exchange minimum; collapsing to full stop @%.6f for %s %s", collapsePrice, symbol, positionSide)
 					adjusted.StopLossPrice = collapsePrice
 					adjusted.StopLossOrders = nil
 				}
@@ -549,7 +565,7 @@ func (at *AutoTrader) validateProtectionPlanExecution(symbol, positionSide strin
 			// configured target instead of leaving the position with no TP and looping
 			// forever (fix 2026-06-07).
 			if adjusted.TakeProfitPrice > 0 {
-				logger.Warnf("  ⚠️ Ladder take-profit tiers all below exchange minimum; using full TP @%.6f for %s %s", adjusted.TakeProfitPrice, symbol, positionSide)
+				warnf("  ⚠️ Ladder take-profit tiers all below exchange minimum; using full TP @%.6f for %s %s", adjusted.TakeProfitPrice, symbol, positionSide)
 			} else if collapsePrice := nearestLadderTakeProfitPrice(plan.TakeProfitOrders, strings.ToLower(positionSide)); collapsePrice > 0 {
 				// Only collapse to a TP that is still executable against current mark.
 				// When price has already moved past the TP target (e.g. long TP below
@@ -557,9 +573,9 @@ func (at *AutoTrader) validateProtectionPlanExecution(symbol, positionSide strin
 				// forever re-placing a doomed order. In that case leave TP empty and let
 				// the stop / break-even own the exit (fix 2026-06-09).
 				if hasMarkPrice && !isExecutableHeldTakeProfitPrice(strings.ToLower(positionSide), collapsePrice, markPrice) {
-					logger.Warnf("  ⚠️ Ladder TP collapse price %.6f already passed vs mark %.6f for %s %s; not re-placing TP (price moved past target)", collapsePrice, markPrice, symbol, positionSide)
+					warnf("  ⚠️ Ladder TP collapse price %.6f already passed vs mark %.6f for %s %s; not re-placing TP (price moved past target)", collapsePrice, markPrice, symbol, positionSide)
 				} else {
-					logger.Warnf("  ⚠️ Ladder take-profit tiers all below exchange minimum; collapsing to full TP @%.6f for %s %s", collapsePrice, symbol, positionSide)
+					warnf("  ⚠️ Ladder take-profit tiers all below exchange minimum; collapsing to full TP @%.6f for %s %s", collapsePrice, symbol, positionSide)
 					adjusted.TakeProfitPrice = collapsePrice
 					adjusted.TakeProfitOrders = nil
 				}
@@ -630,7 +646,7 @@ func (at *AutoTrader) placeAndVerifyProtectionPlan(symbol, positionSide string, 
 		return nil
 	}
 
-	validatedPlan, err := at.validateProtectionPlanExecution(symbol, positionSide, quantity, plan)
+	validatedPlan, err := at.validateProtectionPlanExecution(symbol, positionSide, quantity, plan, false)
 	if err != nil {
 		return err
 	}
@@ -699,6 +715,7 @@ func (at *AutoTrader) placeFallbackMaxLossProtection(symbol, positionSide string
 		if err := setter.SetStopLossTagged(symbol, positionSide, quantity, stopLossPrice, "fallback_maxloss_sl"); err != nil {
 			return fmt.Errorf("failed to set fallback max-loss stop loss: %w", err)
 		}
+		at.recordProtectionIntent(symbol, positionSide, "fallback_maxloss_sl", quantity, stopLossPrice)
 		return nil
 	}
 	if err := at.trader.SetStopLoss(symbol, positionSide, quantity, stopLossPrice); err != nil {
@@ -717,6 +734,23 @@ func (at *AutoTrader) placeAndVerifyLadderProtection(symbol, positionSide string
 		return fmt.Errorf("failed to inspect existing ladder protection orders: %w", err)
 	}
 
+	// CRITICAL (2026-06-27): every ladder tier must be placed at open in a single
+	// pass. A per-tier failure must NOT abort the remaining tiers — otherwise a
+	// transient/single-tier reject silently drops the rest of the ladder (e.g. WLD
+	// short lost TP2/TP3/TP4 after TP1 and had only the wide structural backstop
+	// left). We attempt EVERY tier, collect per-tier errors, and surface an
+	// aggregate error at the end so the retry wrapper re-runs; the placement is
+	// idempotent because hasExistingEquivalentProtection skips already-placed tiers.
+	var placeErrs []error
+	slSetter, slTaggedOK := at.trader.(interface {
+		SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error
+		SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) error
+	})
+	tpSetter, tpTaggedOK := at.trader.(interface {
+		SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error
+		SetTakeProfitTagged(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) error
+	})
+
 	for _, order := range plan.StopLossOrders {
 		orderQty := quantity * order.CloseRatioPct / 100.0
 		if orderQty <= 0 {
@@ -725,15 +759,15 @@ func (at *AutoTrader) placeAndVerifyLadderProtection(symbol, positionSide string
 		if hasExistingEquivalentProtection(existingOrders, positionSide, false, order.Price, orderQty) {
 			continue
 		}
-		if setter, ok := at.trader.(interface {
-			SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error
-			SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) error
-		}); ok {
-			if err := setter.SetStopLossTagged(symbol, positionSide, orderQty, order.Price, "ladder_sl"); err != nil {
-				return fmt.Errorf("failed to set ladder stop loss %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err)
+		if slTaggedOK {
+			if err := slSetter.SetStopLossTagged(symbol, positionSide, orderQty, order.Price, "ladder_sl"); err != nil {
+				placeErrs = append(placeErrs, fmt.Errorf("ladder stop loss %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err))
+				continue
 			}
+			at.recordProtectionIntent(symbol, positionSide, "ladder_sl", orderQty, order.Price)
 		} else if err := at.trader.SetStopLoss(symbol, positionSide, orderQty, order.Price); err != nil {
-			return fmt.Errorf("failed to set ladder stop loss %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err)
+			placeErrs = append(placeErrs, fmt.Errorf("ladder stop loss %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err))
+			continue
 		}
 	}
 	for _, order := range plan.TakeProfitOrders {
@@ -744,16 +778,22 @@ func (at *AutoTrader) placeAndVerifyLadderProtection(symbol, positionSide string
 		if hasExistingEquivalentProtection(existingOrders, positionSide, true, order.Price, orderQty) {
 			continue
 		}
-		if setter, ok := at.trader.(interface {
-			SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error
-			SetTakeProfitTagged(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) error
-		}); ok {
-			if err := setter.SetTakeProfitTagged(symbol, positionSide, orderQty, order.Price, "ladder_tp"); err != nil {
-				return fmt.Errorf("failed to set ladder take profit %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err)
+		if tpTaggedOK {
+			if err := tpSetter.SetTakeProfitTagged(symbol, positionSide, orderQty, order.Price, "ladder_tp"); err != nil {
+				placeErrs = append(placeErrs, fmt.Errorf("ladder take profit %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err))
+				continue
 			}
+			at.recordProtectionIntent(symbol, positionSide, "ladder_tp", orderQty, order.Price)
 		} else if err := at.trader.SetTakeProfit(symbol, positionSide, orderQty, order.Price); err != nil {
-			return fmt.Errorf("failed to set ladder take profit %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err)
+			placeErrs = append(placeErrs, fmt.Errorf("ladder take profit %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err))
+			continue
 		}
+	}
+	if len(placeErrs) > 0 {
+		// Surface as one aggregate error: every tier was still attempted, so no
+		// tier is silently skipped, and the retry wrapper re-runs the whole ladder.
+		logger.Warnf("  ⚠️ Ladder placement had %d tier error(s) for %s %s; every tier was still attempted, remaining tiers not abandoned", len(placeErrs), symbol, positionSide)
+		return fmt.Errorf("ladder protection placement: %d tier(s) failed: %w", len(placeErrs), errors.Join(placeErrs...))
 	}
 
 	// Retry verification with delay to handle exchange propagation latency.
@@ -836,6 +876,7 @@ func (at *AutoTrader) placeAndVerifyProtection(symbol, positionSide string, quan
 			if err := setter.SetStopLossTagged(symbol, positionSide, quantity, stopLossPrice, "full_sl"); err != nil {
 				return fmt.Errorf("failed to set stop loss: %w", err)
 			}
+			at.recordProtectionIntent(symbol, positionSide, "full_sl", quantity, stopLossPrice)
 		} else if err := at.trader.SetStopLoss(symbol, positionSide, quantity, stopLossPrice); err != nil {
 			return fmt.Errorf("failed to set stop loss: %w", err)
 		}
@@ -848,6 +889,7 @@ func (at *AutoTrader) placeAndVerifyProtection(symbol, positionSide string, quan
 			if err := setter.SetTakeProfitTagged(symbol, positionSide, quantity, takeProfitPrice, "full_tp"); err != nil {
 				return fmt.Errorf("failed to set take profit: %w", err)
 			}
+			at.recordProtectionIntent(symbol, positionSide, "full_tp", quantity, takeProfitPrice)
 		} else if err := at.trader.SetTakeProfit(symbol, positionSide, quantity, takeProfitPrice); err != nil {
 			return fmt.Errorf("failed to set take profit: %w", err)
 		}

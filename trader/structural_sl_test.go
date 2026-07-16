@@ -15,29 +15,30 @@ func TestStructuralSLPercent_ClampAndConvert(t *testing.T) {
 	entry, atr := 100.0, 2.0 // 1 ATR = 2% of entry
 
 	// Boundary 6 below entry (94) → 3 ATR → within [1.5,4.5] → 6%.
-	if pct, ok := structuralSLPercent(entry, 94.0, atr, ss, acfg); !ok || math.Abs(pct-6.0) > 1e-9 {
+	if pct, ok := structuralSLPercent(entry, 94.0, atr, 0, ss, acfg); !ok || math.Abs(pct-6.0) > 1e-9 {
 		t.Fatalf("mid want 6%%, got %.4f ok=%v", pct, ok)
 	}
 	// Boundary 1 below entry (99) → 0.5 ATR → floored to 1.5 ATR → 3%.
-	if pct, ok := structuralSLPercent(entry, 99.0, atr, ss, acfg); !ok || math.Abs(pct-3.0) > 1e-9 {
+	if pct, ok := structuralSLPercent(entry, 99.0, atr, 0, ss, acfg); !ok || math.Abs(pct-3.0) > 1e-9 {
 		t.Fatalf("floor want 3%%, got %.4f ok=%v", pct, ok)
 	}
-	// Boundary 20 below entry (80) → 10 ATR → capped to 4.5 ATR → 9%.
-	if pct, ok := structuralSLPercent(entry, 80.0, atr, ss, acfg); !ok || math.Abs(pct-9.0) > 1e-9 {
-		t.Fatalf("cap want 9%%, got %.4f ok=%v", pct, ok)
+	// Boundary 20 below entry (80) → 10 ATR → beyond backstop 4.5 → falls back to
+	// FallbackATRMul (default 3.0) → 6% (was 9% before the nearest-structure fix).
+	if pct, ok := structuralSLPercent(entry, 80.0, atr, 0, ss, acfg); !ok || math.Abs(pct-6.0) > 1e-9 {
+		t.Fatalf("beyond-backstop fallback want 6%%, got %.4f ok=%v", pct, ok)
 	}
 }
 
 func TestStructuralSLPercent_InvalidInputs(t *testing.T) {
 	acfg := store.ATRProtectionConfig{Enabled: true}
 	ss := store.StructuralSLConfig{Enabled: true}
-	if _, ok := structuralSLPercent(0, 94, 2, ss, acfg); ok {
+	if _, ok := structuralSLPercent(0, 94, 2, 0, ss, acfg); ok {
 		t.Fatalf("zero entry must be not-ok")
 	}
-	if _, ok := structuralSLPercent(100, 0, 2, ss, acfg); ok {
+	if _, ok := structuralSLPercent(100, 0, 2, 0, ss, acfg); ok {
 		t.Fatalf("zero boundary must be not-ok")
 	}
-	if _, ok := structuralSLPercent(100, 94, 0, ss, acfg); ok {
+	if _, ok := structuralSLPercent(100, 94, 0, 0, ss, acfg); ok {
 		t.Fatalf("zero atr must be not-ok")
 	}
 }
@@ -48,7 +49,7 @@ func TestStructuralSLPercent_ShortSideSymmetric(t *testing.T) {
 	ss := store.StructuralSLConfig{Enabled: true, FloorATRMul: 1.5, BackstopATRMul: 4.5}
 	entry, atr := 100.0, 2.0
 	// Boundary 106 above entry → 3 ATR → 6%.
-	if pct, ok := structuralSLPercent(entry, 106.0, atr, ss, acfg); !ok || math.Abs(pct-6.0) > 1e-9 {
+	if pct, ok := structuralSLPercent(entry, 106.0, atr, 0, ss, acfg); !ok || math.Abs(pct-6.0) > 1e-9 {
 		t.Fatalf("short mid want 6%%, got %.4f ok=%v", pct, ok)
 	}
 }

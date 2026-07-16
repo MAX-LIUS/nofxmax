@@ -1,8 +1,36 @@
 # 统一保护系统 - AI 记忆文档
 
-> **状态**: 生产运行 | churn 已根治 | 回吐护栏实盘全策略生效 | trader 级 custom_prompt bug 已修复
-> **更新**: 2026-06-23 (回吐护栏实盘 + GPT 不开仓根因修复:trader 级 custom_prompt 死字段)
-> **版本**: v1.12.0
+> **状态**: 生产运行 | churn 已根治 | 回吐护栏实盘全策略生效 | excursion(MFE/MAE)跟踪已上线 | structural_sl 归因已修
+> **更新**: 2026-07-07 (excursion 峰谷+ATR倍数落库 + structural_sl 平仓归因回归修复,前后端已部署)
+> **版本**: v1.13.0
+
+---
+
+## 📈 Excursion(MFE/MAE)跟踪 + structural_sl 归因修复(2026-07-07,已部署上线)
+
+**背景**:用户复盘 TRB LONG 被广度熔断平在 -6.62%(SL-4.5%没触发)。查明**非 bug**:SL 是 structural 模式,真实止损=开仓前 24×1h swing low(15.86,-13.2%)夹到[1.5,4.5]×ATR,价格最低 17.06 没到,广度熔断正确兜底。结构止损宽窄由 ATR timeframe 决定(Claude本体 1h vs Claude-R 15m)。**注意 prune-on-close**:`protection_reconciler.go:1225` 平仓即删 frozen ATR/边界记录,所以查已平仓位的 frozen 记录必然为空,不能据此判断"开仓时没冻结"。
+
+**需求 1 = 谷值+ATR倍数落库**(对称已有峰值):
+- `store/position.go` TraderPosition 加 4 列:`peak_pnl_pct/trough_pnl_pct/peak_atr_mult/trough_atr_mult`(GORM AutoMigrate 自动加列)。
+- `peak_pnl_states` 表加 3 列(trough_pnl_pct/peak_atr_mult/trough_atr_mult),幂等 PRAGMA(`migration_unified_protection.go`),新增 `ExcursionState`/`SaveExcursion`/`LoadExcursionForTrader`,保留旧 `SavePeakPnL`/`LoadPeakPnLForTrader`。
+- `trader/auto_trader.go` 加 3 缓存(troughPnLCache/peakAtrMultCache/troughAtrMultCache,共用 peakPnLCacheMutex),构造+`loadPeakPnLFromStore` 改用 LoadExcursionForTrader 恢复 4 缓存。
+- `trader/auto_trader_risk.go` 新增 `UpdateExcursion`(每 poll 每仓无条件调,含 nil-map lazy-init 供测试直构 struct)+`GetExcursion`;`ClearPeakPnLCache` 清 4 缓存。ATR% 来自 frozenATRForPosition(仅 ATRProtection.Enabled 时),ATR倍数=profit%/ATR%(带符号)。
+- **平仓冻结**:`store/position.go` `stampExcursionOntoUpdates`(从 peak_pnl_states 读快照,pos_key 大小写不敏感)在 `ClosePositionFully`+`ClosePositionWithAccurateData` 落到 position 行,ClearPeakPnLCache 删缓存前。
+- API:`auto_trader_decision.go` GetPositions map 加 4 字段;前端 `web/src/types/trading.ts` Position + HistoricalPosition 加 4 字段。
+- **验证**:线上 peak_pnl_states 4 列齐、trader_positions 4 列齐、实盘每 poll 写入(BNB peak0.986/trough-1.673/tr_atr-2.49 等)、重启 `🔁 Excursion: restored N` 正常。
+
+**需求 2 = structural_sl 平仓归因回归修复**:
+- **bug**:`store/attribution.go` `ClassifyClose` 无 structural_sl 分支→全部落 `{system, unknown_close}`(structural_sl 是归因修复后才加的新功能)。
+- **修复**:加常量 `MechStructuralSL="structural_sl"`;ClassifyClose 在 full_tp 后、full_sl 前加 `structural_sl||structural → {protection, structural_sl}`(须在 full_sl 前避免被 substring 遮蔽);`cmd/closeeventbackfill/main.go` classify 镜像同改;测试用例已加。
+- **历史修复**:11 行 `structural_sl+unknown_close+system` 已 UPDATE 为 `protection/structural_sl`(close_reason 已确定,确定性修正)。
+- `close_long`/`close_short`(25笔)= 已知 sync 回退歧义,非新回归(AI 平仓走 ai_close_long/short 意图账本正确)。
+
+**部署**:后端镜像旧 `04e4e5ee`(回滚点)→新 `d5c7a0ded132`;前端旧 `e1403f14`(回滚点)。`docker compose build nofx / nofx-frontend` → `up -d`。两容器 healthy 无 panic。CGO=1 测试 store+trader 全绿。**改动未 commit(遵规矩)**:cmd/closeeventbackfill、store/{attribution,attribution_classify_test,migration_unified_protection,position}、trader/{auto_trader,auto_trader_decision,auto_trader_risk}、web/src/types/trading.ts。
+
+---
+
+<!-- 历史记录见下 -->
+> **旧版本**: v1.12.0(2026-06-23)
 
 ---
 

@@ -140,14 +140,13 @@ function summarizeCloseSource(
       group: 'sync',
     }
 
-  if (
-    merged.includes('ai_close') ||
-    merged === 'close_long' ||
-    merged === 'close_short' ||
-    merged.includes('close_long') ||
-    merged.includes('close_short') ||
-    type === 'AI_CLOSE'
-  ) {
+  // Only an explicit ai_close* reason is a genuine AI proactive close. A bare
+  // close_long/close_short is NOT: on Binance those are exchange-side protection
+  // triggers (STOP/TP/TRAILING/maker-TP) whose native type wasn't recovered at
+  // sync time, and exit_decision_cycle is always populated (latest cycle) so a
+  // decision-cycle link is NOT evidence of an AI close. Treating bare closes as
+  // AI here is the false-positive the panel used to show.
+  if (merged.includes('ai_close') || type === 'AI_CLOSE') {
     if (hasDecisionCycle || hasReview) {
       return {
         label: 'AI proactive close',
@@ -157,8 +156,24 @@ function summarizeCloseSource(
       }
     }
     return {
-      label: 'AI/sync close attribution',
-      detail: 'not decision-linked',
+      label: 'AI close (not decision-linked)',
+      detail: 'reason=ai_close but no matching decision',
+      confidence: 'low',
+      group: 'sync',
+    }
+  }
+
+  if (
+    merged === 'close_long' ||
+    merged === 'close_short' ||
+    merged.includes('close_long') ||
+    merged.includes('close_short') ||
+    merged.includes('sync_external') ||
+    merged.includes('sync_absent')
+  ) {
+    return {
+      label: 'Exchange close · mechanism unresolved',
+      detail: 'exchange-side protection, native type not recovered',
       confidence: 'low',
       group: 'sync',
     }
@@ -1209,6 +1224,17 @@ function DirectionStatsCard({
   )
 }
 
+// PLAN_KIND_COLOR maps a protection-plan item's kind to its system color so the
+// entry plan and the matched close-event row read as one color-coded story
+// (green=TP, red=SL, amber=break-even, purple=drawdown, blue=trailing).
+const PLAN_KIND_COLOR: Record<PlanItem['kind'], string> = {
+  tp: '#0ECB81',
+  sl: '#F6465D',
+  be: '#F0B90B',
+  drawdown: '#C084FC',
+  trailing: '#60A5FA',
+}
+
 // matchCloseEventToPlan links an actual close event to the entry-plan item that
 // fired it. Primary key is the mechanism (both come from the same taxonomy);
 // among same-mechanism tiers (ladder TP1/TP2/...), the tier whose trigger price
@@ -1239,27 +1265,93 @@ function matchCloseEventToPlan(
   return best
 }
 
+// planItemKey uniquely identifies a plan tier by its mechanism + its position in
+// the plan array, so a per-tier fired signal can distinguish TP1 from TP4 even
+// though they share the mechanism `ladder_tp`.
+function planItemKey(item: PlanItem, idx: number): string {
+  return `${item.mechanism}#${idx}`
+}
+
+// resolveLadderFiring attributes each close event to the concrete plan tier that
+// actually executed, by consuming the closed ratio against the tiers of that
+// mechanism in the order price reaches them (nearest-to-entry first). This fixes
+// two display errors a naive match makes:
+//   (1) one fired ladder mechanism lighting up EVERY tier of that kind — e.g. a
+//       single 20% TP fill marking TP1..TP4 all ✓ when price never reached TP3/4
+//   (2) a fill mapped to the wrong tier by nearest price when the traded ratio
+//       proves which tier executed — e.g. a 20%-ratio fill is TP1 (20%), not TP2
+//       (18%), regardless of which trigger price is numerically closest.
+// Single-tier mechanisms (full_sl, break_even, ...) stay 1:1. Returns the set of
+// fired tier keys and a per-event map to the owning tier.
+function resolveLadderFiring(
+  events: PositionCloseEvent[],
+  plan: PlanItem[]
+): { firedKeys: Set<string>; eventKeyToPlan: Map<string, PlanItem> } {
+  const firedKeys = new Set<string>()
+  const eventKeyToPlan = new Map<string, PlanItem>()
+  const tiersByMech = new Map<string, { item: PlanItem; key: string }[]>()
+  plan.forEach((item, idx) => {
+    const arr = tiersByMech.get(item.mechanism) || []
+    arr.push({ item, key: planItemKey(item, idx) })
+    tiersByMech.set(item.mechanism, arr)
+  })
+  tiersByMech.forEach((arr) =>
+    arr.sort(
+      (a, b) => Math.abs(a.item.triggerPct) - Math.abs(b.item.triggerPct)
+    )
+  )
+  const consumed = new Map<string, number>()
+  events.forEach((event, idx) => {
+    const mech =
+      event.mechanism ||
+      classifyMechanism(event.close_reason || event.execution_source)
+    const eventKey = `${event.parent_order_id}-${event.event_time}-${idx}`
+    const tiers = tiersByMech.get(mech)
+    if (!tiers || tiers.length === 0) return
+    if (tiers.length === 1) {
+      firedKeys.add(tiers[0].key)
+      eventKeyToPlan.set(eventKey, tiers[0].item)
+      return
+    }
+    const before = consumed.get(mech) || 0
+    const ratio = event.close_ratio_pct || 0
+    const mid = before + ratio / 2
+    let acc = 0
+    let owner = tiers[tiers.length - 1]
+    for (const t of tiers) {
+      const tierRatio = t.item.closeRatioPct || 0
+      const start = acc
+      const end = acc + tierRatio
+      if (before + ratio > start + 1e-6 && before < end - 1e-6) {
+        firedKeys.add(t.key)
+      }
+      if (mid >= start - 1e-6 && mid < end + 1e-6) {
+        owner = t
+      }
+      acc = end
+    }
+    eventKeyToPlan.set(eventKey, owner.item)
+    consumed.set(mech, before + ratio)
+  })
+  return { firedKeys, eventKeyToPlan }
+}
+
 // EntryProtectionPlan renders the price-anchored protection plan captured at
 // entry: every ladder TP/SL tier, break-even arm point, and drawdown floor with
-// its concrete trigger price and close ratio. `firedMechanisms` highlights the
-// levels that actually fired so the plan and the outcome read as one story.
+// its concrete trigger price and close ratio. `firedKeys` (mechanism#index)
+// highlights only the tiers that actually fired so the plan and the outcome read
+// as one story — a single 20% TP fill marks TP1 only, not the whole ladder.
 function EntryProtectionPlan({
   plan,
   language,
-  firedMechanisms,
+  firedKeys,
 }: {
   plan: PlanItem[]
   language: string
-  firedMechanisms: Set<string>
+  firedKeys: Set<string>
 }) {
   if (plan.length === 0) return null
-  const kindColor: Record<PlanItem['kind'], string> = {
-    tp: '#0ECB81',
-    sl: '#F6465D',
-    be: '#F0B90B',
-    drawdown: '#C084FC',
-    trailing: '#60A5FA',
-  }
+  const kindColor = PLAN_KIND_COLOR
   return (
     <div>
       <div className="text-xs mb-2" style={{ color: '#848E9C' }}>
@@ -1269,7 +1361,7 @@ function EntryProtectionPlan({
       <div className="flex flex-wrap gap-1.5">
         {plan.map((item, idx) => {
           const c = kindColor[item.kind]
-          const fired = firedMechanisms.has(item.mechanism)
+          const fired = firedKeys.has(planItemKey(item, idx))
           return (
             <div
               key={`${item.mechanism}-${idx}`}
@@ -1356,6 +1448,13 @@ function PositionRow({
 
   const closeRatioPct = position.close_ratio_pct || 0
   const closeValueUsdt = position.close_value_usdt || exitPrice * displayQty
+  // Excursion (MFE/MAE) frozen onto the row at close: favorable peak + adverse trough
+  // profit% and each extreme in open-time ATR multiples. Reverse-lookup / backtest trail.
+  const excPeakPct = Number(position.peak_pnl_pct ?? 0)
+  const excTroughPct = Number(position.trough_pnl_pct ?? 0)
+  const excPeakAtr = Number(position.peak_atr_mult ?? 0)
+  const excTroughAtr = Number(position.trough_atr_mult ?? 0)
+  const hasExcursion = excPeakPct !== 0 || excTroughPct !== 0
   // Position-level canonical mechanism/category from the taxonomy.
   const positionMech = classifyMechanism(
     position.close_reason || position.execution_source
@@ -1371,12 +1470,12 @@ function PositionRow({
     position.entry_decision_review?.protection_snapshot ||
     position.protection_snapshot
   const protectionPlan = buildProtectionPlan(planSnapshot, entryPrice, isLong)
-  const firedMechanisms = new Set<string>(
-    (position.close_events || []).map(
-      (ev) =>
-        ev.mechanism ||
-        classifyMechanism(ev.close_reason || ev.execution_source)
-    )
+  // Per-tier firing: attribute each close to the exact tier that executed so a
+  // single fired ladder tier does not light up its whole mechanism, and each
+  // fill is labeled by the tier its traded ratio proves (not nearest price).
+  const { firedKeys, eventKeyToPlan } = resolveLadderFiring(
+    position.close_events || [],
+    protectionPlan
   )
   const entryReviewSummary = position.entry_review_summary
   const entryTf = entryReviewSummary?.timeframe_context as
@@ -1631,12 +1730,43 @@ function PositionRow({
                     {`${position.entry_decision_cycle || '—'} / ${position.exit_decision_cycle || '—'}`}
                   </div>
                 </div>
-                <div>
-                  <div style={{ color: '#848E9C' }}>
-                    {'复盘上下文 / Review Context'}
+                {hasExcursion && (
+                  <div>
+                    <div style={{ color: '#848E9C' }}>
+                      {'峰值 / 谷值 (ATR倍数) / MFE / MAE (×ATR)'}
+                    </div>
+                    <div className="font-mono text-[11px]">
+                      <span style={{ color: '#0ECB81' }}>
+                        {`${excPeakPct >= 0 ? '+' : ''}${excPeakPct.toFixed(2)}%`}
+                        {excPeakAtr !== 0
+                          ? ` (${excPeakAtr > 0 ? '+' : ''}${excPeakAtr.toFixed(2)}×)`
+                          : ''}
+                      </span>
+                      <span style={{ color: '#848E9C' }}> / </span>
+                      <span style={{ color: '#F6465D' }}>
+                        {`${excTroughPct >= 0 ? '+' : ''}${excTroughPct.toFixed(2)}%`}
+                        {excTroughAtr !== 0
+                          ? ` (${excTroughAtr.toFixed(2)}×)`
+                          : ''}
+                      </span>
+                    </div>
                   </div>
+                )}
+                <details className="group">
+                  <summary
+                    className="cursor-pointer list-none select-none flex items-center gap-1"
+                    style={{ color: '#848E9C' }}
+                  >
+                    <span
+                      className="transition-transform group-open:rotate-90"
+                      style={{ fontSize: '9px' }}
+                    >
+                      ▶
+                    </span>
+                    {'复盘上下文 / Review Context'}
+                  </summary>
                   <div
-                    className="text-[11px] leading-5"
+                    className="mt-1 text-[11px] leading-5"
                     style={{ color: '#EAECEF' }}
                   >
                     {formatReviewContextSummary(
@@ -1697,7 +1827,7 @@ function PositionRow({
                       }
                     />
                   </div>
-                </div>
+                </details>
                 <div>
                   <div style={{ color: '#848E9C' }}>
                     {'成交比例 / Close Ratio'}
@@ -1801,12 +1931,25 @@ function PositionRow({
                   }
                 })()}
 
-              {protectionPlan.length > 0 && (
+              {protectionPlan.length > 0 ? (
                 <EntryProtectionPlan
                   plan={protectionPlan}
                   language={language}
-                  firedMechanisms={firedMechanisms}
+                  firedKeys={firedKeys}
                 />
+              ) : (
+                <div
+                  className="text-xs mb-3 px-3 py-2 rounded"
+                  style={{
+                    color: '#848E9C',
+                    background: '#1E2329',
+                    border: '1px dashed #2B3139',
+                  }}
+                >
+                  {language === 'zh'
+                    ? '历史仓 · 开仓保护计划未记录（此仓建立时未落库真实计划，不显示模板）'
+                    : 'Legacy position · protection plan not recorded (no real plan was persisted at open; template intentionally not shown)'}
+                </div>
               )}
 
               {position.close_events &&
@@ -1881,10 +2024,14 @@ function PositionRow({
                                 )
                               const eventCat = categoryOf(eventMech)
                               const catMeta = categoryMeta(eventCat)
-                              const matchedPlan = matchCloseEventToPlan(
-                                event,
-                                protectionPlan
-                              )
+                              // Prefer the ratio-consuming resolver (labels each
+                              // fill by the tier its traded ratio proves); fall
+                              // back to nearest-price match if unresolved.
+                              const matchedPlan =
+                                eventKeyToPlan.get(
+                                  `${event.parent_order_id}-${event.event_time}-${idx}`
+                                ) ||
+                                matchCloseEventToPlan(event, protectionPlan)
                               const pnl = event.realized_pnl_delta || 0
                               const pnlColor = pnl >= 0 ? '#0ECB81' : '#F6465D'
                               return (
@@ -1963,28 +2110,51 @@ function PositionRow({
                                           : catMeta.en}
                                       </span>
                                     </div>
-                                    {matchedPlan && (
-                                      <div
-                                        className="mt-0.5 text-[10px]"
-                                        style={{ color: '#848E9C' }}
-                                        title={
-                                          language === 'zh'
-                                            ? '对应开仓保护档位'
-                                            : 'matched entry-plan tier'
-                                        }
-                                      >
-                                        → {matchedPlan.label}
-                                        {typeof matchedPlan.triggerPrice ===
-                                          'number' && (
-                                          <span className="font-mono ml-0.5">
-                                            @
-                                            {formatPrice(
-                                              matchedPlan.triggerPrice
+                                    {matchedPlan &&
+                                      (() => {
+                                        const pc =
+                                          PLAN_KIND_COLOR[matchedPlan.kind]
+                                        return (
+                                          <div
+                                            className="mt-0.5 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]"
+                                            style={{
+                                              background: `${pc}14`,
+                                              border: `1px solid ${pc}55`,
+                                              color: pc,
+                                            }}
+                                            title={
+                                              language === 'zh'
+                                                ? '对应开仓保护档位'
+                                                : 'matched entry-plan tier'
+                                            }
+                                          >
+                                            <span style={{ fontWeight: 600 }}>
+                                              → {matchedPlan.label}
+                                            </span>
+                                            <span className="font-mono">
+                                              {matchedPlan.triggerPct >= 0
+                                                ? '+'
+                                                : ''}
+                                              {matchedPlan.triggerPct}%
+                                            </span>
+                                            {typeof matchedPlan.triggerPrice ===
+                                              'number' && (
+                                              <span className="font-mono opacity-80">
+                                                @
+                                                {formatPrice(
+                                                  matchedPlan.triggerPrice
+                                                )}
+                                              </span>
                                             )}
-                                          </span>
-                                        )}
-                                      </div>
-                                    )}
+                                            {typeof matchedPlan.closeRatioPct ===
+                                              'number' && (
+                                              <span className="opacity-70">
+                                                ·{matchedPlan.closeRatioPct}%
+                                              </span>
+                                            )}
+                                          </div>
+                                        )
+                                      })()}
                                   </td>
                                   <td
                                     className="py-2 px-3 text-right font-mono font-semibold"

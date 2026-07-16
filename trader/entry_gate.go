@@ -60,6 +60,9 @@ type entryGateInput struct {
 	ConstraintSnap       *ExecutionConstraintsSnapshot
 	ProtectionAlign      *store.DecisionActionProtectionAlignment
 	LastSameDirectionTrade *store.RecentTrade
+	// RecentCloseStats is the trader's own finished-close toxicity in the trailing
+	// throttle window (causal: only closes before this entry). nil when unavailable.
+	RecentCloseStats     *store.RecentCloseStats
 	ChainOfThought       string
 }
 
@@ -503,6 +506,30 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 					Values:   fmt.Sprintf("new_entry=%.4f, last_entry=%.4f", entryPrice, lastTrade.EntryPrice),
 				})
 			}
+		}
+	}
+
+	// 1.9 Correlated-adverse throttle — block a new entry when the trader's OWN
+	// recent finished closes are clustering into losses (toxic/correlated-adverse
+	// regime). Causal: RecentCloseStats counts only closes before this entry.
+	// Validated as the sole entry lever positive out-of-sample and after crash-day
+	// removal; it removes negative-EV entries while keeping the positive ones.
+	if input.StrategyConfig != nil && input.RecentCloseStats != nil {
+		gate := input.StrategyConfig.EntryStructure.EntryGate
+		if gate.CorrelatedAdverseThrottleEnabled() {
+			gd := gate.WithDefaults()
+			rc := input.RecentCloseStats
+			toxic := rc.Count >= gd.ThrottleMinCloses && rc.LossRate >= gd.ThrottleLossRate
+			checks = append(checks, EntryGateCheck{
+				Code:     "correlated_adverse_throttle",
+				Stage:    string(EntryGateStageMarketState),
+				Passed:   !toxic,
+				Enforced: true,
+				Detail: fmt.Sprintf("recent closes toxicity: %d closes / %d losses (%.0f%%) in %.0fh window; block ≥%.0f%% (min %d closes)",
+					rc.Count, rc.Losses, rc.LossRate*100, gd.ThrottleWindowHours, gd.ThrottleLossRate*100, gd.ThrottleMinCloses),
+				Values: fmt.Sprintf("count=%d losses=%d loss_rate=%.2f thresh=%.2f min_closes=%d window_h=%.0f",
+					rc.Count, rc.Losses, rc.LossRate, gd.ThrottleLossRate, gd.ThrottleMinCloses, gd.ThrottleWindowHours),
+			})
 		}
 	}
 
@@ -1055,6 +1082,39 @@ func evaluateConfidenceRiskGate(input entryGateInput) []EntryGateCheck {
 			Values:   fmt.Sprintf("setup=%s", d.SetupType),
 		}
 		checks = append(checks, check)
+	}
+
+	// 3g. Entry-quality hard blocks (backtest: 1190 closed positions, rolling
+	// 5-fold walk-forward, bootstrap P(improve)=98.8%, max-DD -134→-92).
+	if input.StrategyConfig != nil {
+		gate := input.StrategyConfig.EntryStructure.EntryGate.WithDefaults()
+
+		// breakout_retest is net-negative in every time third — hard block.
+		if gate.BlockBreakoutRetest != nil && *gate.BlockBreakoutRetest &&
+			strings.EqualFold(strings.TrimSpace(d.SetupType), "breakout_retest") {
+			checks = append(checks, EntryGateCheck{
+				Code:     "breakout_retest_blocked",
+				Stage:    string(EntryGateStageConfidenceRisk),
+				Passed:   false,
+				Enforced: true,
+				Detail:   "setup_type=breakout_retest is net-negative across all backtest periods (early/mid/late) — hard-blocked",
+				Values:   fmt.Sprintf("setup=%s", d.SetupType),
+			})
+		}
+
+		// Over-promised RR: net_rr above ceiling has ~52% win rate, far targets
+		// rarely hit — the mirror of MaxTargetATRMul on the RR axis. Hard block.
+		if gate.MaxNetRR > 0 && d.EntryProtection != nil && d.EntryProtection.RiskReward.NetEstimatedRR > gate.MaxNetRR {
+			netRR := d.EntryProtection.RiskReward.NetEstimatedRR
+			checks = append(checks, EntryGateCheck{
+				Code:     "net_rr_above_max",
+				Stage:    string(EntryGateStageConfidenceRisk),
+				Passed:   false,
+				Enforced: true,
+				Detail:   fmt.Sprintf("net RR %.2f > max %.2f — over-promised targets are rarely hit (net-negative in backtest)", netRR, gate.MaxNetRR),
+				Values:   fmt.Sprintf("net_rr=%.2f max_net_rr=%.2f", netRR, gate.MaxNetRR),
+			})
+		}
 	}
 
 	// 3x. AI hesitation/self-contradiction in chain of thought

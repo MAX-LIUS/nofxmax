@@ -298,6 +298,12 @@ export interface Position {
   entry_review_summary?: EntryReviewSummary
   entry_structure_audit?: EntryStructureAuditConfig
   protection_runtime?: ProtectionRuntime
+  // Excursion (MFE/MAE): favorable peak + adverse trough profit% and each extreme in
+  // open-time ATR multiples. Live running envelope for reverse-lookup/backtest.
+  peak_pnl_pct?: number
+  trough_pnl_pct?: number
+  peak_atr_mult?: number
+  trough_atr_mult?: number
 }
 
 export interface ProtectionSnapshotValueSource {
@@ -765,6 +771,12 @@ export interface HistoricalPosition {
   protection_snapshot?: ProtectionSnapshot
   protection_runtime?: ProtectionRuntime
   entry_scene_tags?: string // JSON: {trend_phase, regime, chg4h, chg1h, ema20_dev, direction}
+  // Excursion (MFE/MAE): favorable peak + adverse trough profit% and each extreme in
+  // open-time ATR multiples, frozen onto the row at close for reverse-lookup/backtest.
+  peak_pnl_pct?: number
+  trough_pnl_pct?: number
+  peak_atr_mult?: number
+  trough_atr_mult?: number
   created_at: string
   updated_at: string
 }

@@ -37,6 +37,18 @@ func (at *AutoTrader) runCycle() error {
 		at.checkClaw402Balance()
 	}
 
+	// Shadow-gate reconciler (observation-only): link prior forward verdicts to
+	// the positions that materialized since, by time-nearest match. Runs once per
+	// cycle, best-effort — never affects trading. A 15-min window comfortably
+	// covers the seconds-scale gap between an open decision and its synced fill.
+	if at.store != nil {
+		if n, err := at.store.ShadowGate().LinkForwardVerdicts(15 * 60 * 1000); err != nil {
+			logger.Infof("⚠ shadow-link skipped (non-blocking): %v", err)
+		} else if n > 0 {
+			logger.Infof("🔗 shadow-link: attributed %d forward verdict rows to positions", n)
+		}
+	}
+
 	// Create decision record
 	record := &store.DecisionRecord{
 		ExecutionLog:   []string{},
@@ -456,17 +468,30 @@ func (at *AutoTrader) runCycle() error {
 		if side := directionFromAction(d.Action); side != "" {
 			lastSameDirTrade, _ = at.store.Position().GetLastClosedTradeByDirection(at.id, d.Symbol, side)
 		}
+		// Correlated-adverse throttle input: the trader's own finished-close
+		// toxicity in the trailing window (causal — closes before now only).
+		var recentCloseStats *store.RecentCloseStats
+		if at.config.StrategyConfig != nil {
+			gd := at.config.StrategyConfig.EntryStructure.EntryGate.WithDefaults()
+			if at.config.StrategyConfig.EntryStructure.EntryGate.CorrelatedAdverseThrottleEnabled() {
+				windowMs := int64(gd.ThrottleWindowHours * 3600 * 1000)
+				if rc, err := at.store.Position().GetRecentCloseStats(at.id, time.Now().UTC().UnixMilli(), windowMs); err == nil {
+					recentCloseStats = &rc
+				}
+			}
+		}
 		gateResult := evaluateEntryGate(entryGateInput{
 			Decision:               &d,
 			MarketData:             ctx.MarketDataMap[d.Symbol],
-			StrategyConfig:        at.config.StrategyConfig,
-			PolicyMode:            policyMode,
-			MinRR:                 at.getMinRiskRewardRatio(),
-			MinConfidence:         at.getMinConfidence(),
-			ConstraintSnap:        constraintSnapshot,
-			ProtectionAlign:       protectionAlignment,
+			StrategyConfig:         at.config.StrategyConfig,
+			PolicyMode:             policyMode,
+			MinRR:                  at.getMinRiskRewardRatio(),
+			MinConfidence:          at.getMinConfidence(),
+			ConstraintSnap:         constraintSnapshot,
+			ProtectionAlign:        protectionAlignment,
 			LastSameDirectionTrade: lastSameDirTrade,
-			ChainOfThought:        record.CoTTrace,
+			RecentCloseStats:       recentCloseStats,
+			ChainOfThought:         record.CoTTrace,
 		})
 		gateResult.Regime = classifyProtectionRegime(ctx.MarketDataMap[d.Symbol])
 		if ctx.MarketDataMap[d.Symbol] != nil {
@@ -478,6 +503,38 @@ func (at *AutoTrader) runCycle() error {
 			gateResult.EffectiveRR = d.EntryProtection.RiskReward.NetEstimatedRR
 			if gateResult.EffectiveRR <= 0 {
 				gateResult.EffectiveRR = d.EntryProtection.RiskReward.GrossEstimatedRR
+			}
+		}
+
+		// ── Configurable regime gates (enforce mode) ──
+		// Gates promoted from the shadow dry-run and set to enforce actually block
+		// the open here, folding into the same block-handling (audit-only, logging,
+		// blocksim capture) as the built-in gate. The observation-only shadow sweep
+		// below still runs for ALL candidates regardless.
+		if gateResult.Allowed && directionFromAction(d.Action) != "" {
+			rgTF := ""
+			rgEx := at.exchange
+			if at.config.StrategyConfig != nil {
+				rgTF = at.config.StrategyConfig.Indicators.Klines.PrimaryTimeframe
+				if at.config.StrategyConfig.CoinSource.ExchangeSource != "" {
+					rgEx = at.config.StrategyConfig.CoinSource.ExchangeSource
+				}
+			}
+			if hits := evaluateEnforceRegimeGates(at.config.StrategyConfig, &d, ctx.MarketDataMap[d.Symbol], rgTF, rgEx); len(hits) > 0 {
+				cats := make([]string, 0, len(hits))
+				for _, h := range hits {
+					cats = append(cats, h.Category)
+				}
+				gateResult.Allowed = false
+				gateResult.Stage = EntryGateStageMarketState
+				gateResult.BlockedBy = "regime_gate:" + strings.Join(cats, ",")
+				gateResult.BlockReason = fmt.Sprintf("regime gate(s) [%s] blocked %s %s: %s",
+					strings.Join(cats, ","), d.Symbol, d.Action, hits[0].Detail)
+				gateResult.EnforcedCodes = append(gateResult.EnforcedCodes, gateResult.BlockedBy)
+
+				// Capture the blocked intent for counterfactual replay (blocksim).
+				// Best-effort: a capture failure must never touch the live path.
+				at.captureBlockedIntent(&d, ctx.MarketDataMap[d.Symbol], strings.Join(cats, ","))
 			}
 		}
 
@@ -526,6 +583,27 @@ func (at *AutoTrader) runCycle() error {
 			actionRecord.ReviewContext.Control = entryGateResultToControlOutcome(gateResult, &d)
 			actionRecord.ReviewContext.QualityGate = entryGateResultToQualityGate(gateResult, &d)
 			attachExecutionQualityToReview(actionRecord.ReviewContext, executionQuality)
+		}
+
+		// ── Shadow entry gates (observation-only, never blocks) ──
+		// Evaluate ALL candidate regime/trend gate rules in parallel and persist
+		// each verdict, joined to positions later by (trader_id, cycle, symbol).
+		// This is dry-run substrate: forward live data ranks every rule before any
+		// is allowed to enforce. Best-effort — failures never touch execution.
+		if directionFromAction(d.Action) != "" {
+			primaryTF := ""
+			if at.config.StrategyConfig != nil {
+				primaryTF = at.config.StrategyConfig.Indicators.Klines.PrimaryTimeframe
+			}
+			shadowExchange := at.exchange
+			if at.config.StrategyConfig != nil && at.config.StrategyConfig.CoinSource.ExchangeSource != "" {
+				shadowExchange = at.config.StrategyConfig.CoinSource.ExchangeSource
+			}
+			if verdicts := evaluateShadowGates(at.id, int64(at.cycleNumber), &d, ctx.MarketDataMap[d.Symbol], primaryTF, shadowExchange, gateResult.Allowed); len(verdicts) > 0 && at.store != nil {
+				if err := at.store.ShadowGate().RecordBatch(verdicts); err != nil {
+					logger.Infof("⚠ shadow-gate record failed (non-blocking): %v", err)
+				}
+			}
 		}
 
 		if !gateResult.Allowed {

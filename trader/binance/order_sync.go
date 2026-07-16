@@ -400,9 +400,26 @@ func (t *FuturesTrader) StartOrderSync(traderID string, exchangeID string, excha
 	// Then run periodically
 	ticker := time.NewTicker(interval)
 	go func() {
+		pruneEvery := 0
 		for range ticker.C {
 			if err := t.SyncOrdersFromBinance(traderID, exchangeID, exchangeType, st); err != nil {
 				logger.Infof("⚠️  Binance order sync failed: %v", err)
+			}
+			// Bound the close_intents table. Protection intents are recorded per
+			// tier at open; only the fired tier is consumed, so unfired tiers must
+			// be reclaimed once the position is long gone. Prune stale intents
+			// older than 72h (well beyond any hold horizon) periodically.
+			pruneEvery++
+			if pruneEvery >= 20 && st != nil {
+				pruneEvery = 0
+				if ci := st.CloseIntent(); ci != nil {
+					cutoff := time.Now().Add(-72 * time.Hour).UnixMilli()
+					if n, err := ci.PruneStale(cutoff); err != nil {
+						logger.Infof("⚠️  close_intents prune failed: %v", err)
+					} else if n > 0 {
+						logger.Infof("🧹 Pruned %d stale close intents (older than 72h)", n)
+					}
+				}
 			}
 		}
 	}()

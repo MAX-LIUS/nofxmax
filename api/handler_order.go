@@ -358,12 +358,23 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 		if matchedReview, ok := matched["review_context"].(map[string]interface{}); ok {
 			reviewContext = matchedReview
 		}
+		// Real per-position plan first: extract the actual structural+ATR-derived
+		// protection plan the AI resolved for THIS symbol/action from the raw
+		// decision payloads. Fall back to nil (never the strategy-level template)
+		// so the UI can show "plan not recorded" for legacy positions instead of
+		// misrepresenting a shared template as the position's real plan.
+		var protectionSnapshot interface{}
+		if real := realProtectionSnapshotFromDecisionJSON(
+			[]string{record.DecisionJSON, record.RawResponse}, symbol, action,
+		); real != nil {
+			protectionSnapshot = real
+		}
 		return map[string]interface{}{
 			"decision_record_id":  record.ID,
 			"cycle_number":        record.CycleNumber,
 			"timestamp":           record.Timestamp.UTC().Format(time.RFC3339),
 			"review_context":      reviewContext,
-			"protection_snapshot": record.ProtectionSnapshot,
+			"protection_snapshot": protectionSnapshot,
 			"decisions":           record.Decisions,
 			"matched_decision":    matched,
 		}
@@ -438,7 +449,12 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 			executionOrderType = "STOP_MARKET"
 		case strings.Contains(sourceLower, "manual"):
 			executionOrderType = "MANUAL"
-		case strings.Contains(sourceLower, "close_long") || strings.Contains(sourceLower, "close_short"):
+		case strings.Contains(sourceLower, "ai_close"):
+			// Only an explicit ai_close reason is a genuine AI proactive close.
+			// A bare close_long/close_short must NOT be relabeled AI_CLOSE — on
+			// Binance those are exchange-side fills whose native type wasn't
+			// recovered at sync time; keep the real resolved order type (MARKET)
+			// so the panel doesn't contradict the "未归因" attribution.
 			executionOrderType = "AI_CLOSE"
 		}
 
@@ -447,27 +463,27 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 			if events, err := eventStore.ListByPositionIDAggregated(pos.ID); err == nil {
 				for _, ev := range events {
 					eventMap := map[string]interface{}{
-						"position_id":         ev.PositionID,
-						"trader_id":           ev.TraderID,
-						"exchange_id":         ev.ExchangeID,
-						"symbol":              ev.Symbol,
-						"side":                ev.Side,
-						"close_reason":        ev.CloseReason,
-						"execution_source":    ev.ExecutionSource,
-						"execution_type":      ev.ExecutionType,
-						"category":            ev.Category,
-						"mechanism":           ev.Mechanism,
-						"protection_status":   ev.ProtectionStatus,
-						"decision_cycle":      ev.DecisionCycle,
-						"parent_order_id":     ev.ParentOrderID,
-						"fill_count":          ev.FillCount,
-						"close_quantity":      ev.CloseQuantity,
-						"close_ratio_pct":     ev.CloseRatioPct,
-						"execution_price":     ev.AvgExecutionPrice,
-						"close_value_usdt":    ev.CloseValueUSDT,
-						"realized_pnl_delta":  ev.RealizedPnLDelta,
-						"fee_delta":           ev.FeeDelta,
-						"event_time":          time.UnixMilli(ev.EventTime).UTC().Format(time.RFC3339),
+						"position_id":        ev.PositionID,
+						"trader_id":          ev.TraderID,
+						"exchange_id":        ev.ExchangeID,
+						"symbol":             ev.Symbol,
+						"side":               ev.Side,
+						"close_reason":       ev.CloseReason,
+						"execution_source":   ev.ExecutionSource,
+						"execution_type":     ev.ExecutionType,
+						"category":           ev.Category,
+						"mechanism":          ev.Mechanism,
+						"protection_status":  ev.ProtectionStatus,
+						"decision_cycle":     ev.DecisionCycle,
+						"parent_order_id":    ev.ParentOrderID,
+						"fill_count":         ev.FillCount,
+						"close_quantity":     ev.CloseQuantity,
+						"close_ratio_pct":    ev.CloseRatioPct,
+						"execution_price":    ev.AvgExecutionPrice,
+						"close_value_usdt":   ev.CloseValueUSDT,
+						"realized_pnl_delta": ev.RealizedPnLDelta,
+						"fee_delta":          ev.FeeDelta,
+						"event_time":         time.UnixMilli(ev.EventTime).UTC().Format(time.RFC3339),
 					}
 					if doFullEnrich {
 						eventMap["decision_review"] = buildDecisionReviewRef(ev.DecisionCycle, ev.Symbol, ev.CloseReason)
@@ -476,7 +492,6 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 				}
 			}
 		}
-
 
 		enrichedPos := map[string]interface{}{
 			"id":                   pos.ID,

@@ -169,6 +169,46 @@ func (s *PositionStore) GetRecentTrades(traderID string, limit int) ([]RecentTra
 	return trades, nil
 }
 
+// RecentCloseStats summarizes the trader's own finished closes within a trailing
+// window ending at a reference time. It is the causal input to the
+// correlated-adverse entry throttle: only positions whose exit_time is at/before
+// the reference and at/after (reference - window) are counted, so there is no
+// look-ahead relative to the entry being evaluated.
+type RecentCloseStats struct {
+	Count    int
+	Losses   int
+	LossRate float64
+}
+
+// GetRecentCloseStats counts the trader's finished closes (all symbols/sides)
+// whose exit_time falls in [refMs-windowMs, refMs] and how many were losers.
+// refMs and windowMs are in milliseconds. A loss is realized_pnl < 0.
+func (s *PositionStore) GetRecentCloseStats(traderID string, refMs, windowMs int64) (RecentCloseStats, error) {
+	var out RecentCloseStats
+	if s.db == nil || traderID == "" || refMs <= 0 || windowMs <= 0 {
+		return out, nil
+	}
+	lo := refMs - windowMs
+	var positions []TraderPosition
+	err := s.db.Select("realized_pnl").
+		Where("trader_id = ? AND status = ? AND exit_time > 0 AND exit_time >= ? AND exit_time <= ?",
+			traderID, "CLOSED", lo, refMs).
+		Find(&positions).Error
+	if err != nil {
+		return out, fmt.Errorf("failed to query recent close stats: %w", err)
+	}
+	out.Count = len(positions)
+	for _, p := range positions {
+		if p.RealizedPnL < 0 {
+			out.Losses++
+		}
+	}
+	if out.Count > 0 {
+		out.LossRate = float64(out.Losses) / float64(out.Count)
+	}
+	return out, nil
+}
+
 // GetLastClosedTrade returns the most recent closed trade for a specific symbol.
 func (s *PositionStore) GetLastClosedTrade(traderID, symbol string) (*RecentTrade, error) {
 	var pos TraderPosition

@@ -96,6 +96,12 @@ func (s *Server) setupRoutes() {
 		api.GET("/crypto/public-key", s.cryptoHandler.HandleGetPublicKey)
 		api.POST("/crypto/decrypt", s.cryptoHandler.HandleDecryptSensitiveData)
 
+		// Shadow-gate monitor (standalone diagnostic page; page itself carries the
+		// JWT and calls the protected /shadow-gates/* endpoints). Data is not served
+		// here — only the static HTML/JS shell.
+		api.GET("/shadow-gates/monitor", s.handleShadowMonitorPage)
+		api.GET("/shadow-gates/monitor.js", s.handleShadowMonitorJS)
+
 		// Public competition data (no authentication required)
 		s.route(api, "GET", "/traders", "Public trader list", s.handlePublicTraderList)
 		s.route(api, "GET", "/competition", "Public competition data", s.handlePublicCompetition)
@@ -394,6 +400,10 @@ Returns: {"total_trades":<int>,"winning_trades":<int>,"win_rate":<float>,"total_
 				`:id = trader_id. Retroactively fills entry_scene_tags from decision record prompts.`,
 				s.handleBackfillSceneTags)
 			s.route(protected, "GET", "/gate-blocks", "Recent gate-blocked trades (?trader_id=xxx&limit=50)", s.handleGateBlocks)
+			s.route(protected, "GET", "/shadow-gates/stats", "Shadow entry-gate forward scorecard per rule (?trader_id=xxx)", s.handleShadowGateStats)
+			s.route(protected, "GET", "/shadow-gates/feed", "Recent shadow-gate verdicts live feed (?trader_id=xxx&limit=100)", s.handleShadowGateFeed)
+			s.route(protected, "GET", "/shadow-gates/bench", "Virtual Trader Bench: gate policies as competing traders (equity curves + significance)", s.handleShadowBench)
+			s.route(protected, "GET", "/shadow-gates/blocksim", "Blocked-open counterfactuals: simulated R of enforce-blocked opens (was the block right?)", s.handleBlockSim)
 
 		}
 	}
@@ -636,6 +646,10 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 
 // Start Start server
 func (s *Server) Start() error {
+	// Background Virtual Trader Bench refresher (read-only, observation-only).
+	s.startShadowBenchRefresher()
+	s.startBlockSimReplayer()
+
 	addr := fmt.Sprintf(":%d", s.port)
 	logger.Infof("🌐 API server starting at http://localhost%s", addr)
 	logger.Infof("📊 API Documentation:")

@@ -19,7 +19,7 @@ func TestValidateProtectionPlanExecutionDoesNotCollapseTPPastMark(t *testing.T) 
 			{Price: 62.63, CloseRatioPct: 35},
 		},
 	}
-	validated, err := at.validateProtectionPlanExecution("HYPEUSDT", "LONG", 0.2, plan)
+	validated, err := at.validateProtectionPlanExecution("HYPEUSDT", "LONG", 0.2, plan, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestValidateProtectionPlanExecutionCollapsesTPAheadOfMark(t *testing.T) {
 			{Price: 62.63, CloseRatioPct: 35},
 		},
 	}
-	validated, err := at.validateProtectionPlanExecution("HYPEUSDT", "LONG", 0.2, plan)
+	validated, err := at.validateProtectionPlanExecution("HYPEUSDT", "LONG", 0.2, plan, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -264,7 +264,7 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 	// subset remains the plan is narrowed to it; the all-dropped case keeps the raw
 	// plan so existing collapse/fallback handling still applies.
 	if plan != nil {
-		if executablePlan, vErr := at.validateProtectionPlanExecution(symbol, positionSide, quantity, plan); vErr == nil && executablePlan != nil {
+		if executablePlan, vErr := at.validateProtectionPlanExecution(symbol, positionSide, quantity, plan, true); vErr == nil && executablePlan != nil {
 			plan = executablePlan
 		}
 	}

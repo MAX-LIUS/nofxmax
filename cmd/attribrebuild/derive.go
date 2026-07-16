@@ -2,13 +2,14 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"math"
 	"strings"
 )
 
 // deriveReasonForPosition implements the rebuild taxonomy for one closed
 // position using canonical order data.
-func deriveReasonForPosition(db *sql.DB, posID int64, exchangeID, side string, entryPrice float64, exitCycle int64, traderID string) string {
+func deriveReasonForPosition(db *sql.DB, posID int64, exchangeID, symbol, side string, entryPrice float64, exitCycle int64, traderID string) string {
 	// 1. Inspect the dominant FILLED closing order's tags/type.
 	closeSide := "SELL"
 	if strings.EqualFold(side, "SHORT") {
@@ -40,18 +41,72 @@ func deriveReasonForPosition(db *sql.DB, posID int64, exchangeID, side string, e
 		}
 	}
 
-	// 2. AI close: exit decision cycle links to a real decision record.
-	if exitCycle > 0 {
-		var n int
-		_ = db.QueryRow(`SELECT count(*) FROM decision_records WHERE trader_id=? AND cycle_number=?`,
-			traderID, exitCycle).Scan(&n)
-		if n > 0 {
-			return "ai_close"
+	// 2. AI close: exit decision cycle links to a real decision record that
+	//    contains a matching close action for THIS symbol+side. This mirrors
+	//    store.decisionCycleHasAICloseFor so the backfill agrees with what the
+	//    live path now writes — never fabricate an AI close from a bare
+	//    cycle-exists row.
+	if exitCycle > 0 && decisionCycleHasAIClose(db, traderID, exitCycle, symbol, side) {
+		if strings.EqualFold(side, "SHORT") {
+			return "ai_close_short"
 		}
+		return "ai_close_long"
 	}
 
 	// 3. Origin not recorded.
 	return "market_close"
+}
+
+// decisionCycleHasAIClose reports whether the decision record for
+// (traderID, cycle) contains a close action matching symbol+side. Mirrors
+// store.decisionCycleHasAICloseFor.
+func decisionCycleHasAIClose(db *sql.DB, traderID string, cycle int64, symbol, side string) bool {
+	wantAction := "close_long"
+	if strings.EqualFold(side, "SHORT") {
+		wantAction = "close_short"
+	}
+	normSym := normalizeSymbolForMatch(symbol)
+
+	rows, err := db.Query(`SELECT decisions FROM decision_records WHERE trader_id=? AND cycle_number=?`,
+		traderID, cycle)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw sql.NullString
+		if err := rows.Scan(&raw); err != nil || !raw.Valid || raw.String == "" {
+			continue
+		}
+		var decisions []struct {
+			Action string `json:"action"`
+			Symbol string `json:"symbol"`
+		}
+		if err := json.Unmarshal([]byte(raw.String), &decisions); err != nil {
+			continue
+		}
+		for _, d := range decisions {
+			if strings.EqualFold(strings.TrimSpace(d.Action), wantAction) &&
+				normalizeSymbolForMatch(d.Symbol) == normSym {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// normalizeSymbolForMatch mirrors store.normalizeSymbolForMatch: uppercase,
+// strip separators, strip common quote/perp suffixes so BCH-USDT, BCHUSDT and
+// BCHUSDT-PERP all compare equal.
+func normalizeSymbolForMatch(sym string) string {
+	s := strings.ToUpper(strings.TrimSpace(sym))
+	s = strings.NewReplacer("-", "", "_", "", "/", "").Replace(s)
+	for _, suf := range []string{"USDTPERP", "USDCPERP", "USDPERP", "PERP", "USDT", "USDC", "USD"} {
+		if strings.HasSuffix(s, suf) {
+			return strings.TrimSuffix(s, suf)
+		}
+	}
+	return s
 }
 
 func pickPrice(avg, price float64) float64 {

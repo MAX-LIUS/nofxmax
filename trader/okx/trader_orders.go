@@ -259,7 +259,7 @@ func (t *OKXTrader) closeLongWithTag(symbol string, quantity float64, reasonTag 
 		"side":    "sell",
 		"ordType": "market",
 		"sz":      szStr,
-		"clOrdId": genOkxClOrdID(),
+		"clOrdId": clOrdIDForReason(reasonTag),
 		"tag":     okxReasonTag(reasonTag),
 	}
 
@@ -397,7 +397,7 @@ func (t *OKXTrader) closeShortWithTag(symbol string, quantity float64, reasonTag
 		"side":    "buy",
 		"ordType": "market",
 		"sz":      szStr,
-		"clOrdId": genOkxClOrdID(),
+		"clOrdId": clOrdIDForReason(reasonTag),
 		"tag":     okxReasonTag(reasonTag),
 	}
 
@@ -782,6 +782,14 @@ func (t *OKXTrader) setStopLossWithTag(symbol string, positionSide string, quant
 		"slOrdPx":     "-1", // Market price
 		"tag":         okxReasonTag(reasonTag),
 	}
+	// Deterministic attribution: carry the mechanism inside a client-controlled
+	// algo id so the eventual close fill decodes its own reason (no price guessing).
+	// Only set when the reason has a registered code; unknown reasons fall through
+	// to the plain tag path unchanged.
+	algoClOrdID := encodeReasonClientID(reasonTag)
+	if algoClOrdID != "" {
+		body["algoClOrdId"] = algoClOrdID
+	}
 
 	resp, err := t.doRequest("POST", okxAlgoOrderPath, body)
 	if err != nil {
@@ -792,7 +800,7 @@ func (t *OKXTrader) setStopLossWithTag(symbol string, positionSide string, quant
 		return err
 	}
 
-	logger.Infof("  Stop loss price set: %.4f algoId=%s", stopPrice, algoID)
+	logger.Infof("  Stop loss price set: %.4f algoId=%s algoClOrdId=%s reason=%s", stopPrice, algoID, algoClOrdID, reasonTag)
 	return nil
 }
 
@@ -841,6 +849,12 @@ func (t *OKXTrader) setTakeProfitWithTag(symbol string, positionSide string, qua
 		"tpOrdPx":     "-1", // Market price
 		"tag":         okxReasonTag(reasonTag),
 	}
+	// Deterministic attribution: carry the mechanism inside a client-controlled
+	// algo id (see reason_codec.go). Only set for reasons with a registered code.
+	algoClOrdID := encodeReasonClientID(reasonTag)
+	if algoClOrdID != "" {
+		body["algoClOrdId"] = algoClOrdID
+	}
 
 	resp, err := t.doRequest("POST", okxAlgoOrderPath, body)
 	if err != nil {
@@ -851,7 +865,7 @@ func (t *OKXTrader) setTakeProfitWithTag(symbol string, positionSide string, qua
 		return err
 	}
 
-	logger.Infof("  Take profit price set: %.4f algoId=%s", takeProfitPrice, algoID)
+	logger.Infof("  Take profit price set: %.4f algoId=%s algoClOrdId=%s reason=%s", takeProfitPrice, algoID, algoClOrdID, reasonTag)
 	return nil
 }
 
@@ -1118,6 +1132,29 @@ func (t *OKXTrader) GetOrderLinkedAlgoID(symbol, orderID string) (string, error)
 	}
 	if algoID, ok := st["algoId"].(string); ok && algoID != "" {
 		return algoID, nil
+	}
+	return "", nil
+}
+
+// GetOrderLinkedReason resolves the canonical close mechanism for a fill's order
+// id by reading the order detail's algoClOrdId (the client-controlled id we set at
+// placement) and decoding it. This is the VERIFIED-available exact path: the
+// order-detail endpoint returns algoClOrdId even when the triggered algo spawned a
+// fresh fill ordId, so attribution does not depend on the fills-history feed
+// echoing the client id. Returns "" (never guesses) when the order carries no
+// recognizable coded id.
+func (t *OKXTrader) GetOrderLinkedReason(symbol, orderID string) (string, error) {
+	if orderID == "" {
+		return "", nil
+	}
+	st, err := t.GetOrderStatus(symbol, orderID)
+	if err != nil {
+		return "", err
+	}
+	if aco, ok := st["algoClOrdId"].(string); ok {
+		if reason := decodeReasonFromClientID(aco); reason != "" {
+			return reason, nil
+		}
 	}
 	return "", nil
 }

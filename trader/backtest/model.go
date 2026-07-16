@@ -106,6 +106,22 @@ type ProtectionParams struct {
 	RangeSLFloorATR    float64
 	RangeSLBackstopATR float64
 	RangeSLLookback    int
+	// RangeSLPivotStrength: fractal strength for nearest-swing detection — the
+	// boundary anchors to the NEAREST pre-entry swing beyond entry (closest overhead
+	// swing high for a short / closest swing low below for a long), NOT the window's
+	// absolute extreme. Mirrors live computeStructuralBoundary. Default 2.
+	RangeSLPivotStrength int
+	// RangeSLFallbackATR: the tighter cap used INSTEAD of RangeSLBackstopATR when the
+	// nearest structure is still beyond the backstop (no near structure). Mirrors live
+	// FallbackATRMul. Must be <= RangeSLBackstopATR. Default 3.0.
+	RangeSLFallbackATR float64
+	// RangeSLFallbackRRCapRatio: on the fallback path, the stop distance must stay
+	// below this ratio × the max TP target (fallbackSL% <= ratio × TP%). Mirrors live
+	// FallbackRRCapRatio. RangeSLFloorATR remains a hard minimum. 0 disables. Default 0.8.
+	RangeSLFallbackRRCapRatio float64
+	// RangeSLMaxTPTargetPct: the max TP target move (% of entry) across ladder tiers,
+	// the reference the fallback RR cap tightens against. Resolved by LiveConfigParams.
+	RangeSLMaxTPTargetPct float64
 	// RangeSLCloseConfirm models the live Phase-2 close-confirm structural stop:
 	// the tight structural boundary is NOT a resting intrabar stop — it fires
 	// only when a bar CLOSES beyond the boundary, filling at that close. A wide

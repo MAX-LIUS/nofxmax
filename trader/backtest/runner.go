@@ -20,6 +20,10 @@ type loadedEntry struct {
 	entryIdx int
 }
 
+// LoadedEntry is the exported alias so cmd/ can hold the prepared-entry slice
+// returned by both PrepareEntries and PrepareEntriesHorizon.
+type LoadedEntry = loadedEntry
+
 // PrepareEntries fetches bars once for every entry (the slow, network-bound
 // step). Entries whose bars can't be fetched are skipped and counted.
 func PrepareEntries(entries []Entry, tf string, provider BarsProvider) ([]loadedEntry, int) {

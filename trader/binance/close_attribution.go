@@ -109,8 +109,45 @@ func (t *FuturesTrader) resolveBinanceClose(
 			if origType == "LIMIT" && strings.HasPrefix(clientID, brOrderIDPrefix) {
 				out.realType = "TAKE_PROFIT"
 			}
+			// EXACT mechanism from the coded client id we set at placement. All of
+			// BE/ladder_sl/structural_sl/full_sl surface as STOP_MARKET, so origType
+			// alone cannot disambiguate them — the coded id does, with no guessing.
+			// This pre-empts the L2.5 trigger-price match below.
+			if coded := decodeReasonFromClientID(clientID); coded != "" {
+				out.reason = coded
+				logger.Infof("  ✅ BN close %s %s attributed reason=%s via coded client-id=%s (exact 1:1)", symbol, positionSide, coded, clientID)
+			}
 			if origType != "" && origType != "MARKET" {
 				logger.Infof("  🔗 BN close %s %s real origType=%s stop=%.6f (client=%s)", symbol, positionSide, origType, stopPrice, clientID)
+			}
+		}
+	}
+
+	// L2.5: exchange-native protection resolved by trigger-price match. When L1/L2
+	// did not resolve a mechanism (no bot order-id intent; origType lookup failed
+	// or returned bare MARKET because the conditional order aged out of the
+	// exchange's queryable window), a protection intent recorded AT PLACEMENT time
+	// still pins the mechanism: a real STOP/TP fills AT its trigger, so the fill
+	// price ≈ the intent's trigger_price. This is the aged-order-survivable path
+	// that brings Binance native protection attribution to OKX parity, since a
+	// triggered algo order spawns a NEW fill order id that the placement never saw.
+	if out.reason == "" && (out.realType == "" || out.realType == "MARKET") && st != nil && trade.Price > 0 {
+		if ci := st.CloseIntent(); ci != nil {
+			// Scope the trigger-price match to the current position's lifetime so a
+			// stale untriggered tier from an EARLIER same-symbol position cannot be
+			// borrowed (cross-position stringing). Best-effort: if the open position
+			// can't be resolved, notBefore stays 0 (legacy unbounded behaviour).
+			var notBeforeMs int64
+			if pos, perr := st.Position().GetOpenPositionBySymbol(traderID, symbol, positionSide); perr == nil && pos != nil {
+				notBeforeMs = pos.EntryTime
+			}
+			if intent, err := ci.MatchByTriggerPriceAndConsume(traderID, symbol, positionSide, trade.Price, 3.5, notBeforeMs); err == nil && intent != nil && intent.Reason != "" {
+				out.reason = intent.Reason
+				if out.realType == "" || out.realType == "MARKET" {
+					out.realType = "MARKET"
+				}
+				logger.Infof("  🎯 BN close %s %s attributed reason=%s via protection-intent (trigger-price %.6f≈fill %.6f)",
+					symbol, positionSide, out.reason, intent.TriggerPrice, trade.Price)
 			}
 		}
 	}

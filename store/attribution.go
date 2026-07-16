@@ -28,6 +28,7 @@ const (
 	MechLadderSL        = "ladder_sl"
 	MechFullTP          = "full_tp"
 	MechFullSL          = "full_sl"
+	MechStructuralSL    = "structural_sl" // range-anchored structural stop (close-confirm guard or resting backstop)
 	MechFallbackSL      = "fallback_maxloss_sl"
 	MechNativeTrailing  = "native_trailing"
 	MechManagedDrawdown = "managed_drawdown"
@@ -96,6 +97,11 @@ func ClassifyClose(rawReason string) Attribution {
 		return Attribution{CategoryProtection, MechFallbackSL}
 	case strings.Contains(r, "full_tp"):
 		return Attribution{CategoryProtection, MechFullTP}
+	case strings.Contains(r, "structural_sl") || strings.Contains(r, "structural"):
+		// Range-anchored structural stop-loss (the close-confirm guard's tight exit or
+		// the wide resting backstop). A protection mechanism; must be matched BEFORE
+		// full_sl so the more specific structural label is not shadowed.
+		return Attribution{CategoryProtection, MechStructuralSL}
 	case strings.Contains(r, "full_sl"):
 		return Attribution{CategoryProtection, MechFullSL}
 	case strings.Contains(r, "time_stop"):

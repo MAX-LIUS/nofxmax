@@ -156,7 +156,10 @@ type AutoTrader struct {
 	stopMonitorCh          chan struct{}                             // Used to stop monitoring goroutine
 	monitorWg              sync.WaitGroup                            // Used to wait for monitoring goroutine to finish
 	peakPnLCache           map[string]float64                        // Peak profit cache (symbol -> peak P&L percentage)
-	peakPnLCacheMutex      sync.RWMutex                              // Cache read-write lock
+	troughPnLCache         map[string]float64                        // Adverse trough cache (symbol_side -> low-water profit%); mirrors peak
+	peakAtrMultCache       map[string]float64                        // Peak excursion in open-time ATR multiples (symbol_side -> |peak dist|/ATR%)
+	troughAtrMultCache     map[string]float64                        // Trough excursion in open-time ATR multiples (symbol_side -> |trough dist|/ATR%)
+	peakPnLCacheMutex      sync.RWMutex                              // Cache read-write lock (guards peak + trough + ATR-mult caches)
 	gbGuardMutex           sync.Mutex                                // Protects giveback-guard breadth state below
 	gbPnlHist              map[string][]float64                      // Giveback guard breadth: symbol_side -> recent profit% samples (velocity)
 	gbBreadthBarsSinceFire int                                       // Giveback guard breadth: ticks since last breadth fire (cooldown)
@@ -390,6 +393,9 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		stopMonitorCh:         make(chan struct{}),
 		monitorWg:             sync.WaitGroup{},
 		peakPnLCache:          make(map[string]float64),
+		troughPnLCache:        make(map[string]float64),
+		peakAtrMultCache:      make(map[string]float64),
+		troughAtrMultCache:    make(map[string]float64),
 		peakPnLCacheMutex:     sync.RWMutex{},
 		gbPnlHist:             make(map[string][]float64),
 		protectionStateMutex:  sync.RWMutex{},
@@ -418,12 +424,12 @@ func (at *AutoTrader) loadPeakPnLFromStore() {
 	if at == nil || at.store == nil {
 		return
 	}
-	peaks, err := at.store.LoadPeakPnLForTrader(at.id)
+	excursions, err := at.store.LoadExcursionForTrader(at.id)
 	if err != nil {
-		logger.Warnf("⚠️ Peak PnL: failed to load persisted state: %v", err)
+		logger.Warnf("⚠️ Excursion: failed to load persisted state: %v", err)
 		return
 	}
-	if len(peaks) == 0 {
+	if len(excursions) == 0 {
 		return
 	}
 
@@ -444,9 +450,12 @@ func (at *AutoTrader) loadPeakPnLFromStore() {
 	at.peakPnLCacheMutex.Lock()
 	restored := 0
 	stale := make([]string, 0)
-	for posKey, peak := range peaks {
+	for posKey, ex := range excursions {
 		if openKeys[strings.ToLower(posKey)] {
-			at.peakPnLCache[posKey] = peak
+			at.peakPnLCache[posKey] = ex.PeakPnlPct
+			at.troughPnLCache[posKey] = ex.TroughPnlPct
+			at.peakAtrMultCache[posKey] = ex.PeakAtrMult
+			at.troughAtrMultCache[posKey] = ex.TroughAtrMult
 			restored++
 		} else {
 			stale = append(stale, posKey)
@@ -457,10 +466,10 @@ func (at *AutoTrader) loadPeakPnLFromStore() {
 	// Clean up stale persisted rows for positions no longer open.
 	for _, posKey := range stale {
 		if delErr := at.store.DeletePeakPnL(at.id, posKey); delErr != nil {
-			logger.Warnf("⚠️ Peak PnL: failed to delete stale row %s: %v", posKey, delErr)
+			logger.Warnf("⚠️ Excursion: failed to delete stale row %s: %v", posKey, delErr)
 		}
 	}
-	logger.Infof("🔁 Peak PnL: restored %d high-water mark(s), pruned %d stale", restored, len(stale))
+	logger.Infof("🔁 Excursion: restored %d position excursion(s), pruned %d stale", restored, len(stale))
 }
 
 // loadBreadthVelocityStateFromStore restores the breadth breaker's velocity

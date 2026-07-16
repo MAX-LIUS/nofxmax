@@ -1644,6 +1644,81 @@ export function ProtectionEditor({
                     />
                   </div>
                 </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <label
+                      className="block text-[11px] mb-1"
+                      style={{ color: '#848E9C' }}
+                    >
+                      {isZh ? '摆动强度 (分形)' : 'Pivot strength'}
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={structuralSL.pivot_strength ?? 2}
+                      onChange={(e) =>
+                        updateStructuralSL({
+                          pivot_strength: parseInt(e.target.value, 10) || 0,
+                        })
+                      }
+                      disabled={disabled}
+                      className="w-full px-2 py-1.5 rounded text-xs"
+                      style={inputStyle}
+                    />
+                  </div>
+                  <div>
+                    <label
+                      className="block text-[11px] mb-1"
+                      style={{ color: '#848E9C' }}
+                    >
+                      {isZh ? '无结构兜底 (ATR倍数)' : 'Fallback (ATR×)'}
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={structuralSL.fallback_atr_mul ?? 3.0}
+                      onChange={(e) =>
+                        updateStructuralSL({
+                          fallback_atr_mul: parseFloat(e.target.value) || 0,
+                        })
+                      }
+                      disabled={disabled}
+                      className="w-full px-2 py-1.5 rounded text-xs"
+                      style={inputStyle}
+                    />
+                  </div>
+                  <div>
+                    <label
+                      className="block text-[11px] mb-1"
+                      style={{ color: '#848E9C' }}
+                    >
+                      {isZh ? '兜底RR上限 (×TP)' : 'Fallback RR cap (×TP)'}
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={structuralSL.fallback_rr_cap_ratio ?? 0.8}
+                      onChange={(e) =>
+                        updateStructuralSL({
+                          fallback_rr_cap_ratio:
+                            parseFloat(e.target.value) || 0,
+                        })
+                      }
+                      disabled={disabled}
+                      className="w-full px-2 py-1.5 rounded text-xs"
+                      style={inputStyle}
+                    />
+                  </div>
+                </div>
+                <div className="text-[11px]" style={{ color: '#848E9C' }}>
+                  {isZh
+                    ? '摆动强度：判定摆动高/低点时两侧各比较的K线数（越大越显著）。无结构兜底：入场价附近找不到近处止损结构时，用这个更紧的ATR倍数代替宽兜底。兜底RR上限：兜底止损距离必须 < 该比例×TP目标涨幅（0.8 → RR≥1.25），地板仍为硬下限。'
+                    : 'Pivot strength: bars compared on each side to qualify a swing high/low. Fallback: tighter ATR multiple used instead of the wide backstop when no near structure exists. RR cap: fallback stop must stay below ratio × TP target (0.8 → RR ≥ 1.25); floor remains a hard minimum.'}
+                </div>
                 <label
                   className="flex items-start gap-2 text-xs"
                   style={{ color: '#EAECEF' }}

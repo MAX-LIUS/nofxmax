@@ -54,6 +54,7 @@ import {
 import { normalizeEntryStructureConfig } from '../components/strategy/EntryStructureEditor'
 import { PreEntryGateEditor } from '../components/strategy/PreEntryGateEditor'
 import { EntryPipelinePanel } from '../components/strategy/EntryPipelinePanel'
+import { RegimeGatesEditor } from '../components/strategy/RegimeGatesEditor'
 import { EvolutionEditor } from '../components/strategy/EvolutionEditor'
 import { DeepVoidBackground } from '../components/common/DeepVoidBackground'
 import { t } from '../i18n/translations'
@@ -790,6 +791,12 @@ export function StrategyStudioPage() {
               })
               setHasChanges(true)
             }}
+            disabled={selectedStrategy?.is_default}
+            language={language}
+          />
+          <RegimeGatesEditor
+            gates={editingConfig.regime_gates ?? []}
+            onChange={(gates) => updateConfig('regime_gates', gates)}
             disabled={selectedStrategy?.is_default}
             language={language}
           />

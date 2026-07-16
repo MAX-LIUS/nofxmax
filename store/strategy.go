@@ -76,6 +76,13 @@ type StrategyConfig struct {
 	// max positions, position-value cap, configured ladder/runner/time-stop protection).
 	BreakoutEntry BreakoutEntryConfig `json:"breakout_entry,omitempty"`
 
+	// RegimeGates is the configurable regime/trend entry-gate ruleset promoted from
+	// the shadow (dry-run) candidates. Each entry selects a gate CATEGORY, its own
+	// PARAMS, and a MODE (shadow = observe only; enforce = actually block the open).
+	// The full observation-only shadow sweep still runs regardless, so enforcing a
+	// gate never loses the counterfactual record for the others.
+	RegimeGates []RegimeGateConfig `json:"regime_gates,omitempty"`
+
 	// Grid trading configuration (only used when StrategyType == "grid_trading")
 	GridConfig *GridStrategyConfig `json:"grid_config,omitempty"`
 
@@ -100,6 +107,40 @@ type BreakoutEntryConfig struct {
 	// Position size as a fraction of equity (e.g. 0.5 = 50% of equity notional).
 	// 0/unset → fall back to a conservative default.
 	SizeEquityFrac float64 `json:"size_equity_frac,omitempty"`
+}
+
+// RegimeGateConfig is one configured regime/trend entry gate. Gates are organized
+// by CATEGORY (the method), with parameters kept separate so the same category can
+// be instantiated at different settings (e.g. counter_trend at slope window 30 vs
+// 50 are two entries of the same category). Mode controls whether it merely
+// observes (shadow) or actually blocks the open (enforce).
+//
+// Categories and their params:
+//
+//	counter_trend         params: slope_window (30|50|72)   — block entry opposing regression-slope trend
+//	trend_direction_only  params: slope_window, block_side (LONG|SHORT) — block one side against the trend
+//	chop_reject           params: (none)                    — block ALL entries in consensus chop
+//	chop_lowconf          params: min_conf (e.g. 70|80)      — block low-confidence entries in chop
+//	adx_weak              params: threshold (e.g. 20)        — block entries when ADX below threshold
+//	donchian_counter      params: lookback (e.g. 48)         — block entry opposing an N-bar breakout
+//	chart_trend           params: slope_window, align_min, r2_min — ALLOW only clean chart trends
+//	                      (regression channel R2>=r2_min AND swing-structure align>=align_min AND
+//	                      regression slope in the trade direction); blocks everything else. This is
+//	                      an ALLOW-list "only open in a clean visual trend" gate, not a counter-trend
+//	                      reject. Defaults: slope_window 30, align_min 0.55, r2_min 0.60.
+type RegimeGateConfig struct {
+	Category string `json:"category"` // see doc above
+	Mode     string `json:"mode"`     // "shadow" (default) | "enforce"
+	Enabled  bool   `json:"enabled"`  // master on/off for this entry
+	Params   struct {
+		SlopeWindow int     `json:"slope_window,omitempty"`
+		BlockSide   string  `json:"block_side,omitempty"` // LONG | SHORT (trend_direction_only)
+		MinConf     float64 `json:"min_conf,omitempty"`
+		Threshold   float64 `json:"threshold,omitempty"`
+		Lookback    int     `json:"lookback,omitempty"`
+		AlignMin    float64 `json:"align_min,omitempty"` // chart_trend: min swing-structure alignment (0..1)
+		R2Min       float64 `json:"r2_min,omitempty"`    // chart_trend: min regression-channel R^2 (0..1)
+	} `json:"params,omitempty"`
 }
 
 type EntryStructureConfig struct {
@@ -178,6 +219,47 @@ type EntryGateConfig struct {
 	// When SL distance < (MinSLDistanceATRMul + VolatilityBufferATRMul) × ATR and
 	// RR still holds after widening, backend auto-widens SL to meet the threshold.
 	VolatilityBufferATRMul float64 `json:"volatility_buffer_atr_mul,omitempty"`
+
+	// BlockBreakoutRetest hard-blocks entries tagged setup_type=breakout_retest.
+	// Entry-quality study (1190 closed positions, rolling 5-fold walk-forward +
+	// bootstrap p=98.8%): breakout_retest is net-negative in every time third
+	// (early -11.5, mid -28.6, late -4.0) and removing it improves net and lowers
+	// max drawdown. Pointer to distinguish an explicit false (allow) from unset.
+	BlockBreakoutRetest *bool `json:"block_breakout_retest,omitempty"`
+
+	// MaxNetRR hard-blocks entries whose AI-promised net risk/reward exceeds this
+	// ceiling. Same study: net_rr>2.8 entries are net-negative (win rate ~52%,
+	// far targets rarely hit) — the mirror of MaxTargetATRMul on the RR axis.
+	// Default 2.8. Set <0 to disable, 0 uses the default.
+	MaxNetRR float64 `json:"max_net_rr,omitempty"`
+
+	// CorrelatedAdverseThrottle skips a NEW entry when the trader's OWN recently
+	// closed positions are clustering into losses (a toxic/correlated-adverse
+	// regime). Fully causal: it reads only closes that FINISHED before this entry,
+	// so there is no look-ahead.
+	//
+	// DEFAULT OFF (opt-in). On the 63-day live dataset it was the sole entry lever
+	// positive out-of-sample (holdout +6.5, bootstrap P(delta>0)=96%, positive in
+	// leave-one-trader-out). BUT a multi-year (2022-2026, 15-coin) proxy-strategy
+	// backtest FAILED to confirm it generalises: full-sample delta −72.7, positive
+	// in only 2/5 years, with a chaotic sign-flipping parameter surface. The reason:
+	// the throttle's real edge is not loss-clustering itself (present in both) but
+	// whether a toxic window PREDICTS the next loss — a +9.8pp conditional lift in
+	// the live data vs ~0 in the proxy. That predictive lift is strategy- and
+	// period-specific and unconfirmed beyond the 63-day live window, so the throttle
+	// is shipped OFF by default and enabled per-trader only after the live
+	// conditional lift is re-observed. Pointer distinguishes explicit true/false
+	// from unset (default off).
+	CorrelatedAdverseThrottle *bool `json:"correlated_adverse_throttle,omitempty"`
+	// ThrottleWindowHours is the trailing window of FINISHED closes used to assess
+	// toxicity. Default 12 (best-validated; the whole 12h neighbourhood is positive).
+	ThrottleWindowHours float64 `json:"throttle_window_hours,omitempty"`
+	// ThrottleMinCloses is the minimum number of finished closes required in the
+	// window before the throttle may fire (avoids acting on tiny samples). Default 3.
+	ThrottleMinCloses int `json:"throttle_min_closes,omitempty"`
+	// ThrottleLossRate is the loss-rate in the window at/above which new entries are
+	// blocked. Default 0.6 (i.e. ≥60% of recent closes were losers). Range (0,1].
+	ThrottleLossRate float64 `json:"throttle_loss_rate,omitempty"`
 }
 
 func (c EntryGateConfig) WithDefaults() EntryGateConfig {
@@ -199,6 +281,15 @@ func (c EntryGateConfig) WithDefaults() EntryGateConfig {
 		c.MaxTargetATRMul = 5.0
 	} else if c.MaxTargetATRMul < 0 {
 		c.MaxTargetATRMul = 0 // negative means explicitly disabled
+	}
+	if c.BlockBreakoutRetest == nil {
+		defaultBlock := true // entry-quality study: breakout_retest is net-negative
+		c.BlockBreakoutRetest = &defaultBlock
+	}
+	if c.MaxNetRR == 0 {
+		c.MaxNetRR = 2.8
+	} else if c.MaxNetRR < 0 {
+		c.MaxNetRR = 0 // negative means explicitly disabled
 	}
 	if c.TargetReachabilityMode == "" {
 		c.TargetReachabilityMode = "cap" // cap unreachable targets by default (reshape > reject)
@@ -247,7 +338,29 @@ func (c EntryGateConfig) WithDefaults() EntryGateConfig {
 	if c.VolatilityBufferATRMul > 1.5 {
 		c.VolatilityBufferATRMul = 1.5
 	}
+	if c.ThrottleWindowHours <= 0 {
+		c.ThrottleWindowHours = 12
+	}
+	if c.ThrottleMinCloses <= 0 {
+		c.ThrottleMinCloses = 3
+	}
+	if c.ThrottleLossRate <= 0 {
+		c.ThrottleLossRate = 0.6
+	} else if c.ThrottleLossRate > 1 {
+		c.ThrottleLossRate = 1
+	}
 	return c
+}
+
+// CorrelatedAdverseThrottleEnabled reports whether the throttle is active,
+// defaulting to FALSE when unset: the multi-year proxy backtest did not confirm
+// the throttle generalises, so it is opt-in per trader. An explicit true enables
+// it; an explicit false (or unset) disables it.
+func (c EntryGateConfig) CorrelatedAdverseThrottleEnabled() bool {
+	if c.CorrelatedAdverseThrottle == nil {
+		return false
+	}
+	return *c.CorrelatedAdverseThrottle
 }
 
 type StrategyControlPolicyMode string
@@ -454,6 +567,27 @@ type StructuralSLConfig struct {
 	// bot-downtime safety net. When false (Phase 1) the resting stop sits at the
 	// structural distance and fires on an intrabar touch.
 	CloseConfirm bool `json:"close_confirm,omitempty"`
+	// PivotStrength: fractal strength for nearest-swing detection — a bar is a swing
+	// high/low if its High/Low is the most extreme among this many bars on EACH side.
+	// The boundary anchors to the NEAREST swing beyond entry (nearest overhead swing
+	// high for a short / nearest swing low below for a long), NOT the window's absolute
+	// extreme. This stops a distant large-degree spike from pushing the stop out to the
+	// backstop when a much closer, valid invalidation level exists. Default 2.
+	PivotStrength int `json:"pivot_strength,omitempty"`
+	// FallbackATRMul: the tighter cap used INSTEAD of BackstopATRMul when the nearest
+	// structural level is still farther than the backstop (i.e. no near structure
+	// exists). Rather than parking the tight exit at the wide backstop, fall back to
+	// this fixed ATR distance so a structure-less entry still has a reasonable stop.
+	// Must be <= BackstopATRMul to have any effect. Default 3.0.
+	FallbackATRMul float64 `json:"fallback_atr_mul,omitempty"`
+	// FallbackRRCapRatio: when the fallback (no near structure) path is taken, the
+	// resulting stop distance must stay BELOW this ratio × the entry's take-profit
+	// target move, i.e. fallbackSL% <= ratio × TP%. This guarantees a minimum
+	// reward:risk of 1/ratio (0.8 => RR >= 1.25) so a structure-less entry never gets
+	// a wide stop that dwarfs its own profit target. FloorATRMul remains a hard
+	// minimum, so the cap never drives the stop tighter than the noise floor.
+	// Set <= 0 to disable the RR cap. Default 0.8.
+	FallbackRRCapRatio float64 `json:"fallback_rr_cap_ratio,omitempty"`
 }
 
 // WithDefaults fills unset structural-SL fields with safe, backtested defaults.
@@ -466,6 +600,19 @@ func (c StructuralSLConfig) WithDefaults() StructuralSLConfig {
 	}
 	if c.LookbackBars <= 0 {
 		c.LookbackBars = 24
+	}
+	if c.PivotStrength <= 0 {
+		c.PivotStrength = 2
+	}
+	if c.FallbackATRMul <= 0 {
+		c.FallbackATRMul = 3.0
+	}
+	// Fallback must never exceed the backstop (it is meant to be the tighter cap).
+	if c.FallbackATRMul > c.BackstopATRMul {
+		c.FallbackATRMul = c.BackstopATRMul
+	}
+	if c.FallbackRRCapRatio <= 0 {
+		c.FallbackRRCapRatio = 0.8
 	}
 	return c
 }

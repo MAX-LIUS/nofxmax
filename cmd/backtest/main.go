@@ -30,6 +30,9 @@ func main() {
 	liveConfig := flag.Bool("liveconfig", false, "use the trader's LIVE strategy protection config (ATR/structural) as the replay baseline")
 	variants := flag.Bool("variants", false, "compare pre-specified single-change optimization variants derived from the live baseline (keeps the structural stop type; faithful to live)")
 	pertrade := flag.Bool("pertrade", false, "with -variants: decompose each variant vs baseline TRADE-BY-TRADE (winners cut early vs losers saved)")
+	configTrader := flag.String("configtrader", "", "when set with -liveconfig, load the protection CONFIG from THIS trader pattern while entries still come from -trader. Lets a large pooled entry set (many traders) be replayed under one trader's config (e.g. Claude-R 15m).")
+	horizonHours := flag.Int("horizon", 0, "when >0, replay OPEN-ENDED over this forward horizon (hours) past each entry instead of clamping at the live exit time. Makes time-based exits (max-hold/time-stop) testable. Uses a per-symbol disk bar cache (-barcache).")
+	barCachePath := flag.String("barcache", "/tmp/bt_barcache.gob", "path to the persisted per-symbol bar cache used by -horizon")
 	flag.Parse()
 
 	db, err := sql.Open("sqlite", *dbPath)
@@ -54,8 +57,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println("fetching OKX history per entry (network-bound, please wait)...")
-	loaded, skipped := backtest.PrepareEntries(entries, *tf, backtest.OKXBars)
+	var loaded []backtest.LoadedEntry
+	var skipped int
+	if *horizonHours > 0 {
+		fmt.Printf("HORIZON mode: open-ended replay %dh past each entry (bar cache: %s)\n", *horizonHours, *barCachePath)
+		cache, cerr := backtest.LoadBarCache(*barCachePath, *tf)
+		if cerr != nil {
+			log.Fatalf("load bar cache: %v", cerr)
+		}
+		var herr error
+		loaded, skipped, herr = backtest.PrepareEntriesHorizon(entries, *tf, *horizonHours, cache, backtest.OKXBars)
+		if herr != nil {
+			log.Fatalf("prepare horizon: %v", herr)
+		}
+		if serr := cache.Save(*barCachePath); serr != nil {
+			fmt.Printf("(warn: could not persist bar cache: %v)\n", serr)
+		}
+	} else {
+		fmt.Println("fetching OKX history per entry (network-bound, please wait)...")
+		loaded, skipped = backtest.PrepareEntries(entries, *tf, backtest.OKXBars)
+	}
 	fmt.Printf("prepared %d entries (%d skipped: no/short data)\n", len(loaded), skipped)
 	if len(loaded) == 0 {
 		os.Exit(1)
@@ -66,13 +87,20 @@ func main() {
 	//    live config is what makes trusted-subset fidelity meaningful.
 	baseline := backtest.ClaudeBaselineParams()
 	if *liveConfig {
-		cfg, ctf, err := backtest.LoadTraderStrategyConfig(db, *traderLike)
+		cfgPattern := *traderLike
+		if *configTrader != "" {
+			cfgPattern = *configTrader
+		}
+		cfg, ctf, err := backtest.LoadTraderStrategyConfig(db, cfgPattern)
 		if err != nil {
 			log.Fatalf("liveconfig: %v", err)
 		}
-		baseline = backtest.LiveConfigParams(cfg, backtest.TimeframeHours(ctf))
-		fmt.Printf("(baseline from LIVE strategy config; primary_tf=%s, unit=%s, TP=%d BE=%d DD=%d SL_atr=%.1f)\n",
-			ctf, baseline.Unit, len(baseline.TPLegs), len(baseline.BELegs), len(baseline.DDRules), baseline.StopLossATR)
+		// Replay at the requested -tf, not the config's own primary_tf, so a pooled
+		// entry set can be evaluated at a chosen granularity (e.g. 15m).
+		baseline = backtest.LiveConfigParams(cfg, backtest.TimeframeHours(*tf))
+		fmt.Printf("(baseline from LIVE config of %q; config_primary_tf=%s replay_tf=%s unit=%s TP=%d BE=%d DD=%d SL_atr=%.1f timestop=%.0fh/%.1f%% maxhold=%.0fh/%.1f%%)\n",
+			cfgPattern, ctf, *tf, baseline.Unit, len(baseline.TPLegs), len(baseline.BELegs), len(baseline.DDRules), baseline.StopLossATR,
+			baseline.CloseProxy.TimeStopHours, baseline.CloseProxy.TimeStopLossPct, baseline.CloseProxy.MaxHoldHours, baseline.CloseProxy.MaxHoldProfitExemptPct)
 	}
 	if *proxy && !*liveConfig {
 		baseline.CloseProxy = backtest.ClaudeCloseProxy(backtest.TimeframeHours(*tf))

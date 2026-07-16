@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -122,8 +123,20 @@ type TraderPosition struct {
 	CloseReason       string  `gorm:"column:close_reason;default:''" json:"close_reason"`
 	Source            string  `gorm:"column:source;default:system" json:"source"`
 	EntrySceneTags    string  `gorm:"column:entry_scene_tags;default:''" json:"entry_scene_tags"` // JSON: trend_phase, ema20_deviation, regime, chg4h at entry
-	CreatedAt         int64   `gorm:"column:created_at" json:"created_at"`                       // Unix milliseconds UTC
-	UpdatedAt         int64   `gorm:"column:updated_at" json:"updated_at"`                       // Unix milliseconds UTC
+
+	// Excursion tracking (MFE/MAE): running favorable peak and adverse trough of the
+	// position's profit%, plus each extreme in frozen-open-time ATR multiples. Updated
+	// live on the drawdown poll and frozen onto the row at close so closed positions
+	// stay fully reconstructable for review/backtest reverse-lookup. PeakPnlPct is the
+	// high-water profit%; TroughPnlPct the low-water (most adverse) profit%. Peak/Trough
+	// AtrMult = |extreme profit% distance from entry| / ATR% at entry.
+	PeakPnlPct    float64 `gorm:"column:peak_pnl_pct;default:0" json:"peak_pnl_pct"`
+	TroughPnlPct  float64 `gorm:"column:trough_pnl_pct;default:0" json:"trough_pnl_pct"`
+	PeakAtrMult   float64 `gorm:"column:peak_atr_mult;default:0" json:"peak_atr_mult"`
+	TroughAtrMult float64 `gorm:"column:trough_atr_mult;default:0" json:"trough_atr_mult"`
+
+	CreatedAt int64 `gorm:"column:created_at" json:"created_at"` // Unix milliseconds UTC
+	UpdatedAt int64 `gorm:"column:updated_at" json:"updated_at"` // Unix milliseconds UTC
 }
 
 // TableName returns the table name
@@ -257,6 +270,61 @@ func (s *PositionStore) deriveCloseReason(pos *TraderPosition, exchangeOrderID s
 	return reason, source, executionType
 }
 
+// decisionCycleHasAICloseFor reports whether the decision_records row for this
+// trader+cycle contains an AI close decision for the given symbol/side. It is the
+// deterministic signal used to attribute a bare close_long/close_short fill to an
+// AI proactive close when no close-intent was persisted (e.g. Binance). Matching
+// on the recorded AI decision — not a guess — keeps attribution trustworthy: a
+// cycle=0 or exchange-discovered close (no matching decision) is left as-is.
+func (s *PositionStore) decisionCycleHasAICloseFor(traderID string, cycle int, symbol, side string) bool {
+	if s.db == nil || cycle <= 0 {
+		return false
+	}
+	var rec DecisionRecordDB
+	if err := s.db.Where("trader_id = ? AND cycle_number = ?", traderID, cycle).
+		First(&rec).Error; err != nil {
+		return false
+	}
+	if rec.Decisions == "" {
+		return false
+	}
+	var decisions []struct {
+		Action string `json:"action"`
+		Symbol string `json:"symbol"`
+	}
+	if err := json.Unmarshal([]byte(rec.Decisions), &decisions); err != nil {
+		return false
+	}
+	wantAction := "close_long"
+	if strings.EqualFold(side, "SHORT") {
+		wantAction = "close_short"
+	}
+	normSym := normalizeSymbolForMatch(symbol)
+	for _, d := range decisions {
+		if strings.EqualFold(d.Action, wantAction) && normalizeSymbolForMatch(d.Symbol) == normSym {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeSymbolForMatch reduces a symbol to a comparable base form (upper-case,
+// stripped of common quote suffixes and separators) so a decision-record symbol
+// matches the position symbol regardless of USDT/USDC/PERP/dash formatting
+// differences across exchanges.
+func normalizeSymbolForMatch(sym string) string {
+	s := strings.ToUpper(strings.TrimSpace(sym))
+	s = strings.ReplaceAll(s, "-", "")
+	s = strings.ReplaceAll(s, "_", "")
+	s = strings.ReplaceAll(s, "/", "")
+	for _, suffix := range []string{"USDTPERP", "USDCPERP", "USDPERP", "PERP", "USDT", "USDC", "USD"} {
+		if strings.HasSuffix(s, suffix) {
+			return strings.TrimSuffix(s, suffix)
+		}
+	}
+	return s
+}
+
 func (s *PositionStore) logCloseEvent(pos *TraderPosition, closeReason, executionSource, executionType, exchangeOrderID string, closeQty, executionPrice, feeDelta, realizedPnLDelta float64, eventTimeMs int64) error {
 	if s.db == nil || pos == nil || closeQty <= 0 {
 		return nil
@@ -314,6 +382,26 @@ func (s *PositionStore) logCloseEvent(pos *TraderPosition, closeReason, executio
 					break
 				}
 			}
+		}
+	}
+	// Decision-cycle fallback (exchange-agnostic, deterministic): some exchanges
+	// (notably Binance) do not reliably persist a close-intent for a bot-issued AI
+	// market close — the intent write can be skipped and the synced fill loses the
+	// broker client id, so the two intent lookups above miss and the close lands in
+	// sync_external even though the AI truly initiated it. When the position's exit
+	// decision cycle links to a REAL close decision for THIS symbol/side in
+	// decision_records, the close is deterministically an AI proactive close. This
+	// makes the stored attribution agree with what the review panel already infers
+	// from the decision link, instead of leaving the header as 未归因.
+	if attr.Mechanism == MechSyncExternal && decisionCycle > 0 {
+		if s.decisionCycleHasAICloseFor(pos.TraderID, decisionCycle, pos.Symbol, pos.Side) {
+			aiReason := "ai_close_long"
+			if strings.EqualFold(pos.Side, "SHORT") {
+				aiReason = "ai_close_short"
+			}
+			closeReason = aiReason
+			executionSource = aiReason
+			attr = ClassifyClose(aiReason)
 		}
 	}
 	event := &PositionCloseEvent{
@@ -462,48 +550,77 @@ func (s *PositionStore) FindEntryDecisionCycleForPosition(traderID, symbol, side
 	// Strip all whitespace (spaces, newlines, tabs) for matching pretty-printed JSON.
 	stripped := "REPLACE(REPLACE(REPLACE(decisions, ' ', ''), char(10), ''), char(13), '')"
 
-	query := func() *gorm.DB {
-		q := s.db.Model(&DecisionRecordDB{}).
-			Where("trader_id = ? AND success = ?", traderID, true).
-			Where(fmt.Sprintf("(%s LIKE ? OR %s LIKE ?)", stripped, stripped), combinedAS, combinedSA)
-		return q
+	// IMPORTANT: do NOT compare the decision timestamp in SQL. The timestamp /
+	// created_at columns are declared `datetime`, and the modernc sqlite driver
+	// coerces both the column and the bound string parameter to a datetime value
+	// for `<=` comparisons — which silently corrupts ordering (a 21:22 row can
+	// test as `<= 12:24`). That bug caused entry_decision_cycle to be linked to
+	// the wrong re-entry of the same symbol, or not backfilled at all. Instead we
+	// fetch the symbol/action candidates and pick the nearest by absolute time in
+	// Go, using time.Parse on the scanned string (plain text, no coercion).
+	type cand struct {
+		Cycle     int
+		Timestamp string
+		CreatedAt string
+	}
+	var candidates []cand
+	s.db.Model(&DecisionRecordDB{}).
+		Where("trader_id = ? AND success = ?", traderID, true).
+		Where(fmt.Sprintf("(%s LIKE ? OR %s LIKE ?)", stripped, stripped), combinedAS, combinedSA).
+		Order("cycle_number DESC").
+		Select("cycle_number AS cycle, timestamp, created_at").
+		Scan(&candidates)
+
+	if len(candidates) == 0 {
+		return 0
 	}
 
-	if !entryTime.IsZero() {
-		// The decision record is written AFTER the order executes (AI response →
-		// parse → execute order → record decision), so the decision timestamp is
-		// typically 5-30 s after the position entry_time. Extend the search window
-		// slightly past entry_time so the correct cycle is found on the first pass.
-		postEntryGrace := entryTime.Add(90 * time.Second)
+	// No entry time known: fall back to the most recent matching cycle.
+	if entryTime.IsZero() {
+		return candidates[0].Cycle
+	}
 
-		var cycle int
-		query().Where("timestamp <= ? OR created_at <= ?", postEntryGrace, postEntryGrace).
-			Order("cycle_number DESC").
-			Limit(1).
-			Select("cycle_number").
-			Scan(&cycle)
-		if cycle > 0 {
-			return cycle
+	parseTS := func(c cand) (time.Time, bool) {
+		for _, v := range []string{c.CreatedAt, c.Timestamp} {
+			if v == "" {
+				continue
+			}
+			if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+				return t.UTC(), true
+			}
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				return t.UTC(), true
+			}
 		}
-
-		// Exchange sync can create the local position after the order/decision timestamp.
-		// If no pre-entry match exists, use the nearest same-symbol/side open decision
-		// after the observed position time, bounded to avoid stale historical matches.
-		windowEnd := entryTime.Add(6 * time.Hour)
-		query().Where("(timestamp > ? AND timestamp <= ?) OR (created_at > ? AND created_at <= ?)", postEntryGrace, windowEnd, postEntryGrace, windowEnd).
-			Order("timestamp ASC, created_at ASC, cycle_number ASC").
-			Limit(1).
-			Select("cycle_number").
-			Scan(&cycle)
-		return cycle
+		return time.Time{}, false
 	}
 
-	var cycle int
-	query().Order("cycle_number DESC").
-		Limit(1).
-		Select("cycle_number").
-		Scan(&cycle)
-	return cycle
+	// The decision record is written AFTER the order executes (AI response →
+	// parse → execute order → record decision), so the decision timestamp is
+	// typically 5-30 s after entry_time. Pick the candidate whose time is closest
+	// to entry_time in absolute terms, bounded to 6h so a stale historical
+	// re-entry of the same symbol can never be linked by mistake.
+	const maxSkewMs = int64(6 * 60 * 60 * 1000)
+	bestCycle := 0
+	bestDiff := int64(1<<62 - 1)
+	for _, c := range candidates {
+		t, ok := parseTS(c)
+		if !ok {
+			continue
+		}
+		diff := entryTimeMs - t.UnixMilli()
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff < bestDiff {
+			bestDiff = diff
+			bestCycle = c.Cycle
+		}
+	}
+	if bestCycle > 0 && bestDiff <= maxSkewMs {
+		return bestCycle
+	}
+	return 0
 }
 
 func (s *PositionStore) BackfillEntryDecisionCycle(positionID int64, cycle int) error {
@@ -636,6 +753,44 @@ func (s *PositionStore) UpdatePositionExchangeInfo(id int64, exchangeID, exchang
 	}).Error
 }
 
+// stampExcursionOntoUpdates freezes the position's final favorable-peak / adverse-
+// trough profit% + ATR multiples onto the close Updates map, read from the live
+// peak_pnl_states row. This preserves the full MFE/MAE trail on the closed history
+// row before ClearPeakPnLCache deletes the transient state. Best-effort: a missing
+// row (e.g. position never polled) leaves the columns at their existing values.
+// pos_key matching is case-insensitive because the live cache uses exchange-reported
+// side casing (OKX "long") while the DB row stores uppercase ("LONG").
+func (s *PositionStore) stampExcursionOntoUpdates(pos *TraderPosition, updates map[string]interface{}) {
+	if pos == nil || s.db == nil || pos.TraderID == "" {
+		return
+	}
+	posKey := pos.Symbol + "_" + pos.Side
+	var ex struct {
+		PeakPnlPct    float64
+		TroughPnlPct  float64
+		PeakAtrMult   float64
+		TroughAtrMult float64
+	}
+	row := s.db.Raw(`
+		SELECT COALESCE(peak_pnl_pct,0)   AS peak_pnl_pct,
+		       COALESCE(trough_pnl_pct,0) AS trough_pnl_pct,
+		       COALESCE(peak_atr_mult,0)  AS peak_atr_mult,
+		       COALESCE(trough_atr_mult,0) AS trough_atr_mult
+		FROM peak_pnl_states
+		WHERE trader_id = ? AND lower(pos_key) = lower(?)
+		LIMIT 1`, pos.TraderID, posKey).Row()
+	if row == nil {
+		return
+	}
+	if err := row.Scan(&ex.PeakPnlPct, &ex.TroughPnlPct, &ex.PeakAtrMult, &ex.TroughAtrMult); err != nil {
+		return // no live excursion row; leave columns unchanged
+	}
+	updates["peak_pnl_pct"] = ex.PeakPnlPct
+	updates["trough_pnl_pct"] = ex.TroughPnlPct
+	updates["peak_atr_mult"] = ex.PeakAtrMult
+	updates["trough_atr_mult"] = ex.TroughAtrMult
+}
+
 // ClosePositionFully marks position as fully closed
 // exitTimeMs is Unix milliseconds UTC
 func (s *PositionStore) ClosePositionFully(id int64, exitPrice float64, exitOrderID string, exitTimeMs int64, totalRealizedPnL float64, totalFee float64, closeReason string, executionSource string, executionType string) error {
@@ -650,7 +805,7 @@ func (s *PositionStore) ClosePositionFully(id int64, exitPrice float64, exitOrde
 	}
 	reason, source, execType := s.deriveCloseReason(&pos, exitOrderID, closeReason, pos.Quantity, exitPrice)
 
-	if err := s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(map[string]interface{}{
+	updates := map[string]interface{}{
 		"quantity":            quantity,
 		"exit_price":          exitPrice,
 		"exit_order_id":       exitOrderID,
@@ -661,11 +816,23 @@ func (s *PositionStore) ClosePositionFully(id int64, exitPrice float64, exitOrde
 		"status":              "CLOSED",
 		"close_reason":        reason,
 		"updated_at":          time.Now().UTC().UnixMilli(),
-	}).Error; err != nil {
+	}
+	s.stampExcursionOntoUpdates(&pos, updates)
+	if err := s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 		return err
 	}
 	feeDelta := totalFee - pos.Fee
 	realizedPnLDelta := totalRealizedPnL - pos.RealizedPnL
+	// Drain any leftover unconsumed protection intents for this symbol/side: the
+	// position is now closed, so its untriggered ladder tiers must not survive to
+	// be borrowed by the NEXT position's close via the trigger-price matcher
+	// (cross-position stringing). Best-effort; a failure here never blocks the
+	// close. Bounded to intents recorded at/before this close time.
+	if n, err := NewCloseIntentStore(s.db).ExpireUnconsumedForPosition(pos.TraderID, pos.Symbol, pos.Side, exitTimeMs); err != nil {
+		logger.Warnf("⚠️ Failed to expire leftover close-intents for %s %s: %v", pos.Symbol, pos.Side, err)
+	} else if n > 0 {
+		logger.Infof("🧹 Expired %d leftover protection intents for closed %s %s", n, pos.Symbol, pos.Side)
+	}
 	return s.logCloseEvent(&pos, reason, source, execType, exitOrderID, pos.Quantity, exitPrice, feeDelta, realizedPnLDelta, exitTimeMs)
 }
 
@@ -1028,7 +1195,7 @@ func (s *PositionStore) CreateOpenPosition(pos *TraderPosition) error {
 // ClosePositionWithAccurateData closes a position with accurate data from exchange
 // exitTimeMs is Unix milliseconds UTC
 func (s *PositionStore) ClosePositionWithAccurateData(id int64, exitPrice float64, exitOrderID string, exitTimeMs int64, realizedPnL float64, fee float64, closeReason string) error {
-	return s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(map[string]interface{}{
+	updates := map[string]interface{}{
 		"exit_price":    exitPrice,
 		"exit_order_id": exitOrderID,
 		"exit_time":     exitTimeMs,
@@ -1037,7 +1204,12 @@ func (s *PositionStore) ClosePositionWithAccurateData(id int64, exitPrice float6
 		"status":        "CLOSED",
 		"close_reason":  closeReason,
 		"updated_at":    time.Now().UTC().UnixMilli(),
-	}).Error
+	}
+	var pos TraderPosition
+	if err := s.db.First(&pos, id).Error; err == nil {
+		s.stampExcursionOntoUpdates(&pos, updates)
+	}
+	return s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(updates).Error
 }
 
 func (s *PositionStore) MarkOpenPositionsAbsentFromExchangeClosed(traderID string, livePositions map[string]float64, closeReason string) (int64, error) {

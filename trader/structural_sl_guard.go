@@ -59,13 +59,14 @@ func (at *AutoTrader) runStructuralSLGuard() {
 		if symbol == "" || side == "" || entry <= 0 || qty <= 0 {
 			continue
 		}
-		at.evaluateStructuralSLClose(symbol, side, entry, qty, ladder.StructuralSL, acfg)
+		at.evaluateStructuralSLClose(symbol, side, entry, qty, ladder, acfg)
 	}
 }
 
 // evaluateStructuralSLClose closes one position if the last CLOSED bar breached its
 // frozen structural boundary. Dedups per closed-bar so a single breach fires once.
-func (at *AutoTrader) evaluateStructuralSLClose(symbol, side string, entry, qty float64, sscfg store.StructuralSLConfig, acfg store.ATRProtectionConfig) {
+func (at *AutoTrader) evaluateStructuralSLClose(symbol, side string, entry, qty float64, ladder store.LadderTPSLConfig, acfg store.ATRProtectionConfig) {
+	sscfg := ladder.StructuralSL
 	isLong := actionFromPositionSide(side) == "open_long"
 	// allowCompute=false: the guard only enforces a boundary that was frozen AT ENTRY.
 	// A position with no frozen boundary (opened before enablement) rides the backstop.
@@ -80,7 +81,8 @@ func (at *AutoTrader) evaluateStructuralSLClose(symbol, side string, entry, qty 
 	// never trigger, silently degrading the structural stop. Clamping keeps the
 	// guard trigger at/inside the backstop so the tight close-confirm actually works.
 	if frozenATR, aok := at.frozenATRForPosition(symbol, side, entry, acfg); aok && frozenATR > 0 {
-		if clamped, cok := clampStructuralBoundary(entry, boundary, frozenATR, isLong, sscfg); cok {
+		tpTargetPct := ladderMaxTPTargetPct(ladder.Rules, frozenATR, entry, acfg)
+		if clamped, cok := clampStructuralBoundary(entry, boundary, frozenATR, tpTargetPct, isLong, sscfg); cok {
 			boundary = clamped
 		}
 	}

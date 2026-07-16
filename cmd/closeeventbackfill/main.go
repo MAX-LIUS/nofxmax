@@ -135,6 +135,8 @@ func classify(rawReason string) (category, mechanism string) {
 		return "protection", "fallback_maxloss_sl"
 	case strings.Contains(r, "full_tp"):
 		return "protection", "full_tp"
+	case strings.Contains(r, "structural_sl") || strings.Contains(r, "structural"):
+		return "protection", "structural_sl"
 	case strings.Contains(r, "full_sl"):
 		return "protection", "full_sl"
 	case strings.Contains(r, "time_stop"):

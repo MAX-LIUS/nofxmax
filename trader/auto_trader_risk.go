@@ -158,6 +158,13 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			}
 		}
 
+		// Excursion tracking (MFE/MAE): record the favorable peak + adverse trough
+		// profit% and their open-time ATR multiples EVERY poll for EVERY position,
+		// independent of any protection config. This is the durable process-data trail
+		// used for reverse-lookup/backtest, so it must run before any early-continue
+		// (time-stop / max-hold / drawdown gates) that would skip a position.
+		at.UpdateExcursion(symbol, side, symbol+"_"+side, entryPrice, markPrice)
+
 		// Time-stop (independent of drawdown rules): force-close a position held too long
 		// that is still in loss. Cuts the slow-bleed "wrong direction held 20-37h" pattern
 		// (fix 2026-06-12). Runs BEFORE the drawdown-rules gate so it works even when no
@@ -2509,6 +2516,7 @@ func (at *AutoTrader) applyBreakEvenStop(symbol, side string, quantity, entryPri
 		if err := okxTrader.SetStopLossTagged(symbol, positionSide, quantity, breakEvenPrice, "break_even_stop"); err != nil {
 			return fmt.Errorf("failed to set break-even stop loss: %w", err)
 		}
+		at.recordProtectionIntent(symbol, positionSide, "break_even_stop", quantity, breakEvenPrice)
 	} else if err := at.trader.SetStopLoss(symbol, positionSide, quantity, breakEvenPrice); err != nil {
 		return fmt.Errorf("failed to set break-even stop loss: %w", err)
 	}
@@ -2684,6 +2692,26 @@ func (at *AutoTrader) recordCloseIntentFromOrderResult(order map[string]interfac
 	}
 }
 
+// recordProtectionIntent writes a placement-time close-intent for an
+// exchange-native protection order (Binance STOP/TP), keyed by its trigger price.
+// This is what brings Binance protection attribution to OKX parity: unlike OKX
+// (bot MARKET close, resolved by order id), Binance protection fires exchange-side
+// and its triggered fill carries a NEW order id the bot never saw — but the fill
+// price equals the trigger, so a trigger-price intent recorded here lets the sync
+// path attribute the mechanism deterministically, even after the conditional
+// order has aged out of the exchange (origType lookup fails). positionSide is
+// LONG/SHORT. Safe no-op when triggerPrice<=0 or store is nil.
+func (at *AutoTrader) recordProtectionIntent(symbol, positionSide, mechanism string, quantity, triggerPrice float64) {
+	if at.store == nil || mechanism == "" || triggerPrice <= 0 {
+		return
+	}
+	if err := at.store.CloseIntent().RecordProtection(
+		at.id, at.exchangeID, market.Normalize(symbol), positionSide, mechanism, quantity, triggerPrice, at.cycleNumber, "",
+	); err != nil {
+		logger.Warnf("⚠️ Failed to record protection intent for %s %s (%s @ %.6f): %v", symbol, positionSide, mechanism, triggerPrice, err)
+	}
+}
+
 // emergencyClosePosition emergency close position function
 func (at *AutoTrader) emergencyClosePosition(symbol, side string) error {
 	return at.closePositionByReason(symbol, side, 0, "emergency_protection_close")
@@ -2729,17 +2757,104 @@ func (at *AutoTrader) UpdatePeakPnL(symbol, side string, currentPnLPct float64) 
 	}
 }
 
-// ClearPeakPnLCache clears peak cache for specified position
+// ClearPeakPnLCache clears the peak/trough/ATR-mult caches for a position and
+// removes the persisted excursion row (called on close).
 func (at *AutoTrader) ClearPeakPnLCache(symbol, side string) {
 	at.peakPnLCacheMutex.Lock()
 	posKey := symbol + "_" + side
 	delete(at.peakPnLCache, posKey)
+	delete(at.troughPnLCache, posKey)
+	delete(at.peakAtrMultCache, posKey)
+	delete(at.troughAtrMultCache, posKey)
 	at.peakPnLCacheMutex.Unlock()
 
 	if at.store != nil {
 		if err := at.store.DeletePeakPnL(at.id, posKey); err != nil {
-			logger.Warnf("⚠️ Failed to delete persisted peak PnL for %s: %v", posKey, err)
+			logger.Warnf("⚠️ Failed to delete persisted excursion for %s: %v", posKey, err)
 		}
+	}
+}
+
+// UpdateExcursion tracks the full favorable/adverse excursion (MFE/MAE) of a
+// position: the high-water peak profit% and low-water trough profit%, plus each
+// extreme expressed in open-time ATR multiples (signed: +favorable / -adverse).
+// It also keeps peakPnLCache consistent so existing peak readers are unaffected.
+// Persists only when an extreme actually moves, so DB load stays light. ATR% comes
+// from the frozen open-time ATR (stable, restart-safe); when ATR protection is off
+// or unavailable the ATR multiples stay 0 while the profit% extremes are still kept.
+func (at *AutoTrader) UpdateExcursion(symbol, side, posKey string, entryPrice, markPrice float64) {
+	if posKey == "" {
+		posKey = symbol + "_" + side
+	}
+	pnlPct := calculatePositionPnLPct(side, entryPrice, markPrice)
+
+	// Resolve open-time ATR% once (best-effort). Only when ATR protection is enabled,
+	// so strategies without ATR never trigger a live ATR freeze as a side effect.
+	atrPct := 0.0
+	if at.config.StrategyConfig != nil && at.config.StrategyConfig.ATRProtection.Enabled && entryPrice > 0 {
+		if atr, ok := at.frozenATRForPosition(symbol, side, entryPrice, at.config.StrategyConfig.ATRProtection); ok && atr > 0 {
+			atrPct = atr / entryPrice * 100
+		}
+	}
+
+	at.peakPnLCacheMutex.Lock()
+	// Lazy-init: tests construct AutoTrader structs directly (not via the
+	// constructor), so the excursion maps may be nil here.
+	if at.peakPnLCache == nil {
+		at.peakPnLCache = make(map[string]float64)
+	}
+	if at.troughPnLCache == nil {
+		at.troughPnLCache = make(map[string]float64)
+	}
+	if at.peakAtrMultCache == nil {
+		at.peakAtrMultCache = make(map[string]float64)
+	}
+	if at.troughAtrMultCache == nil {
+		at.troughAtrMultCache = make(map[string]float64)
+	}
+	changed := false
+	// Peak (favorable high-water).
+	if peak, ok := at.peakPnLCache[posKey]; !ok || pnlPct > peak {
+		at.peakPnLCache[posKey] = pnlPct
+		if atrPct > 0 {
+			at.peakAtrMultCache[posKey] = pnlPct / atrPct
+		}
+		changed = true
+	}
+	// Trough (adverse low-water).
+	if trough, ok := at.troughPnLCache[posKey]; !ok || pnlPct < trough {
+		at.troughPnLCache[posKey] = pnlPct
+		if atrPct > 0 {
+			at.troughAtrMultCache[posKey] = pnlPct / atrPct
+		}
+		changed = true
+	}
+	ex := store.ExcursionState{
+		PeakPnlPct:    at.peakPnLCache[posKey],
+		TroughPnlPct:  at.troughPnLCache[posKey],
+		PeakAtrMult:   at.peakAtrMultCache[posKey],
+		TroughAtrMult: at.troughAtrMultCache[posKey],
+	}
+	at.peakPnLCacheMutex.Unlock()
+
+	if changed && at.store != nil {
+		if err := at.store.SaveExcursion(at.id, posKey, ex); err != nil {
+			logger.Warnf("⚠️ Failed to persist excursion for %s: %v", posKey, err)
+		}
+	}
+}
+
+// GetExcursion returns the current excursion snapshot for a position (zero-value
+// when none tracked yet).
+func (at *AutoTrader) GetExcursion(symbol, side string) store.ExcursionState {
+	posKey := symbol + "_" + side
+	at.peakPnLCacheMutex.RLock()
+	defer at.peakPnLCacheMutex.RUnlock()
+	return store.ExcursionState{
+		PeakPnlPct:    at.peakPnLCache[posKey],
+		TroughPnlPct:  at.troughPnLCache[posKey],
+		PeakAtrMult:   at.peakAtrMultCache[posKey],
+		TroughAtrMult: at.troughAtrMultCache[posKey],
 	}
 }
 
