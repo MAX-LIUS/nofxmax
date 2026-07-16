@@ -769,6 +769,12 @@ export interface HistoricalPosition {
   close_value_usdt?: number
   close_events?: PositionCloseEvent[]
   protection_snapshot?: ProtectionSnapshot
+  // Ground-truth protections the bot actually placed on the exchange (from
+  // close_intents within this position's lifetime). Preferred over the AI
+  // decision plan for display, because the AI plan is skipped in manual mode.
+  placed_protection?: PlacedProtectionItem[]
+  // Manual (placed) vs AI (structural) SL/TP deviation + R multiples.
+  protection_deviation?: ProtectionDeviation
   protection_runtime?: ProtectionRuntime
   entry_scene_tags?: string // JSON: {trend_phase, regime, chg4h, chg1h, ema20_dev, direction}
   // Excursion (MFE/MAE): favorable peak + adverse trough profit% and each extreme in
@@ -779,6 +785,31 @@ export interface HistoricalPosition {
   trough_atr_mult?: number
   created_at: string
   updated_at: string
+}
+
+// Real protections the bot placed on the exchange, mirrored from close_intents.
+// Shape matches the frontend PlanItem so it renders through EntryProtectionPlan.
+export interface PlacedProtectionItem {
+  mechanism: string
+  kind: 'tp' | 'sl' | 'be' | 'drawdown' | 'trailing'
+  label: string
+  triggerPct: number
+  triggerPrice?: number
+  closeRatioPct?: number
+  note?: string
+}
+
+// Manual (placed) vs AI (structural) SL/TP deviation with R multiples.
+export interface ProtectionDeviation {
+  manual_sl?: number
+  manual_tp?: number
+  ai_sl?: number
+  ai_tp?: number
+  sl_diff_pct?: number
+  tp_diff_pct?: number
+  manual_rr?: number
+  ai_rr?: number
+  entry_price?: number
 }
 
 // Matches Go TraderStats struct exactly

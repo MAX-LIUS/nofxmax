@@ -23,6 +23,7 @@ import {
 import type {
   HistoricalPosition,
   PositionCloseEvent,
+  ProtectionDeviation,
   TraderStats,
   SymbolStats,
   DirectionStats,
@@ -1402,6 +1403,84 @@ function EntryProtectionPlan({
   )
 }
 
+// ProtectionDeviationBlock shows the manual (actually-placed) first TP/SL against
+// the AI's structural TP/SL opinion, plus each side's R multiple, so the operator
+// can see whether the manual template drifted from where the AI read structure.
+function ProtectionDeviationBlock({
+  dev,
+  language,
+}: {
+  dev: ProtectionDeviation
+  language: string
+}) {
+  const zh = language === 'zh'
+  const fmt = (v?: number) => (typeof v === 'number' ? formatPrice(v) : '—')
+  const pct = (v?: number) =>
+    typeof v === 'number' ? `${v >= 0 ? '+' : ''}${v}%` : '—'
+  const rr = (v?: number) => (typeof v === 'number' ? `${v}R` : '—')
+  const hasAI = typeof dev.ai_sl === 'number' || typeof dev.ai_tp === 'number'
+  return (
+    <div className="mt-3">
+      <div className="text-xs mb-2" style={{ color: '#848E9C' }}>
+        {zh
+          ? '结构位偏差（手动实盘 vs AI 结构建议）'
+          : 'Structural Deviation (manual placed vs AI structural)'}
+      </div>
+      <div
+        className="rounded text-[11px]"
+        style={{ background: '#1E2329', border: '1px solid #2B3139' }}
+      >
+        <div
+          className="grid px-3 py-1.5"
+          style={{ gridTemplateColumns: '1fr 1fr 1fr 1fr', color: '#848E9C' }}
+        >
+          <span></span>
+          <span>SL</span>
+          <span>TP</span>
+          <span>R</span>
+        </div>
+        <div
+          className="grid px-3 py-1.5"
+          style={{ gridTemplateColumns: '1fr 1fr 1fr 1fr', color: '#EAECEF' }}
+        >
+          <span style={{ color: '#848E9C' }}>{zh ? '手动实盘' : 'Manual'}</span>
+          <span className="font-mono">{fmt(dev.manual_sl)}</span>
+          <span className="font-mono">{fmt(dev.manual_tp)}</span>
+          <span className="font-mono">{rr(dev.manual_rr)}</span>
+        </div>
+        {hasAI && (
+          <div
+            className="grid px-3 py-1.5"
+            style={{ gridTemplateColumns: '1fr 1fr 1fr 1fr', color: '#EAECEF' }}
+          >
+            <span style={{ color: '#848E9C' }}>
+              {zh ? 'AI 结构' : 'AI struct'}
+            </span>
+            <span className="font-mono">{fmt(dev.ai_sl)}</span>
+            <span className="font-mono">{fmt(dev.ai_tp)}</span>
+            <span className="font-mono">{rr(dev.ai_rr)}</span>
+          </div>
+        )}
+        {hasAI && (
+          <div
+            className="grid px-3 py-1.5"
+            style={{
+              gridTemplateColumns: '1fr 1fr 1fr 1fr',
+              color: '#F0B90B',
+              borderTop: '1px solid #2B3139',
+            }}
+          >
+            <span style={{ color: '#848E9C' }}>{zh ? '偏差' : 'Δ'}</span>
+            <span className="font-mono">{pct(dev.sl_diff_pct)}</span>
+            <span className="font-mono">{pct(dev.tp_diff_pct)}</span>
+            <span></span>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // Position Row Component
 function PositionRow({
   position,
@@ -1469,7 +1548,25 @@ function PositionRow({
     position.exit_decision_review?.protection_snapshot ||
     position.entry_decision_review?.protection_snapshot ||
     position.protection_snapshot
-  const protectionPlan = buildProtectionPlan(planSnapshot, entryPrice, isLong)
+  // Prefer the REAL placed protections (from close_intents) over the AI decision
+  // plan: the AI plan is skipped entirely in manual protection mode, so it never
+  // reflects what actually protected the position. Fall back to the AI snapshot
+  // for legacy positions that predate the intent ledger.
+  const placedPlan: PlanItem[] = Array.isArray(position.placed_protection)
+    ? position.placed_protection.map((p) => ({
+        mechanism: p.mechanism,
+        kind: p.kind,
+        label: p.label,
+        triggerPct: p.triggerPct,
+        triggerPrice: p.triggerPrice,
+        closeRatioPct: p.closeRatioPct,
+        note: p.note,
+      }))
+    : []
+  const protectionPlan =
+    placedPlan.length > 0
+      ? placedPlan
+      : buildProtectionPlan(planSnapshot, entryPrice, isLong)
   // Per-tier firing: attribute each close to the exact tier that executed so a
   // single fired ladder tier does not light up its whole mechanism, and each
   // fill is labeled by the tier its traded ratio proves (not nearest price).
@@ -1950,6 +2047,13 @@ function PositionRow({
                     ? '历史仓 · 开仓保护计划未记录（此仓建立时未落库真实计划，不显示模板）'
                     : 'Legacy position · protection plan not recorded (no real plan was persisted at open; template intentionally not shown)'}
                 </div>
+              )}
+
+              {position.protection_deviation && (
+                <ProtectionDeviationBlock
+                  dev={position.protection_deviation}
+                  language={language}
+                />
               )}
 
               {position.close_events &&

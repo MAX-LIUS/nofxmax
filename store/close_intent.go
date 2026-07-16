@@ -391,3 +391,32 @@ func (s *CloseIntentStore) ExpireUnconsumedForPosition(traderID, symbol, side st
 	res := q.Updates(map[string]interface{}{"consumed": true, "consumed_at": now})
 	return res.RowsAffected, res.Error
 }
+
+// ListForPositionLifetime returns every protection intent (consumed or not) the
+// bot actually placed for a (trader, symbol, side) within a position's lifetime
+// window [fromMs, toMs]. This is the ground-truth "what protection was really
+// placed on the exchange" source used by the position-history panel — unlike the
+// AI decision plan (which is skipped entirely in manual protection mode), this
+// reflects the resolved manual template OR AI plan legs that were genuinely sent.
+// Ordered by intent_time so tiers read entry-first. toMs<=0 means "no upper
+// bound" (still-open positions). Only rows carrying a trigger_price are useful
+// for a price-anchored panel, but bot MARKET closes (trigger_price=0) are still
+// returned so callers can decide.
+func (s *CloseIntentStore) ListForPositionLifetime(traderID, symbol, side string, fromMs, toMs int64) ([]CloseIntent, error) {
+	if s.db == nil || traderID == "" {
+		return nil, nil
+	}
+	q := s.db.Model(&CloseIntent{}).
+		Where("trader_id = ? AND symbol = ? AND side = ?", traderID, symbol, strings.ToUpper(side))
+	if fromMs > 0 {
+		q = q.Where("intent_time >= ?", fromMs)
+	}
+	if toMs > 0 {
+		q = q.Where("intent_time <= ?", toMs)
+	}
+	var rows []CloseIntent
+	if err := q.Order("intent_time asc").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
