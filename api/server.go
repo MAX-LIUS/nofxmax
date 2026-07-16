@@ -404,6 +404,9 @@ Returns: {"total_trades":<int>,"winning_trades":<int>,"win_rate":<float>,"total_
 			s.route(protected, "GET", "/shadow-gates/feed", "Recent shadow-gate verdicts live feed (?trader_id=xxx&limit=100)", s.handleShadowGateFeed)
 			s.route(protected, "GET", "/shadow-gates/bench", "Virtual Trader Bench: gate policies as competing traders (equity curves + significance)", s.handleShadowBench)
 			s.route(protected, "GET", "/shadow-gates/blocksim", "Blocked-open counterfactuals: simulated R of enforce-blocked opens (was the block right?)", s.handleBlockSim)
+			s.route(protected, "GET", "/shadow-gates/timeseries", "One rule's four-category PnL over time (?rule=xxx&trader_id=xxx&period=10m|1h|12h|1d|1w|1mo|1y&source=backfill|forward)", s.handleShadowGateTimeSeries)
+			s.route(protected, "GET", "/shadow-gates/footprint", "One rule's per-trade scatter: real/simulated PnL per open, colored by block/keep (?rule=xxx&trader_id=xxx&source=backfill|forward)", s.handleShadowGateFootprint)
+			s.route(protected, "GET", "/shadow-gates/matrix", "All gates' correct/wrong block/keep confusion over the SAME trades from one source (?trader_id=xxx&source=backfill|forward)", s.handleShadowGateMatrix)
 
 		}
 	}

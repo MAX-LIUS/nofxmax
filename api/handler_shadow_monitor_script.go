@@ -8,6 +8,12 @@ import (
 
 // handleShadowMonitorJS serves the vanilla-JS logic for the monitor page.
 func (s *Server) handleShadowMonitorJS(c *gin.Context) {
+	// No-cache: the monitor JS is served inline from the binary and changes on every
+	// deploy. Without this, browsers cache a stale version and newly-added functions
+	// (e.g. loadCurves) resolve as undefined against the freshly-deployed HTML.
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
 	c.Data(http.StatusOK, "application/javascript; charset=utf-8", []byte(shadowMonitorJS))
 }
 
@@ -304,6 +310,142 @@ async function loadConf(){
 }
 
 function kpi(v,l){return '<div class="kpi"><div class="v">'+v+'</div><div class="l">'+l+'</div></div>';}
+
+// ---- 历史足迹: 逐笔散点(同一批开仓数据,门控只改配色) + 9门控混淆矩阵 ----
+// 固定规则顺序(与后端 CanonicalShadowRuleOrder 一致,不随点击重排)
+var GATE_ORDER=['countertrend_slope30','countertrend_slope50','countertrend_slope72',
+  'downtrend_long_only_s50','uptrend_short_only_s50','chop_reject_all',
+  'chop_lowconf_lt70','chop_lowconf_lt80','adx_weak_lt20','donchian48_counter','builtin_regime_filter'];
+var FP_RULE='builtin_regime_filter', FP_SOURCE='backfill';
+var FP_TRADES=[], FP_VIEW=null; // FP_VIEW={t0,t1} 可见时间窗(拖动/缩放)
+var QUAD={block_loss:{c:'#22c55e',label:'拦对了(拦亏损·省钱)'},
+  block_win:{c:'#ef4444',label:'拦错了(误伤盈利)'},
+  keep_win:{c:'#3b82f6',label:'放对了(留住盈利)'},
+  keep_loss:{c:'#f59e0b',label:'放错了(漏掉亏损)'}};
+function setFpRule(v){FP_RULE=v;loadCurves();}
+function setFpSource(v){FP_SOURCE=v;FP_VIEW=null;loadCurves();}
+function fpPeriodMs(p){var m=60000,h=60*m,d=24*h;return {'10m':10*m,'1h':h,'12h':12*h,'1d':d,'1w':7*d,'1mo':30*d,'1y':365*d}[p]||d;}
+function setFpWindow(p){ // 周期=可见时间窗宽度(以最新点为右端)
+  if(!FP_TRADES.length)return;
+  var tmax=FP_TRADES[FP_TRADES.length-1].time, w=fpPeriodMs(p);
+  FP_VIEW={t0:tmax-w,t1:tmax}; drawFootprint();
+}
+function fpResetView(){FP_VIEW=null;drawFootprint();}
+async function loadCurves(){
+  var srcQ=(qs()?'&':'?')+'source='+FP_SOURCE;
+  var d=await api('/shadow-gates/footprint'+qs()+srcQ+'&rule='+encodeURIComponent(FP_RULE));
+  FP_TRADES=(d.trades||[]).slice();
+  var m={};try{m=await api('/shadow-gates/matrix'+qs()+srcQ);}catch(e){m={gates:[]};}
+  renderFootprintUI(m.gates||[]);
+}
+function renderFootprintUI(gates){
+  var periods=['10m','1h','12h','1d','1w','1mo','1y'];
+  var h='<div class="card"><div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">';
+  // 数据源(可选,同源比较)
+  h+='<span>数据源:</span>';
+  [['backfill','本地回填开仓'],['forward','实盘运行记录'],['all','全部(混合)']].forEach(function(s){
+    h+='<button class="tab'+(s[0]===FP_SOURCE?' on':'')+'" onclick="setFpSource(\''+s[0]+'\')">'+s[1]+'</button>';});
+  // 规则(固定顺序)
+  h+='<span style="margin-left:8px">门控:</span><select onchange="setFpRule(this.value)" style="padding:5px">';
+  GATE_ORDER.forEach(function(rn){h+='<option value="'+rn+'"'+(rn===FP_RULE?' selected':'')+'>'+rn+'</option>';});
+  h+='</select>';
+  // 时间窗(缩放)
+  h+='<span style="margin-left:8px">时间窗:</span>';
+  periods.forEach(function(p){h+='<button class="tab" onclick="setFpWindow(\''+p+'\')">'+p+'</button>';});
+  h+='<button class="tab" onclick="fpResetView()">全览</button>';
+  h+='</div>';
+  h+='<canvas id="cv" width="1000" height="400" style="width:100%;max-width:1000px;background:var(--card);border:1px solid var(--bd);border-radius:6px;cursor:grab"></canvas>';
+  h+='<div id="fptip" style="font-size:12px;color:#aaa;height:18px;margin-top:4px"></div>';
+  // 图例
+  h+='<div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;font-size:12px">';
+  ['block_loss','block_win','keep_win','keep_loss'].forEach(function(k){
+    h+='<span><span style="display:inline-block;width:12px;height:12px;background:'+QUAD[k].c+';border-radius:50%;vertical-align:middle"></span> '+QUAD[k].label+'</span>';});
+  h+='</div>';
+  h+='<div class="hint">每个点=一笔真实开仓：Y=该笔最终盈亏(真实平仓或blocksim完整保护模拟)，X=平仓时间。'
+    +'颜色=当前门控对这笔的判定(拦/放 × 盈/亏)。切换门控时散点位置不变、只有配色变——因为是同一批开仓数据。'
+    +'滚轮缩放、按住拖动平移、点选时间窗快速定位。</div>';
+  // 9门控混淆矩阵(同源,固定顺序)
+  h+='<h3 style="margin:14px 0 6px">9门控混淆矩阵（同一数据源: '+FP_SOURCE+'）</h3>';
+  h+='<table><thead><tr><th>门控</th>'
+    +'<th style="color:'+QUAD.block_loss.c+'">拦对(拦亏)</th>'
+    +'<th style="color:'+QUAD.block_win.c+'">拦错(误伤盈)</th>'
+    +'<th style="color:'+QUAD.keep_win.c+'">放对(留盈)</th>'
+    +'<th style="color:'+QUAD.keep_loss.c+'">放错(漏亏)</th>'
+    +'<th>净效果*</th></tr></thead><tbody>';
+  var order={};GATE_ORDER.forEach(function(n,i){order[n]=i;});
+  gates.slice().sort(function(a,b){return (order[a.rule_name]==null?99:order[a.rule_name])-(order[b.rule_name]==null?99:order[b.rule_name]);})
+  .forEach(function(g){
+    // 净效果 = 拦掉的亏损(省下,取正) + 误伤的盈利(损失,取负) = -block_loss_pnl - block_win_pnl
+    var net=(-(g.block_loss_pnl||0))-(g.block_win_pnl||0);
+    h+='<tr><td style="text-align:left"><b>'+g.rule_name+'</b></td>'
+      +'<td>'+g.block_loss_n+' <span class="neg">'+fmt(g.block_loss_pnl,1)+'</span></td>'
+      +'<td>'+g.block_win_n+' <span class="pos">'+fmt(g.block_win_pnl,1)+'</span></td>'
+      +'<td>'+g.keep_win_n+' <span class="pos">'+fmt(g.keep_win_pnl,1)+'</span></td>'
+      +'<td>'+g.keep_loss_n+' <span class="neg">'+fmt(g.keep_loss_pnl,1)+'</span></td>'
+      +'<td class="'+cls(net)+'" style="font-weight:600">'+fmt(net,1)+'</td></tr>';
+  });
+  h+='</tbody></table>';
+  h+='<div class="hint">净效果 = 拦掉亏损省下的钱 − 误伤盈利损失的钱（= −拦对PnL − 拦错PnL）。为正=该门控净创造价值。'
+    +'所有门控用同一数据源的同一批开仓，可直接横向比较稳定性与足迹。</div></div>';
+  document.getElementById('view').innerHTML=h;
+  bindFootprintEvents();
+  drawFootprint();
+}
+function fpVisible(){
+  if(!FP_TRADES.length)return[];
+  if(!FP_VIEW)return FP_TRADES;
+  return FP_TRADES.filter(function(t){return t.time>=FP_VIEW.t0&&t.time<=FP_VIEW.t1;});
+}
+function drawFootprint(){
+  var cv=document.getElementById('cv');if(!cv||!cv.getContext)return;
+  var ctx=cv.getContext('2d'),W=cv.width,H=cv.height,padL=56,padR=14,padT=14,padB=30;
+  ctx.clearRect(0,0,W,H);
+  var pts=fpVisible();
+  if(!pts.length){ctx.fillStyle='#888';ctx.font='13px sans-serif';ctx.fillText('暂无数据（该数据源下此门控还没有已平仓/已模拟的开仓）',padL,H/2);return;}
+  var t0=FP_VIEW?FP_VIEW.t0:pts[0].time, t1=FP_VIEW?FP_VIEW.t1:pts[pts.length-1].time;
+  if(t1<=t0)t1=t0+1;
+  var lo=0,hi=0;pts.forEach(function(p){if(p.pnl<lo)lo=p.pnl;if(p.pnl>hi)hi=p.pnl;});
+  if(hi===lo){hi+=1;lo-=1;}var pad=(hi-lo)*0.08;hi+=pad;lo-=pad;
+  function X(t){return padL+(W-padL-padR)*((t-t0)/(t1-t0));}
+  function Y(v){return padT+(H-padT-padB)*(1-(v-lo)/(hi-lo));}
+  // 零轴 + Y刻度
+  ctx.strokeStyle='#3a3a3a';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(padL,Y(0));ctx.lineTo(W-padR,Y(0));ctx.stroke();
+  ctx.fillStyle='#888';ctx.font='11px sans-serif';
+  ctx.fillText('0',padL-16,Y(0)+3);ctx.fillText(hi.toFixed(1),padL-48,Y(hi)+9);ctx.fillText(lo.toFixed(1),padL-48,Y(lo));
+  // X时间刻度(5等分)
+  for(var i=0;i<=5;i++){var tt=t0+(t1-t0)*i/5,x=X(tt);
+    ctx.strokeStyle='#242424';ctx.beginPath();ctx.moveTo(x,padT);ctx.lineTo(x,H-padB);ctx.stroke();
+    var dt=new Date(tt);var lbl=(dt.getMonth()+1)+'/'+dt.getDate()+' '+String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0');
+    ctx.fillStyle='#888';ctx.fillText(lbl,x-28,H-padB+16);}
+  // 散点
+  cv._pts=[];
+  pts.forEach(function(p){var x=X(p.time),y=Y(p.pnl);
+    ctx.fillStyle=(QUAD[p.quadrant]||{c:'#888'}).c;
+    ctx.beginPath();ctx.arc(x,y,p.sim?4:3,0,6.283);ctx.fill();
+    if(p.sim){ctx.strokeStyle='#fff';ctx.lineWidth=0.7;ctx.stroke();}
+    cv._pts.push({x:x,y:y,d:p});});
+}
+function bindFootprintEvents(){
+  var cv=document.getElementById('cv');if(!cv)return;
+  var drag=null;
+  cv.onwheel=function(e){e.preventDefault();
+    if(!FP_TRADES.length)return;
+    var v=FP_VIEW||{t0:FP_TRADES[0].time,t1:FP_TRADES[FP_TRADES.length-1].time};
+    var span=v.t1-v.t0,mid=(v.t0+v.t1)/2,f=e.deltaY<0?0.8:1.25;
+    FP_VIEW={t0:mid-span*f/2,t1:mid+span*f/2};drawFootprint();};
+  cv.onmousedown=function(e){drag={x:e.clientX,view:FP_VIEW||{t0:FP_TRADES[0].time,t1:FP_TRADES[FP_TRADES.length-1].time}};cv.style.cursor='grabbing';};
+  window.addEventListener('mouseup',function(){drag=null;var c=document.getElementById('cv');if(c)c.style.cursor='grab';});
+  cv.onmousemove=function(e){
+    if(drag){var span=drag.view.t1-drag.view.t0,dx=(e.clientX-drag.x)/cv.clientWidth*span;
+      FP_VIEW={t0:drag.view.t0-dx,t1:drag.view.t1-dx};drawFootprint();return;}
+    // hover tooltip
+    if(!cv._pts)return;var r=cv.getBoundingClientRect(),mx=(e.clientX-r.left)*cv.width/r.width,my=(e.clientY-r.top)*cv.height/r.height;
+    var best=null,bd=1e9;cv._pts.forEach(function(pt){var dd=(pt.x-mx)*(pt.x-mx)+(pt.y-my)*(pt.y-my);if(dd<bd){bd=dd;best=pt;}});
+    var tip=document.getElementById('fptip');
+    if(best&&bd<80){var d=best.d,dt=new Date(d.time);
+      tip.innerHTML=d.symbol+' '+d.side+' | '+(QUAD[d.quadrant]||{}).label+' | PnL '+fmt(d.pnl,2)+(d.sim?' (模拟)':' (真实)')+' | '+dt.toLocaleString();}
+    else tip.textContent='';};
+}
 
 // initial paint
 load();

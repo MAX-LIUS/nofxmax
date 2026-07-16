@@ -12,6 +12,7 @@ import (
 // protected /shadow-gates/* endpoints. Intentionally dependency-free (vanilla JS)
 // so it is a throwaway diagnostic surface, not part of the React build.
 func (s *Server) handleShadowMonitorPage(c *gin.Context) {
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(shadowMonitorHTML))
 }
 
@@ -77,6 +78,7 @@ const shadowMonitorHTML = `<!DOCTYPE html>
     <div class="tab" data-t="investor" onclick="tab('investor')">投资者实战视角</div>
     <div class="tab" data-t="bench" onclick="tab('bench')">虚拟交易员对战</div>
     <div class="tab" data-t="conf" onclick="tab('conf')">信心分层</div>
+    <div class="tab" data-t="curves" onclick="tab('curves')">历史足迹</div>
   </div>
   <div id="view"></div>
   <div class="hint">
@@ -114,12 +116,14 @@ function fmt(v,d){return (v>0?'+':'')+Number(v).toFixed(d===undefined?2:d);}
 async function api(path){const r=await fetch('/api'+path,{headers:hdr()});if(!r.ok)throw new Error(r.status+' '+r.statusText);return r.json();}
 async function load(){
   $('#status').textContent='加载中…';
+  var fns={rules:'loadRules',feed:'loadFeed',bench:'loadBench',conf:'loadConf',curves:'loadCurves',investor:'loadInvestor'};
+  var fn=fns[CUR]||'loadInvestor';
+  if(typeof window[fn]!=='function'){
+    $('#status').innerHTML='<span class="amb">脚本仍在加载或缓存过期，请强制刷新（Ctrl+Shift+R）</span>';
+    return;
+  }
   try{
-    if(CUR==='rules')await loadRules();
-    else if(CUR==='feed')await loadFeed();
-    else if(CUR==='bench')await loadBench();
-    else if(CUR==='conf')await loadConf();
-    else await loadInvestor();
+    await window[fn]();
     $('#status').textContent='更新于 '+new Date().toLocaleTimeString();
   }catch(e){$('#status').innerHTML='<span class="neg">错误: '+e.message+'（检查 token）</span>';}
 }
