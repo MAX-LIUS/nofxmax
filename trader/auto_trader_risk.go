@@ -2511,12 +2511,13 @@ func (at *AutoTrader) applyBreakEvenStop(symbol, side string, quantity, entryPri
 	// break-even stops. For now, preserve existing SL orders and add break-even separately.
 	if okxTrader, ok := at.trader.(interface {
 		SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error
-		SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) error
+		SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) (string, error)
 	}); ok {
-		if err := okxTrader.SetStopLossTagged(symbol, positionSide, quantity, breakEvenPrice, "break_even_stop"); err != nil {
+		algoID, err := okxTrader.SetStopLossTagged(symbol, positionSide, quantity, breakEvenPrice, "break_even_stop")
+		if err != nil {
 			return fmt.Errorf("failed to set break-even stop loss: %w", err)
 		}
-		at.recordProtectionIntent(symbol, positionSide, "break_even_stop", quantity, breakEvenPrice)
+		at.recordProtectionIntent(symbol, positionSide, "break_even_stop", quantity, breakEvenPrice, algoID)
 	} else if err := at.trader.SetStopLoss(symbol, positionSide, quantity, breakEvenPrice); err != nil {
 		return fmt.Errorf("failed to set break-even stop loss: %w", err)
 	}
@@ -2701,14 +2702,14 @@ func (at *AutoTrader) recordCloseIntentFromOrderResult(order map[string]interfac
 // path attribute the mechanism deterministically, even after the conditional
 // order has aged out of the exchange (origType lookup fails). positionSide is
 // LONG/SHORT. Safe no-op when triggerPrice<=0 or store is nil.
-func (at *AutoTrader) recordProtectionIntent(symbol, positionSide, mechanism string, quantity, triggerPrice float64) {
+func (at *AutoTrader) recordProtectionIntent(symbol, positionSide, mechanism string, quantity, triggerPrice float64, exchangeOrderID string) {
 	if at.store == nil || mechanism == "" || triggerPrice <= 0 {
 		return
 	}
 	if err := at.store.CloseIntent().RecordProtection(
-		at.id, at.exchangeID, market.Normalize(symbol), positionSide, mechanism, quantity, triggerPrice, at.cycleNumber, "",
+		at.id, at.exchangeID, market.Normalize(symbol), positionSide, mechanism, quantity, triggerPrice, at.cycleNumber, exchangeOrderID,
 	); err != nil {
-		logger.Warnf("⚠️ Failed to record protection intent for %s %s (%s @ %.6f): %v", symbol, positionSide, mechanism, triggerPrice, err)
+		logger.Warnf("⚠️ Failed to record protection intent for %s %s (%s @ %.6f, orderID=%s): %v", symbol, positionSide, mechanism, triggerPrice, exchangeOrderID, err)
 	}
 }
 
