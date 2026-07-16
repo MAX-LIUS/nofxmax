@@ -1883,6 +1883,18 @@ func normalizeAndRepairDecisions(decisions []Decision, positions []PositionInfo)
 		d.Action = strings.ToLower(strings.TrimSpace(d.Action))
 		d.Symbol = strings.ToUpper(strings.TrimSpace(d.Symbol))
 
+		// Empty action: the model emitted a decision object without a usable action
+		// (observed when JSON extraction misaligns or the field is omitted). Treat it
+		// as a safe no-op "wait" instead of letting it fail validation and trip SAFE
+		// MODE for the whole trader — mirrors the missing-JSON SafeFallback philosophy.
+		if d.Action == "" {
+			logger.Warnf("⚠️  Empty action for %s; normalizing to 'wait' (safe no-op) to avoid tripping SAFE MODE", firstNonEmptyString(d.Symbol, "<no-symbol>"))
+			d.Action = "wait"
+			if strings.TrimSpace(d.Reasoning) == "" {
+				d.Reasoning = "auto-repaired: model emitted empty action, defaulted to wait"
+			}
+		}
+
 		// Normalize invalid "close" action to "close_long" or "close_short" based on held position
 		if d.Action == "close" {
 			if side, exists := positionSideMap[d.Symbol]; exists {
