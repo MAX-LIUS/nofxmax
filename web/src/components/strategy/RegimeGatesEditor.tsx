@@ -30,6 +30,8 @@ type ParamKey =
   | 'min_conf'
   | 'threshold'
   | 'lookback'
+  | 'align_min'
+  | 'r2_min'
 
 interface ParamSpec {
   key: ParamKey
@@ -174,6 +176,47 @@ const CATALOG: CategorySpec[] = [
         step: 1,
         hintZh: '唐奇安通道回看根数，默认48。',
         hintEn: 'Donchian channel lookback bars. Default 48.',
+      },
+    ],
+  },
+  {
+    category: 'chart_trend',
+    titleZh: '图形化趋势 (Chart Trend)',
+    titleEn: 'Chart Trend',
+    descZh: '综合摆动对齐、回归R²、方向斜率判定图形化趋势，拦截逆趋势开仓。',
+    descEn:
+      'Full graphical trend using swing alignment, regression R², and directional slope. Blocks counter-trend opens.',
+    color: '#22D3EE',
+    params: [
+      {
+        key: 'slope_window',
+        labelZh: '斜率窗口',
+        labelEn: 'Slope window',
+        kind: 'number',
+        default: 30,
+        step: 1,
+        hintZh: '计算趋势的K线窗口，默认30。',
+        hintEn: 'Bars for trend calculation. Default 30.',
+      },
+      {
+        key: 'align_min',
+        labelZh: '对齐阈值',
+        labelEn: 'Align threshold',
+        kind: 'number',
+        default: 0.55,
+        step: 0.01,
+        hintZh: '摆动对齐最小阈值（0-1），默认0.55。',
+        hintEn: 'Minimum swing alignment ratio (0-1). Default 0.55.',
+      },
+      {
+        key: 'r2_min',
+        labelZh: 'R² 阈值',
+        labelEn: 'R² threshold',
+        kind: 'number',
+        default: 0.6,
+        step: 0.01,
+        hintZh: '线性回归R²最小值（0-1），默认0.60。',
+        hintEn: 'Minimum regression R² (0-1). Default 0.60.',
       },
     ],
   },

@@ -158,6 +158,7 @@ export type RegimeGateCategory =
   | 'chop_lowconf'
   | 'adx_weak'
   | 'donchian_counter'
+  | 'chart_trend'
 
 export type RegimeGateMode = 'shadow' | 'enforce'
 
@@ -168,11 +169,13 @@ export interface RegimeGateConfig {
   mode: RegimeGateMode
   enabled: boolean
   params?: {
-    slope_window?: number // counter_trend / trend_direction_only
+    slope_window?: number // counter_trend / trend_direction_only / chart_trend
     block_side?: 'LONG' | 'SHORT' // trend_direction_only
     min_conf?: number // chop_lowconf
     threshold?: number // adx_weak
     lookback?: number // donchian_counter
+    align_min?: number // chart_trend
+    r2_min?: number // chart_trend
   }
 }
 

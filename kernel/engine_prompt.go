@@ -91,60 +91,50 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 
 	// 2b. Trading principles
 	sb.WriteString("## Trading Principles\n\n")
-	sb.WriteString("- Seek trades with structural depth: entry near tested support/resistance, SL beyond a deeper level, TP at higher-TF structure\n")
-	sb.WriteString("- Every open must justify: which structural level, where invalidation is, where the target is\n")
-	sb.WriteString("- The backend has quantitative entry gates (ATR distance, RR ratio, regime alignment, confidence floor) that will reject trades not meeting thresholds — focus on finding high-quality setups rather than worrying about exact numbers\n\n")
+	sb.WriteString("- Seek structural depth: entry near a tested support/resistance level, invalidation beyond a deeper level, target at higher-TF structure.\n")
+	sb.WriteString("- Every open must name three things: the structural level, where invalidation sits, where the target sits.\n")
+	sb.WriteString("- Backend quantitative gates (ATR distance, RR ratio, regime alignment, confidence floor) reject trades below threshold. Focus on setup quality, not on guessing exact numbers.\n\n")
 
 	// 2c. Trigger gate — the most critical entry quality filter
 	sb.WriteString("## Entry Trigger Gate (MANDATORY)\n\n")
-	sb.WriteString("Open only if thesis + trigger + invalidation + target are ALL clear.\n\n")
-	sb.WriteString("**Long trigger must be one of:**\n")
-	sb.WriteString("- `support_rejection_confirmed`: price touches/enters support zone, then 15m/1h candle closes back above it\n")
-	sb.WriteString("- `resistance_breakout_retest_successful`: price breaks resistance, pulls back to it, holds and closes above\n")
-	sb.WriteString("- `higher_low_breakout_confirmed`: price forms higher low above support, then breaks trigger candle high\n\n")
-	sb.WriteString("**Short trigger must be one of:**\n")
-	sb.WriteString("- `resistance_rejection_confirmed`: price touches/enters resistance zone, then 15m/1h candle closes back below it\n")
-	sb.WriteString("- `support_breakdown_retest_failed`: price breaks support, pulls back to it, fails and closes below\n")
-	sb.WriteString("- `lower_high_breakdown_confirmed`: price forms lower high below resistance, then breaks trigger candle low\n\n")
-	sb.WriteString("**HARD RULES:**\n")
-	sb.WriteString("- \"Near support/resistance\" is NOT a trigger. Price moving toward a level is NOT a trigger.\n")
-	sb.WriteString("- A trigger REQUIRES multi-candle confirmation. ONE candle touching a level and closing on the correct side is NOT enough. You need:\n")
-	sb.WriteString("  - At least 2 consecutive closed 15m candles confirming direction AFTER the level interaction, OR\n")
-	sb.WriteString("  - 1 closed 1h candle with clear rejection (wick ≥ 50% of body on the rejection side), OR\n")
-	sb.WriteString("  - A higher-low / lower-high PATTERN (requires 3+ candles to form)\n")
-	sb.WriteString("- **FAKE RETEST TRAP (most common loss pattern):** Price arrives at a level, ONE candle closes on the 'correct' side, then reverses. To avoid this:\n")
-	sb.WriteString("  - After a level touch, the NEXT candle must ALSO close in your direction (not just the touch candle)\n")
-	sb.WriteString("  - If the candle after the touch candle has a body that moves AGAINST your direction, the trigger is INVALID — output wait\n")
-	sb.WriteString("  - Example: price touches support at 100, 15m candle closes at 100.5 (above support). If the NEXT 15m candle closes at 100.3 (lower), this is NOT confirmed — it's a potential fake bounce\n")
-	sb.WriteString("- If price is still approaching a level (has not yet touched it and been rejected), output wait.\n")
-	sb.WriteString("- If trigger is missing or unclear, output wait.\n")
-	sb.WriteString("- You MUST include `trigger_type` field in every open decision (one of the 6 types above). Entry without trigger_type will be BLOCKED by the system.\n")
-	sb.WriteString("- Only reference structural ZONES provided in the market data. Do not invent levels that are not listed.\n")
-	sb.WriteString("- A single wick rejection candle is only valid if the wick is ≥ 1.5x the body size AND the close is decisively on the correct side of the level (not just barely above/below).\n\n")
+	sb.WriteString("Open only when thesis + trigger + invalidation + target are ALL clear. Longs and shorts are held to the SAME evidential bar — neither direction is preferred.\n\n")
+	sb.WriteString("`trigger_type` is REQUIRED on every open. It must be one of these 6 (3 long / 3 short mirror pairs):\n\n")
+	sb.WriteString("| Long trigger | Short mirror |\n")
+	sb.WriteString("|--------------|--------------|\n")
+	sb.WriteString("| `support_rejection_confirmed`: touches/enters support, then 15m/1h closes back above | `resistance_rejection_confirmed`: touches/enters resistance, then 15m/1h closes back below |\n")
+	sb.WriteString("| `resistance_breakout_retest_successful`: breaks resistance, pulls back, holds and closes above | `support_breakdown_retest_failed`: breaks support, pulls back, fails and closes below |\n")
+	sb.WriteString("| `higher_low_breakout_confirmed`: forms higher low above support, then breaks trigger-candle high | `lower_high_breakdown_confirmed`: forms lower high below resistance, then breaks trigger-candle low |\n\n")
+	sb.WriteString("**Confirmation rules (apply identically to long and short):**\n")
+	sb.WriteString("- Proximity is NOT a trigger. \"Near\" a level, or price moving toward a level, does not qualify — output wait.\n")
+	sb.WriteString("- A trigger needs multi-candle confirmation, ONE of: (a) 2 consecutive closed 15m candles confirming direction after the level interaction; (b) 1 closed 1h candle with clear rejection (wick ≥ 50% of body on the rejection side); (c) a higher-low / lower-high pattern (3+ candles).\n")
+	sb.WriteString("- FAKE RETEST TRAP (top loss pattern, both directions): one candle closes on the 'correct' side, then reverses. The candle AFTER the touch candle must also close in your direction. If it closes against you, the trigger is INVALID — output wait.\n")
+	sb.WriteString("- A single wick-rejection candle counts only if the wick is ≥ 1.5× the body AND the close is decisively (not marginally) on the correct side.\n")
+	sb.WriteString("- Only reference structural zones present in the market data. Do not invent levels. If the trigger is missing or unclear, output wait.\n\n")
 
 	// 2d. Trend Phase Discipline — the most important strategic principle
 	sb.WriteString("## Trend Phase Discipline (CRITICAL)\n\n")
-	sb.WriteString("**Your #1 priority: trade WITH the trend, at the RIGHT TIME.**\n\n")
-	sb.WriteString("Trend direction alone is not enough — you must also assess WHERE in the trend lifecycle you are.\n\n")
+	sb.WriteString("Trade WITH the trend, at the RIGHT phase. Direction alone is insufficient — you must also locate where in the trend lifecycle price is.\n\n")
+	sb.WriteString("### Step 1 — Direction (symmetric):\n")
+	sb.WriteString("- 4h change > +1% AND price > EMA20 → UP: take LONG setups only.\n")
+	sb.WriteString("- 4h change < -1% AND price < EMA20 → DOWN: take SHORT setups only.\n")
+	sb.WriteString("- 4h change within ±1% → range: both directions valid, only at structural edges.\n\n")
+	sb.WriteString("### Step 2 — Phase (from `trend_phase` field):\n")
+	sb.WriteString("| Phase | Condition | Action |\n")
+	sb.WriteString("|-------|-----------|--------|\n")
+	sb.WriteString("| establishment | 4h 0.5-1.5%, EMA20 dev <0.8% | Best entry window. 15m trigger OK. |\n")
+	sb.WriteString("| continuation | 4h 1.5-2.5%, EMA20 dev 0.8-1.8% | Enter only on pullback to within 0.5% of EMA20. Require 1h trigger. |\n")
+	sb.WriteString("| extension | 4h >2.5% or EMA20 dev >1.8% | DO NOT open trend-following. Wait for pullback to EMA20. |\n")
+	sb.WriteString("| exhaustion | 4h >3.5% or momentum decay <0.15 | DO NOT open. Output wait. |\n\n")
+	sb.WriteString("Backend BLOCKS extension/exhaustion entries — do not spend analysis on them. In extension/exhaustion a small-TF bounce/rejection is noise, not a trigger.\n\n")
 
-	sb.WriteString("### Step 1: Determine Direction\n")
-	sb.WriteString("- If 4h change > +1% AND price > EMA20: trend is UP → only LONG setups\n")
-	sb.WriteString("- If 4h change < -1% AND price < EMA20: trend is DOWN → only SHORT setups\n")
-	sb.WriteString("- If 4h change between -1% and +1%: range/balanced → both directions valid at structural edges\n\n")
-
-	sb.WriteString("### Step 2: Check Trend Phase (from `trend_phase` field in market data)\n\n")
-	sb.WriteString("| Phase | Condition | What to do |\n")
-	sb.WriteString("|-------|-----------|------------|\n")
-	sb.WriteString("| **establishment** | 4h 0.5-1.5%, EMA20 deviation <0.8% | Best entry window. Normal trend-following with 15m trigger OK |\n")
-	sb.WriteString("| **continuation** | 4h 1.5-2.5%, EMA20 deviation 0.8-1.8% | Only enter on pullback to EMA20. Require 1h trigger (15m not enough) |\n")
-	sb.WriteString("| **extension** | 4h >2.5% or EMA20 deviation >1.8% | **DO NOT open trend-following positions.** Wait for pullback to EMA20 |\n")
-	sb.WriteString("| **exhaustion** | 4h >3.5% or momentum decay <0.15 | **DO NOT open ANY position.** Output wait |\n\n")
-
-	sb.WriteString("### Key Rules:\n")
-	sb.WriteString("- In **extension/exhaustion**: a 15m support bounce is NOT a valid entry — it's noise within an overextended move\n")
-	sb.WriteString("- In **continuation**: only enter if price has pulled back to within 0.5% of EMA20\n")
-	sb.WriteString("- The backend WILL BLOCK extension/exhaustion entries — don't waste analysis on them\n")
-	sb.WriteString("- Counter-trend trades are FORBIDDEN unless: 4h+ structural level + exhaustion evidence + completed candle confirmation\n\n")
+	// 2e. Position-in-range discipline — symmetric guardrail against chasing extremes
+	sb.WriteString("## Position-In-Range Discipline (symmetric anti-chase guardrail)\n\n")
+	sb.WriteString("Where price sits inside its recent range gates which \"dip/bounce\" theses are legitimate. This rule is fully symmetric:\n")
+	sb.WriteString("- When price is in the UPPER part of its recent range (near range highs), you MUST NOT open long on a \"pullback to support / dip-buy\" thesis — near the high there is no dip to buy, that is chasing. A long there needs a genuine breakout-retest trigger, not a support-bounce story.\n")
+	sb.WriteString("- When price is in the LOWER part of its recent range (near range lows), you MUST NOT open short on a \"rejection at resistance / bounce-sell\" thesis — near the low there is no bounce to fade, that is chasing down. A short there needs a genuine breakdown-retest trigger, not a resistance-rejection story.\n")
+	sb.WriteString("- A support-bounce long is only valid when price is actually in the lower/mid range; a resistance-rejection short is only valid when price is actually in the upper/mid range. Never relabel an extreme as its opposite to justify an entry.\n")
+	sb.WriteString("- Counter-trend trades are FORBIDDEN unless ALL hold: 4h+ structural level + exhaustion evidence + completed-candle confirmation. This bar is identical for counter-trend longs and counter-trend shorts.\n")
+	sb.WriteString("- When no legitimate setup exists, `wait` is a fully correct, encouraged answer for either direction.\n\n")
 
 	// 3. Hard constraints (risk control)
 	btcEthPosValueRatio := riskControl.BTCETHMaxPositionValueRatio
@@ -221,22 +211,6 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 		sb.WriteString(fmt.Sprintf("\nFeel free to use any effective analysis method, but **confidence ≥ %d** required to open positions; avoid low-quality behaviors such as single indicators, contradictory signals, sideways consolidation, reopening immediately after closing, etc.\n\n", riskControl.MinConfidence))
 	}
 
-	// Structural analysis requirements
-	sb.WriteString("# 🏗️ Structural Analysis Requirements\n\n")
-	sb.WriteString("You receive auto-detected support/resistance levels and Fibonacci retracements for EACH timeframe in the market data.\n")
-	sb.WriteString("Higher timeframes (4h, 1d) provide stronger structural levels; lower timeframes (15m) provide precision.\n\n")
-
-	// Backend entry gates explanation
-	sb.WriteString("## Backend Entry Gates (for your awareness)\n\n")
-	sb.WriteString("The system validates your decisions before execution. Understanding these helps you avoid wasted analysis:\n")
-	sb.WriteString("- **Regime alignment**: open direction must align with detected trend regime\n")
-	sb.WriteString("- **ATR-relative distances**: SL and TP must exceed minimum ATR multiples (configurable per strategy)\n")
-	sb.WriteString("- **Risk-reward ratio**: effective RR must meet minimum threshold\n")
-	sb.WriteString("- **Confidence floor**: varies by regime (higher for squeeze/crowded scenarios, higher for shorts in non-downtrend)\n")
-	sb.WriteString("- **Funding rate cap**: extreme funding rates block new entries\n")
-	sb.WriteString("- **Structural fit**: setup_type must match regime's allowed setups\n")
-	sb.WriteString("If your trade is rejected, it appears in the decision log with the specific reason.\n\n")
-
 	entryGate := e.config.EntryStructure.EntryGate
 	gateDefaults := entryGate.WithDefaults()
 	minSLATR := entryGate.MinSLDistanceATRMul
@@ -252,38 +226,46 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	maxTargetATR := gateDefaults.MaxTargetATRMul            // reachable target ceiling (default 5.0)
 	realisticRiskMul := gateDefaults.RealisticTargetRiskMul // profit-lock tier (default 0.8× risk)
 
-	sb.WriteString("## How to use multi-timeframe structural data:\n\n")
-	sb.WriteString("1. **Entry positioning**: Open positions near support (long) or resistance (short), not in no-man's land\n")
-	sb.WriteString("2. **Protection planning — use multi-timeframe structure**:\n")
-	sb.WriteString(fmt.Sprintf("   - **Stop Loss**: Place beyond the nearest structural invalidation on the PRIMARY timeframe. The backend requires SL distance >= %.1f× ATR14 (base %.1f + volatility buffer %.1f). Place SL at structure + enough ATR buffer to survive wicks/stop-hunts. Ladder SL tiers: use distinct prices around the same structure with ≥75%% close protection near it.\n", effectiveMinSL, minSLATR, volBuffer))
-	sb.WriteString(fmt.Sprintf("   - **Take Profit / Ladder TP**: Primary TP target MUST come from a HIGHER timeframe structural level (resistance for longs, support for shorts). If the nearest higher-TF target is < %.1f× ATR14 from entry, the setup is too crowded — skip it. Lower timeframe levels are only for partial exits (ladder intermediate tiers), never for the main target.\n", minRewardATR))
-	sb.WriteString(fmt.Sprintf("   - **REACHABLE first_target (CRITICAL, data-driven)**: Keep `risk_reward.first_target` within %.1f× ATR14 of entry. Backtest of 174 far-target trades: 54%% actually ran ≥1× risk in profit but reverted before an unreachable target and gave it all back (net -35%%). Targets beyond %.1f× ATR are hit only ~12%% of the time. If the structural thesis points to a level farther than %.1f× ATR, DO NOT set first_target there — set first_target at the reachable ceiling and keep the far level only as an OUTER runner ladder tier. The backend will otherwise cap an over-far first_target to %.1f× ATR and recompute RR.\n", maxTargetATR, maxTargetATR, maxTargetATR, maxTargetATR))
-	sb.WriteString(fmt.Sprintf("   - **Bank profit early — first lock tier at ~%.1f× risk (data-driven)**: Set your FIRST ladder take-profit / break-even tier at roughly %.1f× the stop-risk distance (floored at %.1f× ATR14 so it clears the noise band). 72%% of trades that later reverted had already reached 0.5× risk and 54%% reached 1× risk in profit — a first lock at ~%.1f× risk banks that gain before mean-reversion. Keep 20-35%% as a runner to the higher-TF structural target. This lets you keep big winners while no longer donating the reverting ones back to break-even/SL.\n", realisticRiskMul, realisticRiskMul, minRewardATR, realisticRiskMul))
-	sb.WriteString("   - **Drawdown rules**: Each profit stage's min_profit_pct should correspond to a structural level distance from entry. First stage should lock near the ~0.8× risk / first reachable structure (generous max_drawdown_pct); outer stage protects the runner against higher-TF structure. max_drawdown_pct is percentage-of-peak-profit giveback (exchange trailing semantics), e.g. 55 means allow 55% of peak profit to be given back before closing.\n")
-	sb.WriteString(fmt.Sprintf("   - **Break-even trigger**: Move stop to break-even once price reaches the first profit-lock tier (~%.1f× risk / first structural level past entry), with offset beyond the nearest support/resistance so normal wicks don't trip it.\n", realisticRiskMul))
-	sb.WriteString(fmt.Sprintf("3. **Volatility buffer (CRITICAL)**: SL must survive normal wicks. Backend enforces minimum %.1f× ATR14 total SL distance. If your structural SL is closer than this, the system will auto-widen it. Design entries where invalidation is naturally >= %.1f× ATR from entry.\n", effectiveMinSL, effectiveMinSL))
-	sb.WriteString("4. **Cross-validation**: Auto-detected levels are hints, not gospel. Confirm with volume profile, bounce count, multi-TF alignment, and confidence score. Prefer levels with confidence >= 60 and multi_tf_count >= 1. Discard levels with confidence < 30.\n")
-	sb.WriteString("5. **selected_levels in output (REQUIRED for open)**: Include a `selected_levels` array listing every structural level you chose for protection/entry. For each, state basis_type (structural/atr_based/percentage/fibonacci) and a brief reason. If input SL/TP candidates have low quality, use ATR-based alternatives and mark basis_type accordingly.\n")
-	sb.WriteString("6. **structural_key_levels in output**: When opening, include a `structural_key_levels` array listing the structural levels that influenced your entry/TP/SL/drawdown decisions, with the timeframe each came from\n")
-	sb.WriteString("6. **Higher-timeframe runner context**: If `timeframe_context.higher` is present, include `higher_timeframe_anchors` or `timeframe_structures` with explicit higher-TF price anchors. Outer drawdown/runner stages must cite those higher-TF anchors, not only primary-TF resistance/support text.\n")
-	sb.WriteString(fmt.Sprintf("7. **Target distance sanity check**: first_target can be the nearest structural level OR a higher-timeframe level if the nearest one is too close — but it MUST stay within the reachable ceiling (%.1f× ATR14). When calculating RR, use the most reasonable REACHABLE target the thesis supports. Bounds: first_target distance >= 1.2× stop_loss distance AND <= %.1f× ATR14. Park any farther structural objective as an outer runner ladder tier, not as first_target.\n\n", maxTargetATR, maxTargetATR))
-	sb.WriteString("## Protection Plan Requirements (when mode = ai):\n\n")
-	sb.WriteString("### For ladder mode=ai:\n")
-	sb.WriteString("- Each ladder TP target MUST correspond to a nearby structural level (support/resistance/fibonacci) from the relevant timeframe\n")
-	sb.WriteString("- Include a `structural_anchor` field in each ladder rule explaining which level + timeframe it references\n")
-	sb.WriteString("- Position sizing per tier should reflect distance to the structural target and confidence\n")
-	sb.WriteString("- SL placement: beyond the nearest invalidation level on primary TF, plus ATR buffer to survive wicks; ladder SL tiers must be distinct prices around the same nearest primary structure, with >=75% close protection and any far tier <=25%.\n")
-	sb.WriteString("- DO NOT use arbitrary round percentages (like 1%%, 2%%, 3%%) - use market structure\n\n")
-	sb.WriteString("### For drawdown mode=ai:\n")
-	sb.WriteString("- Each drawdown rule represents a profit protection stage. Design stages around structural targets:\n")
-	sb.WriteString("- You MUST output at least 2 `drawdown_rules` for every drawdown/combined protection plan:\n")
-	sb.WriteString("  - Stage 1 = lock profit near the first primary-timeframe structure, generous `max_drawdown_pct`\n")
-	sb.WriteString("  - Stage 2+ = outer runner/trend protection anchored to higher-timeframe structure\n")
-	sb.WriteString("- The outer runner stage should use primary/higher timeframe trend structure and ATR, not lower-timeframe noise; allow normal retests/wicks so profitable positions can keep running\n")
-	sb.WriteString("- max_drawdown_pct should account for ATR volatility — too tight a tolerance triggers on normal retracements\n")
-	sb.WriteString("- Include `reason_anchor` field referencing the specific structural level + timeframe that justifies each stage\n")
-	sb.WriteString("- Use the exact field name `close_ratio_pct` in drawdown_rules; do NOT use `close_ratio`\n")
-	sb.WriteString("- DO NOT use arbitrary round percentages — derive from actual structural distances\n\n")
+	// Structural analysis requirements — authoritative constants defined ONCE here,
+	// referenced by name later. Do not restate the numbers elsewhere.
+	sb.WriteString("# 🏗️ Structural Analysis & Protection (authoritative definitions)\n\n")
+	sb.WriteString("You receive auto-detected support/resistance levels and Fibonacci retracements per timeframe. Higher TFs (4h,1d) give stronger levels; lower TFs (15m) give precision. Levels are hints: prefer confidence>=60 and multi_tf_count>=1, discard confidence<30. Only reference levels present in the market data — never invent levels.\n\n")
+
+	sb.WriteString("## Key constants (all planning references these)\n")
+	sb.WriteString(fmt.Sprintf("- **MIN_SL_DIST = %.1f× ATR14** (base %.1f + volatility buffer %.1f). Every stop must sit this far from entry so normal wicks/stop-hunts don't trip it. Closer stops are auto-widened by the backend.\n", effectiveMinSL, minSLATR, volBuffer))
+	sb.WriteString(fmt.Sprintf("- **TARGET_CEILING = %.1f× ATR14**. `first_target` must stay within this. Targets beyond it hit only ~12%% of the time; the backend caps an over-far first_target to this and recomputes RR. Park farther objectives as an OUTER runner tier, not as first_target.\n", maxTargetATR))
+	sb.WriteString(fmt.Sprintf("- **MIN_REWARD = %.1f× ATR14**. The main target must come from a HIGHER-TF level and be at least this far; if the nearest higher-TF target is closer, the setup is too crowded — wait.\n", minRewardATR))
+	sb.WriteString(fmt.Sprintf("- **FIRST_LOCK = ~%.1f× risk** (floored at MIN_REWARD). Data: 72%% of reverting trades had reached 0.5× risk and 54%% reached 1× risk before giving it back. Lock the first profit tier here, keep 20-35%% as a runner to the higher-TF target.\n", realisticRiskMul))
+	sb.WriteString("- **first_target distance must be >= 1.2× the stop distance AND <= TARGET_CEILING.**\n\n")
+
+	sb.WriteString("## Placement rules (symmetric long/short)\n")
+	sb.WriteString("- **Entry**: near tested support (long) / resistance (short), never in no-man's land. Direction must satisfy: long → invalidation < entry < first_target; short → invalidation > entry > first_target.\n")
+	sb.WriteString("- **Stop loss**: beyond the nearest primary-TF invalidation (support for long, resistance for short) + buffer so total distance >= MIN_SL_DIST. Do not place naked on a crowded level — invalidation requires an effective break, not a one-tick touch.\n")
+	sb.WriteString("- **Take profit**: main target from a higher-TF level (resistance for long, support for short), within [MIN_REWARD, TARGET_CEILING]. Lower-TF levels are for partial/intermediate tiers only.\n")
+	sb.WriteString("- **Anchoring**: derive all prices from actual structural distances + ATR buffer. Never use arbitrary round percentages (1%/2%/3%).\n\n")
+
+	sb.WriteString("## Required output arrays for every open\n")
+	sb.WriteString("- `selected_levels`: every level you used for SL/TP/entry, each with price, type, timeframe, source, used_for, basis_type (structural/atr_based/percentage/fibonacci), brief reason. If no structural level fits, use atr_based/percentage and say why.\n")
+	sb.WriteString("- `structural_key_levels`: the levels that drove entry/TP/SL/drawdown, each with price, type, timeframe, source, used_for. Must be consistent with key_levels.support/resistance (don't leave them empty).\n")
+	sb.WriteString("- If `timeframe_context.higher` is present, include `higher_timeframe_anchors` (or `timeframe_structures`) with explicit higher-TF price anchors; outer runner/drawdown stages must cite those, not only primary-TF text.\n\n")
+
+	sb.WriteString("## Protection plan by mode (when mode = ai)\n")
+	sb.WriteString("- **ladder**: 2-3 tiers. Each TP tier maps to a structural level; each rule has `structural_anchor` (level + timeframe) + a volatility buffer. All ladder SL tiers use the SAME nearest primary-TF invalidation structure at distinct inside/outside-buffer prices (>=75% close near it, any farther tier <=25%). Ladder[0]/[1] TP within 0.5% of a structural level; Ladder[2] may extend but its close ratio <=20%.\n")
+	sb.WriteString("- **drawdown**: >=2 stages. Stage 1 locks partial profit near the first primary-TF structure at FIRST_LOCK with generous `max_drawdown_pct`; Stage 2+ protects the runner against higher-TF structure. `max_drawdown_pct` is percent-of-peak-profit giveback (trailing semantics), sized for ATR so normal retests don't trip it. Each stage needs `reason_anchor` (level + timeframe). Use exact field name `close_ratio_pct` (never `close_ratio`).\n")
+	sb.WriteString(fmt.Sprintf("- **break_even**: trigger at FIRST_LOCK (~%.1f× risk / first structure past entry), offset beyond the nearest support/resistance + ATR buffer; cite the level in `break_even_reason_anchor`.\n\n", realisticRiskMul))
+	if e.config.Protection.DrawdownTakeProfit.Enabled {
+		sb.WriteString("- If Drawdown Take Profit is enabled in strategy config, your reasoning must explicitly mention drawdown, trailing, or profit-protection ownership.\n")
+	}
+	if e.config.Protection.BreakEvenStop.Enabled {
+		sb.WriteString("- If Break-even Stop is enabled in strategy config (`mode=break_even`, fields `break_even_trigger_mode/value/offset`), your reasoning must mention break-even or acknowledge that an additional stop layer exists after profit trigger.\n")
+	}
+	if e.config.Protection.DrawdownTakeProfit.Enabled || e.config.Protection.BreakEvenStop.Enabled {
+		sb.WriteString("\n")
+	}
+
+	// Backend entry gates explanation — awareness only, kept short
+	sb.WriteString("## Backend gates (awareness — rejected trades appear in the log with a reason)\n")
+	sb.WriteString("Regime alignment (direction must match regime) · ATR-relative SL/TP distances · min RR · confidence floor (higher for squeeze/crowded, and for shorts in non-downtrend / longs in non-uptrend) · funding-rate cap · setup_type must match regime's allowed setups.\n\n")
 
 	// Dynamic: inject hard requirement when drawdown is actually in AI mode
 	prot := e.config.Protection
@@ -310,6 +292,7 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 			sb.WriteString("- You MUST include `protection_plan` with `mode=\"drawdown\"` and at least 2 `drawdown_rules` for every open_long/open_short decision\n")
 			sb.WriteString("- Rule 1 should partially lock profit near the first primary-timeframe structural target; rule 2+ should protect a runner using primary/higher timeframe structure and ATR tolerance\n")
 			sb.WriteString("- Omitting `drawdown_rules` or providing only one drawdown stage will cause the trade to be rejected\n")
+			sb.WriteString("- Your reasoning must explicitly claim drawdown, trailing, or profit-protection ownership\n")
 			if prot.FullTPSL.Enabled && prot.FullTPSL.Mode == store.ProtectionModeAI {
 				sb.WriteString("- Combined ownership mode is active: drawdown AI owns profit-taking / profit-protection, while full AI remains strategy-level stop-loss / fallback stop protection\n")
 				sb.WriteString("- In this combined mode, DO NOT output `mode=full` in the AI decision. Output only drawdown ownership fields and let strategy-level full stop protection merge at execution time\n")
@@ -322,11 +305,40 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 			sb.WriteString("\n")
 		}
 	}
+
+	// Per-leg MANUAL notice: any protection leg configured in manual mode is owned
+	// by the strategy template (resolved from ATR/structure at execution time), NOT
+	// by the AI. Without this notice the AI — seeing the generic "when mode = ai"
+	// guidance above — emits a half-baked protection_plan that is silently discarded
+	// at execution (manual legs never defer to it) and only pollutes the record.
+	// This block is emitted whenever at least one of ladder/drawdown/full-TPSL is in
+	// manual mode, telling the AI exactly which legs to leave alone while STILL
+	// requiring its structural SL/TP + R-multiple opinion at the top level.
+	ladderManual := prot.LadderTPSL.Enabled && prot.LadderTPSL.Mode != store.ProtectionModeAI
+	drawdownManual := prot.DrawdownTakeProfit.Enabled && prot.DrawdownTakeProfit.Mode != store.ProtectionModeAI && prot.DrawdownTakeProfit.Mode != store.ProtectionModeDisabled
+	fullManual := prot.FullTPSL.Enabled && prot.FullTPSL.Mode != store.ProtectionModeAI
+	if ladderManual || drawdownManual || fullManual {
+		sb.WriteString("### ⚠️ ACTIVE: Some protection legs are MANUALLY managed by the strategy\n")
+		sb.WriteString("- The legs below are placed by the strategy's manual template (resolved from ATR + structure at open); you do NOT own them.\n")
+		if ladderManual {
+			sb.WriteString(fmt.Sprintf("  - Ladder TP/SL: MANUAL (%d template rule(s)). Do NOT output `ladder_rules` in protection_plan — they will be ignored.\n", len(prot.LadderTPSL.Rules)))
+		}
+		if drawdownManual {
+			sb.WriteString(fmt.Sprintf("  - Drawdown take-profit: MANUAL (%d template rule(s)). Do NOT output `drawdown_rules` — they will be ignored.\n", len(prot.DrawdownTakeProfit.Rules)))
+		}
+		if fullManual {
+			sb.WriteString("  - Full TP/SL: MANUAL. Do NOT output `mode=full` tp/sl in protection_plan — they will be ignored.\n")
+		}
+		sb.WriteString("- For a fully-manual protection stack, OMIT `protection_plan` entirely (do not emit an empty or partial plan).\n")
+		sb.WriteString("- REGARDLESS of manual legs, you MUST STILL provide, at the decision top level, your structural opinion: `stop_loss` (nearest primary-TF invalidation + ATR buffer) and `take_profit` (higher-TF structural target), plus `selected_levels`/`structural_key_levels` and the R multiple in `risk_reward`. These drive entry-quality gating and the manual-vs-structural deviation panel even though the manual template executes the actual orders.\n\n")
+	}
+
 	if prot.BreakEvenStop.Enabled {
 		if prot.BreakEvenStop.Mode == store.ProtectionModeAI {
 			sb.WriteString("### ⚠️ ACTIVE: Break-even Stop is enabled in AI mode for this strategy\n")
-			sb.WriteString("- You MUST include break_even_trigger_mode, break_even_trigger_value, and break_even_offset_pct in protection_plan for every open action\n")
+			sb.WriteString("- Use `mode=break_even` (or include break-even fields in your combined plan) and include break_even_trigger_mode/value/offset in protection_plan for every open action\n")
 			sb.WriteString(fmt.Sprintf("  - Manual fallback/reference: trigger_mode=%s, trigger_value=%.1f, offset=%.2f%%\n", prot.BreakEvenStop.TriggerMode, prot.BreakEvenStop.TriggerValue, prot.BreakEvenStop.OffsetPct))
+			sb.WriteString("- Your reasoning must mention break-even or acknowledge that an additional stop layer exists after the profit trigger\n")
 		} else {
 			sb.WriteString("### ⚠️ ACTIVE: Break-even Stop is enabled in manual mode for this strategy\n")
 			sb.WriteString("- Break-even uses the strategy manual trigger/offset; do NOT invent AI break-even values unless another AI protection route needs rationale text\n")
@@ -409,82 +421,78 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	}
 
 	// 7. Output format
-	sb.WriteString("# Output Format — HARD SEPARATION CONTRACT\n\n")
-	sb.WriteString("You MUST separate analysis from executable JSON exactly like this:\n")
-	sb.WriteString("- `<reasoning>`: concise analysis only. No JSON required here.\n")
-	sb.WriteString("- `<decision>`: executable JSON array only. No prose, no markdown fence, no comments, no formulas.\n")
-	sb.WriteString("If there is no valid trade, output `<decision>[]</decision>`.\n\n")
-	sb.WriteString("## Token budget rules\n\n")
-	sb.WriteString("- **wait/hold**: <reasoning> MUST be ≤3 sentences (regime + why no setup). <decision> MUST be `[]` or minimal `[{\"symbol\":\"X\",\"action\":\"wait\"}]`. Do NOT output protection/entry fields. Do NOT list every coin individually — one combined summary is enough.\n")
-	sb.WriteString("- **open/close**: <reasoning> should be concise (≤5 sentences). <decision> MUST include full schema with `entry_protection_rationale` and `protection_plan`.\n")
-	sb.WriteString("- Minimize output tokens. Every extra token costs money and time.\n\n")
-	sb.WriteString("<reasoning>\n")
-	sb.WriteString("Concise: regime, key observation, action rationale. Max 3 sentences for wait/hold.\n")
-	sb.WriteString("</reasoning>\n")
-	sb.WriteString("<decision>\n")
-	sb.WriteString("[\n")
+	sb.WriteString("# Output Format — HARD OUTPUT CONTRACT\n\n")
+	sb.WriteString("Output EXACTLY two blocks, nothing before or after:\n")
+	sb.WriteString("- `<reasoning>`: prose analysis only, no JSON. wait/hold ≤3 sentences; open/close ≤5 sentences. One combined summary for coins you skip — do NOT list every coin.\n")
+	sb.WriteString("- `<decision>`: ONE JSON array only. No prose, no markdown fences, no comments, no trailing text. If no trade: `<decision>[]</decision>`.\n\n")
+
+	sb.WriteString("## JSON validity rules (violations are rejected by the parser — read carefully)\n")
+	sb.WriteString("1. `<decision>` is an ARRAY whose elements are ALL objects `{...}`. Never put a bare string, number, range, or symbol as an element (e.g. `[B]`, `[60.9-61.4]` are INVALID).\n")
+	sb.WriteString("2. Standard JSON only: double-quoted keys/strings, comma between elements, no trailing comma, no comment, no `//`. Do not append a second array or stray token after the closing `]`.\n")
+	sb.WriteString("3. **STRICT JSON NUMBER RULE**: Numeric fields = plain digits with an optional single decimal point. Never use thousands separators, spaces, or localized punctuation, and NEVER put a formula. Correct: `97687.05`, `2293.23`. Wrong: `97,687.05`, `2 293`, `3000*0.01`. Comma-formatted prices may appear ONLY inside quoted natural-language strings.\n")
+	sb.WriteString("4. ANTI-TRUNCATION (top cause of rejected outputs): the whole array must be complete and closed within the token budget. If you are running low on budget, emit FEWER complete decision objects rather than a half-written one. NEVER stop mid-object or mid-array. A missing closing `}`/`]` voids the entire response.\n\n")
+
+	sb.WriteString("## `action` — CLOSED enum (any other value is rejected)\n")
+	sb.WriteString("Allowed values, EXACTLY these six: `open_long` | `open_short` | `close_long` | `close_short` | `hold` | `wait`.\n")
+	sb.WriteString("Do NOT invent variants. Map your intent to the enum:\n")
+	sb.WriteString("- want to keep a position, maybe tighten/trail its stop → `hold` (describe the stop change in reasoning; the protection layer owns the stop)\n")
+	sb.WriteString("- want to reduce/partially exit → `close_long`/`close_short` (partial size is expressed via position/close fields, NOT via a new action word)\n")
+	sb.WriteString("- INVALID examples seen in logs, never output them: `close`, `hold_tighten`, `hold_tighten_stop`, `hold_raise_stop`, `hold_position`, `hold_with_protection`, `update_stop`, `adjust_stop`, `partial_close`.\n\n")
+
 	examplePositionSize := accountEquity * btcEthPosValueRatio
-	sb.WriteString(fmt.Sprintf("  {\"symbol\":\"BTCUSDT\",\"action\":\"open_short\",\"leverage\":%d,\"position_size_usd\":%.0f,\"stop_loss\":97000,\"take_profit\":91000,\"confidence\":85,\"risk_usd\":300,\"entry_protection_rationale\":{\"timeframe_context\":{\"primary\":\"1h\",\"lower\":[\"15m\"],\"higher\":[\"4h\"]},\"risk_reward\":{\"entry\":95000,\"invalidation\":97000,\"first_target\":91000,\"gross_estimated_rr\":2.0,\"net_estimated_rr\":1.8,\"min_required_rr\":%.1f,\"passed\":true},\"key_levels\":{\"support\":[91000],\"resistance\":[97000]},\"anchors\":[{\"type\":\"resistance\",\"timeframe\":\"1h\",\"price\":96000,\"reason\":\"primary rejection\"}]},\"protection_plan\":{\"mode\":\"combined\",\"ladder_rules\":[{\"take_profit_price\":93000,\"take_profit_close_ratio_pct\":35,\"stop_loss_price\":97000,\"stop_loss_close_ratio_pct\":50,\"structural_anchor\":\"1h support target / 1h invalidation resistance with ATR buffer\",\"volatility_buffer_reason\":\"ATR/wick buffer applied\"},{\"take_profit_price\":91000,\"take_profit_close_ratio_pct\":35,\"stop_loss_price\":98200,\"stop_loss_close_ratio_pct\":50,\"structural_anchor\":\"4h support extension / higher invalidation with ATR buffer\",\"volatility_buffer_reason\":\"ATR/wick buffer applied\"}],\"drawdown_rules\":[{\"timeframe\":\"1h\",\"min_profit_pct\":0.75,\"max_drawdown_pct\":60,\"close_ratio_pct\":65,\"runner_keep_pct\":35,\"stage_name\":\"partial_profit_lock\",\"reason_anchor\":\"1h first structural target (inside of nearest structure)\"},{\"timeframe\":\"4h\",\"min_profit_pct\":1.4,\"max_drawdown_pct\":55,\"close_ratio_pct\":80,\"runner_keep_pct\":20,\"stage_name\":\"runner_extension\",\"reason_anchor\":\"4h runner structure\"}]}}},\n", riskControl.BTCETHMaxLeverage, examplePositionSize, riskControl.MinRiskRewardRatio))
-	sb.WriteString("  {\"symbol\":\"ETHUSDT\",\"action\":\"wait\"}\n")
-	sb.WriteString("]\n")
-	sb.WriteString("</decision>\n\n")
-	sb.WriteString("### Top-level decision object\n")
-	sb.WriteString("- Required for open_long/open_short: `symbol`, `action`, `leverage`, `position_size_usd`, `stop_loss`, `take_profit`, `confidence`, `risk_usd`, `entry_protection_rationale`, `protection_plan`.\n")
-	sb.WriteString("- For hold/wait/close actions: do NOT include `protection_plan`.\n")
-	sb.WriteString("- JSON numeric fields must be plain numbers only; never use formulas, commas, or strings for numeric values.\n\n")
-	sb.WriteString("### protection_plan schema\n")
-	sb.WriteString("- `mode`: one of `full`, `ladder`, `drawdown`, `combined`, `break_even`. Use `combined` when ladder AI and drawdown AI are both active.\n")
-	sb.WriteString("- `ladder_rules`: 2~3 objects when ladder is active. Each active TP leg MUST have `take_profit_price` and `take_profit_close_ratio_pct`; each active SL leg MUST have `stop_loss_price` and `stop_loss_close_ratio_pct`. Do not output TP/SL price without its close ratio.\n")
-	sb.WriteString("- Ladder prices MUST be absolute executable structural prices, not percent-only placeholders. Long: TP > entry and SL < entry. Short: TP < entry and SL > entry.\n")
-	sb.WriteString("- Every ladder rule MUST include `structural_anchor` or side-specific anchors, plus `volatility_buffer_pct` or `volatility_buffer_reason`.\n")
-	sb.WriteString("- **CRITICAL LADDER CONSTRAINTS**:\n")
-	sb.WriteString("  - **All ladder SL must use the SAME nearest primary-timeframe invalidation structure** (e.g., all use 1h resistance + buffer). Do NOT use different timeframe structures for different ladder tiers. The tiers must still have distinct prices: split near the structure into inside/near-buffer and outside/beyond-buffer prices protecting at least 75% total size; at most one farther tier may remain, and it must be <=25%.\n")
-	sb.WriteString("  - Ladder[0] and Ladder[1] TP: MUST be within 0.5% of a structural support/resistance/fibonacci level.\n")
-	sb.WriteString("  - Ladder[2] (TP3) extended target: MAY deviate from structure to pursue larger profit, but `take_profit_close_ratio_pct` MUST be ≤ 20%. If you want TP3 > 20%, move it closer to structure.\n")
-	sb.WriteString("  - **When drawdown_rules are present, drawdown owns TP/profit-taking. Do NOT output ladder take_profit_price/take_profit_close_ratio_pct unless explicitly needed for audit; prefer ladder rules with stop-loss side only.**\n")
-	sb.WriteString("  - When drawdown_rules are present, ladder TP ratios do NOT need to sum to 80%+ (drawdown handles dynamic allocation).\n")
-	sb.WriteString("  - Each `drawdown_rule.timeframe` must be a SINGLE timeframe string (e.g., \"15m\" or \"1h\"), NOT a combined format like \"15m/1h\". If you want to reference cross-timeframe resonance, mention it in `reason_anchor` text only.\n")
-	sb.WriteString("- `drawdown_rules`: at least 2 objects when drawdown/combined is active. Each must include `timeframe` (SINGLE timeframe string like \"15m\" or \"1h\", NOT \"15m/1h\"), `min_profit_pct`, `max_drawdown_pct`, `close_ratio_pct`, `stage_name`, `reason_anchor`. `max_drawdown_pct` is percent-of-peak-profit giveback, not absolute price drawdown.\n")
-	sb.WriteString("- Drawdown structure should lock partial profit first, then leave runner inventory for higher targets: early stages close less than 60%, final/outer stage may close more but should preserve runner semantics when trend allows.\n")
-	sb.WriteString("- Fallback policy: fallback exists as exchange/runtime safety and may reference operator manual/default values if an otherwise good setup cannot place one leg natively. But the model's goal is a schema-valid, structure-anchored AI `protection_plan`; do NOT intentionally omit/underspecify protection to rely on fallback. If the market structure is too unclear to derive valid protection, then do not open. Output wait/[] instead.\n\n")
-	sb.WriteString("## Field Description\n\n")
-	sb.WriteString("- `action`: open_long | open_short | close_long | close_short | hold | wait\n")
-	sb.WriteString("- `trigger_type` (REQUIRED for open_long/open_short): one of `support_rejection_confirmed`, `resistance_breakout_retest_successful`, `higher_low_breakout_confirmed`, `resistance_rejection_confirmed`, `support_breakdown_retest_failed`, `lower_high_breakdown_confirmed`. If you cannot assign one of these, do NOT open.\n")
-	sb.WriteString("- Optional reliability fields for every decision: `regime` (trend_up|trend_down|range|squeeze|chop|news_risk|no_trade), `setup_type` (trend_pullback|range_edge|breakout_retest|none), and `quality_score` with total/trend_alignment/structure_location/sr_fib_quality/derivatives_context/trigger_quality/net_rr. These fields are currently audit/shadow fields, but strong opens should include them.\n")
-	sb.WriteString("- Prefer `wait` when no clear setup is present. Recognized setup types: trend_pullback, range_edge, breakout_retest.\n")
-	sb.WriteString("- `protection_plan`: optional structured protection output for open actions only\n")
-	sb.WriteString("- Ladder rule price fields: explicit absolute `take_profit_price` / `stop_loss_price` (or aliases `tp_level` / `sl_level`) are REQUIRED for AI ladder. `take_profit_pct` / `stop_loss_pct` are only equivalent UI/audit percentages after calculating from the absolute prices; they are never enough by themselves. Every TP leg with `take_profit_price` MUST include positive `take_profit_close_ratio_pct`; every SL leg with `stop_loss_price` MUST include positive `stop_loss_close_ratio_pct`. Include `take_profit_anchor` / `stop_loss_anchor` or `structural_anchor` naming the support/resistance/fibonacci/invalidation level, plus a volatility/wick buffer (`volatility_buffer_pct` or `volatility_buffer_reason`) based on ATR/recent wicks. Do not put stops/targets naked exactly on crowded structural levels: invalidation should require an effective break, not a one-tick touch. Never output generic 0.9% / 1.5% ladder stops unless those exact percentages are back-calculated from explicit structural prices plus buffer. Ladder SL tiers must not collapse to identical or near-identical prices; use same nearest primary structure but distinct inside/near and outside/beyond buffer stops.\n")
-	sb.WriteString("- `entry_protection_rationale`: required for `open_long` / `open_short`; must include timeframe_context, risk_reward (entry/invalidation/first_target/gross_estimated_rr and preferably net_estimated_rr), and structural anchors when opening\n")
-	sb.WriteString("  - Opening decisions MUST include a first-target anchor: use either `anchors[].type=\"first_target\"`, or `structural_key_levels[].used_for=\"first_target\"/\"tp1\"/\"take_profit\"`, with target price and reason.\n")
-	sb.WriteString("  - If you do NOT have a concrete higher-timeframe anchor, leave `timeframe_context.higher` empty/omitted. If `timeframe_context.higher` is present, you MUST include `higher_timeframe_anchors` or `timeframe_structures` with explicit higher-TF price anchors.\n")
-	sb.WriteString("  - `gross_estimated_rr` MUST equal abs(first_target-entry)/abs(entry-invalidation). Do not invent or round it upward; if computed RR is below the minimum, output wait/[] instead.\n")
-	sb.WriteString("  - Treat structural entry as a compact contract, not a verbose essay: include only the few levels/anchors needed to justify entry, invalidation, and first target\n")
-	sb.WriteString("  - When strategy `entry_structure` is enabled, you MUST provide the required structural fields (primary timeframe, adjacent timeframe, support/resistance, anchors, and fibonacci only when explicitly required) or output wait/[] instead of forcing an open\n")
-	sb.WriteString("  - Use exchange/runtime market data only to extract the necessary structure for judgment; do not dump every indicator or noisy field\n")
-	sb.WriteString("  - Use `mode=full` when one unified TP/SL plan is enough\n")
-	sb.WriteString("  - For `mode=full`, output `take_profit_pct` / `stop_loss_pct` only; do not place absolute price fields inside protection_plan\n")
-	sb.WriteString("  - Use `mode=ladder` when you want staged TP/SL with multiple ladder_rules\n")
-	sb.WriteString("  - For ladder_rules, output 2~3 structurally distinct tiers. Prefer both TP and SL sides when the strategy route owns ladder: each rule should include absolute `take_profit_price`, `take_profit_close_ratio_pct`, absolute `stop_loss_price`, `stop_loss_close_ratio_pct`, and anchor text.\n")
-	sb.WriteString("  - **Position sizing rules**: When `drawdown_rules` are present, drawdown owns TP/profit-taking, so prefer omitting ladder TP fields entirely and provide ladder stop-loss side only. Without drawdown, TP ratios should total 60~90%. SL ratios may total up to 100%. For ladder SL, at least 75% of total position protection must be near the nearest primary invalidation structure; any farther stop tier is optional and must be <=25%.\n")
-	sb.WriteString("  - **TP3 extended target rule**: Ladder[2] (TP3) MAY deviate from structure to pursue larger profit, but `take_profit_close_ratio_pct` MUST be ≤ 20%. If you want more than 20% at TP3, move TP3 closer to a structural level.\n")
-	sb.WriteString("  - **Unified SL structure rule**: All ladder SL prices must reference the SAME nearest primary-timeframe invalidation structure (e.g., all use 1h resistance 5.444 + ATR buffer). Do NOT use 4h structure for Ladder[1] and 1h for Ladder[0]. Use the same base structure, only vary the buffer; do not repeat the same stop price.\n")
-	sb.WriteString("  - Example long ladder rule: `{\"take_profit_price\": 0.2538, \"take_profit_close_ratio_pct\": 35, \"stop_loss_price\": 0.2472, \"stop_loss_close_ratio_pct\": 50, \"structural_anchor\": \"1h resistance 0.2540 / 1h invalidation support 0.2475, buffered by ATR\"}`. Percent-only ladder rules are rejected when structure exists.\n")
-	sb.WriteString("  - Use `mode=drawdown` when the strategy route enables AI drawdown profit protection; then `drawdown_rules` must be non-empty\n")
-	sb.WriteString("  - Use `mode=break_even` when the strategy enables Break-even Stop as an AI-required runtime stop layer; include break_even_trigger_mode/value/offset\n")
-	sb.WriteString("  - In drawdown/break-even AI mode, reasoning must reference the primary timeframe, adjacent timeframes, and structural anchors such as support/resistance, fibonacci, and volatility\n")
-	sb.WriteString("  - If Drawdown Take Profit is enabled in strategy config, your reasoning must explicitly mention drawdown, trailing, or profit-protection ownership\n")
-	sb.WriteString("  - If Break-even Stop is enabled in strategy config, your reasoning must explicitly mention break-even or acknowledge that an additional stop layer exists after profit trigger\n")
-	sb.WriteString("  - Do NOT output protection_plan for hold/wait/close actions\n")
-	sb.WriteString(fmt.Sprintf("- `confidence`: 0-100 (opening recommended ≥ %d)\n", riskControl.MinConfidence))
-	sb.WriteString(fmt.Sprintf("- Required when opening: leverage, position_size_usd, stop_loss, take_profit, confidence, risk_usd, entry_protection_rationale; risk_reward must satisfy min RR ≥ %.1f and direction sanity (long: invalidation < entry < first_target, short: invalidation > entry > first_target)\n", riskControl.MinRiskRewardRatio))
-	sb.WriteString("- Structural entry fields should be compact and purpose-driven: primary/adjacent timeframe, top support/resistance, one or a few anchors, and fibonacci only when it materially affects invalidation/target planning\n")
-	sb.WriteString("- `entry_protection_rationale.key_levels.support` and `entry_protection_rationale.key_levels.resistance` are REQUIRED for open actions when structural entry is enabled; provide only the most decision-relevant structural levels and stay within configured caps (typically support<=3, resistance<=3) instead of dumping every visible level\n")
-	sb.WriteString("- `structural_key_levels`: structural levels that influenced protection placement decisions; each must specify price, type (support/resistance), timeframe, source, and what it was used_for (tp1/tp2/stop_loss/invalidation)\n")
-	sb.WriteString("- If you provide `structural_key_levels`, make sure they are consistent with key_levels.support/resistance; do not leave support/resistance empty\n")
-	sb.WriteString("- `selected_levels`: REQUIRED for open actions. List the structural levels you actually chose for SL/TP/entry decisions. Each entry must include: price, type, timeframe, source, used_for (stop_loss/tp1/tp2/tp3/invalidation/entry_trigger/break_even), basis_type (structural/atr_based/percentage/fibonacci), and a brief reason. If no suitable structural level exists for SL or TP, use basis_type=\"atr_based\" or \"percentage\" and explain why.\n")
-	sb.WriteString("- `protection_plan.ladder_rules[].basis_type` and `protection_plan.drawdown_rules[].basis_type`: indicate whether each protection tier is based on \"structural\", \"atr_based\", \"percentage\", or \"fibonacci\" levels\n")
-	sb.WriteString("- **IMPORTANT**: All numeric values must be calculated numbers, NOT formulas/expressions (e.g., use `27.76` not `3000 * 0.01`)\n")
-	sb.WriteString("- **STRICT JSON NUMBER RULE**: JSON numeric fields must use plain digits with optional decimal point only. Never use thousands separators, grouping commas, spaces, or localized punctuation in numeric fields. Correct: `97687.05`, `77048.9`, `2293.23`. Wrong: `97,687.05`, `77,048.9`, `2,293.23`, `9,76887.05`. If you want to mention comma-formatted prices, put them only inside quoted natural-language strings, never in numeric fields.\n\n")
+	sb.WriteString("## Skeleton (structure only — derive every number from data)\n")
+	sb.WriteString("<reasoning>\nRegime, key observation, action rationale. ≤3 sentences for wait/hold.\n</reasoning>\n")
+	sb.WriteString("<decision>\n[\n")
+	if e.anyProtectionLegAI() {
+		sb.WriteString(fmt.Sprintf("  {\"symbol\":\"BTCUSDT\",\"action\":\"open_short\",\"leverage\":%d,\"position_size_usd\":%.0f,\"stop_loss\":97000,\"take_profit\":91000,\"confidence\":85,\"risk_usd\":300,\"trigger_type\":\"resistance_rejection_confirmed\",\"entry_protection_rationale\":{\"timeframe_context\":{\"primary\":\"1h\",\"lower\":[\"15m\"],\"higher\":[\"4h\"]},\"risk_reward\":{\"entry\":95000,\"invalidation\":97000,\"first_target\":91000,\"gross_estimated_rr\":2.0,\"net_estimated_rr\":1.8,\"min_required_rr\":%.1f,\"passed\":true},\"key_levels\":{\"support\":[91000],\"resistance\":[97000]},\"anchors\":[{\"type\":\"resistance\",\"timeframe\":\"1h\",\"price\":96000,\"reason\":\"primary rejection\"}]},\"selected_levels\":[{\"price\":97000,\"type\":\"resistance\",\"timeframe\":\"1h\",\"source\":\"swing\",\"used_for\":\"stop_loss\",\"basis_type\":\"structural\",\"reason\":\"1h invalidation\"}],\"protection_plan\":{\"mode\":\"combined\",\"ladder_rules\":[{\"stop_loss_price\":97000,\"stop_loss_close_ratio_pct\":50,\"structural_anchor\":\"1h invalidation resistance + ATR buffer\",\"volatility_buffer_reason\":\"ATR/wick buffer applied\"},{\"stop_loss_price\":98200,\"stop_loss_close_ratio_pct\":50,\"structural_anchor\":\"same 1h structure, outer buffer\",\"volatility_buffer_reason\":\"ATR/wick buffer applied\"}],\"drawdown_rules\":[{\"timeframe\":\"1h\",\"min_profit_pct\":0.75,\"max_drawdown_pct\":60,\"close_ratio_pct\":65,\"runner_keep_pct\":35,\"stage_name\":\"partial_profit_lock\",\"reason_anchor\":\"1h first structural target\"},{\"timeframe\":\"4h\",\"min_profit_pct\":1.4,\"max_drawdown_pct\":55,\"close_ratio_pct\":80,\"runner_keep_pct\":20,\"stage_name\":\"runner_extension\",\"reason_anchor\":\"4h runner structure\"}]}},\n", riskControl.BTCETHMaxLeverage, examplePositionSize, riskControl.MinRiskRewardRatio))
+	} else {
+		// Manual/disabled protection: any protection_plan is ignored at execution,
+		// so the skeleton omits it. The AI still gives top-level stop_loss/take_profit
+		// (structural opinion) + selected_levels for entry-quality gating.
+		sb.WriteString(fmt.Sprintf("  {\"symbol\":\"BTCUSDT\",\"action\":\"open_short\",\"leverage\":%d,\"position_size_usd\":%.0f,\"stop_loss\":97000,\"take_profit\":91000,\"confidence\":85,\"risk_usd\":300,\"trigger_type\":\"resistance_rejection_confirmed\",\"entry_protection_rationale\":{\"timeframe_context\":{\"primary\":\"1h\",\"lower\":[\"15m\"],\"higher\":[\"4h\"]},\"risk_reward\":{\"entry\":95000,\"invalidation\":97000,\"first_target\":91000,\"gross_estimated_rr\":2.0,\"net_estimated_rr\":1.8,\"min_required_rr\":%.1f,\"passed\":true},\"key_levels\":{\"support\":[91000],\"resistance\":[97000]},\"anchors\":[{\"type\":\"resistance\",\"timeframe\":\"1h\",\"price\":96000,\"reason\":\"primary rejection\"}]},\"selected_levels\":[{\"price\":97000,\"type\":\"resistance\",\"timeframe\":\"1h\",\"source\":\"swing\",\"used_for\":\"stop_loss\",\"basis_type\":\"structural\",\"reason\":\"1h invalidation\"}]},\n", riskControl.BTCETHMaxLeverage, examplePositionSize, riskControl.MinRiskRewardRatio))
+	}
+	sb.WriteString("  {\"symbol\":\"ETHUSDT\",\"action\":\"wait\"}\n]\n</decision>\n\n")
+
+	sb.WriteString("## Fields by action\n")
+	protectionPlanReq := ""
+	if e.anyProtectionLegAI() {
+		protectionPlanReq = "`protection_plan`, "
+	}
+	sb.WriteString(fmt.Sprintf("- **open_long / open_short** REQUIRE: `symbol`, `action`, `leverage`, `position_size_usd`, `stop_loss`, `take_profit`, `confidence` (0-100, open ≥ %d), `risk_usd`, `trigger_type`, `entry_protection_rationale`, %s`selected_levels`. Direction sanity: long → invalidation < entry < first_target; short → invalidation > entry > first_target. RR must meet min ≥ %.1f.\n", riskControl.MinConfidence, protectionPlanReq, riskControl.MinRiskRewardRatio))
+	sb.WriteString("- **hold / wait / close_long / close_short**: Do NOT output protection_plan for hold/wait/close actions, nor entry/structural fields.\n")
+	sb.WriteString("- `trigger_type`: one of the 6 in the Entry Trigger Gate section. No valid trigger → do not open.\n")
+	sb.WriteString("- Optional audit fields (include on strong opens): `regime` (trend_up|trend_down|range|squeeze|chop|news_risk|no_trade), `setup_type` (trend_pullback|range_edge|breakout_retest|none), `quality_score`.\n\n")
+
+	sb.WriteString("## entry_protection_rationale (open only)\n")
+	sb.WriteString("- Must contain `timeframe_context`, `risk_reward` (entry/invalidation/first_target/gross_estimated_rr, prefer net_estimated_rr), `key_levels.support` + `key_levels.resistance` (only decision-relevant levels, ≤3 each), and structural `anchors`.\n")
+	sb.WriteString("- `gross_estimated_rr` MUST equal abs(first_target-entry)/abs(entry-invalidation). Do not round it up; if below min RR, output wait.\n")
+	sb.WriteString("- Include a first-target anchor via `anchors[].type=\"first_target\"` OR `structural_key_levels[].used_for` in {first_target,tp1,take_profit}.\n")
+	sb.WriteString("- Leave `timeframe_context.higher` omitted unless you have a concrete higher-TF anchor; if present, also include `higher_timeframe_anchors` (or `timeframe_structures`) with explicit higher-TF prices.\n")
+	sb.WriteString("- Keep it compact: only the levels/anchors needed for entry, invalidation, and first target. Do not dump every indicator.\n\n")
+
+	sb.WriteString("## selected_levels / structural_key_levels (open only)\n")
+	sb.WriteString("- `selected_levels` (REQUIRED): every level you used for SL/TP/entry. Each item: `price`, `type`, `timeframe`, `source`, `used_for` (stop_loss/tp1/tp2/tp3/invalidation/entry_trigger/break_even), `basis_type` (structural/atr_based/percentage/fibonacci), `reason`. No structural level available → use basis_type atr_based/percentage and say why.\n")
+	sb.WriteString("- `structural_key_levels` (optional): levels that shaped protection; must stay consistent with key_levels.support/resistance (do not leave those empty).\n\n")
+
+	// protection_plan schema is only relevant when at least one protection leg is in
+	// AI mode. With an all-manual/disabled protection stack the AI's protection_plan is
+	// discarded at execution, so the full schema is dead weight — skip it and keep only
+	// the top-level structural SL/TP opinion (still used for entry-quality gating and the
+	// manual-vs-structural deviation panel).
+	if e.anyProtectionLegAI() {
+		sb.WriteString("## protection_plan (open only) — reuse the Key constants above; do not restate numbers here\n")
+		sb.WriteString("- `mode`: `mode=full` | `mode=ladder` | `mode=drawdown` | `combined` | `mode=break_even`. Use `combined` when ladder AI and drawdown AI are both active.\n")
+		sb.WriteString("- Each rule tags `basis_type` (structural/atr_based/percentage/fibonacci). Never use arbitrary round percentages when structure exists.\n")
+		sb.WriteString("- `mode=full`: output `take_profit_pct` / `stop_loss_pct` only; no absolute price fields.\n")
+		sb.WriteString("- `ladder_rules` (2~3 objects): every active TP leg needs `take_profit_price` + `take_profit_close_ratio_pct`; every active SL leg needs `stop_loss_price` + `stop_loss_close_ratio_pct` (never a price without its close ratio). Absolute structural prices only. Every rule carries `structural_anchor` + a volatility buffer (`volatility_buffer_pct` or `volatility_buffer_reason`). All ladder SL tiers reference the SAME nearest primary-TF invalidation structure with distinct inside/outside buffer prices (≥75% close near it, any farther tier ≤25%); do not repeat identical stop prices. TP1/TP2 within 0.5% of a structural level; TP3 may extend but its close ratio ≤20%.\n")
+		sb.WriteString("- `drawdown_rules` (≥2 objects): each needs `timeframe` (SINGLE string like \"1h\", never \"15m/1h\"), `min_profit_pct`, `max_drawdown_pct` (percent-of-peak-profit giveback, not price), `close_ratio_pct` (this exact key, not `close_ratio`), `stage_name`, `reason_anchor`. Stage 1 locks partial profit near first structure (close <60%); outer stage protects the runner off higher-TF structure.\n")
+		sb.WriteString("- When drawdown_rules are present they own TP/profit-taking: prefer ladder rules with the SL side only and omit ladder TP fields.\n")
+		sb.WriteString("- Do not underspecify protection to lean on fallback. If structure is too unclear to derive valid protection, output wait instead of opening.\n\n")
+	} else {
+		sb.WriteString("## Protection: MANAGED BY STRATEGY (do NOT output `protection_plan`)\n")
+		sb.WriteString("- All TP/SL/drawdown/break-even legs are placed by the strategy template from ATR + structure at execution; any `protection_plan` you emit is ignored.\n")
+		sb.WriteString("- Still provide the top-level `stop_loss` and `take_profit` (structural opinion) plus `selected_levels`; these drive entry-quality gating even though the template executes the orders.\n\n")
+	}
 
 	// 8. Custom Prompt
 	if e.config.CustomPrompt != "" {
@@ -525,6 +533,21 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	}
 
 	return sb.String()
+}
+
+// anyProtectionLegAI reports whether at least one protection leg (full / ladder /
+// drawdown / break-even) is in AI mode. When NONE are, the AI's protection_plan is
+// fully discarded at execution (see trader/protection_execution.go usesManualProtection
+// and protectionRouteRequiresDecisionPlan), so emitting the full protection_plan schema
+// into the system prompt is wasted tokens with zero effect on behavior. In that case we
+// skip the schema entirely and only keep the top-level structural SL/TP opinion (which
+// still drives entry-quality gating and the manual-vs-structural deviation panel).
+func (e *StrategyEngine) anyProtectionLegAI() bool {
+	prot := e.config.Protection
+	return (prot.FullTPSL.Enabled && prot.FullTPSL.Mode == store.ProtectionModeAI) ||
+		(prot.LadderTPSL.Enabled && prot.LadderTPSL.Mode == store.ProtectionModeAI) ||
+		(prot.DrawdownTakeProfit.Enabled && prot.DrawdownTakeProfit.Mode == store.ProtectionModeAI) ||
+		(prot.BreakEvenStop.Enabled && prot.BreakEvenStop.Mode == store.ProtectionModeAI)
 }
 
 func (e *StrategyEngine) writeAvailableIndicators(sb *strings.Builder) {

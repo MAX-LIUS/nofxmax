@@ -70,6 +70,20 @@ func evalRegimeGate(g store.RegimeGateConfig, ctx shadowGateCtx) (bool, string) 
 		br := sgDonchianBreak(ctx.highs, ctx.lows, ctx.closes, n)
 		block := (br > 0 && ctx.side == "SHORT") || (br < 0 && ctx.side == "LONG")
 		return block, fmt.Sprintf("donchian%d=%d side=%s", n, br, ctx.side)
+	case "chart_trend":
+		w := g.Params.SlopeWindow
+		if w == 0 {
+			w = 30
+		}
+		alignMin := g.Params.AlignMin
+		if alignMin == 0 {
+			alignMin = 0.55
+		}
+		r2Min := g.Params.R2Min
+		if r2Min == 0 {
+			r2Min = 0.60
+		}
+		return chartTrendGate(ctx, w, alignMin, r2Min)
 	}
 	return false, "unknown_category:" + g.Category
 }

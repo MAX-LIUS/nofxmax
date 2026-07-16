@@ -123,6 +123,11 @@ type BreakoutEntryConfig struct {
 //	chop_lowconf          params: min_conf (e.g. 70|80)      — block low-confidence entries in chop
 //	adx_weak              params: threshold (e.g. 20)        — block entries when ADX below threshold
 //	donchian_counter      params: lookback (e.g. 48)         — block entry opposing an N-bar breakout
+//	chart_trend           params: slope_window, align_min, r2_min — ALLOW only clean chart trends
+//	                      (regression channel R2>=r2_min AND swing-structure align>=align_min AND
+//	                      regression slope in the trade direction); blocks everything else. This is
+//	                      an ALLOW-list "only open in a clean visual trend" gate, not a counter-trend
+//	                      reject. Defaults: slope_window 30, align_min 0.55, r2_min 0.60.
 type RegimeGateConfig struct {
 	Category string `json:"category"` // see doc above
 	Mode     string `json:"mode"`     // "shadow" (default) | "enforce"
@@ -133,6 +138,8 @@ type RegimeGateConfig struct {
 		MinConf     float64 `json:"min_conf,omitempty"`
 		Threshold   float64 `json:"threshold,omitempty"`
 		Lookback    int     `json:"lookback,omitempty"`
+		AlignMin    float64 `json:"align_min,omitempty"` // chart_trend: min swing-structure alignment (0..1)
+		R2Min       float64 `json:"r2_min,omitempty"`    // chart_trend: min regression-channel R^2 (0..1)
 	} `json:"params,omitempty"`
 }
 
