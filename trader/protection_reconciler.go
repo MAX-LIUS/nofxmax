@@ -456,6 +456,13 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 	}
 
 	rules := at.getActiveDrawdownRulesForPosition(symbol, side)
+	// Resolve ATR-unit rules to effective percent, matching the main drawdown
+	// monitor (auto_trader_risk.go) and decision path. Without this the reconciler
+	// arms trailing tiers on the RAW percent (e.g. 3.0%) while the main loop arms
+	// on the ATR-derived percent (e.g. 2.84%), producing two trailing orders at
+	// slightly different activation prices that each treat the other as a stale
+	// duplicate — an endless place/cancel churn (observed on SPCXUSDT).
+	rules = at.resolveDrawdownRulesATR(rules, symbol, side, entryPrice)
 	if len(rules) > 0 {
 		peakPnLPct := currentPnLPct
 		at.peakPnLCacheMutex.RLock()

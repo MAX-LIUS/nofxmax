@@ -68,8 +68,12 @@ func TestSyncCodedCloseAttributedExactly(t *testing.T) {
 	}
 }
 
-// A close fill whose order carries NO coded id and matches NO intent must stay
-// honestly unattributed (bare close_long) — never guessed to a mechanism.
+// A close fill whose order carries NO coded id and matches NO intent must be
+// marked EXPLICITLY as "unresolved_exchange_close" — never guessed to a real
+// mechanism (no fabrication), but also never left as a silent bare close that
+// would later be dumped into sync_external. The explicit marker preserves the
+// no-guessing invariant while making the attribution failure visible for
+// forensics (see Phase 2 attribution fix, 2026-07-16).
 func TestSyncUnattributedCloseNotGuessed(t *testing.T) {
 	fills := `[
 		{"instId":"BTC-USDT-SWAP","tradeId":"t-open","ordId":"o-open","billId":"b1","side":"buy","posSide":"long","fillPx":"100.0","fillSz":"2","fee":"-0.01","feeCcy":"USDT","ts":"1714260000000","execType":"T","tag":"entry"},
@@ -107,8 +111,9 @@ func TestSyncUnattributedCloseNotGuessed(t *testing.T) {
 	if err != nil || closeOrder == nil {
 		t.Fatalf("get close order: %v", err)
 	}
-	// Must remain the bare canonical action — NOT a fabricated protection reason.
-	if closeOrder.OrderAction != "close_long" {
-		t.Fatalf("unattributed close became %q, want bare close_long (no guessing)", closeOrder.OrderAction)
+	// Must be the explicit unresolved marker — NOT a fabricated protection reason
+	// (no guessing) and NOT a silent bare close (which later becomes sync_external).
+	if closeOrder.OrderAction != "unresolved_exchange_close" {
+		t.Fatalf("unattributed close became %q, want unresolved_exchange_close (explicit, no guessing)", closeOrder.OrderAction)
 	}
 }
