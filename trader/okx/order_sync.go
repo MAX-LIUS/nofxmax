@@ -547,6 +547,15 @@ func (t *OKXTrader) SyncOrdersFromOKXWithFullCloseHandler(traderID string, excha
 					}
 				}
 			}
+
+			// When all attribution layers fail (still bare close_long/short), mark
+			// explicitly as unresolved rather than silent sync_external. Emit the raw
+			// fingerprint so future forensics can match the fill to its origin.
+			if requestedReason == canonicalAction {
+				requestedReason = "unresolved_exchange_close"
+				logger.Warnf("⚠️ OKX close %s %s unresolved (all attribution layers failed) — fingerprint: orderId=%s clientID=%s tag=%s type=%s price=%.6f qty=%.6f tradeID=%s",
+					symbol, positionSide, parentOrderID, trade.ClientID, trade.Tag, trade.OrderType, trade.FillPrice, trade.FillQtyBase, trade.TradeID)
+			}
 		}
 		orderRecord := &store.TraderOrder{
 			TraderID:        ownerTraderID,

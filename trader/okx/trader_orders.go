@@ -739,21 +739,22 @@ func (t *OKXTrader) CancelTakeProfitOrdersTagged(symbol string, reasonTag string
 
 // SetStopLoss sets stop loss order
 func (t *OKXTrader) SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error {
-	return t.setStopLossWithTag(symbol, positionSide, quantity, stopPrice, "")
+	_, err := t.setStopLossWithTag(symbol, positionSide, quantity, stopPrice, "")
+	return err
 }
 
-func (t *OKXTrader) SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) error {
+func (t *OKXTrader) SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) (string, error) {
 	return t.setStopLossWithTag(symbol, positionSide, quantity, stopPrice, reasonTag)
 }
 
-func (t *OKXTrader) setStopLossWithTag(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) error {
+func (t *OKXTrader) setStopLossWithTag(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) (string, error) {
 	defer t.invalidateOpenOrdersCache(symbol)
 	instId := t.convertSymbol(symbol)
 
 	// Get instrument info
 	inst, err := t.getInstrument(symbol)
 	if err != nil {
-		return fmt.Errorf("failed to get instrument info: %w", err)
+		return "", fmt.Errorf("failed to get instrument info: %w", err)
 	}
 
 	// Calculate contract size: quantity (in base asset) / ctVal (asset per contract)
@@ -793,34 +794,35 @@ func (t *OKXTrader) setStopLossWithTag(symbol string, positionSide string, quant
 
 	resp, err := t.doRequest("POST", okxAlgoOrderPath, body)
 	if err != nil {
-		return fmt.Errorf("failed to set stop loss: %w", err)
+		return "", fmt.Errorf("failed to set stop loss: %w", err)
 	}
 	algoID, err := parseOKXAlgoOrderResponse(resp, "stop loss")
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	logger.Infof("  Stop loss price set: %.4f algoId=%s algoClOrdId=%s reason=%s", stopPrice, algoID, algoClOrdID, reasonTag)
-	return nil
+	return algoID, nil
 }
 
 // SetTakeProfit sets take profit order
 func (t *OKXTrader) SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error {
-	return t.setTakeProfitWithTag(symbol, positionSide, quantity, takeProfitPrice, "")
+	_, err := t.setTakeProfitWithTag(symbol, positionSide, quantity, takeProfitPrice, "")
+	return err
 }
 
-func (t *OKXTrader) SetTakeProfitTagged(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) error {
+func (t *OKXTrader) SetTakeProfitTagged(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) (string, error) {
 	return t.setTakeProfitWithTag(symbol, positionSide, quantity, takeProfitPrice, reasonTag)
 }
 
-func (t *OKXTrader) setTakeProfitWithTag(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) error {
+func (t *OKXTrader) setTakeProfitWithTag(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) (string, error) {
 	defer t.invalidateOpenOrdersCache(symbol)
 	instId := t.convertSymbol(symbol)
 
 	// Get instrument info
 	inst, err := t.getInstrument(symbol)
 	if err != nil {
-		return fmt.Errorf("failed to get instrument info: %w", err)
+		return "", fmt.Errorf("failed to get instrument info: %w", err)
 	}
 
 	// Calculate contract size: quantity (in base asset) / ctVal (asset per contract)
@@ -858,15 +860,15 @@ func (t *OKXTrader) setTakeProfitWithTag(symbol string, positionSide string, qua
 
 	resp, err := t.doRequest("POST", okxAlgoOrderPath, body)
 	if err != nil {
-		return fmt.Errorf("failed to set take profit: %w", err)
+		return "", fmt.Errorf("failed to set take profit: %w", err)
 	}
 	algoID, err := parseOKXAlgoOrderResponse(resp, "take profit")
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	logger.Infof("  Take profit price set: %.4f algoId=%s algoClOrdId=%s reason=%s", takeProfitPrice, algoID, algoClOrdID, reasonTag)
-	return nil
+	return algoID, nil
 }
 
 func (t *OKXTrader) CancelAlgoOrderByID(symbol string, algoID string) error {

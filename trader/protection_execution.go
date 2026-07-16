@@ -732,12 +732,13 @@ func (at *AutoTrader) placeFallbackMaxLossProtection(symbol, positionSide string
 	logger.Infof("  🛡 Placing fallback max-loss stop: symbol=%s side=%s qty=%.6f stop=%.6f", symbol, positionSide, quantity, stopLossPrice)
 	if setter, ok := at.trader.(interface {
 		SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error
-		SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) error
+		SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) (string, error)
 	}); ok {
-		if err := setter.SetStopLossTagged(symbol, positionSide, quantity, stopLossPrice, "fallback_maxloss_sl"); err != nil {
+		algoID, err := setter.SetStopLossTagged(symbol, positionSide, quantity, stopLossPrice, "fallback_maxloss_sl")
+		if err != nil {
 			return fmt.Errorf("failed to set fallback max-loss stop loss: %w", err)
 		}
-		at.recordProtectionIntent(symbol, positionSide, "fallback_maxloss_sl", quantity, stopLossPrice)
+		at.recordProtectionIntent(symbol, positionSide, "fallback_maxloss_sl", quantity, stopLossPrice, algoID)
 		return nil
 	}
 	if err := at.trader.SetStopLoss(symbol, positionSide, quantity, stopLossPrice); err != nil {
@@ -766,11 +767,11 @@ func (at *AutoTrader) placeAndVerifyLadderProtection(symbol, positionSide string
 	var placeErrs []error
 	slSetter, slTaggedOK := at.trader.(interface {
 		SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error
-		SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) error
+		SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) (string, error)
 	})
 	tpSetter, tpTaggedOK := at.trader.(interface {
 		SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error
-		SetTakeProfitTagged(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) error
+		SetTakeProfitTagged(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) (string, error)
 	})
 
 	for _, order := range plan.StopLossOrders {
@@ -782,11 +783,12 @@ func (at *AutoTrader) placeAndVerifyLadderProtection(symbol, positionSide string
 			continue
 		}
 		if slTaggedOK {
-			if err := slSetter.SetStopLossTagged(symbol, positionSide, orderQty, order.Price, "ladder_sl"); err != nil {
+			algoID, err := slSetter.SetStopLossTagged(symbol, positionSide, orderQty, order.Price, "ladder_sl")
+			if err != nil {
 				placeErrs = append(placeErrs, fmt.Errorf("ladder stop loss %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err))
 				continue
 			}
-			at.recordProtectionIntent(symbol, positionSide, "ladder_sl", orderQty, order.Price)
+			at.recordProtectionIntent(symbol, positionSide, "ladder_sl", orderQty, order.Price, algoID)
 		} else if err := at.trader.SetStopLoss(symbol, positionSide, orderQty, order.Price); err != nil {
 			placeErrs = append(placeErrs, fmt.Errorf("ladder stop loss %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err))
 			continue
@@ -801,11 +803,12 @@ func (at *AutoTrader) placeAndVerifyLadderProtection(symbol, positionSide string
 			continue
 		}
 		if tpTaggedOK {
-			if err := tpSetter.SetTakeProfitTagged(symbol, positionSide, orderQty, order.Price, "ladder_tp"); err != nil {
+			algoID, err := tpSetter.SetTakeProfitTagged(symbol, positionSide, orderQty, order.Price, "ladder_tp")
+			if err != nil {
 				placeErrs = append(placeErrs, fmt.Errorf("ladder take profit %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err))
 				continue
 			}
-			at.recordProtectionIntent(symbol, positionSide, "ladder_tp", orderQty, order.Price)
+			at.recordProtectionIntent(symbol, positionSide, "ladder_tp", orderQty, order.Price, algoID)
 		} else if err := at.trader.SetTakeProfit(symbol, positionSide, orderQty, order.Price); err != nil {
 			placeErrs = append(placeErrs, fmt.Errorf("ladder take profit %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err))
 			continue
@@ -893,12 +896,13 @@ func (at *AutoTrader) placeAndVerifyProtection(symbol, positionSide string, quan
 	if needsStopLoss {
 		if setter, ok := at.trader.(interface {
 			SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error
-			SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) error
+			SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) (string, error)
 		}); ok {
-			if err := setter.SetStopLossTagged(symbol, positionSide, quantity, stopLossPrice, "full_sl"); err != nil {
+			algoID, err := setter.SetStopLossTagged(symbol, positionSide, quantity, stopLossPrice, "full_sl")
+			if err != nil {
 				return fmt.Errorf("failed to set stop loss: %w", err)
 			}
-			at.recordProtectionIntent(symbol, positionSide, "full_sl", quantity, stopLossPrice)
+			at.recordProtectionIntent(symbol, positionSide, "full_sl", quantity, stopLossPrice, algoID)
 		} else if err := at.trader.SetStopLoss(symbol, positionSide, quantity, stopLossPrice); err != nil {
 			return fmt.Errorf("failed to set stop loss: %w", err)
 		}
@@ -906,12 +910,13 @@ func (at *AutoTrader) placeAndVerifyProtection(symbol, positionSide string, quan
 	if needsTakeProfit {
 		if setter, ok := at.trader.(interface {
 			SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error
-			SetTakeProfitTagged(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) error
+			SetTakeProfitTagged(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) (string, error)
 		}); ok {
-			if err := setter.SetTakeProfitTagged(symbol, positionSide, quantity, takeProfitPrice, "full_tp"); err != nil {
+			algoID, err := setter.SetTakeProfitTagged(symbol, positionSide, quantity, takeProfitPrice, "full_tp")
+			if err != nil {
 				return fmt.Errorf("failed to set take profit: %w", err)
 			}
-			at.recordProtectionIntent(symbol, positionSide, "full_tp", quantity, takeProfitPrice)
+			at.recordProtectionIntent(symbol, positionSide, "full_tp", quantity, takeProfitPrice, algoID)
 		} else if err := at.trader.SetTakeProfit(symbol, positionSide, quantity, takeProfitPrice); err != nil {
 			return fmt.Errorf("failed to set take profit: %w", err)
 		}

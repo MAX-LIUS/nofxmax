@@ -234,6 +234,15 @@ func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string
 			if trade.OrderID != "" {
 				recordParentID = trade.OrderID
 			}
+
+			// When all attribution layers fail (no reason, no origType beyond MARKET),
+			// mark explicitly as unresolved rather than silent sync_external. Emit the
+			// raw fingerprint so future forensics can match the fill to its origin.
+			if resolved.reason == "" && (resolved.realType == "" || resolved.realType == "MARKET") {
+				recordAction = "unresolved_exchange_close"
+				logger.Warnf("⚠️ BN close %s %s unresolved (all attribution layers failed) — fingerprint: orderID=%s clientID=%s type=%s price=%.6f qty=%.6f tradeID=%s",
+					symbol, positionSide, trade.OrderID, recordClientID, recordType, trade.Price, trade.Quantity, trade.TradeID)
+			}
 		}
 
 		// Create order record - use Unix milliseconds UTC

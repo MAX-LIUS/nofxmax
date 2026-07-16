@@ -922,15 +922,17 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 // SetStopLoss sets stop-loss order using new Algo Order API
 // Binance has migrated stop orders to Algo Order system (error -4120 STOP_ORDER_SWITCH_ALGO)
 func (t *FuturesTrader) SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error {
-	return t.SetStopLossTagged(symbol, positionSide, quantity, stopPrice, "")
+	_, err := t.SetStopLossTagged(symbol, positionSide, quantity, stopPrice, "")
+	return err
 }
 
 // SetStopLossTagged sets a stop-loss order. Stop-loss is protective and MUST fill
 // on trigger, so it always uses the trigger-market algo order (taker) — never a
 // resting post-only limit, which could fail to fill in a fast adverse move. The
 // reasonTag is accepted for interface parity with OKX/attribution but does not
-// change execution semantics.
-func (t *FuturesTrader) SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) error {
+// change execution semantics. Returns the exchange algoId so the caller can record
+// it in the close-intent ledger for exact order-id attribution.
+func (t *FuturesTrader) SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) (string, error) {
 	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	var side futures.SideType
 	var posSide futures.PositionSideType
@@ -950,7 +952,7 @@ func (t *FuturesTrader) SetStopLossTagged(symbol string, positionSide string, qu
 	// idempotent on exec symbols.
 	triggerStr, err := t.FormatPrice(symbol, stopPrice)
 	if err != nil {
-		return fmt.Errorf("failed to format stop-loss trigger price: %w", err)
+		return "", fmt.Errorf("failed to format stop-loss trigger price: %w", err)
 	}
 
 	// Use new Algo Order API. In hedge mode Binance permits only ONE
@@ -974,26 +976,30 @@ func (t *FuturesTrader) SetStopLossTagged(symbol string, positionSide string, qu
 	if quantity > 0 {
 		qtyStr, ferr := t.FormatQuantity(symbol, quantity)
 		if ferr != nil {
-			return fmt.Errorf("failed to format stop-loss quantity: %w", ferr)
+			return "", fmt.Errorf("failed to format stop-loss quantity: %w", ferr)
 		}
 		svc = svc.Quantity(qtyStr)
 	} else {
 		svc = svc.ClosePosition(true)
 	}
 
-	_, err = svc.Do(context.Background())
-
+	resp, err := svc.Do(context.Background())
 	if err != nil {
-		return fmt.Errorf("failed to set stop-loss: %w", err)
+		return "", fmt.Errorf("failed to set stop-loss: %w", err)
 	}
 
-	logger.Infof("  Stop-loss price set (Algo Order): %.4f (qty=%.6f)", stopPrice, quantity)
-	return nil
+	algoID := ""
+	if resp != nil && resp.AlgoId != 0 {
+		algoID = strconv.FormatInt(resp.AlgoId, 10)
+	}
+	logger.Infof("  Stop-loss price set (Algo Order): %.4f (qty=%.6f) reason=%q algoId=%s", stopPrice, quantity, reasonTag, algoID)
+	return algoID, nil
 }
 
 // SetTakeProfit sets take-profit. Delegates to the tagged implementation.
 func (t *FuturesTrader) SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error {
-	return t.SetTakeProfitTagged(symbol, positionSide, quantity, takeProfitPrice, "")
+	_, err := t.SetTakeProfitTagged(symbol, positionSide, quantity, takeProfitPrice, "")
+	return err
 }
 
 // SetTakeProfitTagged sets a take-profit order.
@@ -1007,12 +1013,15 @@ func (t *FuturesTrader) SetTakeProfit(symbol string, positionSide string, quanti
 //
 // SL / break-even / trailing intentionally do NOT use this path: those are
 // protective and must fill on trigger, so they stay trigger-market (taker).
-func (t *FuturesTrader) SetTakeProfitTagged(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) error {
+//
+// Returns the exchange algoId when the algo TP path is used (empty string when
+// maker TP succeeds, since regular limit orders don't have algoId).
+func (t *FuturesTrader) SetTakeProfitTagged(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) (string, error) {
 	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 
 	if t.makerTakeProfit && quantity > 0 {
 		if err := t.placeMakerTakeProfit(symbol, positionSide, quantity, takeProfitPrice, reasonTag); err == nil {
-			return nil
+			return "", nil // maker TP succeeded, no algoId
 		} else if isPostOnlyCrossRejection(err) {
 			logger.Infof("  ↩️ Maker TP would cross for %s @ %.8f; falling back to algo TP", symbol, takeProfitPrice)
 		} else {
@@ -1066,7 +1075,7 @@ func (t *FuturesTrader) placeMakerTakeProfit(symbol, positionSide string, quanti
 // Laddered partial TPs (quantity>0) use explicit quantity (hedge mode allows
 // only one closePosition=true TP per side; see SetStopLossTagged). A
 // full-position TP (quantity<=0) uses closePosition=true.
-func (t *FuturesTrader) setAlgoTakeProfit(symbol, positionSide string, quantity, takeProfitPrice float64, reasonTag string) error {
+func (t *FuturesTrader) setAlgoTakeProfit(symbol, positionSide string, quantity, takeProfitPrice float64, reasonTag string) (string, error) {
 	var side futures.SideType
 	var posSide futures.PositionSideType
 	if positionSide == "LONG" {
@@ -1080,7 +1089,7 @@ func (t *FuturesTrader) setAlgoTakeProfit(symbol, positionSide string, quantity,
 	// Tick-align the trigger price (see SetStopLossTagged) to avoid -1111.
 	triggerStr, err := t.FormatPrice(symbol, takeProfitPrice)
 	if err != nil {
-		return fmt.Errorf("failed to format take-profit trigger price: %w", err)
+		return "", fmt.Errorf("failed to format take-profit trigger price: %w", err)
 	}
 
 	svc := t.client.NewCreateAlgoOrderService().
@@ -1095,21 +1104,24 @@ func (t *FuturesTrader) setAlgoTakeProfit(symbol, positionSide string, quantity,
 	if quantity > 0 {
 		qtyStr, ferr := t.FormatQuantity(symbol, quantity)
 		if ferr != nil {
-			return fmt.Errorf("failed to format take-profit quantity: %w", ferr)
+			return "", fmt.Errorf("failed to format take-profit quantity: %w", ferr)
 		}
 		svc = svc.Quantity(qtyStr)
 	} else {
 		svc = svc.ClosePosition(true)
 	}
 
-	_, err = svc.Do(context.Background())
-
+	resp, err := svc.Do(context.Background())
 	if err != nil {
-		return fmt.Errorf("failed to set take-profit: %w", err)
+		return "", fmt.Errorf("failed to set take-profit: %w", err)
 	}
 
-	logger.Infof("  Take-profit price set (Algo Order): %.4f (qty=%.6f)", takeProfitPrice, quantity)
-	return nil
+	algoID := ""
+	if resp != nil && resp.AlgoId != 0 {
+		algoID = strconv.FormatInt(resp.AlgoId, 10)
+	}
+	logger.Infof("  Take-profit price set (Algo Order): %.4f (qty=%.6f) reason=%q algoId=%s", takeProfitPrice, quantity, reasonTag, algoID)
+	return algoID, nil
 }
 
 // isPostOnlyCrossRejection reports whether err is Binance's rejection of a

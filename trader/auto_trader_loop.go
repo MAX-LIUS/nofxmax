@@ -13,6 +13,37 @@ import (
 	"time"
 )
 
+// evalAICloseGate decides whether an AI-decision close_long/close_short must be
+// blocked, and returns a short log tag for the reason. This ONLY governs
+// model-generated closes; protection/exchange-native closes (SL/TP/BE/trailing/
+// drawdown/structural circuit-breaker) run on separate paths and never reach here.
+//
+// Gate precedence:
+//  1. allowAIClose is the MASTER switch — when false, EVERY AI close is blocked.
+//     (Regression guard: commit 53ffef7 dropped this master check, leaving only
+//     the two sub-gates, which let AI closes through when the master was off.)
+//  2. Stop-loss closes additionally require allowAIStopClose AND a loss deeper than
+//     stopMinLossPct.
+//  3. Non-stop (take-profit / discretionary) closes require allowAITakeProfit.
+func evalAICloseGate(isStopLoss bool, pnlPct float64, allowAIClose, allowAIStopClose, allowAITakeProfit bool, stopMinLossPct float64) (blocked bool, logTag string) {
+	if !allowAIClose {
+		return true, "AI close disabled (master gate)"
+	}
+	if isStopLoss {
+		if !allowAIStopClose {
+			return true, "AI stop-close disabled"
+		}
+		if pnlPct > -stopMinLossPct {
+			return true, fmt.Sprintf("AI stop-close below min loss threshold (pnl %.2f%% > -%.2f%%)", pnlPct, stopMinLossPct)
+		}
+		return false, ""
+	}
+	if !allowAITakeProfit {
+		return true, "AI take-profit disabled"
+	}
+	return false, ""
+}
+
 // runCycle 是自动交易主循环里最关键的一步：
 // 它把账户、持仓、行情、策略配置收敛成一个完整决策周期，
 // 再把 AI 输出转成排序后的动作并交给执行链处理。
@@ -401,27 +432,27 @@ func (at *AutoTrader) runCycle() error {
 		sortedDecisions = filtered
 	}
 
-	// AI close gate: fine-grained stop-loss / take-profit permission control.
-	// Code protection / exchange-native protection remain active and unaffected.
+	// AI close gate: master switch + fine-grained stop-loss / take-profit control.
+	// allow_ai_close is the MASTER gate for AI-decision closes. When off, it blocks
+	// ALL model-generated close_long / close_short regardless of stop/take-profit
+	// intent. Code protection / exchange-native protection (SL/TP/BE/trailing/
+	// drawdown/structural circuit-breaker) run on separate paths and are NOT
+	// filtered here, so they remain fully active. (Regression fix: 53ffef7 dropped
+	// this master check, leaving only the two sub-gates.)
 	{
 		filtered := make([]kernel.Decision, 0, len(sortedDecisions))
 		for _, d := range sortedDecisions {
 			if d.Action == "close_long" || d.Action == "close_short" {
+				pnlPct := 0.0
 				if d.IsStopLoss {
-					if !at.GetAllowAIStopClose() {
-						logger.Warnf("🚫 [%s] AI stop-close disabled: BLOCKED %s %s (reason: %s)", at.name, d.Action, d.Symbol, d.CloseReason)
-						continue
-					}
-					pnlPct := at.getCurrentPositionPnLPct(d.Symbol, d.Action)
-					if pnlPct > -at.GetAIStopMinLossPct() {
-						logger.Warnf("🚫 [%s] AI stop-close below min loss threshold: BLOCKED %s %s (pnl %.2f%% > -%.2f%%)", at.name, d.Action, d.Symbol, pnlPct, at.GetAIStopMinLossPct())
-						continue
-					}
-				} else {
-					if !at.GetAllowAITakeProfit() {
-						logger.Warnf("🚫 [%s] AI take-profit disabled: BLOCKED %s %s", at.name, d.Action, d.Symbol)
-						continue
-					}
+					pnlPct = at.getCurrentPositionPnLPct(d.Symbol, d.Action)
+				}
+				if blocked, logMsg := evalAICloseGate(
+					d.IsStopLoss, pnlPct,
+					at.GetAllowAIClose(), at.GetAllowAIStopClose(), at.GetAllowAITakeProfit(), at.GetAIStopMinLossPct(),
+				); blocked {
+					logger.Warnf("🚫 [%s] %s: BLOCKED %s %s (reason: %s)", at.name, logMsg, d.Action, d.Symbol, d.CloseReason)
+					continue
 				}
 			}
 			filtered = append(filtered, d)
