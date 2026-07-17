@@ -1024,6 +1024,19 @@ func (at *AutoTrader) hasMatchingNativeTrailingOrderForRule(symbol, side string,
 		if !strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
 			continue
 		}
+		// Once a trailing order has ACTIVATED, its exchange-reported trigger
+		// (StopPrice) is the MOVING trail level and, on Binance, its callback rate is
+		// not reported at all (CallbackRate=0). Both the activation-drift and
+		// callback-match checks below therefore FAIL for a perfectly healthy activated
+		// order, so this dedup gate returned false and the drawdown monitor re-armed —
+		// placing a fresh trailing order EVERY cycle (~11/min across Binance shorts,
+		// occasionally tripping the -4045 max-stop limit). An activated trailing order
+		// of the right position/side IS the live protection for this tier; treat it as
+		// a match so we do not re-arm. Pre-activation orders still go through the
+		// activation+callback comparison below.
+		if order.ActivationStatus == "activated" {
+			return true
+		}
 		callback := order.CallbackRate
 		if callback <= 0 && order.CallbackRatePct > 0 {
 			callback = order.CallbackRatePct / 100.0
@@ -1037,7 +1050,10 @@ func (at *AutoTrader) hasMatchingNativeTrailingOrderForRule(symbol, side string,
 			activationDrift := math.Abs(order.StopPrice-plannedActivationPrice) / math.Max(math.Abs(order.StopPrice), math.Abs(plannedActivationPrice))
 			activationOK = activationDrift <= 0.01
 		}
-		if activationOK && math.Abs(callback-plannedCallbackRate) <= callbackTolerance {
+		// When the venue does not report callback (<=0 after the pct fallback), trust
+		// the activation-price match alone rather than treating unreported as drift.
+		callbackOK := callback <= 0 || math.Abs(callback-plannedCallbackRate) <= callbackTolerance
+		if activationOK && callbackOK {
 			return true
 		}
 	}

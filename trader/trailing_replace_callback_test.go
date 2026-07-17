@@ -1,6 +1,10 @@
 package trader
 
-import "testing"
+import (
+	"testing"
+
+	"nofx/store"
+)
 
 // TestShouldReplacePartialTrailingTier_CallbackGuard guards the SPCX/XAG/XAU
 // Binance trailing churn fix (2026-07-17). Binance's algo-order list endpoint
@@ -92,4 +96,58 @@ func TestFindExistingFullTrailingOrder_PreservesActivationStatus(t *testing.T) {
 	if got.ActivationStatus != "activated" {
 		t.Fatalf("ActivationStatus not preserved: got %q, want \"activated\"", got.ActivationStatus)
 	}
+}
+
+// TestHasMatchingNativeTrailingOrderForRule_ActivatedAndUnreportedCallback guards
+// the arm-dedup gate (the "should I skip re-arming?" check). For an ACTIVATED
+// Binance trailing order the exchange reports a moving trail level as StopPrice and
+// no callback rate (0), so both the activation-drift and callback-match checks used
+// to fail — the gate returned false and the drawdown monitor re-armed every cycle
+// (~11/min across Binance shorts, occasionally tripping -4045). An activated order
+// of the right side must be recognised as a match; and when callback is unreported
+// (0) a pre-activation order must match on activation price alone.
+func TestHasMatchingNativeTrailingOrderForRule_ActivatedAndUnreportedCallback(t *testing.T) {
+	at := &AutoTrader{}
+	entry := 134.44
+	rule := store.DrawdownTakeProfitRule{MinProfitPct: 2.8398, MaxDrawdownPct: 1.7039, CloseRatioPct: 100}
+	plannedActivation := calculateProfitBasedTrailingTriggerPrice(entry, "short", rule.MinProfitPct)
+
+	t.Run("activated order with moving trail level and unreported callback → match (no re-arm)", func(t *testing.T) {
+		openOrders := []OpenOrder{{
+			PositionSide:     "SHORT",
+			Type:             "TRAILING_STOP_MARKET",
+			StopPrice:        128.0, // moving trail level, far from plannedActivation ~130.6
+			CallbackRate:     0,     // Binance does not report it
+			ActivationStatus: "activated",
+		}}
+		if !at.hasMatchingNativeTrailingOrderForRule("XAGUSDT", "short", entry, rule, openOrders) {
+			t.Fatal("activated trailing order must be recognised as a match (else it re-arms every cycle)")
+		}
+	})
+
+	t.Run("pre-activation order, matching activation, unreported callback → match", func(t *testing.T) {
+		openOrders := []OpenOrder{{
+			PositionSide:     "SHORT",
+			Type:             "TRAILING_STOP_MARKET",
+			StopPrice:        plannedActivation, // resting at planned activation
+			CallbackRate:     0,
+			ActivationStatus: "", // not activated
+		}}
+		if !at.hasMatchingNativeTrailingOrderForRule("XAGUSDT", "short", entry, rule, openOrders) {
+			t.Fatal("pre-activation order at planned activation must match on price alone when callback unreported")
+		}
+	})
+
+	t.Run("pre-activation order with wrong activation price → no match (legit re-arm)", func(t *testing.T) {
+		openOrders := []OpenOrder{{
+			PositionSide:     "SHORT",
+			Type:             "TRAILING_STOP_MARKET",
+			StopPrice:        plannedActivation * 1.05, // 5% off, beyond 1% tolerance
+			CallbackRate:     0,
+			ActivationStatus: "",
+		}}
+		if at.hasMatchingNativeTrailingOrderForRule("XAGUSDT", "short", entry, rule, openOrders) {
+			t.Fatal("a resting order far from planned activation must NOT match")
+		}
+	})
 }
