@@ -2,6 +2,7 @@ package trader
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -883,10 +884,18 @@ func (at *AutoTrader) getPositionDetailsForFingerprint(symbol, side string) (flo
 		pd, _ := pos["side"].(string)
 		if strings.EqualFold(ps, symbol) && strings.EqualFold(pd, side) {
 			var qty float64
-			if q, ok := pos["positionAmt"].(float64); ok && q > 0 {
-				qty = q
-			} else if q, ok := pos["quantity"].(float64); ok && q > 0 {
-				qty = q
+			// positionAmt is NEGATIVE for short positions on Binance (the sign
+			// encodes direction). The prior `q > 0` guard skipped shorts entirely,
+			// leaving qty=0 — so the persisted dynamic-protection record got a
+			// PositionFingerprint of "entry|0.00000000", which the next reconcile
+			// cycle read as a closed position (qty=0), ignored, found 0 armed
+			// records, declared the trailing state "belongs to an old position",
+			// cleared it, and re-armed — an endless re-arm on EVERY short. Take the
+			// absolute value like every other positionAmt consumer in this package.
+			if q, ok := pos["positionAmt"].(float64); ok && q != 0 {
+				qty = math.Abs(q)
+			} else if q, ok := pos["quantity"].(float64); ok && q != 0 {
+				qty = math.Abs(q)
 			}
 			var cTime int64
 			if ct, ok := pos["createdTime"].(int64); ok {
