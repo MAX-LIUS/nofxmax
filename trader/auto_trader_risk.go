@@ -2820,6 +2820,56 @@ func (at *AutoTrader) ClearPeakPnLCache(symbol, side string) {
 	}
 }
 
+// resetPerPositionStateOnOpen wipes ALL in-memory per-position state keyed by
+// symbol|side at the moment a brand-new position is opened. This is the definitive
+// guard against cross-position state carryover (fix 2026-07-17): the reconcile
+// sweep evicts state when a position closes, but a new position can open on the same
+// symbol|side BEFORE the next reconcile pass runs — and sync/exchange-side closes
+// may never have cleared some maps at all. Resetting unconditionally at open ensures
+// a new position never inherits the prior position's drawdown tiers, peak/trough
+// excursion, break-even/protection status, runner semantics, AI rules, or the
+// structural-SL fire dedup. Idempotent and safe: a freshly opened position legitimately
+// has no prior state to preserve.
+func (at *AutoTrader) resetPerPositionStateOnOpen(symbol, side string) {
+	sideLower := strings.ToLower(side)
+	key := positionKey(symbol, sideLower)
+
+	// Excursion caches (peak/trough/ATR-mult) + persisted excursion row.
+	at.ClearPeakPnLCache(symbol, sideLower)
+
+	// Drawdown tier allocations — the SPCX false-DD root cause.
+	at.clearDrawdownTierAllocs(symbol, sideLower)
+
+	// Drawdown runner + executed-fingerprint + armed records.
+	at.clearDrawdownRunnerState(symbol, sideLower)
+	at.clearDrawdownExecutionFingerprint(symbol, sideLower)
+
+	// Break-even lifecycle state.
+	at.clearBreakEvenState(symbol, sideLower)
+
+	// Protection status + immediate trailing order id.
+	at.clearProtectionState(symbol, sideLower)
+	at.clearImmediateTrailingOrderID(symbol, sideLower)
+
+	// AI rule/source markers + structural-SL dedup that lack dedicated clearers.
+	at.protectionStateMutex.Lock()
+	delete(at.drawdownAIRules, key)
+	delete(at.drawdownSource, key)
+	at.protectionStateMutex.Unlock()
+
+	at.breakEvenStateMutex.Lock()
+	delete(at.breakEvenSource, key)
+	at.breakEvenStateMutex.Unlock()
+
+	at.structSLMutex.Lock()
+	delete(at.structSLFiredBar, key)
+	at.structSLMutex.Unlock()
+
+	at.gbGuardMutex.Lock()
+	delete(at.gbPnlHist, key)
+	at.gbGuardMutex.Unlock()
+}
+
 // UpdateExcursion tracks the full favorable/adverse excursion (MFE/MAE) of a
 // position: the high-water peak profit% and low-water trough profit%, plus each
 // extreme expressed in open-time ATR multiples (signed: +favorable / -adverse).

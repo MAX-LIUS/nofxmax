@@ -4,7 +4,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"nofx/store"
 	tradertypes "nofx/trader/types"
@@ -364,9 +363,9 @@ func TestCleanupInactiveProtectionState_CancelsOrphanedOrdersAndClearsLocalState
 		peakPnLCacheMutex:     sync.RWMutex{},
 	}
 
-	reconcileCooldownMutex.Lock()
-	reconcileCooldowns["BTCUSDT_long"] = time.Now()
-	reconcileCooldownMutex.Unlock()
+	// Set via the real API so the cooldown is stored under this trader's namespaced
+	// key (fix 2026-07-17 cross-trader isolation); cleanup only evicts its own keys.
+	at.setReconcileCooldown("BTCUSDT_long")
 
 	at.cleanupInactiveProtectionState(map[string]struct{}{})
 
@@ -385,10 +384,7 @@ func TestCleanupInactiveProtectionState_CancelsOrphanedOrdersAndClearsLocalState
 	if _, ok := at.GetPeakPnLCache()["BTCUSDT_long"]; ok {
 		t.Fatal("expected peak cache cleared for inactive position")
 	}
-	reconcileCooldownMutex.RLock()
-	_, cooldownExists := reconcileCooldowns["BTCUSDT_long"]
-	reconcileCooldownMutex.RUnlock()
-	if cooldownExists {
+	if at.isReconcileCooldownActive("BTCUSDT_long") {
 		t.Fatal("expected reconcile cooldown cleared for inactive position")
 	}
 }

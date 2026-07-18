@@ -1738,6 +1738,214 @@ export function ProtectionEditor({
                       : 'Close-confirm (Phase 2): exit only when a bar CLOSES beyond the boundary (anti stop-hunt). Resting stop parks at the backstop as a downtime net; the tight stop runs via engine poll.'}
                   </span>
                 </label>
+
+                {/* Ratcheting (trailing) structural stop — requires close-confirm */}
+                <label
+                  className="flex items-start gap-2 text-xs"
+                  style={{ color: '#EAECEF' }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={structuralSL.trail_enabled ?? false}
+                    onChange={(e) =>
+                      updateStructuralSL({ trail_enabled: e.target.checked })
+                    }
+                    disabled={
+                      disabled || !(structuralSL.close_confirm ?? false)
+                    }
+                    className="mt-0.5"
+                  />
+                  <span>
+                    {isZh
+                      ? '结构位跟随（棘轮）：每根收盘K线把止损边界向锁盈方向收紧（只紧不松），以入场结构位为起点。需先开启收盘确认。'
+                      : 'Ratcheting trail: each closed bar tightens the stop boundary toward locking profit (never looser), starting from the entry structural level. Requires close-confirm.'}
+                  </span>
+                </label>
+                {(structuralSL.trail_enabled ?? false) && (
+                  <div className="pl-6 space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label
+                          className="block text-xs mb-1"
+                          style={{ color: '#B7BDC6' }}
+                        >
+                          {isZh ? '跟随周期模式' : 'Trail mode'}
+                        </label>
+                        <select
+                          value={structuralSL.trail_mode ?? 'current'}
+                          onChange={(e) =>
+                            updateStructuralSL({ trail_mode: e.target.value })
+                          }
+                          disabled={disabled}
+                          className="w-full px-2 py-1 rounded text-xs"
+                          style={{
+                            background: '#0B0E11',
+                            color: '#EAECEF',
+                            border: '1px solid #2B3139',
+                          }}
+                        >
+                          <option value="current">
+                            {isZh ? '当前周期（最紧）' : 'Current (tightest)'}
+                          </option>
+                          <option value="higher">
+                            {isZh
+                              ? '高周期（最抗震）'
+                              : 'Higher (whipsaw-resistant)'}
+                          </option>
+                          <option value="both">
+                            {isZh ? '两者取松（折中）' : 'Both (looser of two)'}
+                          </option>
+                        </select>
+                      </div>
+                      <div>
+                        <label
+                          className="block text-xs mb-1"
+                          style={{ color: '#B7BDC6' }}
+                        >
+                          {isZh ? '高周期聚合倍数' : 'Higher-TF mult'}
+                        </label>
+                        <input
+                          type="number"
+                          step="1"
+                          min="2"
+                          value={structuralSL.trail_higher_mult ?? 4}
+                          onChange={(e) =>
+                            updateStructuralSL({
+                              trail_higher_mult: parseInt(e.target.value) || 0,
+                            })
+                          }
+                          disabled={disabled}
+                          className="w-full px-2 py-1 rounded text-xs"
+                          style={{
+                            background: '#0B0E11',
+                            color: '#EAECEF',
+                            border: '1px solid #2B3139',
+                          }}
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <label
+                          className="block text-xs mb-1"
+                          style={{ color: '#B7BDC6' }}
+                        >
+                          {isZh ? '容差(ATR)' : 'Tolerance (ATR)'}
+                        </label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0"
+                          value={structuralSL.trail_tol_atr ?? 0.5}
+                          onChange={(e) =>
+                            updateStructuralSL({
+                              trail_tol_atr: parseFloat(e.target.value) || 0,
+                            })
+                          }
+                          disabled={disabled}
+                          className="w-full px-2 py-1 rounded text-xs"
+                          style={{
+                            background: '#0B0E11',
+                            color: '#EAECEF',
+                            border: '1px solid #2B3139',
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <label
+                          className="block text-xs mb-1"
+                          style={{ color: '#B7BDC6' }}
+                        >
+                          {isZh ? '启动盈利(ATR)' : 'Min profit (ATR)'}
+                        </label>
+                        <input
+                          type="number"
+                          step="0.5"
+                          min="0"
+                          value={structuralSL.trail_min_profit_atr ?? 1.0}
+                          onChange={(e) =>
+                            updateStructuralSL({
+                              trail_min_profit_atr:
+                                parseFloat(e.target.value) || 0,
+                            })
+                          }
+                          disabled={disabled}
+                          className="w-full px-2 py-1 rounded text-xs"
+                          style={{
+                            background: '#0B0E11',
+                            color: '#EAECEF',
+                            border: '1px solid #2B3139',
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <label
+                          className="block text-xs mb-1"
+                          style={{ color: '#B7BDC6' }}
+                        >
+                          {isZh ? '最多追几次(0=不限)' : 'Max ratchets (0=∞)'}
+                        </label>
+                        <input
+                          type="number"
+                          step="1"
+                          min="0"
+                          value={structuralSL.trail_max_ratchets ?? 0}
+                          onChange={(e) =>
+                            updateStructuralSL({
+                              trail_max_ratchets: parseInt(e.target.value) || 0,
+                            })
+                          }
+                          disabled={disabled}
+                          className="w-full px-2 py-1 rounded text-xs"
+                          style={{
+                            background: '#0B0E11',
+                            color: '#EAECEF',
+                            border: '1px solid #2B3139',
+                          }}
+                        />
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <label
+                        className="flex items-center gap-2 text-xs"
+                        style={{ color: '#EAECEF' }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={structuralSL.trail_on_profit ?? true}
+                          onChange={(e) =>
+                            updateStructuralSL({
+                              trail_on_profit: e.target.checked,
+                            })
+                          }
+                          disabled={disabled}
+                        />
+                        <span>{isZh ? '盈利侧生效' : 'Ratchet in profit'}</span>
+                      </label>
+                      <label
+                        className="flex items-center gap-2 text-xs"
+                        style={{ color: '#EAECEF' }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={structuralSL.trail_on_loss ?? true}
+                          onChange={(e) =>
+                            updateStructuralSL({
+                              trail_on_loss: e.target.checked,
+                            })
+                          }
+                          disabled={disabled}
+                        />
+                        <span>{isZh ? '亏损侧生效' : 'Ratchet in loss'}</span>
+                      </label>
+                    </div>
+                    <div className="text-xs" style={{ color: '#848E9C' }}>
+                      {isZh
+                        ? '两侧都开=全状态生效；仅开一侧=该侧生效；都关=不追。'
+                        : 'Both on = every state; one on = that side only; both off = never.'}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

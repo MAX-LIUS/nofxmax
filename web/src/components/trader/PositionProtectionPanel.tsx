@@ -167,7 +167,12 @@ function buildProtectionRows(
   for (const tier of scheduledTiers) {
     const tierIdx = tier.index || 0
     const zone = `DD-${tierIdx}`
-    const callbackRate = tier.callback_rate || 0
+    // callback_rate arrives as a RATIO (e.g. 0.024) for OKX but as a PERCENT
+    // (e.g. 2.4) for Binance/Bitget (backend multiplies by 100 for the exchange
+    // API). Every consumer below expects a ratio, so normalize here: a value > 1
+    // can only be a percent (a >100% trailing callback is nonsensical), so /100.
+    const rawCallback = tier.callback_rate || 0
+    const callbackRate = rawCallback > 1 ? rawCallback / 100 : rawCallback
     // Activation/armed are distinct: is_activated means the peak reached the
     // trigger so the trailing stop is live and tracking the peak; is_armed means
     // an order rests on the exchange but price has not yet reached activation.

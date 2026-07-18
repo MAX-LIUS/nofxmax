@@ -588,6 +588,42 @@ type StructuralSLConfig struct {
 	// minimum, so the cap never drives the stop tighter than the noise floor.
 	// Set <= 0 to disable the RR cap. Default 0.8.
 	FallbackRRCapRatio float64 `json:"fallback_rr_cap_ratio,omitempty"`
+
+	// --- Ratcheting (trailing) structural stop ---
+	// TrailEnabled upgrades the static structural stop into a ratchet: once per CLOSED
+	// bar the guard recomputes the NEAREST swing beyond the CURRENT price and moves the
+	// close-confirm boundary TIGHTER toward locking profit — never looser. The frozen
+	// entry boundary is the starting floor; the wide resting backstop still guards
+	// intrabar catastrophes. Requires CloseConfirm. No-op when false (static behavior).
+	TrailEnabled bool `json:"trail_enabled,omitempty"`
+	// TrailTolATR is the volatility tolerance buffer (ATR multiples) added BEYOND the
+	// recomputed swing before it becomes the new boundary, so the trail sits a cushion
+	// past structure (not exactly on it) and does not whipsaw on a marginal poke. This
+	// same cushion is the anti-jitter step: the boundary only ratchets when the new
+	// candidate is at least this much tighter than the current. Default 0.5.
+	TrailTolATR float64 `json:"trail_tol_atr,omitempty"`
+	// TrailMode selects which timeframe's structure the trail follows:
+	//   "current" / "" → this-period swings only (tightest, locks the most profit)
+	//   "higher"       → higher-period swings only (widest, most whipsaw-resistant)
+	//   "both"         → the LOOSER of current & higher (higher-tf floor) — middle ground.
+	TrailMode string `json:"trail_mode,omitempty"`
+	// TrailHigherMult is the higher-timeframe aggregation factor (base bars per higher
+	// bar) for "higher"/"both" modes, e.g. 4 → 4h structure on a 1h ATR timeframe.
+	// Default 4 when a higher mode is selected.
+	TrailHigherMult int `json:"trail_higher_mult,omitempty"`
+	// TrailMinProfitATR gates activation: the trail only starts ratcheting once the
+	// position's favorable excursion exceeds this many ATR from entry, so a just-opened
+	// position is not immediately trailed into a tight noise stop. Default 1.0.
+	TrailMinProfitATR float64 `json:"trail_min_profit_atr,omitempty"`
+	// TrailMaxRatchets caps how many times the boundary may tighten over the life of the
+	// position; once reached the boundary locks. 0 = unlimited (default, back-compatible).
+	TrailMaxRatchets int `json:"trail_max_ratchets,omitempty"`
+	// TrailOnProfit allows ratcheting while the position is in PROFIT (current price
+	// beyond entry in the favorable direction). TrailOnLoss allows it while in LOSS.
+	// Both true = ratchet in every state; only one = that side only; both false = the
+	// trail never ratchets (equivalent to TrailEnabled off). Default: both true.
+	TrailOnProfit *bool `json:"trail_on_profit,omitempty"`
+	TrailOnLoss   *bool `json:"trail_on_loss,omitempty"`
 }
 
 // WithDefaults fills unset structural-SL fields with safe, backtested defaults.
@@ -614,7 +650,44 @@ func (c StructuralSLConfig) WithDefaults() StructuralSLConfig {
 	if c.FallbackRRCapRatio <= 0 {
 		c.FallbackRRCapRatio = 0.8
 	}
+	// Ratcheting-trail defaults (only meaningful when TrailEnabled).
+	if c.TrailTolATR <= 0 {
+		c.TrailTolATR = 0.5
+	}
+	if c.TrailMode == "" {
+		c.TrailMode = "current"
+	}
+	if c.TrailHigherMult < 2 {
+		c.TrailHigherMult = 4
+	}
+	if c.TrailMinProfitATR <= 0 {
+		c.TrailMinProfitATR = 1.0
+	}
+	if c.TrailMaxRatchets < 0 {
+		c.TrailMaxRatchets = 0
+	}
+	// Side gates default to true (ratchet in every state) when unset.
+	if c.TrailOnProfit == nil {
+		v := true
+		c.TrailOnProfit = &v
+	}
+	if c.TrailOnLoss == nil {
+		v := true
+		c.TrailOnLoss = &v
+	}
 	return c
+}
+
+// TrailRatchetOnProfit reports whether the ratchet is allowed while in profit
+// (nil-safe; unset defaults to true).
+func (c StructuralSLConfig) TrailRatchetOnProfit() bool {
+	return c.TrailOnProfit == nil || *c.TrailOnProfit
+}
+
+// TrailRatchetOnLoss reports whether the ratchet is allowed while in loss
+// (nil-safe; unset defaults to true).
+func (c StructuralSLConfig) TrailRatchetOnLoss() bool {
+	return c.TrailOnLoss == nil || *c.TrailOnLoss
 }
 
 type ProtectionValueSource struct {

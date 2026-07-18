@@ -273,6 +273,10 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 	posKey := decision.Symbol + "_long"
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
 
+	// Wipe any stale per-position state from a prior same-symbol position before the
+	// new position's protection is materialized (fix 2026-07-17 cross-position carryover).
+	at.resetPerPositionStateOnOpen(decision.Symbol, "long")
+
 	if err := at.applyPostOpenProtection(&protectionExecutionRequest{
 		Symbol:       decision.Symbol,
 		Action:       decision.Action,
@@ -458,6 +462,10 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 	// Record position opening time
 	posKey := decision.Symbol + "_short"
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
+
+	// Wipe any stale per-position state from a prior same-symbol position before the
+	// new position's protection is materialized (fix 2026-07-17 cross-position carryover).
+	at.resetPerPositionStateOnOpen(decision.Symbol, "short")
 
 	if err := at.applyPostOpenProtection(&protectionExecutionRequest{
 		Symbol:       decision.Symbol,

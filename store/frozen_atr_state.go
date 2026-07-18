@@ -28,6 +28,15 @@ type FrozenATRRecord struct {
 	// the position does not use structural SL. Frozen because it cannot be recomputed
 	// after the fact — GetKlines returns the latest bars, not the pre-entry window.
 	StructuralBoundary float64 `json:"structural_boundary,omitempty"`
+	// TrailBoundary is the current ratcheted close-confirm boundary for the trailing
+	// structural stop. It starts at StructuralBoundary and only tightens (never loosens)
+	// as the guard recomputes nearest structure per closed bar. Persisted so the ratchet
+	// survives a restart instead of resetting to the entry boundary. 0 when the trail
+	// has not armed yet (falls back to StructuralBoundary).
+	TrailBoundary float64 `json:"trail_boundary,omitempty"`
+	// TrailRatchets counts how many times TrailBoundary has tightened, enforced against
+	// TrailMaxRatchets. Persisted alongside the boundary.
+	TrailRatchets int `json:"trail_ratchets,omitempty"`
 }
 
 type FrozenATRState struct {

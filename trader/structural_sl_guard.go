@@ -1,6 +1,8 @@
 package trader
 
 import (
+	"time"
+
 	"nofx/logger"
 	"nofx/market"
 	"nofx/store"
@@ -88,15 +90,30 @@ func (at *AutoTrader) evaluateStructuralSLClose(symbol, side string, entry, qty 
 	}
 
 	c := acfg.WithDefaults()
-	// Need at least 2 bars: the last element is the still-forming bar, the one before
-	// it is the most recently CLOSED bar we confirm against.
-	bars, err := market.GetKlines(symbol, c.Timeframe, at.exchange, 3)
+	ss := sscfg.WithDefaults()
+	// When the ratchet is enabled we need the full lookback window (for swing
+	// recompute); otherwise 3 bars suffice for the static close-confirm check.
+	fetch := 3
+	if ss.TrailEnabled {
+		fetch = ss.LookbackBars + 4
+		if fetch < 8 {
+			fetch = 8
+		}
+	}
+	bars, err := market.GetKlines(symbol, c.Timeframe, at.exchange, fetch)
 	if err != nil || len(bars) < 2 {
 		return
 	}
 	closedBar := bars[len(bars)-2]
 	if closedBar.Close <= 0 {
 		return
+	}
+
+	// Ratcheting trail: tighten the effective close-confirm boundary toward locking
+	// profit. Uses the frozen entry boundary as the starting floor and only ever moves
+	// tighter. Persisted so the ratchet survives a restart. Static behavior when off.
+	if ss.TrailEnabled {
+		boundary = at.applyStructuralTrail(symbol, side, entry, isLong, boundary, closedBar, bars, ss, acfg)
 	}
 
 	breached := (isLong && closedBar.Close < boundary) || (!isLong && closedBar.Close > boundary)
@@ -122,5 +139,94 @@ func (at *AutoTrader) evaluateStructuralSLClose(symbol, side string, entry, qty 
 	if err := at.closePositionByReason(symbol, side, qty, "structural_sl"); err != nil {
 		logger.Infof("❌ [StructuralSL] close failed %s %s: %v", symbol, side, err)
 	}
+}
+
+// applyStructuralTrail runs one ratchet step for the trailing structural stop and
+// returns the EFFECTIVE close-confirm boundary to enforce this cycle: the tighter of
+// the frozen entry boundary and the current ratcheted trail boundary. It loads the
+// prior trail state (boundary + ratchet count) from the frozen-ATR record, recomputes
+// nearest structure on the closed-bar window, persists any tighten, and clamps the
+// result to the same [floor, backstop] band the static boundary uses so the ratchet
+// can never push the trigger BEYOND the wide resting backstop. entryBoundary is the
+// already-clamped frozen entry boundary; frozenBars includes the still-forming bar.
+func (at *AutoTrader) applyStructuralTrail(symbol, side string, entry float64, isLong bool, entryBoundary float64, closedBar market.Kline, frozenBars []market.Kline, ss store.StructuralSLConfig, acfg store.ATRProtectionConfig) float64 {
+	if len(frozenBars) < 4 {
+		return entryBoundary
+	}
+	tf := acfg.WithDefaults().Timeframe
+	sideUpper := "SHORT"
+	if isLong {
+		sideUpper = "LONG"
+	}
+	key := frozenATRKey(at.id, symbol, tf, sideUpper)
+
+	// Frozen open-time ATR (price units) drives cushion/min-profit. No ATR → static.
+	atr, ok := at.frozenATRForPosition(symbol, side, entry, acfg)
+	if !ok || atr <= 0 {
+		return entryBoundary
+	}
+
+	// Load prior trail state; seed from the entry boundary on first arm.
+	prevBoundary := entryBoundary
+	prevRatchets := 0
+	if at.store != nil {
+		if state, err := at.store.LoadFrozenATRState(); err == nil {
+			if rec, found := state.Records[key]; found && entrySamePosition(rec.EntryPrice, entry) {
+				if rec.TrailBoundary > 0 {
+					prevBoundary = rec.TrailBoundary
+				}
+				prevRatchets = rec.TrailRatchets
+			}
+		}
+	}
+
+	// Closed-bar window (drop the still-forming last bar) for swing recompute.
+	window := frozenBars[:len(frozenBars)-1]
+	newBoundary, newRatchets := computeTrailBoundary(ss, trailRecomputeInput{
+		window:   window,
+		curClose: closedBar.Close,
+		atr:      atr,
+		entry:    entry,
+		isLong:   isLong,
+		curBound: prevBoundary,
+		ratchets: prevRatchets,
+	})
+
+	// Clamp to the same [floor, backstop] band as the static boundary so a ratcheted
+	// trigger can never sit beyond the wide resting backstop (which would fire first).
+	tpTargetPct := ladderMaxTPTargetPct(at.config.StrategyConfig.Protection.LadderTPSL.Rules, atr, entry, acfg)
+	if clamped, cok := clampStructuralBoundary(entry, newBoundary, atr, tpTargetPct, isLong, ss); cok {
+		newBoundary = clamped
+	}
+
+	// Never let the ratchet LOOSEN below the frozen entry boundary; keep the tighter.
+	effective := newBoundary
+	if !isLong {
+		if entryBoundary > 0 && entryBoundary < effective {
+			effective = entryBoundary // short: lower = tighter
+		}
+	} else {
+		if entryBoundary > 0 && entryBoundary > effective {
+			effective = entryBoundary // long: higher = tighter
+		}
+	}
+
+	// Persist the tighten (only when it actually moved) so it survives restart.
+	if newRatchets != prevRatchets && at.store != nil {
+		if state, err := at.store.LoadFrozenATRState(); err == nil {
+			rec := state.Records[key]
+			rec.TraderID, rec.Symbol, rec.EntryPrice = at.id, symbol, entry
+			rec.TrailBoundary = newBoundary
+			rec.TrailRatchets = newRatchets
+			rec.UpdatedAt = time.Now().Unix()
+			if err := at.store.SaveFrozenATRRecord(key, rec); err != nil {
+				logger.Warnf("⚠️ [StructuralSL] trail persist failed %s: %v", key, err)
+			} else {
+				logger.Infof("🔧 [StructuralSL] %s %s trail ratchet #%d → boundary %.6f (entry-floor %.6f)",
+					symbol, sideUpper, newRatchets, newBoundary, entryBoundary)
+			}
+		}
+	}
+	return effective
 }
 

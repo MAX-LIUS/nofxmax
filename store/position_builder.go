@@ -111,6 +111,16 @@ func (pb *PositionBuilder) handleClose(
 		if fallbackErr != nil {
 			return fallbackErr
 		}
+		// Broader fallback (fix 2026-07-17 SOL): a position closed via reconcile whose
+		// close_reason was rewritten to a specific protection tag (not sync_absent)
+		// won't match above. Catch any recently-closed, under-closed position so the
+		// late closing fill's qty/PnL are still attributed instead of dropped.
+		if fallback == nil {
+			fallback, fallbackErr = pb.positionStore.GetRecentlyClosedUnderClosedPosition(traderID, symbol, side, tradeTimeMs, 2*time.Minute)
+			if fallbackErr != nil {
+				return fallbackErr
+			}
+		}
 		if fallback != nil {
 			if realizedPnL == 0 && fallback.EntryPrice > 0 {
 				if strings.EqualFold(side, "LONG") {

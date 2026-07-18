@@ -1307,18 +1307,102 @@ func (at *AutoTrader) cleanupInactiveProtectionState(active map[string]struct{})
 	}
 	at.protectionStateMutex.Unlock()
 
+	// Peak/trough/ATR-mult excursion caches all share peakPnLCacheMutex. Evict every
+	// one so a new position on the same symbol|side never inherits stale MFE/MAE.
 	at.peakPnLCacheMutex.Lock()
 	for key := range at.peakPnLCache {
 		if _, ok := active[key]; !ok {
 			delete(at.peakPnLCache, key)
+			delete(at.troughPnLCache, key)
+			delete(at.peakAtrMultCache, key)
+			delete(at.troughAtrMultCache, key)
+		}
+	}
+	// A trough/ATR-mult key can exist without a peak key (trough recorded first on an
+	// immediately-adverse position). Sweep them independently so none survive a full
+	// close as stale seed for the next position.
+	for key := range at.troughPnLCache {
+		if _, ok := active[key]; !ok {
+			delete(at.troughPnLCache, key)
+		}
+	}
+	for key := range at.peakAtrMultCache {
+		if _, ok := active[key]; !ok {
+			delete(at.peakAtrMultCache, key)
+		}
+	}
+	for key := range at.troughAtrMultCache {
+		if _, ok := active[key]; !ok {
+			delete(at.troughAtrMultCache, key)
 		}
 	}
 	at.peakPnLCacheMutex.Unlock()
 
-	// Cleanup cooldowns for inactive positions.
+	// Drawdown tier allocations (fix 2026-07-17 SPCX false-DD): a fully-closed
+	// position's tier allocs must be evicted, otherwise the lazy re-init on the NEXT
+	// same-symbol position (`if len(allocs)==0`) is blocked and the new position
+	// inherits the old tier's peak/"tracking" state — firing a phantom drawdown on
+	// a position that was never in profit. Sync/exchange-side closes never call
+	// clearDrawdownTierAllocs, so this reconcile sweep is the authoritative eviction.
+	at.drawdownTierAllocMu.Lock()
+	for key := range at.drawdownTierAllocs {
+		if _, ok := active[key]; !ok {
+			delete(at.drawdownTierAllocs, key)
+		}
+	}
+	at.drawdownTierAllocMu.Unlock()
+
+	// AI drawdown rules + source markers + immediate-trailing IDs share protectionStateMutex.
+	at.protectionStateMutex.Lock()
+	for key := range at.drawdownAIRules {
+		if _, ok := active[key]; !ok {
+			delete(at.drawdownAIRules, key)
+		}
+	}
+	for key := range at.drawdownSource {
+		if _, ok := active[key]; !ok {
+			delete(at.drawdownSource, key)
+		}
+	}
+	for key := range at.immediateTrailingIDs {
+		if _, ok := active[key]; !ok {
+			delete(at.immediateTrailingIDs, key)
+		}
+	}
+	at.protectionStateMutex.Unlock()
+
+	// Break-even source marker shares breakEvenStateMutex.
+	at.breakEvenStateMutex.Lock()
+	for key := range at.breakEvenSource {
+		if _, ok := active[key]; !ok {
+			delete(at.breakEvenSource, key)
+		}
+	}
+	at.breakEvenStateMutex.Unlock()
+
+	// Structural-SL close-confirm dedup (fix 2026-07-17): the "already fired for this
+	// closed bar" marker must not survive a full close, or a new same-symbol position
+	// whose boundary breach lands on the same bar openTime would be silently skipped —
+	// a structural stop that never fires. Evict on full close.
+	at.structSLMutex.Lock()
+	for key := range at.structSLFiredBar {
+		if _, ok := active[key]; !ok {
+			delete(at.structSLFiredBar, key)
+		}
+	}
+	at.structSLMutex.Unlock()
+
+	// Cleanup cooldowns for inactive positions. reconcileCooldowns is package-level and
+	// shared across traders, so only touch THIS trader's namespaced keys — never delete
+	// another trader's cooldowns (fix 2026-07-17 cross-trader isolation).
+	traderPrefix := at.id + "|"
 	reconcileCooldownMutex.Lock()
 	for key := range reconcileCooldowns {
-		if _, ok := active[key]; !ok {
+		rawKey, isMine := strings.CutPrefix(key, traderPrefix)
+		if !isMine {
+			continue
+		}
+		if _, ok := active[rawKey]; !ok {
 			delete(reconcileCooldowns, key)
 		}
 	}
@@ -1376,18 +1460,27 @@ func splitPositionKey(key string) (symbol, side string) {
 	return key[:idx], key[idx+1:]
 }
 
+// reconcileCooldownKey namespaces a position cooldown key by trader id. reconcileCooldowns
+// is a PACKAGE-LEVEL map shared by every AutoTrader in the process; without the trader
+// prefix, trader A setting a cooldown on "SPCXUSDT_short" would suppress trader B's
+// reconcile of its own SPCXUSDT short (even on a different exchange), and A's cleanup
+// pass would delete B's cooldowns (fix 2026-07-17 cross-trader isolation).
+func (at *AutoTrader) reconcileCooldownKey(key string) string {
+	return at.id + "|" + key
+}
+
 // setReconcileCooldown marks a position as recently reconciled, preventing re-checks for reconcileCooldownDuration.
 func (at *AutoTrader) setReconcileCooldown(key string) {
 	reconcileCooldownMutex.Lock()
 	defer reconcileCooldownMutex.Unlock()
-	reconcileCooldowns[key] = time.Now()
+	reconcileCooldowns[at.reconcileCooldownKey(key)] = time.Now()
 }
 
 // isReconcileCooldownActive returns true if the position was reconciled within the cooldown window.
 func (at *AutoTrader) isReconcileCooldownActive(key string) bool {
 	reconcileCooldownMutex.RLock()
 	defer reconcileCooldownMutex.RUnlock()
-	if lastTime, ok := reconcileCooldowns[key]; ok {
+	if lastTime, ok := reconcileCooldowns[at.reconcileCooldownKey(key)]; ok {
 		return time.Since(lastTime) < reconcileCooldownDuration
 	}
 	return false

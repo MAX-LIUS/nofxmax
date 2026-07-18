@@ -1008,6 +1008,70 @@ func (s *PositionStore) GetRecentlyClosedSyncAbsentPosition(traderID, symbol, si
 	return &pos, nil
 }
 
+// GetRecentlyClosedUnderClosedPosition finds a position that was closed within the
+// delay window AND is under-closed (the sum of its recorded close events is less
+// than its entry quantity), regardless of the specific close_reason.
+//
+// Why broader than GetRecentlyClosedSyncAbsentPosition (fix 2026-07-17 SOL): when the
+// exchange closes the tail of a position via a resting order (break-even/structural/
+// trailing) and the /positions reconcile marks the local row CLOSED before those
+// closing fills sync, MarkOpenPositionsAbsentFromExchangeClosed's attribution step
+// rewrites close_reason to the specific protection tag (e.g. "ladder_tp") — which
+// made the sync_absent-only matcher miss the late fills, dropping their PnL and
+// leaving them unlinked (rpid=0). Matching on "recently closed AND under-closed"
+// instead catches every such late fill. Under-closure is the safety gate: a fully
+// closed position (recorded closes >= entry qty) never matches, so a genuinely
+// unrelated later fill for a NEW same-symbol position can't attach here. Applying is
+// still capped by ApplyLateCloseFillToClosedPosition's remaining-quantity clamp.
+func (s *PositionStore) GetRecentlyClosedUnderClosedPosition(traderID, symbol, side string, tradeTimeMs int64, maxDelay time.Duration) (*TraderPosition, error) {
+	if s.db == nil || traderID == "" || symbol == "" || side == "" || tradeTimeMs <= 0 {
+		return nil, nil
+	}
+	if maxDelay <= 0 {
+		maxDelay = 2 * time.Minute
+	}
+	minExitTime := tradeTimeMs - maxDelay.Milliseconds()
+	maxExitTime := tradeTimeMs + maxDelay.Milliseconds()
+	var candidates []TraderPosition
+	err := s.db.Where("trader_id = ? AND symbol = ? AND side = ? AND status = ? AND exit_time > 0 AND exit_time >= ? AND exit_time <= ?",
+		traderID, symbol, side, "CLOSED", minExitTime, maxExitTime).
+		Order("exit_time DESC, id DESC").
+		Find(&candidates).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to query recently closed positions: %w", err)
+	}
+	eventStore := NewPositionCloseEventStore(s.db)
+	const qtyTolerance = 0.0001
+	for i := range candidates {
+		pos := candidates[i]
+		entryQty := pos.EntryQuantity
+		if entryQty <= 0 {
+			entryQty = pos.Quantity
+		}
+		if entryQty <= 0 {
+			continue
+		}
+		events, err := eventStore.ListByPositionID(pos.ID)
+		if err != nil {
+			return nil, err
+		}
+		closedRecorded := 0.0
+		for _, event := range events {
+			if event != nil {
+				closedRecorded += event.CloseQuantity
+			}
+		}
+		if closedRecorded < entryQty-qtyTolerance {
+			pos.EntryQuantity = entryQty
+			return &pos, nil
+		}
+	}
+	return nil, nil
+}
+
 // ApplyLateCloseFillToClosedPosition backfills a close fill that arrived after the
 // local position had already been marked closed. This preserves close-event and PnL
 // accounting for short sync gaps without reopening the position.
@@ -1272,7 +1336,15 @@ func (s *PositionStore) MarkOpenPositionsAbsentFromExchangeClosed(traderID strin
 	for _, pos := range openPositions {
 		key := positionPresenceKey(pos.Symbol, pos.Side)
 		liveQty, ok := livePositions[key]
-		if ok && quantitiesEquivalent(pos.Quantity, liveQty) {
+		// Present on the exchange => NOT absent, regardless of quantity.
+		// A smaller live qty than our local row is a PARTIAL close (e.g. a drawdown
+		// tier just reduced the position on-exchange) whose close fill has not yet
+		// synced — force-closing the local row here would zero out a position that is
+		// still live on the exchange, orphaning the remainder (fix 2026-07-17
+		// SPCX partial-close race). Quantity divergence is reconciled by the fill-sync
+		// path, not by this absence sweep. Only a key that is entirely missing from
+		// the snapshot counts as absent.
+		if ok && liveQty > 0 {
 			continue
 		}
 		absent = append(absent, pos)

@@ -252,6 +252,26 @@ export interface StructuralSLConfig {
   // fallback_rr_cap_ratio: on the fallback path, the stop must stay below this ratio ×
   // the TP target move (fallbackSL% <= ratio × TP%), guaranteeing RR >= 1/ratio.
   fallback_rr_cap_ratio?: number
+
+  // --- Ratcheting (trailing) structural stop ---
+  // trail_enabled: upgrade the static structural stop into a ratchet that moves the
+  // close-confirm boundary tighter toward locking profit each closed bar (never looser).
+  trail_enabled?: boolean
+  // trail_tol_atr: volatility cushion (ATR mult) added beyond the swing; also the
+  // anti-jitter step. Default 0.5.
+  trail_tol_atr?: number
+  // trail_mode: which structure the trail follows — "current" | "higher" | "both".
+  trail_mode?: string
+  // trail_higher_mult: higher-timeframe aggregation factor for higher/both modes. Default 4.
+  trail_higher_mult?: number
+  // trail_min_profit_atr: favorable excursion (ATR mult) required before the trail arms. Default 1.
+  trail_min_profit_atr?: number
+  // trail_max_ratchets: cap on how many times the boundary may tighten. 0 = unlimited.
+  trail_max_ratchets?: number
+  // trail_on_profit / trail_on_loss: allow ratcheting while in profit / in loss. Both
+  // true = every state; only one = that side; both false = never. Default both true.
+  trail_on_profit?: boolean
+  trail_on_loss?: boolean
 }
 
 export interface LadderTPSLConfig {

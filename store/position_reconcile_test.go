@@ -174,3 +174,73 @@ func TestMarkOpenPositionsAbsentPartialSnapshotStillCloses(t *testing.T) {
 		t.Fatalf("expected only BTC preserved, got %+v", open)
 	}
 }
+
+// TestMarkOpenPositionsAbsent_PartialCloseNotAbsent reproduces the 2026-07-17 SPCX
+// bug: a position that is still live on the exchange but with a REDUCED quantity
+// (a drawdown tier partially closed it and the close fill has not synced yet) must
+// NOT be treated as absent and force-closed. Doing so zeroed the local row while
+// 0.38 remained short on Binance, orphaning the remainder.
+func TestMarkOpenPositionsAbsent_PartialCloseNotAbsent(t *testing.T) {
+	s := newPositionReconcileTestStore(t)
+	// Local row still reflects the full 0.55 short (pre-sync of the DD1 close fill).
+	if err := s.CreateOpenPosition(&TraderPosition{
+		TraderID: "t", ExchangeID: "ex", Symbol: "SPCXUSDT", Side: "SHORT",
+		Quantity: 0.55, EntryQuantity: 0.55, EntryPrice: 126.57, EntryTime: 1, Status: "OPEN",
+	}); err != nil {
+		t.Fatalf("create position: %v", err)
+	}
+
+	// Exchange still reports the position, but reduced to 0.38 after the partial close.
+	updated, err := s.MarkOpenPositionsAbsentFromExchangeClosed(
+		"t", map[string]float64{"SPCXUSDT|SHORT": 0.38}, "sync_absent_from_exchange")
+	if err != nil {
+		t.Fatalf("mark absent closed: %v", err)
+	}
+	if updated != 0 {
+		t.Fatalf("partial close must not be marked absent, got %d force-closes", updated)
+	}
+
+	open, err := s.GetOpenPositionBySymbol("t", "SPCXUSDT", "SHORT")
+	if err != nil {
+		t.Fatalf("query SPCX open: %v", err)
+	}
+	if open == nil || open.Status != "OPEN" {
+		t.Fatalf("expected SPCX short to remain OPEN, got %+v", open)
+	}
+}
+
+// TestMarkOpenPositionsAbsent_TrulyMissingStillClosed guards that the fix does not
+// mask a genuinely absent position: a key entirely missing from the snapshot is
+// still reconciled to CLOSED.
+func TestMarkOpenPositionsAbsent_TrulyMissingStillClosed(t *testing.T) {
+	s := newPositionReconcileTestStore(t)
+	if err := s.CreateOpenPosition(&TraderPosition{
+		TraderID: "t", ExchangeID: "ex", Symbol: "SPCXUSDT", Side: "SHORT",
+		Quantity: 0.55, EntryQuantity: 0.55, EntryPrice: 126.57, EntryTime: 1, Status: "OPEN",
+	}); err != nil {
+		t.Fatalf("create position: %v", err)
+	}
+	// Keep a second position present so the mass-close guard (>=2 all-absent) does not skip.
+	if err := s.CreateOpenPosition(&TraderPosition{
+		TraderID: "t", ExchangeID: "ex", Symbol: "ETHUSDT", Side: "SHORT",
+		Quantity: 0.02, EntryQuantity: 0.02, EntryPrice: 1858, EntryTime: 2, Status: "OPEN",
+	}); err != nil {
+		t.Fatalf("create eth position: %v", err)
+	}
+
+	updated, err := s.MarkOpenPositionsAbsentFromExchangeClosed(
+		"t", map[string]float64{"ETHUSDT|SHORT": 0.02}, "sync_absent_from_exchange")
+	if err != nil {
+		t.Fatalf("mark absent closed: %v", err)
+	}
+	if updated != 1 {
+		t.Fatalf("truly-absent SPCX should be closed, got %d", updated)
+	}
+	closed, err := s.GetOpenPositionBySymbol("t", "SPCXUSDT", "SHORT")
+	if err != nil {
+		t.Fatalf("query SPCX: %v", err)
+	}
+	if closed != nil {
+		t.Fatalf("expected SPCX closed, still open: %+v", closed)
+	}
+}
