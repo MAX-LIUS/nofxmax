@@ -44,12 +44,42 @@ export const dataApi = {
     return result.data!
   },
 
-  async getDecisions(traderId?: string): Promise<DecisionRecord[]> {
-    const url = traderId
-      ? `${API_BASE}/decisions?trader_id=${traderId}`
-      : `${API_BASE}/decisions`
+  async getDecisions(
+    traderId?: string,
+    limit?: number
+  ): Promise<DecisionRecord[]> {
+    const params = new URLSearchParams()
+    if (traderId) params.append('trader_id', traderId)
+    if (limit && limit > 0) params.append('limit', String(limit))
+    const qs = params.toString()
+    const url = qs ? `${API_BASE}/decisions?${qs}` : `${API_BASE}/decisions`
     const result = await httpClient.get<DecisionRecord[]>(url)
     if (!result.success) throw new Error('Failed to fetch decision logs')
+    return result.data!
+  },
+
+  // Lazy-load the heavy prompt blobs for a single decision cycle. The list
+  // endpoint returns slim records (prompts stripped) to keep the payload small,
+  // so DecisionCard fetches these on demand when a user expands a prompt panel.
+  async getDecisionPrompts(
+    traderId: string,
+    cycle: number
+  ): Promise<{
+    system_prompt: string
+    input_prompt: string
+    cot_trace: string
+    raw_response: string
+  }> {
+    const params = new URLSearchParams()
+    params.append('trader_id', traderId)
+    params.append('cycle', String(cycle))
+    const result = await httpClient.get<{
+      system_prompt: string
+      input_prompt: string
+      cot_trace: string
+      raw_response: string
+    }>(`${API_BASE}/decisions/prompts?${params.toString()}`)
+    if (!result.success) throw new Error('Failed to fetch decision prompts')
     return result.data!
   },
 

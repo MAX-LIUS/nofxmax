@@ -27,14 +27,59 @@ func (s *Server) handleDecisions(c *gin.Context) {
 		return
 	}
 
-	// Get all historical decision records (unlimited)
-	records, err := trader.GetStore().Decision().GetLatestRecords(trader.GetID(), 10000)
+	// Slim list: drop the fat prompt/response blobs (~94% of each row); the dashboard
+	// never renders them here — they lazy-load per cycle via /decisions/prompts.
+	// Default 200 rows (was an unbounded 10000-row full-blob fetch that returned
+	// hundreds of MB per trader). limit is caller-tunable up to 2000.
+	limit := 200
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if parsed, perr := strconv.Atoi(limitStr); perr == nil && parsed > 0 {
+			limit = parsed
+			if limit > 2000 {
+				limit = 2000
+			}
+		}
+	}
+	records, err := trader.GetStore().Decision().GetLatestRecordsSlim(trader.GetID(), limit)
 	if err != nil {
 		SafeInternalError(c, "Get decision log", err)
 		return
 	}
 
 	c.JSON(http.StatusOK, records)
+}
+
+// handleDecisionPrompts lazy-loads the heavy prompt/response blobs for a single
+// decision cycle (system_prompt, input_prompt, cot_trace, raw_response). Kept out of
+// the list payload so /decisions stays lightweight.
+func (s *Server) handleDecisionPrompts(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		SafeBadRequest(c, "Invalid trader ID")
+		return
+	}
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		SafeNotFound(c, "Trader")
+		return
+	}
+	cycleStr := c.Query("cycle")
+	cycle, perr := strconv.Atoi(cycleStr)
+	if perr != nil || cycle <= 0 {
+		SafeBadRequest(c, "Missing or invalid cycle")
+		return
+	}
+	sys, input, cot, raw, err := trader.GetStore().Decision().GetDecisionPrompts(trader.GetID(), cycle)
+	if err != nil {
+		SafeInternalError(c, "Get decision prompts", err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"system_prompt": sys,
+		"input_prompt":  input,
+		"cot_trace":     cot,
+		"raw_response":  raw,
+	})
 }
 
 // handleLatestDecisions Latest decision logs (newest first, supports limit parameter)
@@ -62,14 +107,18 @@ func (s *Server) handleLatestDecisions(c *gin.Context) {
 		}
 	}
 
-	records, err := trader.GetStore().Decision().GetLatestRecords(trader.GetID(), limit)
+	// Slim list: strip the fat prompt/response blobs (~94% of each row). The
+	// dashboard renders these cards without prompts; prompts lazy-load per cycle
+	// via /decisions/prompts. Previously each row carried ~117KB of prompt text,
+	// so a 500-row fetch could return ~58MB.
+	records, err := trader.GetStore().Decision().GetLatestRecordsSlim(trader.GetID(), limit)
 	if err != nil {
 		SafeInternalError(c, "Get decision log", err)
 		return
 	}
 
 	// Reverse array to put newest first (for list display)
-	// GetLatestRecords returns oldest to newest (for charts), here we need newest to oldest
+	// GetLatestRecordsSlim returns oldest to newest (for charts), here we need newest to oldest
 	for i, j := 0, len(records)-1; i < j; i, j = i+1, j-1 {
 		records[i], records[j] = records[j], records[i]
 	}

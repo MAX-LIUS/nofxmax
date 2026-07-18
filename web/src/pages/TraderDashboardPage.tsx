@@ -162,7 +162,13 @@ export function TraderDashboardPage({
   exchanges,
 }: TraderDashboardPageProps) {
   const [closingPosition, setClosingPosition] = useState<string | null>(null)
-  const [showOnlyActionable, setShowOnlyActionable] = useState(false)
+  // Decision list filter: all decisions / all opens / successful opens only /
+  // rejected opens only. Paired with client-side pagination below.
+  const [decisionFilter, setDecisionFilter] = useState<
+    'all' | 'opens' | 'opens_success' | 'opens_rejected'
+  >('all')
+  const [decisionsPage, setDecisionsPage] = useState<number>(1)
+  const decisionsPageSize = 20
   const [selectedChartSymbol, setSelectedChartSymbol] = useState<
     string | undefined
   >(undefined)
@@ -1401,31 +1407,35 @@ export function TraderDashboardPage({
                 </div>
               )}
             </div>
-            {/* Filter Toggle */}
-            <button
-              onClick={() => setShowOnlyActionable(!showOnlyActionable)}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all border"
-              style={{
-                background: showOnlyActionable
-                  ? 'rgba(99, 102, 241, 0.15)'
-                  : 'rgba(0,0,0,0.3)',
-                color: showOnlyActionable ? '#818CF8' : '#848E9C',
-                borderColor: showOnlyActionable
-                  ? 'rgba(99, 102, 241, 0.3)'
-                  : 'rgba(255,255,255,0.1)',
+            {/* Decision type filter */}
+            <select
+              value={decisionFilter}
+              onChange={(e) => {
+                setDecisionFilter(e.target.value as typeof decisionFilter)
+                setDecisionsPage(1)
               }}
-              title={
-                showOnlyActionable
-                  ? 'Showing actionable decisions only'
-                  : 'Showing all decisions'
-              }
+              className="px-3 py-1.5 rounded-lg text-sm font-medium cursor-pointer transition-all bg-black/40 text-nofx-text-main border border-white/10 hover:border-nofx-accent focus:outline-none"
             >
-              {showOnlyActionable ? '⚡ Key' : '📋 All'}
-            </button>
+              <option value="all">
+                {language === 'zh' ? '全部决策' : 'All decisions'}
+              </option>
+              <option value="opens">
+                {language === 'zh' ? '全部开仓决策' : 'All opens'}
+              </option>
+              <option value="opens_success">
+                {language === 'zh' ? '仅成功开仓' : 'Successful opens'}
+              </option>
+              <option value="opens_rejected">
+                {language === 'zh' ? '仅拒绝开仓' : 'Rejected opens'}
+              </option>
+            </select>
             {/* Limit Selector */}
             <select
               value={decisionsLimit}
-              onChange={(e) => onDecisionsLimitChange(Number(e.target.value))}
+              onChange={(e) => {
+                onDecisionsLimitChange(Number(e.target.value))
+                setDecisionsPage(1)
+              }}
               className="px-3 py-1.5 rounded-lg text-sm font-medium cursor-pointer transition-all bg-black/40 text-nofx-text-main border border-white/10 hover:border-nofx-accent focus:outline-none"
             >
               <option value={5}>5</option>
@@ -1444,37 +1454,97 @@ export function TraderDashboardPage({
             style={{ maxHeight: '600px' }}
           >
             {(() => {
-              const filteredDecisions = showOnlyActionable
-                ? (decisions || []).filter((d) =>
-                    d.decisions?.some(
-                      (a) =>
-                        a.action.includes('open') ||
-                        a.action.includes('close') ||
-                        a.review_context?.control?.decision === 'rejected' ||
-                        a.review_context?.control?.decision ===
-                          'downgraded_to_wait'
-                    )
-                  )
-                : decisions || []
-              return filteredDecisions.length > 0 ? (
-                filteredDecisions.map((decision, i) => (
-                  <DecisionCard
-                    key={i}
-                    decision={decision}
-                    language={language}
-                    onSymbolClick={handleSymbolClick}
-                  />
-                ))
-              ) : (
-                <div className="py-16 text-center text-nofx-text-muted opacity-60">
-                  <div className="text-6xl mb-4 opacity-30 grayscale">🧠</div>
-                  <div className="text-lg font-semibold mb-2 text-nofx-text-main">
-                    {t('noDecisionsYet', language)}
+              const isOpenRejected = (d: DecisionRecord) =>
+                d.decisions?.some(
+                  (a) =>
+                    a.action.includes('open') &&
+                    (a.review_context?.control?.decision === 'rejected' ||
+                      a.review_context?.control?.decision ===
+                        'downgraded_to_wait' ||
+                      a.review_context?.quality_gate?.decision === 'rejected' ||
+                      a.review_context?.quality_gate?.decision === 'blocked' ||
+                      (!a.success && !!a.error))
+                )
+              const isOpenSuccess = (d: DecisionRecord) =>
+                d.decisions?.some((a) => a.action.includes('open') && a.success)
+              const hasOpen = (d: DecisionRecord) =>
+                d.decisions?.some((a) => a.action.includes('open'))
+
+              const filteredDecisions = (decisions || []).filter((d) => {
+                switch (decisionFilter) {
+                  case 'opens':
+                    return hasOpen(d)
+                  case 'opens_success':
+                    return isOpenSuccess(d)
+                  case 'opens_rejected':
+                    return isOpenRejected(d) && !isOpenSuccess(d)
+                  default:
+                    return true
+                }
+              })
+
+              const totalPages = Math.max(
+                1,
+                Math.ceil(filteredDecisions.length / decisionsPageSize)
+              )
+              const page = Math.min(decisionsPage, totalPages)
+              const pageStart = (page - 1) * decisionsPageSize
+              const pageDecisions = filteredDecisions.slice(
+                pageStart,
+                pageStart + decisionsPageSize
+              )
+
+              if (filteredDecisions.length === 0) {
+                return (
+                  <div className="py-16 text-center text-nofx-text-muted opacity-60">
+                    <div className="text-6xl mb-4 opacity-30 grayscale">🧠</div>
+                    <div className="text-lg font-semibold mb-2 text-nofx-text-main">
+                      {t('noDecisionsYet', language)}
+                    </div>
+                    <div className="text-sm">
+                      {t('aiDecisionsWillAppear', language)}
+                    </div>
                   </div>
-                  <div className="text-sm">
-                    {t('aiDecisionsWillAppear', language)}
-                  </div>
-                </div>
+                )
+              }
+
+              return (
+                <>
+                  {pageDecisions.map((decision, i) => (
+                    <DecisionCard
+                      key={`${decision.cycle_number}-${i}`}
+                      decision={decision}
+                      language={language}
+                      traderId={selectedTraderId}
+                      onSymbolClick={handleSymbolClick}
+                    />
+                  ))}
+                  {totalPages > 1 && (
+                    <div className="flex items-center justify-center gap-2 pt-2 flex-wrap">
+                      <button
+                        onClick={() =>
+                          setDecisionsPage((p) => Math.max(1, p - 1))
+                        }
+                        disabled={page <= 1}
+                        className="px-3 py-1 rounded-lg text-xs font-medium bg-black/40 text-nofx-text-main border border-white/10 disabled:opacity-40 hover:border-nofx-accent"
+                      >
+                        {language === 'zh' ? '上一页' : 'Prev'}
+                      </button>
+                      <span className="text-xs text-nofx-text-muted">
+                        {page} / {totalPages}
+                      </span>
+                      <button
+                        onClick={() =>
+                          setDecisionsPage((p) => Math.min(totalPages, p + 1))
+                        }
+                        disabled={page >= totalPages}
+                        className="px-3 py-1 rounded-lg text-xs font-medium bg-black/40 text-nofx-text-main border border-white/10 disabled:opacity-40 hover:border-nofx-accent"
+                      >
+                        {language === 'zh' ? '下一页' : 'Next'}
+                      </button>
+                    </div>
+                  )}
+                </>
               )
             })()}
           </div>

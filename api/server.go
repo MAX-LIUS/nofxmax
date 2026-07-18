@@ -389,6 +389,10 @@ Returns: [{"id":"<string>","symbol":"<string>","action":"open_long|open_short|cl
 				`Query: ?trader_id=<EXACT trader_id from GET /api/my-traders>
 Returns the most recent AI decision for each symbol analyzed in the last scan cycle.`,
 				s.handleLatestDecisions)
+			s.routeWithSchema(protected, "GET", "/decisions/prompts", "Lazy-load a decision cycle's prompts",
+				`Query: ?trader_id=<EXACT trader_id>&cycle=<int cycle_number>
+Returns {system_prompt, input_prompt, cot_trace, raw_response} for one cycle. Kept out of the /decisions list payload so the list stays lightweight.`,
+				s.handleDecisionPrompts)
 			s.routeWithSchema(protected, "GET", "/statistics", "Trading performance statistics",
 				`Query: ?trader_id=<EXACT trader_id from GET /api/my-traders>
 Returns: {"total_trades":<int>,"winning_trades":<int>,"win_rate":<float>,"total_pnl":<float>,"sharpe_ratio":<float>,"max_drawdown":<float>}`,

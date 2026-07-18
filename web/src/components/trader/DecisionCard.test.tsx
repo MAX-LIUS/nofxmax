@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { DecisionCard } from './DecisionCard'
 import type { DecisionRecord } from '../../types'
@@ -10,22 +10,20 @@ const baseDecision: DecisionRecord = {
   input_prompt: '',
   cot_trace: '',
   decision_json: '',
-  raw_response: '',
+  account_state: {} as never,
+  positions: [],
   candidate_coins: [],
-  account_snapshot: {
-    total_balance: 68.44,
-    available_balance: 28.32,
-    total_unrealized_profit: 0,
-    position_count: 1,
-    margin_used_pct: 58.6,
-  },
+  ai_decision_mode: 'balanced',
+  allow_ai_open: true,
+  allow_ai_stop_close: false,
+  allow_ai_take_profit: false,
   decisions: [
     {
       action: 'open_long',
       symbol: 'TRUMPUSDT',
-      quantity: 0,
-      leverage: 1,
-      price: 0,
+      quantity: 10,
+      leverage: 3,
+      price: 3.0,
       stop_loss: 2.984,
       take_profit: 3.061,
       confidence: 78,
@@ -34,46 +32,35 @@ const baseDecision: DecisionRecord = {
       success: false,
       error: 'regime filter blocked open_long for TRUMPUSDT',
       review_context: {
-        timeframe_context: { primary: '15m', lower: ['5m'], higher: ['1h'] },
-        key_levels: {
-          support: [2.91],
-          resistance: [3.06],
-          fibonacci: { swing_high: 3.12, swing_low: 2.78, levels: [2.91, 2.99, 3.06] },
-        },
-        anchors: [{ type: 'resistance', timeframe: '15m', price: 3.06, reason: 'local rejection' }],
-        control: {
-          decision: 'rejected',
-          original_action: 'open_long',
-          final_action: 'open_long',
-          reasons: ['trend alignment failed for open_long under regime gate'],
-          failed_checks: ['trend_misaligned'],
-          regime_current: 'choppy',
-          regime_allowed: ['trend', 'breakout'],
-          regime_primary_timeframe: '15m',
-          regime_atr14_pct: 2.31,
-          regime_trend_aligned: false,
-          no_order_placed: true,
-        },
+        control: { decision: 'rejected', no_order_placed: true },
+        quality_gate: { decision: 'rejected', quality_total: 42, net_rr: 1.4 },
+        risk_reward: { net_estimated_rr: 1.4, passed: false },
       },
     },
   ],
+  execution_log: ['🚫 TRUMPUSDT open_long blocked by regime gate'],
   success: true,
 }
 
 describe('DecisionCard', () => {
-  it('renders compact audit and regime context badges for rejected actions', () => {
+  it('renders a compact one-line summary for a trade action', () => {
     render(<DecisionCard decision={baseDecision} language="en" />)
+    // symbol shown without the USDT suffix
+    expect(screen.getByText('TRUMP')).toBeInTheDocument()
+    // this was an open_long, so no SHORT tag should be present
+    expect(screen.queryByText('📉 SHORT')).toBeNull()
+  })
 
-    expect(screen.getByText('rejected')).toBeInTheDocument()
-    expect(screen.getAllByText('no order placed').length).toBeGreaterThan(0)
-    expect(screen.getByText(/failed · trend misaligned/i)).toBeInTheDocument()
-    expect(screen.getByText(/regime choppy/i)).toBeInTheDocument()
-    expect(screen.getByText(/allowed trend/i)).toBeInTheDocument()
-    expect(screen.getByText(/allowed breakout/i)).toBeInTheDocument()
-    expect(screen.getAllByText(/trend misaligned/i).length).toBeGreaterThan(0)
-    expect(screen.getByText(/ATR 2.31%/i)).toBeInTheDocument()
-    expect(screen.getAllByText(/tf 15m/i).length).toBeGreaterThan(0)
-    expect(screen.getAllByText(/fib 3 levels/i).length).toBeGreaterThan(0)
-    expect(screen.getByText(/anchors 1/i)).toBeInTheDocument()
+  it('shows direction tag and leverage', () => {
+    render(<DecisionCard decision={baseDecision} language="en" />)
+    expect(screen.getByText('📈 LONG')).toBeInTheDocument()
+    expect(screen.getByText('3x')).toBeInTheDocument()
+  })
+
+  it('expands to reveal the execution log', () => {
+    render(<DecisionCard decision={baseDecision} language="en" />)
+    // header row toggles expansion
+    fireEvent.click(screen.getByText('🤖 #4796'))
+    expect(screen.getByText(/blocked by regime gate/i)).toBeInTheDocument()
   })
 })

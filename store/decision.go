@@ -525,6 +525,60 @@ func (s *DecisionStore) GetLatestRecords(traderID string, n int) ([]*DecisionRec
 	return records, nil
 }
 
+// slimDecisionColumns is every decision_records column EXCEPT the four fat prompt/
+// response blobs (system_prompt, input_prompt, cot_trace, raw_response), which
+// together are ~94% of a row (~110KB of ~117KB). The dashboard list never renders
+// them — they are lazy-loaded per cycle via GetDecisionPrompts. Selecting only these
+// columns shrinks a row from ~117KB to ~6KB (~20x less transfer + JSON work).
+var slimDecisionColumns = []string{
+	"id", "trader_id", "cycle_number", "timestamp",
+	"decision_json", "candidate_coins", "execution_log", "decisions",
+	"protection_snapshot", "review_context",
+	"allow_ai_close", "allow_ai_open", "ai_decision_mode",
+	"success", "error_message", "ai_request_duration_ms", "created_at",
+}
+
+// GetLatestRecordsSlim is GetLatestRecords WITHOUT the heavy prompt/response blobs.
+// Returns oldest→newest (same ordering contract as GetLatestRecords). Use this for
+// list/dashboard views; call GetDecisionPrompts to lazy-load a single cycle's prompts.
+func (s *DecisionStore) GetLatestRecordsSlim(traderID string, n int) ([]*DecisionRecord, error) {
+	var dbRecords []*DecisionRecordDB
+	err := s.db.Select(slimDecisionColumns).
+		Where("trader_id = ?", traderID).
+		Order("timestamp DESC").
+		Limit(n).
+		Find(&dbRecords).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to query decision records (slim): %w", err)
+	}
+	records := make([]*DecisionRecord, len(dbRecords))
+	for i, db := range dbRecords {
+		records[i] = db.toRecord() // prompt fields are empty strings — omitted by Select
+	}
+	// Reverse to oldest→newest.
+	for i, j := 0, len(records)-1; i < j; i, j = i+1, j-1 {
+		records[i], records[j] = records[j], records[i]
+	}
+	return records, nil
+}
+
+// GetDecisionPrompts lazy-loads ONLY the heavy prompt/response blobs for one cycle,
+// keyed by trader+cycle. Returned separately so the list endpoint stays lightweight.
+func (s *DecisionStore) GetDecisionPrompts(traderID string, cycleNumber int) (systemPrompt, inputPrompt, coTTrace, rawResponse string, err error) {
+	var db DecisionRecordDB
+	qerr := s.db.Select("system_prompt", "input_prompt", "cot_trace", "raw_response").
+		Where("trader_id = ? AND cycle_number = ?", traderID, cycleNumber).
+		Order("timestamp DESC").
+		First(&db).Error
+	if qerr != nil {
+		if qerr == gorm.ErrRecordNotFound {
+			return "", "", "", "", nil
+		}
+		return "", "", "", "", fmt.Errorf("failed to query decision prompts: %w", qerr)
+	}
+	return db.SystemPrompt, db.InputPrompt, db.CoTTrace, db.RawResponse, nil
+}
+
 // GetAllLatestRecords gets the latest N records for all traders
 func (s *DecisionStore) GetAllLatestRecords(n int) ([]*DecisionRecord, error) {
 	var dbRecords []*DecisionRecordDB

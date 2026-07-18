@@ -1,57 +1,57 @@
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import type { DecisionRecord, DecisionAction } from '../../types'
-import { t, type Language } from '../../i18n/translations'
+import { type Language } from '../../i18n/translations'
+import { api } from '../../lib/api'
 
 interface DecisionCardProps {
   decision: DecisionRecord
   language: Language
+  traderId?: string
   onSymbolClick?: (symbol: string) => void
 }
 
-// Action type configuration
 const ACTION_CONFIG: Record<
   string,
   { color: string; bg: string; icon: string; label: string }
 > = {
   open_long: {
     color: '#0ECB81',
-    bg: 'rgba(14, 203, 129, 0.15)',
+    bg: 'rgba(14,203,129,0.15)',
     icon: '📈',
     label: 'LONG',
   },
   open_short: {
     color: '#F6465D',
-    bg: 'rgba(246, 70, 93, 0.15)',
+    bg: 'rgba(246,70,93,0.15)',
     icon: '📉',
     label: 'SHORT',
   },
   close_long: {
     color: '#F0B90B',
-    bg: 'rgba(240, 185, 11, 0.15)',
+    bg: 'rgba(240,185,11,0.15)',
     icon: '💰',
     label: 'CLOSE',
   },
   close_short: {
     color: '#F0B90B',
-    bg: 'rgba(240, 185, 11, 0.15)',
+    bg: 'rgba(240,185,11,0.15)',
     icon: '💰',
     label: 'CLOSE',
   },
   hold: {
     color: '#848E9C',
-    bg: 'rgba(132, 142, 156, 0.15)',
+    bg: 'rgba(132,142,156,0.15)',
     icon: '⏸️',
     label: 'HOLD',
   },
   wait: {
     color: '#848E9C',
-    bg: 'rgba(132, 142, 156, 0.15)',
+    bg: 'rgba(132,142,156,0.15)',
     icon: '⏳',
     label: 'WAIT',
   },
 }
 
-// Format price with proper decimals
 function formatPrice(price: number | undefined): string {
   if (!price || price === 0) return '-'
   if (price >= 1000) return price.toFixed(2)
@@ -59,791 +59,660 @@ function formatPrice(price: number | undefined): string {
   return price.toFixed(6)
 }
 
-// Get confidence color
-function getConfidenceColor(confidence: number | undefined): string {
-  if (!confidence) return '#848E9C'
-  if (confidence >= 80) return '#0ECB81'
-  if (confidence >= 60) return '#F0B90B'
+function formatUsd(v: number | undefined): string {
+  if (!v || v === 0) return '-'
+  if (v >= 1000) return `$${(v / 1000).toFixed(1)}k`
+  return `$${v.toFixed(0)}`
+}
+
+function getConfidenceColor(c: number | undefined): string {
+  if (!c) return '#848E9C'
+  if (c >= 80) return '#0ECB81'
+  if (c >= 60) return '#F0B90B'
   return '#F6465D'
 }
 
-function formatControlDecisionLabel(
-  decision?: string
-): { label: string; tone: 'danger' | 'warn' | 'neutral' } | null {
-  const normalized = String(decision || '')
-    .trim()
-    .toLowerCase()
-  if (!normalized) return null
-  if (normalized === 'rejected') return { label: 'rejected', tone: 'danger' }
-  if (normalized === 'downgraded_to_wait')
-    return { label: 'downgraded to wait', tone: 'warn' }
-  if (normalized === 'accepted') return { label: 'accepted', tone: 'neutral' }
-  // Gate score format: "accepted_score_75"
-  const scoreMatch = normalized.match(/accepted_score_(\d+)/)
-  if (scoreMatch) {
-    const score = parseInt(scoreMatch[1])
-    const tone = score < 75 ? 'warn' : 'neutral'
-    return { label: `score ${score}`, tone }
-  }
-  return { label: normalized.replace(/_/g, ' '), tone: 'neutral' }
+// Classify an action's control/gate outcome -> visual tone for row tinting.
+type Tone = 'accepted' | 'rejected' | 'neutral'
+function actionTone(action: DecisionAction): Tone {
+  const ctl = String(
+    action.review_context?.control?.decision || ''
+  ).toLowerCase()
+  const gate = String(
+    action.review_context?.quality_gate?.decision || ''
+  ).toLowerCase()
+  if (ctl === 'rejected' || gate === 'rejected' || gate === 'blocked')
+    return 'rejected'
+  if (ctl === 'downgraded_to_wait') return 'rejected'
+  if (action.success && action.action.includes('open')) return 'accepted'
+  if (
+    ctl.startsWith('accepted') ||
+    gate === 'passed' ||
+    gate.startsWith('accepted')
+  )
+    return 'accepted'
+  return 'neutral'
 }
 
-function toneColors(tone: 'danger' | 'warn' | 'neutral') {
-  if (tone === 'danger')
-    return {
-      border: '1px solid rgba(246, 70, 93, 0.25)',
-      bg: 'rgba(246, 70, 93, 0.12)',
-      color: '#FCA5A5',
-    }
-  if (tone === 'warn')
-    return {
-      border: '1px solid rgba(240, 185, 11, 0.25)',
-      bg: 'rgba(240, 185, 11, 0.12)',
-      color: '#FCD34D',
-    }
-  return {
-    border: '1px solid rgba(56, 189, 248, 0.25)',
-    bg: 'rgba(56, 189, 248, 0.12)',
-    color: '#7DD3FC',
-  }
+// TONE_STYLE gives the row background/border per the user's spec:
+// rejected = dimmer, reddish; accepted = slightly brighter, greenish.
+const TONE_STYLE: Record<Tone, { bg: string; border: string }> = {
+  rejected: {
+    bg: 'rgba(246,70,93,0.06)',
+    border: '1px solid rgba(246,70,93,0.22)',
+  },
+  accepted: {
+    bg: 'rgba(14,203,129,0.09)',
+    border: '1px solid rgba(14,203,129,0.30)',
+  },
+  neutral: { bg: '#1A1E23', border: '1px solid #2B3139' },
 }
 
-// Single Action Card Component — Layered Design
+// ---- ActionCard: one compact line per decision action ----------------------
+// Layout (single row, wraps on narrow/portrait): symbol · direction · entry
+// target (actual entry below or "-") · SL · TP · leverage · notional USDT ·
+// confidence · RR · score (expandable breakdown).
 function ActionCard({
   action,
-  language,
   onSymbolClick,
 }: {
   action: DecisionAction
-  language: Language
   onSymbolClick?: (symbol: string) => void
 }) {
-  const [showDetails, setShowDetails] = useState(false)
-  const config = ACTION_CONFIG[action.action] || ACTION_CONFIG.wait
-  const isOpen = action.action.includes('open')
-  const isClose = action.action.includes('close')
-  const isHoldWait = !isOpen && !isClose
-  const control = action.review_context?.control
-  const controlStatus = formatControlDecisionLabel(control?.decision)
-  const review = action.review_context
-  const selectedLevels = review?.selected_levels || []
+  const [showScore, setShowScore] = useState(false)
+  const cfg = ACTION_CONFIG[action.action] || ACTION_CONFIG.hold
+  const tone = actionTone(action)
+  const toneStyle = TONE_STYLE[tone]
+  const isTrade =
+    action.action.includes('open') || action.action.includes('close')
 
-  // Hold/Wait: compact single-line card
-  if (isHoldWait) {
+  const rc = action.review_context
+  const rr = rc?.risk_reward
+  const ctl = rc?.control
+  const gate = rc?.quality_gate
+  const levels = rc?.selected_levels || []
+
+  // entry trigger target: prefer selected_levels entry_trigger, fall back to price.
+  const entryTrigger =
+    levels.find((l) => l.used_for === 'entry_trigger')?.price ?? action.price
+  // actual entry (filled) — only known when the order succeeded; otherwise "-".
+  const actualEntry = action.success && action.price ? action.price : undefined
+
+  const notional =
+    action.price && action.quantity ? action.price * action.quantity : undefined
+  const netRr = rr?.net_estimated_rr ?? ctl?.effective_rr ?? gate?.net_rr
+  const scoreTotal = gate?.quality_total
+
+  // Compact "hold / wait" rows: no trade fields, just the tag + reason.
+  if (!isTrade) {
     return (
       <div
-        className="rounded-lg px-3 py-2 flex items-center gap-2"
         style={{
-          background: '#1A1E23',
-          border: '1px solid #2B3139',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '6px 10px',
+          background: toneStyle.bg,
+          border: toneStyle.border,
+          borderRadius: 6,
+          fontSize: 12,
         }}
       >
-        <span className="text-sm">{config.icon}</span>
-        <span
-          className="px-2 py-0.5 rounded text-[10px] font-bold uppercase"
-          style={{ background: config.bg, color: config.color }}
-        >
-          {config.label}
+        <span style={{ color: cfg.color, fontWeight: 600 }}>
+          {cfg.icon} {cfg.label}
         </span>
         <span
-          className="font-mono text-xs cursor-pointer hover:underline"
-          style={{ color: '#EAECEF' }}
           onClick={() => onSymbolClick?.(action.symbol)}
+          style={{
+            color: '#EAECEF',
+            fontWeight: 600,
+            cursor: onSymbolClick ? 'pointer' : 'default',
+          }}
         >
-          {action.symbol.replace('USDT', '')}
+          {action.symbol}
         </span>
-        {action.confidence !== undefined && action.confidence > 0 && (
-          <span className="text-[10px]" style={{ color: '#848E9C' }}>
-            {action.confidence}%
-          </span>
-        )}
-        <span className="flex-1 text-xs truncate" style={{ color: '#848E9C' }}>
-          {action.reasoning}
-        </span>
-        {controlStatus && (
+        {action.reasoning && (
           <span
-            className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium shrink-0"
-            style={toneColors(controlStatus.tone)}
+            style={{
+              color: '#848E9C',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
           >
-            {controlStatus.label}
+            {action.reasoning}
           </span>
         )}
       </div>
     )
   }
 
-  // Open/Close: layered card
+  // Metric cell used inside the flex-wrap grid.
+  const Cell = ({
+    label,
+    value,
+    color,
+    sub,
+  }: {
+    label: string
+    value: string
+    color?: string
+    sub?: string
+  }) => (
+    <div style={{ display: 'flex', flexDirection: 'column', minWidth: 62 }}>
+      <span
+        style={{
+          fontSize: 9,
+          color: '#5E6673',
+          textTransform: 'uppercase',
+          letterSpacing: 0.3,
+        }}
+      >
+        {label}
+      </span>
+      <span
+        style={{
+          fontSize: 12,
+          color: color || '#EAECEF',
+          fontWeight: 600,
+          fontVariantNumeric: 'tabular-nums',
+        }}
+      >
+        {value}
+      </span>
+      {sub !== undefined && (
+        <span
+          style={{
+            fontSize: 10,
+            color: '#5E6673',
+            fontVariantNumeric: 'tabular-nums',
+          }}
+        >
+          {sub}
+        </span>
+      )}
+    </div>
+  )
+
   return (
     <div
-      className="rounded-lg p-4 transition-all duration-200 hover:scale-[1.01]"
       style={{
-        background: 'linear-gradient(135deg, #1E2329 0%, #181C21 100%)',
-        border: `1px solid ${config.color}33`,
-        boxShadow: `0 4px 12px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.03)`,
+        padding: '8px 10px',
+        background: toneStyle.bg,
+        border: toneStyle.border,
+        borderRadius: 6,
       }}
     >
-      {/* Layer 1: Core Summary */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="text-lg">{config.icon}</span>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          flexWrap: 'wrap',
+        }}
+      >
+        {/* direction + symbol */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            minWidth: 108,
+          }}
+        >
           <span
-            className="font-mono font-bold text-base cursor-pointer hover:scale-110 transition-transform"
-            style={{ color: '#EAECEF' }}
-            onClick={() => onSymbolClick?.(action.symbol)}
-          >
-            {action.symbol.replace('USDT', '')}
-          </span>
-          <span
-            className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider"
             style={{
-              background: config.bg,
-              color: config.color,
-              border: `1px solid ${config.color}55`,
+              color: cfg.color,
+              background: cfg.bg,
+              fontWeight: 700,
+              fontSize: 11,
+              padding: '2px 6px',
+              borderRadius: 4,
+              whiteSpace: 'nowrap',
             }}
           >
-            {config.label}
+            {cfg.icon} {cfg.label}
+          </span>
+          <span
+            onClick={() => onSymbolClick?.(action.symbol)}
+            style={{
+              color: '#EAECEF',
+              fontWeight: 700,
+              fontSize: 13,
+              cursor: onSymbolClick ? 'pointer' : 'default',
+            }}
+          >
+            {action.symbol.replace('USDT', '').replace('USDC', '')}
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          {action.confidence !== undefined && action.confidence > 0 && (
+
+        <Cell
+          label="Entry"
+          value={formatPrice(entryTrigger)}
+          sub={actualEntry ? formatPrice(actualEntry) : '-'}
+        />
+        <Cell
+          label="SL"
+          value={formatPrice(action.stop_loss)}
+          color="#F6465D"
+        />
+        <Cell
+          label="TP"
+          value={formatPrice(action.take_profit)}
+          color="#0ECB81"
+        />
+        <Cell
+          label="Lev"
+          value={action.leverage ? `${action.leverage}x` : '-'}
+        />
+        <Cell label="Size" value={formatUsd(notional)} />
+        <Cell
+          label="Conf"
+          value={action.confidence != null ? `${action.confidence}%` : '-'}
+          color={getConfidenceColor(action.confidence)}
+        />
+        <Cell label="RR" value={netRr != null ? netRr.toFixed(2) : '-'} />
+        {scoreTotal != null && (
+          <div
+            onClick={() => setShowScore((v) => !v)}
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              minWidth: 56,
+              cursor: 'pointer',
+            }}
+          >
             <span
-              className="px-2 py-0.5 rounded text-xs font-semibold"
               style={{
-                background: `${getConfidenceColor(action.confidence)}22`,
-                color: getConfidenceColor(action.confidence),
+                fontSize: 9,
+                color: '#5E6673',
+                textTransform: 'uppercase',
               }}
             >
-              {action.confidence}%
+              Score {showScore ? '▲' : '▼'}
             </span>
-          )}
-          {/* RR ratio inline */}
-          {isOpen &&
-            action.stop_loss &&
-            action.take_profit &&
-            action.price &&
-            (() => {
-              const slDist = Math.abs(action.price - action.stop_loss)
-              const tpDist = Math.abs(action.take_profit - action.price)
-              const ratio = slDist > 0 ? tpDist / slDist : 0
-              return (
-                <span
-                  className="px-2 py-0.5 rounded text-[10px] font-semibold"
-                  style={{
-                    background:
-                      ratio >= 2
-                        ? 'rgba(14, 203, 129, 0.15)'
-                        : 'rgba(240, 185, 11, 0.15)',
-                    color:
-                      ratio >= 3
-                        ? '#0ECB81'
-                        : ratio >= 2
-                          ? '#F0B90B'
-                          : '#F6465D',
-                  }}
-                >
-                  RR 1:{ratio.toFixed(1)}
-                </span>
-              )
-            })()}
-          {controlStatus && (
-            <span
-              className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium"
-              style={toneColors(controlStatus.tone)}
-            >
-              {controlStatus.label}
+            <span style={{ fontSize: 12, color: '#F0B90B', fontWeight: 600 }}>
+              {scoreTotal.toFixed(0)}
             </span>
-          )}
-        </div>
-      </div>
-
-      {/* Layer 2: Selected Levels / Structure Basis */}
-      {selectedLevels.length > 0 && (
-        <div className="mt-3 pt-3" style={{ borderTop: '1px solid #2B3139' }}>
-          <div className="text-[10px] mb-1.5" style={{ color: '#848E9C' }}>
-            AI Selected Levels
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {selectedLevels.map((level, idx) => {
-              const isSL =
-                level.used_for === 'stop_loss' ||
-                level.used_for === 'invalidation'
-              const isTP =
-                level.used_for.startsWith('tp') ||
-                level.used_for === 'take_profit'
-              const color = isSL ? '#F6465D' : isTP ? '#0ECB81' : '#F0B90B'
-              const basisIcon =
-                level.basis_type === 'structural'
-                  ? '🎯'
-                  : level.basis_type === 'atr_based'
-                    ? '📐'
-                    : level.basis_type === 'fibonacci'
-                      ? '🌀'
-                      : '📊'
-              return (
-                <span
-                  key={idx}
-                  className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px]"
-                  style={{
-                    background: `${color}15`,
-                    border: `1px solid ${color}30`,
-                    color,
-                  }}
-                  title={level.reason || ''}
-                >
-                  {basisIcon} {level.used_for}: {formatPrice(level.price)}
-                  {level.timeframe && (
-                    <span style={{ color: '#848E9C' }}>
-                      {' '}
-                      ({level.timeframe})
-                    </span>
-                  )}
-                </span>
-              )
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Fallback: show key_levels if no selected_levels (old data) */}
-      {selectedLevels.length === 0 && review?.key_levels && (
-        <div className="mt-3 pt-3" style={{ borderTop: '1px solid #2B3139' }}>
-          <div className="flex flex-wrap gap-1.5 text-[10px]">
-            {(review.key_levels.support || []).slice(0, 2).map((level) => (
-              <span
-                key={`s-${level}`}
-                className="inline-flex items-center rounded px-2 py-0.5"
-                style={{
-                  border: '1px solid rgba(14, 203, 129, 0.25)',
-                  background: 'rgba(14, 203, 129, 0.12)',
-                  color: '#86EFAC',
-                }}
-              >
-                S {formatPrice(level)}
-              </span>
-            ))}
-            {(review.key_levels.resistance || []).slice(0, 2).map((level) => (
-              <span
-                key={`r-${level}`}
-                className="inline-flex items-center rounded px-2 py-0.5"
-                style={{
-                  border: '1px solid rgba(246, 70, 93, 0.25)',
-                  background: 'rgba(246, 70, 93, 0.12)',
-                  color: '#FDA4AF',
-                }}
-              >
-                R {formatPrice(level)}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Reasoning (always visible for open/close) */}
-      {action.reasoning && (
-        <div className="mt-2 text-xs" style={{ color: '#848E9C' }}>
-          {action.reasoning}
-        </div>
-      )}
-
-      {/* Layer 3: Expandable Details */}
-      <div className="mt-3 pt-2" style={{ borderTop: '1px solid #2B3139' }}>
-        <button
-          onClick={() => setShowDetails(!showDetails)}
-          className="text-[10px] font-medium transition-colors hover:opacity-80"
-          style={{ color: '#848E9C' }}
-        >
-          {showDetails ? '▼ Hide details' : '▶ Trading details & audit'}
-        </button>
-
-        {showDetails && (
-          <div className="mt-2 space-y-3">
-            {/* Trading Details */}
-            {isOpen && (
-              <div className="grid grid-cols-4 gap-2 text-center">
-                <div>
-                  <div className="text-[10px]" style={{ color: '#848E9C' }}>
-                    {t('entryPrice', language)}
-                  </div>
-                  <div
-                    className="font-mono text-xs font-semibold"
-                    style={{ color: '#EAECEF' }}
-                  >
-                    {formatPrice(action.price)}
-                  </div>
-                </div>
-                {action.stop_loss && (
-                  <div>
-                    <div className="text-[10px]" style={{ color: '#848E9C' }}>
-                      SL
-                    </div>
-                    <div
-                      className="font-mono text-xs font-semibold"
-                      style={{ color: '#F6465D' }}
-                    >
-                      {formatPrice(action.stop_loss)}
-                    </div>
-                  </div>
-                )}
-                {action.take_profit && (
-                  <div>
-                    <div className="text-[10px]" style={{ color: '#848E9C' }}>
-                      TP
-                    </div>
-                    <div
-                      className="font-mono text-xs font-semibold"
-                      style={{ color: '#0ECB81' }}
-                    >
-                      {formatPrice(action.take_profit)}
-                    </div>
-                  </div>
-                )}
-                {action.leverage > 0 && (
-                  <div>
-                    <div className="text-[10px]" style={{ color: '#848E9C' }}>
-                      {t('leverage', language)}
-                    </div>
-                    <div
-                      className="font-mono text-xs font-semibold"
-                      style={{ color: '#F0B90B' }}
-                    >
-                      {action.leverage}x
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Protection Plan Summary */}
-            {review?.protection && (
-              <div
-                className="text-[10px] space-y-1"
-                style={{ color: '#9CA3AF' }}
-              >
-                <div className="flex flex-wrap gap-1.5">
-                  {review.protection.stop_beyond_invalidation && (
-                    <span style={{ color: '#0ECB81' }}>
-                      SL beyond invalidation
-                    </span>
-                  )}
-                  {review.protection.target_aligned && (
-                    <span style={{ color: '#0ECB81' }}>TP aligned</span>
-                  )}
-                  {review.protection.policy_status && (
-                    <span>{review.protection.policy_status}</span>
-                  )}
-                </div>
-                {review.protection.notes &&
-                  review.protection.notes.length > 0 && (
-                    <div>{review.protection.notes.slice(0, 2).join(' | ')}</div>
-                  )}
-              </div>
-            )}
-
-            {/* Gate Attribution (only for rejected/downgraded) */}
-            {review?.quality_gate && !review.quality_gate.passed && (
-              <div
-                className="rounded p-2"
-                style={{
-                  background: 'rgba(246, 70, 93, 0.08)',
-                  border: '1px solid rgba(246, 70, 93, 0.2)',
-                }}
-              >
-                <div
-                  className="text-[10px] font-medium mb-1"
-                  style={{ color: '#F6465D' }}
-                >
-                  Gate: {review.quality_gate.decision || 'blocked'}
-                  {review.quality_gate.blocked_stage &&
-                    ` @ ${review.quality_gate.blocked_stage}`}
-                </div>
-                {review.quality_gate.gate_checks && (
-                  <div className="space-y-0.5">
-                    {review.quality_gate.gate_checks
-                      .filter((gc) => !gc.passed)
-                      .slice(0, 4)
-                      .map((gc, i) => (
-                        <div
-                          key={i}
-                          className="text-[10px]"
-                          style={{ color: '#FDA4AF' }}
-                        >
-                          {gc.enforced ? '✗' : '⚠'} {gc.code}
-                          {gc.detail ? `: ${gc.detail}` : ''}
-                        </div>
-                      ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Control outcome details (only if not already shown via gate) */}
-            {control && !review?.quality_gate && (
-              <div
-                className="text-[10px] space-y-0.5"
-                style={{ color: '#9CA3AF' }}
-              >
-                {control.failed_checks && control.failed_checks.length > 0 && (
-                  <div>Checks: {control.failed_checks.join(', ')}</div>
-                )}
-                {control.reasons && control.reasons.length > 0 && (
-                  <div>Reason: {control.reasons.join(' | ')}</div>
-                )}
-                {control.regime_current && (
-                  <div>Regime: {control.regime_current}</div>
-                )}
-              </div>
-            )}
           </div>
         )}
       </div>
+
+      {/* score breakdown dropdown */}
+      {showScore && gate && (
+        <div
+          style={{
+            marginTop: 8,
+            padding: 8,
+            background: '#12151A',
+            borderRadius: 4,
+            fontSize: 11,
+            color: '#B7BDC6',
+          }}
+        >
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'auto 1fr',
+              gap: '2px 10px',
+            }}
+          >
+            {gate.setup_type && (
+              <>
+                <span style={{ color: '#5E6673' }}>Setup</span>
+                <span>{gate.setup_type}</span>
+              </>
+            )}
+            {gate.regime && (
+              <>
+                <span style={{ color: '#5E6673' }}>Regime</span>
+                <span>{gate.regime}</span>
+              </>
+            )}
+            {gate.confidence != null && (
+              <>
+                <span style={{ color: '#5E6673' }}>Conf</span>
+                <span>{gate.confidence}</span>
+              </>
+            )}
+            {gate.net_rr != null && (
+              <>
+                <span style={{ color: '#5E6673' }}>Net RR</span>
+                <span>{gate.net_rr.toFixed(2)}</span>
+              </>
+            )}
+            {gate.decision && (
+              <>
+                <span style={{ color: '#5E6673' }}>Gate</span>
+                <span>{gate.decision}</span>
+              </>
+            )}
+          </div>
+          {gate.failed_checks && gate.failed_checks.length > 0 && (
+            <div style={{ marginTop: 6, color: '#F6465D' }}>
+              ✗ {gate.failed_checks.join(', ')}
+            </div>
+          )}
+          {gate.gate_checks && gate.gate_checks.length > 0 && (
+            <div
+              style={{
+                marginTop: 6,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 2,
+              }}
+            >
+              {gate.gate_checks.map((gc, i) => (
+                <div
+                  key={i}
+                  style={{ color: gc.passed ? '#0ECB81' : '#F6465D' }}
+                >
+                  {gc.passed ? '✓' : '✗'} {gc.code}{' '}
+                  {gc.detail ? `— ${gc.detail}` : ''}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {action.error && (
+        <div style={{ marginTop: 6, fontSize: 11, color: '#F6465D' }}>
+          ⚠️ {action.error}
+        </div>
+      )}
     </div>
   )
 }
 
-export function DecisionCard({
-  decision,
-  language,
-  onSymbolClick,
-}: DecisionCardProps) {
-  const [showSystemPrompt, setShowSystemPrompt] = useState(false)
-  const [showInputPrompt, setShowInputPrompt] = useState(false)
-  const [showCoT, setShowCoT] = useState(false)
-
-  // Copy text to clipboard
-  const copyToClipboard = async (text: string, label: string) => {
-    try {
-      await navigator.clipboard.writeText(text)
-      alert(`${label} copied!`)
-    } catch (err) {
-      console.error('Failed to copy:', err)
+// ---- Collapsible that lazy-fetches its content on first expand -------------
+function Collapsible({
+  title,
+  color,
+  defaultOpen,
+  children,
+  onFirstOpen,
+}: {
+  title: string
+  color?: string
+  defaultOpen?: boolean
+  children: React.ReactNode
+  onFirstOpen?: () => void
+}) {
+  const [open, setOpen] = useState(!!defaultOpen)
+  const [everOpened, setEverOpened] = useState(!!defaultOpen)
+  const toggle = () => {
+    const next = !open
+    setOpen(next)
+    if (next && !everOpened) {
+      setEverOpened(true)
+      onFirstOpen?.()
     }
   }
+  return (
+    <div style={{ borderTop: '1px solid #2B3139' }}>
+      <button
+        onClick={toggle}
+        style={{
+          width: '100%',
+          textAlign: 'left',
+          background: 'transparent',
+          border: 'none',
+          color: color || '#848E9C',
+          fontSize: 11,
+          fontWeight: 600,
+          padding: '6px 0',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+        }}
+      >
+        <span>{open ? '▼' : '▶'}</span>
+        {title}
+      </button>
+      {open && everOpened && <div style={{ paddingBottom: 8 }}>{children}</div>}
+    </div>
+  )
+}
 
-  // Download text as file
-  const downloadAsFile = (text: string, filename: string) => {
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = filename
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    URL.revokeObjectURL(url)
-  }
+function PromptBlock({ text, loading }: { text: string; loading: boolean }) {
+  if (loading)
+    return (
+      <div style={{ fontSize: 11, color: '#5E6673', padding: 8 }}>Loading…</div>
+    )
+  if (!text)
+    return <div style={{ fontSize: 11, color: '#5E6673', padding: 8 }}>—</div>
+  return (
+    <pre
+      style={{
+        margin: 0,
+        maxHeight: 320,
+        overflow: 'auto',
+        background: '#0B0E11',
+        border: '1px solid #2B3139',
+        borderRadius: 4,
+        padding: 8,
+        fontSize: 11,
+        color: '#B7BDC6',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+      }}
+    >
+      {text}
+    </pre>
+  )
+}
+
+// ---- Main card -------------------------------------------------------------
+export function DecisionCard({
+  decision,
+  traderId,
+  onSymbolClick,
+}: DecisionCardProps) {
+  const [expanded, setExpanded] = useState(false)
+  const [prompts, setPrompts] = useState<{
+    system_prompt: string
+    input_prompt: string
+    cot_trace: string
+  } | null>(null)
+  const [loadingPrompts, setLoadingPrompts] = useState(false)
+
+  const loadPrompts = useCallback(async () => {
+    if (prompts || loadingPrompts || !traderId) return
+    setLoadingPrompts(true)
+    try {
+      const p = await api.getDecisionPrompts(traderId, decision.cycle_number)
+      setPrompts({
+        system_prompt: p.system_prompt,
+        input_prompt: p.input_prompt,
+        cot_trace: p.cot_trace,
+      })
+    } catch {
+      setPrompts({ system_prompt: '', input_prompt: '', cot_trace: '' })
+    } finally {
+      setLoadingPrompts(false)
+    }
+  }, [prompts, loadingPrompts, traderId, decision.cycle_number])
+
+  const actions = decision.decisions || []
+  const ts = new Date(decision.timestamp)
+  const mode = decision.ai_decision_mode || 'balanced'
+  const modeColor =
+    mode === 'aggressive'
+      ? '#F6465D'
+      : mode === 'conservative'
+        ? '#0ECB81'
+        : '#F0B90B'
+
+  // AI control snapshot flags — shown expanded in the header row.
+  const flag = (on: boolean | undefined) => (on ? 'ON' : 'OFF')
+  const flagColor = (on: boolean | undefined) => (on ? '#0ECB81' : '#5E6673')
 
   return (
     <div
-      className="rounded-xl p-5 transition-all duration-300 hover:translate-y-[-2px]"
       style={{
-        border: '1px solid #2B3139',
-        background: 'linear-gradient(180deg, #1E2329 0%, #181C21 100%)',
-        boxShadow: '0 4px 16px rgba(0, 0, 0, 0.3)',
+        background: '#161A1E',
+        border: `1px solid ${decision.success ? '#2B3139' : 'rgba(246,70,93,0.4)'}`,
+        borderRadius: 8,
+        padding: 12,
+        marginBottom: 10,
       }}
     >
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
-          <div
-            className="w-10 h-10 rounded-lg flex items-center justify-center"
-            style={{ background: 'rgba(240, 185, 11, 0.15)' }}
+      {/* header: cycle # + timestamp + AI mode (+ control snapshot when expanded) */}
+      <div
+        onClick={() => setExpanded((v) => !v)}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          cursor: 'pointer',
+          flexWrap: 'wrap',
+        }}
+      >
+        <span style={{ fontSize: 12 }}>{expanded ? '▼' : '▶'}</span>
+        <span style={{ fontWeight: 700, color: '#EAECEF', fontSize: 13 }}>
+          🤖 #{decision.cycle_number}
+        </span>
+        <span style={{ fontSize: 11, color: '#848E9C' }}>
+          {ts.toLocaleString()}
+        </span>
+        <span
+          style={{
+            fontSize: 10,
+            fontWeight: 700,
+            color: modeColor,
+            border: `1px solid ${modeColor}`,
+            borderRadius: 4,
+            padding: '1px 6px',
+            textTransform: 'uppercase',
+          }}
+        >
+          {mode}
+        </span>
+        {!decision.success && (
+          <span style={{ fontSize: 10, color: '#F6465D', fontWeight: 700 }}>
+            FAILED
+          </span>
+        )}
+        {expanded && (
+          <span
+            style={{
+              display: 'flex',
+              gap: 10,
+              fontSize: 10,
+              marginLeft: 'auto',
+            }}
           >
-            <span className="text-xl">🤖</span>
-          </div>
-          <div>
-            <div className="font-bold" style={{ color: '#EAECEF' }}>
-              {t('cycle', language)} #{decision.cycle_number}
-            </div>
-            <div className="text-xs" style={{ color: '#848E9C' }}>
-              {new Date(decision.timestamp).toLocaleString()}
-            </div>
-          </div>
-        </div>
-        <div
-          className="px-4 py-1.5 rounded-full text-xs font-bold tracking-wider"
-          style={
-            decision.success
-              ? {
-                  background: 'rgba(14, 203, 129, 0.15)',
-                  color: '#0ECB81',
-                  border: '1px solid rgba(14, 203, 129, 0.3)',
-                }
-              : {
-                  background: 'rgba(246, 70, 93, 0.15)',
-                  color: '#F6465D',
-                  border: '1px solid rgba(246, 70, 93, 0.3)',
-                }
-          }
-        >
-          {t(decision.success ? 'success' : 'failed', language)}
-        </div>
+            <span style={{ color: flagColor(decision.allow_ai_open) }}>
+              Open:{flag(decision.allow_ai_open)}
+            </span>
+            <span style={{ color: flagColor(decision.allow_ai_stop_close) }}>
+              SL:{flag(decision.allow_ai_stop_close)}
+            </span>
+            <span style={{ color: flagColor(decision.allow_ai_take_profit) }}>
+              TP:{flag(decision.allow_ai_take_profit)}
+            </span>
+          </span>
+        )}
       </div>
 
-      {/* AI Control Snapshot */}
-      <div className="flex flex-wrap items-center gap-2 mb-4">
-        <div
-          className="px-2.5 py-1 rounded-full text-[11px] font-semibold"
-          style={{
-            background: 'rgba(168, 85, 247, 0.12)',
-            color: '#C084FC',
-            border: '1px solid rgba(168,85,247,0.25)',
-          }}
-        >
-          AI Open: {decision.allow_ai_open === false ? 'OFF' : 'ON'}
-        </div>
-        <div
-          className="px-2.5 py-1 rounded-full text-[11px] font-semibold"
-          style={{
-            background: 'rgba(240, 185, 11, 0.12)',
-            color: '#F0B90B',
-            border: '1px solid rgba(240,185,11,0.25)',
-          }}
-        >
-          SL: {decision.allow_ai_stop_close === false ? 'OFF' : 'ON'} | TP:{' '}
-          {decision.allow_ai_take_profit === false ? 'OFF' : 'ON'}
-        </div>
-        <div
-          className="px-2.5 py-1 rounded-full text-[11px] font-semibold"
-          style={{
-            background: 'rgba(96, 165, 250, 0.12)',
-            color: '#60A5FA',
-            border: '1px solid rgba(96,165,250,0.25)',
-          }}
-        >
-          Mode: {decision.ai_decision_mode || 'balanced'}
-        </div>
+      {/* actions: always show a compact summary of trade actions */}
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+          marginTop: 10,
+        }}
+      >
+        {actions.length === 0 ? (
+          <div style={{ fontSize: 11, color: '#5E6673' }}>No actions</div>
+        ) : (
+          actions.map((a, i) => (
+            <ActionCard key={i} action={a} onSymbolClick={onSymbolClick} />
+          ))
+        )}
       </div>
 
-      {/* Decision Actions - Beautiful Grid */}
-      {decision.decisions && decision.decisions.length > 0 && (
-        <div className="space-y-3 mb-4">
-          {decision.decisions.map((action, index) => (
-            <ActionCard
-              key={`${action.symbol}-${index}`}
-              action={action}
-              language={language}
-              onSymbolClick={onSymbolClick}
+      {expanded && (
+        <div style={{ marginTop: 10 }}>
+          {/* execution log */}
+          {decision.execution_log && decision.execution_log.length > 0 && (
+            <Collapsible title={`📋 $Execution Log`} defaultOpen>
+              <div
+                style={{
+                  background: '#0B0E11',
+                  border: '1px solid #2B3139',
+                  borderRadius: 4,
+                  padding: 8,
+                  maxHeight: 240,
+                  overflow: 'auto',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 2,
+                }}
+              >
+                {decision.execution_log.map((line, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                      color:
+                        line.includes('🚫') ||
+                        line.includes('blocked') ||
+                        line.includes('failed')
+                          ? '#F6465D'
+                          : line.includes('✓') || line.includes('succeeded')
+                            ? '#0ECB81'
+                            : '#B7BDC6',
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                    }}
+                  >
+                    {line}
+                  </div>
+                ))}
+              </div>
+            </Collapsible>
+          )}
+
+          {decision.error_message && (
+            <div
+              style={{
+                marginTop: 8,
+                padding: 8,
+                background: 'rgba(246,70,93,0.1)',
+                border: '1px solid rgba(246,70,93,0.3)',
+                borderRadius: 4,
+                fontSize: 11,
+                color: '#F6465D',
+              }}
+            >
+              ⚠️ {decision.error_message}
+            </div>
+          )}
+
+          {/* lazy-loaded prompts / CoT */}
+          <Collapsible title="🧠 AI Thinking (CoT)" onFirstOpen={loadPrompts}>
+            <PromptBlock
+              text={prompts?.cot_trace || ''}
+              loading={loadingPrompts}
             />
-          ))}
-        </div>
-      )}
-
-      {/* Collapsible Sections */}
-      <div className="space-y-2">
-        {/* System Prompt */}
-        {decision.system_prompt && (
-          <div>
-            <button
-              onClick={() => setShowSystemPrompt(!showSystemPrompt)}
-              className="flex items-center gap-2 text-sm transition-colors w-full justify-between p-2 rounded hover:bg-white/5"
-            >
-              <div className="flex items-center gap-2">
-                <span className="text-base">⚙️</span>
-                <span className="font-semibold" style={{ color: '#a78bfa' }}>
-                  System Prompt
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    copyToClipboard(decision.system_prompt, 'System Prompt')
-                  }}
-                  className="text-xs px-2.5 py-1 rounded hover:opacity-80 transition-opacity flex items-center gap-1"
-                  style={{
-                    background: 'rgba(167, 139, 250, 0.2)',
-                    color: '#a78bfa',
-                    border: '1px solid rgba(167, 139, 250, 0.3)',
-                  }}
-                  title="Copy to clipboard"
-                >
-                  <span>📋</span>
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    downloadAsFile(
-                      decision.system_prompt,
-                      `system-prompt-cycle-${decision.cycle_number}.txt`
-                    )
-                  }}
-                  className="text-xs px-2.5 py-1 rounded hover:opacity-80 transition-opacity flex items-center gap-1"
-                  style={{
-                    background: 'rgba(167, 139, 250, 0.2)',
-                    color: '#a78bfa',
-                    border: '1px solid rgba(167, 139, 250, 0.3)',
-                  }}
-                  title="Download as file"
-                >
-                  <span>💾</span>
-                </button>
-                <span
-                  className="text-xs px-2 py-0.5 rounded"
-                  style={{
-                    background: 'rgba(167, 139, 250, 0.15)',
-                    color: '#a78bfa',
-                  }}
-                >
-                  {showSystemPrompt
-                    ? t('collapse', language)
-                    : t('expand', language)}
-                </span>
-              </div>
-            </button>
-            {showSystemPrompt && (
-              <div
-                className="mt-2 rounded-lg p-4 text-sm font-mono whitespace-pre-wrap max-h-96 overflow-y-auto"
-                style={{
-                  background: '#0B0E11',
-                  border: '1px solid #2B3139',
-                  color: '#EAECEF',
-                }}
-              >
-                {decision.system_prompt}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* User/Input Prompt */}
-        {decision.input_prompt && (
-          <div>
-            <button
-              onClick={() => setShowInputPrompt(!showInputPrompt)}
-              className="flex items-center gap-2 text-sm transition-colors w-full justify-between p-2 rounded hover:bg-white/5"
-            >
-              <div className="flex items-center gap-2">
-                <span className="text-base">📥</span>
-                <span className="font-semibold" style={{ color: '#60a5fa' }}>
-                  User Prompt
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    copyToClipboard(decision.input_prompt, 'User Prompt')
-                  }}
-                  className="text-xs px-2.5 py-1 rounded hover:opacity-80 transition-opacity flex items-center gap-1"
-                  style={{
-                    background: 'rgba(96, 165, 250, 0.2)',
-                    color: '#60a5fa',
-                    border: '1px solid rgba(96, 165, 250, 0.3)',
-                  }}
-                  title="Copy to clipboard"
-                >
-                  <span>📋</span>
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    downloadAsFile(
-                      decision.input_prompt,
-                      `user-prompt-cycle-${decision.cycle_number}.txt`
-                    )
-                  }}
-                  className="text-xs px-2.5 py-1 rounded hover:opacity-80 transition-opacity flex items-center gap-1"
-                  style={{
-                    background: 'rgba(96, 165, 250, 0.2)',
-                    color: '#60a5fa',
-                    border: '1px solid rgba(96, 165, 250, 0.3)',
-                  }}
-                  title="Download as file"
-                >
-                  <span>💾</span>
-                </button>
-                <span
-                  className="text-xs px-2 py-0.5 rounded"
-                  style={{
-                    background: 'rgba(96, 165, 250, 0.15)',
-                    color: '#60a5fa',
-                  }}
-                >
-                  {showInputPrompt
-                    ? t('collapse', language)
-                    : t('expand', language)}
-                </span>
-              </div>
-            </button>
-            {showInputPrompt && (
-              <div
-                className="mt-2 rounded-lg p-4 text-sm font-mono whitespace-pre-wrap max-h-96 overflow-y-auto"
-                style={{
-                  background: '#0B0E11',
-                  border: '1px solid #2B3139',
-                  color: '#EAECEF',
-                }}
-              >
-                {decision.input_prompt}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* AI Thinking */}
-        {decision.cot_trace && (
-          <div>
-            <button
-              onClick={() => setShowCoT(!showCoT)}
-              className="flex items-center gap-2 text-sm transition-colors w-full justify-between p-2 rounded hover:bg-white/5"
-            >
-              <div className="flex items-center gap-2">
-                <span className="text-base">🧠</span>
-                <span className="font-semibold" style={{ color: '#F0B90B' }}>
-                  {t('aiThinking', language)}
-                </span>
-              </div>
-              <span
-                className="text-xs px-2 py-0.5 rounded"
-                style={{
-                  background: 'rgba(240, 185, 11, 0.15)',
-                  color: '#F0B90B',
-                }}
-              >
-                {showCoT ? t('collapse', language) : t('expand', language)}
-              </span>
-            </button>
-            {showCoT && (
-              <div
-                className="mt-2 rounded-lg p-4 text-sm font-mono whitespace-pre-wrap max-h-96 overflow-y-auto"
-                style={{
-                  background: '#0B0E11',
-                  border: '1px solid #2B3139',
-                  color: '#EAECEF',
-                }}
-              >
-                {decision.cot_trace}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Execution Log */}
-      {decision.execution_log && decision.execution_log.length > 0 && (
-        <div
-          className="rounded-lg p-3 mt-4 text-xs font-mono space-y-1"
-          style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
-        >
-          {decision.execution_log.map((log, index) => (
-            <div key={`${log}-${index}`} style={{ color: '#EAECEF' }}>
-              {log}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Error Message */}
-      {decision.error_message && (
-        <div
-          className="rounded-lg p-3 mt-4 text-sm"
-          style={{
-            background: 'rgba(246, 70, 93, 0.1)',
-            border: '1px solid rgba(246, 70, 93, 0.4)',
-            color: '#F6465D',
-          }}
-        >
-          ❌ {decision.error_message}
+          </Collapsible>
+          <Collapsible title="⚙️ System Prompt" onFirstOpen={loadPrompts}>
+            <PromptBlock
+              text={prompts?.system_prompt || ''}
+              loading={loadingPrompts}
+            />
+          </Collapsible>
+          <Collapsible title="💬 User Prompt" onFirstOpen={loadPrompts}>
+            <PromptBlock
+              text={prompts?.input_prompt || ''}
+              loading={loadingPrompts}
+            />
+          </Collapsible>
         </div>
       )}
     </div>
