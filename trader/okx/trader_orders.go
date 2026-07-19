@@ -879,10 +879,45 @@ func (t *OKXTrader) CancelAlgoOrderByID(symbol string, algoID string) error {
 	}
 	instId := t.convertSymbol(symbol)
 	body := []map[string]interface{}{{"algoId": algoID, "instId": instId}}
-	if _, err := t.doRequest("POST", okxCancelAlgoPath, body); err != nil {
+	data, err := t.doRequest("POST", okxCancelAlgoPath, body)
+	if err != nil {
 		return fmt.Errorf("failed to cancel algo order %s: %w", algoID, err)
 	}
+	// doRequest treats top-level code=1 (partial success) as non-error, so a per-order
+	// failure (e.g. wrong endpoint, already gone) surfaces ONLY inside data[].sCode. Without
+	// this check a failed cancel would log a fake success — the exact bug that left structural
+	// backup algos resting on the exchange after a "successful" cancel. sCode "0" = canceled;
+	// "51400"/"51401" = order already canceled/does-not-exist (idempotent, treat as success).
+	if err := okxAlgoCancelResultErr(data, algoID); err != nil {
+		return err
+	}
 	logger.Infof("  ✓ Canceled algo order by id for %s: %s", symbol, algoID)
+	return nil
+}
+
+// okxAlgoCancelResultErr inspects the per-order result array from cancel-algos and returns
+// an error when the order was NOT actually canceled. "Already gone" sCodes are idempotent
+// successes (the desired end-state — no resting order — is achieved).
+func okxAlgoCancelResultErr(data []byte, algoID string) error {
+	if len(data) == 0 {
+		return nil
+	}
+	var results []struct {
+		AlgoID string `json:"algoId"`
+		SCode  string `json:"sCode"`
+		SMsg   string `json:"sMsg"`
+	}
+	if err := json.Unmarshal(data, &results); err != nil {
+		return nil // unparseable body: don't fail the caller on a shape mismatch
+	}
+	for _, r := range results {
+		switch r.SCode {
+		case "", "0", "51400", "51401", "51402": // canceled / already-canceled / not-found
+			return nil
+		default:
+			return fmt.Errorf("OKX cancel-algo rejected algoId=%s: sCode=%s sMsg=%s", algoID, r.SCode, r.SMsg)
+		}
+	}
 	return nil
 }
 
@@ -1555,12 +1590,41 @@ func (t *OKXTrader) CancelOrder(symbol, orderID string) error {
 		"ordId":  orderID,
 	}
 
-	_, err := t.doRequest("POST", "/api/v5/trade/cancel-order", body)
+	data, err := t.doRequest("POST", "/api/v5/trade/cancel-order", body)
 	if err != nil {
 		return fmt.Errorf("failed to cancel order: %w", err)
 	}
+	// Guard against the code=1 partial-success trap: a per-order sCode failure (e.g. this is
+	// actually an ALGO order that cancel-order can't touch) must NOT log a fake success.
+	if err := okxOrderCancelResultErr(data, orderID); err != nil {
+		return err
+	}
 
 	logger.Infof("✓ [OKX] Order cancelled: %s %s", symbol, orderID)
+	return nil
+}
+
+// okxOrderCancelResultErr mirrors okxAlgoCancelResultErr for the regular order-cancel endpoint.
+func okxOrderCancelResultErr(data []byte, ordID string) error {
+	if len(data) == 0 {
+		return nil
+	}
+	var results []struct {
+		OrdID string `json:"ordId"`
+		SCode string `json:"sCode"`
+		SMsg  string `json:"sMsg"`
+	}
+	if err := json.Unmarshal(data, &results); err != nil {
+		return nil
+	}
+	for _, r := range results {
+		switch r.SCode {
+		case "", "0", "51400", "51401", "51402":
+			return nil
+		default:
+			return fmt.Errorf("OKX cancel-order rejected ordId=%s: sCode=%s sMsg=%s", ordID, r.SCode, r.SMsg)
+		}
+	}
 	return nil
 }
 

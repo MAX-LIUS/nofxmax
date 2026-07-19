@@ -203,6 +203,21 @@ func (at *AutoTrader) applyStructuralTrail(symbol, side string, entry float64, i
 		newBoundary = clamped
 	}
 
+	// Genuine-tighten gate: computeTrailBoundary decides the ratchet from the PRE-clamp
+	// swing, but the clamp above can pull newBoundary back to the entry-floor. When that
+	// happens the "tightened" level collapses onto prevBoundary — arming a ratchet that
+	// didn't actually move and (worse) parking a physical backup order right on top of the
+	// close-confirm level, which destroys its wick-immunity. Only count the ratchet when
+	// the clamped level is strictly tighter than prevBoundary; otherwise it is a no-op and
+	// the software close-confirm + wide backstop keep covering the position unchanged.
+	if newRatchets != prevRatchets {
+		genuinelyTighter := (isLong && newBoundary > prevBoundary) || (!isLong && newBoundary < prevBoundary)
+		if !genuinelyTighter {
+			newBoundary = prevBoundary
+			newRatchets = prevRatchets
+		}
+	}
+
 	// Never let the ratchet LOOSEN below the frozen entry boundary; keep the tighter.
 	effective := newBoundary
 	if !isLong {
@@ -216,23 +231,28 @@ func (at *AutoTrader) applyStructuralTrail(symbol, side string, entry float64, i
 	}
 
 	// Persist the tighten (only when it actually moved) so it survives restart.
-	// Rolling 2-level window: the level being SUPERSEDED (prevBoundary) becomes the new
-	// BackupBoundary — a physical intrabar stop one step behind the newest close-confirm
-	// level. This keeps exactly the two most recent structural levels; older levels are
-	// implicitly dropped (BackupBoundary just holds whichever level was tight last cycle).
-	// The wide 4.5-ATR backstop is a separate resting order and is never touched here.
+	// Wick-immunity design (2026-07-20): ALL rolling structural levels — the newest tight
+	// AND every superseded one — are close-confirm ONLY (software, fire on bar close). We do
+	// NOT park a near-price physical intrabar backup at the vacated level: that level sits
+	// close to price and a shallow wick would trigger it, re-introducing exactly the wick
+	// vulnerability close-confirm eliminates (observed: SOL long wick-closed at 75.32 by the
+	// backup @75.30 while the tight close-confirm @75.53 would have ignored the same wick).
+	// The ONLY physical resting stop is the wide 4.5-ATR backstop — far from price (a wick
+	// reaching it = genuine damage) and doubling as the bot-downtime / gap safety net.
+	// BackupBoundary is forced to 0 so syncStructuralBackupStop cancels any legacy backup
+	// order and never places a new one.
 	if newRatchets != prevRatchets && at.store != nil {
 		if state, err := at.store.LoadFrozenATRState(); err == nil {
 			rec := state.Records[key]
 			rec.TraderID, rec.Symbol, rec.EntryPrice = at.id, symbol, entry
-			rec.BackupBoundary = prevBoundary // the level we just superseded → intrabar backup
+			rec.BackupBoundary = 0             // no near-price physical backup (close-confirm only)
 			rec.TrailBoundary = newBoundary    // newest tightest → close-confirm guard
 			rec.TrailRatchets = newRatchets
 			rec.UpdatedAt = time.Now().Unix()
 			if err := at.store.SaveFrozenATRRecord(key, rec); err != nil {
 				logger.Warnf("⚠️ [StructuralSL] trail persist failed %s: %v", key, err)
 			} else {
-				logger.Infof("🔧 [StructuralSL] %s %s trail ratchet #%d → tight %.6f, backup %.6f (entry-floor %.6f)",
+				logger.Infof("🔧 [StructuralSL] %s %s trail ratchet #%d → tight %.6f (close-confirm only, no physical backup; prev %.6f, entry-floor %.6f)",
 					symbol, sideUpper, newRatchets, newBoundary, prevBoundary, entryBoundary)
 			}
 		}
@@ -283,7 +303,6 @@ func (at *AutoTrader) syncStructuralBackupStop(symbol, side string, qty, entry f
 	if isLong {
 		sideUpper = "LONG"
 	}
-	positionSide := sideUpper
 	key := frozenATRKey(at.id, symbol, tf, sideUpper)
 
 	state, err := at.store.LoadFrozenATRState()
@@ -294,61 +313,50 @@ func (at *AutoTrader) syncStructuralBackupStop(symbol, side string, qty, entry f
 	if !found || !entrySamePosition(rec.EntryPrice, entry) {
 		return
 	}
-	desired := rec.BackupBoundary
+	// Wick-immunity design (2026-07-20, Option 1): NO near-price physical backup stop.
+	// All rolling structural levels are close-confirm only (software, bar-close). The only
+	// physical resting stop is the wide 4.5-ATR backstop (owned elsewhere). This function is
+	// therefore CANCEL-ONLY: it tears down any legacy backup order left over from the old
+	// rolling-backup scheme and never places a new one. Because there is no placement path,
+	// the prior race (re-placing a backup onto an already-closing position, seen on SOL) is
+	// structurally eliminated — a stale qty/entry snapshot can no longer arm anything.
+	_ = qty // retained in signature; no longer used to place orders
 
-	// Sanity: a valid backup must sit on the protective side of entry (below for a long,
-	// above for a short). Anything else is treated as "no backup".
-	if desired > 0 {
-		if (isLong && desired >= entry) || (!isLong && desired <= entry) {
-			desired = 0
-		}
-	}
-
-	// The backup order is a physical resting stop keyed by its price. Detect whether one
-	// already sits at the desired price to stay idempotent across cycles/restarts.
-	openOrders, ooErr := at.trader.GetOpenOrders(symbol)
-	if ooErr == nil && desired > 0 && hasMatchingProtectionOrder(openOrders, positionSide, false, desired) &&
-		rec.BackupOrderID != "" {
-		return // already placed and recorded at the right price
-	}
-
-	// Roll: cancel the previously-recorded backup order (the superseded/farther level).
 	if rec.BackupOrderID != "" {
+		// CRITICAL: the backup is an ALGO order (SetStopLossTagged → algoId on BOTH OKX and
+		// Binance). It MUST be cancelled via the algo endpoint (CancelAlgoOrderByID), NOT the
+		// regular CancelOrder path — cancel-order/ordId (OKX) and fapi/v1/order (Binance) do
+		// not know about algo orders and silently no-op while logging a fake success. That bug
+		// left SKHYNIX @1145.94 / TRUMP @1.602 backups resting on OKX after we "cancelled" them.
 		if canceller, ok := at.trader.(interface {
-			CancelOrder(symbol, orderID string) error
+			CancelAlgoOrderByID(symbol, orderID string) error
 		}); ok {
-			if cErr := canceller.CancelOrder(symbol, rec.BackupOrderID); cErr != nil {
-				logger.Warnf("⚠️ [StructuralSL] %s %s cancel prior backup stop %s failed: %v",
+			if cErr := canceller.CancelAlgoOrderByID(symbol, rec.BackupOrderID); cErr != nil {
+				// Do NOT clear the tracked id on failure — clearing it would strand the order
+				// as an untrackable orphan (the exact bug that left SKHYNIX/TRUMP backups live
+				// after a fake-success cancel). Keep the id so the next cycle retries the cancel.
+				logger.Warnf("⚠️ [StructuralSL] %s %s cancel legacy backup stop %s FAILED (will retry): %v",
 					symbol, sideUpper, rec.BackupOrderID, cErr)
 			} else {
-				logger.Infof("🧹 [StructuralSL] %s %s canceled superseded backup stop %s",
+				logger.Infof("🧹 [StructuralSL] %s %s canceled legacy backup stop %s (close-confirm only now)",
 					symbol, sideUpper, rec.BackupOrderID)
+				rec.BackupOrderID = "" // clear ONLY after the exchange confirmed the cancel
 			}
+		} else {
+			// No algo-canceller available (shouldn't happen for OKX/Binance) — keep the id.
+			logger.Warnf("⚠️ [StructuralSL] %s %s no CancelAlgoOrderByID; leaving backup id %s tracked",
+				symbol, sideUpper, rec.BackupOrderID)
 		}
-		rec.BackupOrderID = ""
 	}
 
-	// Place the new backup as a tagged resting intrabar stop at the desired price.
-	if desired > 0 {
-		if setter, ok := at.trader.(interface {
-			SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) (string, error)
-		}); ok {
-			algoID, sErr := setter.SetStopLossTagged(symbol, positionSide, qty, desired, "structural_backup_sl")
-			if sErr != nil {
-				logger.Warnf("⚠️ [StructuralSL] %s %s place backup stop @ %.6f failed: %v",
-					symbol, sideUpper, desired, sErr)
-			} else {
-				rec.BackupOrderID = algoID
-				at.recordProtectionIntent(symbol, positionSide, "structural_backup_sl", qty, desired, algoID)
-				logger.Infof("🛡 [StructuralSL] %s %s backup stop placed @ %.6f (intrabar, one step behind close-confirm)",
-					symbol, sideUpper, desired)
-			}
-		}
+	// Keep BackupBoundary cleared so the panel/reconciler never resurface a near-price level.
+	if rec.BackupBoundary != 0 {
+		rec.BackupBoundary = 0
 	}
 
 	rec.UpdatedAt = time.Now().Unix()
 	if pErr := at.store.SaveFrozenATRRecord(key, rec); pErr != nil {
-		logger.Warnf("⚠️ [StructuralSL] %s %s persist backup order id failed: %v", symbol, sideUpper, pErr)
+		logger.Warnf("⚠️ [StructuralSL] %s %s persist backup teardown failed: %v", symbol, sideUpper, pErr)
 	}
 }
 
