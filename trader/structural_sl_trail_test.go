@@ -141,3 +141,34 @@ func TestComputeTrailBoundary_NeverLoosens(t *testing.T) {
 		t.Fatalf("looser candidate must be rejected: got ratchets=%d boundary=%.4f", nr, nb)
 	}
 }
+
+// min_profit=0 DISABLES the activation gate: a long barely in profit (favorable
+// excursion < 1 ATR) must still ratchet, whereas with min_profit=1.0 it would not.
+func TestComputeTrailBoundary_MinProfitZeroDisablesGate(t *testing.T) {
+	// swing low at index 3 (100); price 100.5 = only +0.5 from entry 100, atr 2
+	// → favMove 0.5 < 1.0*2 would block if min_profit were 1.0.
+	lows := []float64{105, 104, 103, 100, 100.6, 100.7, 100.8}
+	highs := []float64{107, 106, 105, 104, 101, 101, 101}
+	closes := []float64{106, 105, 104, 102, 100.6, 100.6, 100.5}
+	window := mkBars(lows, highs, closes)
+
+	gated := baseTrailCfg()
+	gated.TrailMinProfitATR = 1.0
+	_, nrGated := computeTrailBoundary(gated, trailRecomputeInput{
+		window: window, curClose: 100.5, atr: 2, entry: 100, isLong: true,
+		curBound: 90, ratchets: 0,
+	})
+	if nrGated != 0 {
+		t.Fatalf("min_profit=1.0 should block a +0.25ATR position, got %d ratchets", nrGated)
+	}
+
+	open := baseTrailCfg()
+	open.TrailMinProfitATR = 0 // disabled
+	_, nrOpen := computeTrailBoundary(open, trailRecomputeInput{
+		window: window, curClose: 100.5, atr: 2, entry: 100, isLong: true,
+		curBound: 90, ratchets: 0,
+	})
+	if nrOpen != 1 {
+		t.Fatalf("min_profit=0 should DISABLE the gate and allow the ratchet, got %d ratchets", nrOpen)
+	}
+}

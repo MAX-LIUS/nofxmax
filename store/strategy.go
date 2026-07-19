@@ -660,8 +660,11 @@ func (c StructuralSLConfig) WithDefaults() StructuralSLConfig {
 	if c.TrailHigherMult < 2 {
 		c.TrailHigherMult = 4
 	}
-	if c.TrailMinProfitATR <= 0 {
-		c.TrailMinProfitATR = 1.0
+	// Default 0 = min-profit gate DISABLED (ratchet may arm as soon as structure
+	// permits, subject to the on-profit/on-loss side gates). Negatives clamp to 0.
+	// A positive value re-enables the "must be up N ATR before trailing" cushion.
+	if c.TrailMinProfitATR < 0 {
+		c.TrailMinProfitATR = 0
 	}
 	if c.TrailMaxRatchets < 0 {
 		c.TrailMaxRatchets = 0

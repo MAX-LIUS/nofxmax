@@ -114,6 +114,10 @@ func (at *AutoTrader) evaluateStructuralSLClose(symbol, side string, entry, qty 
 	// tighter. Persisted so the ratchet survives a restart. Static behavior when off.
 	if ss.TrailEnabled {
 		boundary = at.applyStructuralTrail(symbol, side, entry, isLong, boundary, closedBar, bars, ss, acfg)
+		// Roll the physical intrabar backup stop to sit one step behind the newest
+		// close-confirm level (or clear it pre-first-ratchet). The 4.5-ATR resting
+		// backstop is untouched; this is a separate, tighter, rolling safety layer.
+		at.syncStructuralBackupStop(symbol, side, qty, entry, isLong, acfg)
 	}
 
 	breached := (isLong && closedBar.Close < boundary) || (!isLong && closedBar.Close > boundary)
@@ -212,21 +216,139 @@ func (at *AutoTrader) applyStructuralTrail(symbol, side string, entry float64, i
 	}
 
 	// Persist the tighten (only when it actually moved) so it survives restart.
+	// Rolling 2-level window: the level being SUPERSEDED (prevBoundary) becomes the new
+	// BackupBoundary — a physical intrabar stop one step behind the newest close-confirm
+	// level. This keeps exactly the two most recent structural levels; older levels are
+	// implicitly dropped (BackupBoundary just holds whichever level was tight last cycle).
+	// The wide 4.5-ATR backstop is a separate resting order and is never touched here.
 	if newRatchets != prevRatchets && at.store != nil {
 		if state, err := at.store.LoadFrozenATRState(); err == nil {
 			rec := state.Records[key]
 			rec.TraderID, rec.Symbol, rec.EntryPrice = at.id, symbol, entry
-			rec.TrailBoundary = newBoundary
+			rec.BackupBoundary = prevBoundary // the level we just superseded → intrabar backup
+			rec.TrailBoundary = newBoundary    // newest tightest → close-confirm guard
 			rec.TrailRatchets = newRatchets
 			rec.UpdatedAt = time.Now().Unix()
 			if err := at.store.SaveFrozenATRRecord(key, rec); err != nil {
 				logger.Warnf("⚠️ [StructuralSL] trail persist failed %s: %v", key, err)
 			} else {
-				logger.Infof("🔧 [StructuralSL] %s %s trail ratchet #%d → boundary %.6f (entry-floor %.6f)",
-					symbol, sideUpper, newRatchets, newBoundary, entryBoundary)
+				logger.Infof("🔧 [StructuralSL] %s %s trail ratchet #%d → tight %.6f, backup %.6f (entry-floor %.6f)",
+					symbol, sideUpper, newRatchets, newBoundary, prevBoundary, entryBoundary)
 			}
 		}
 	}
 	return effective
+}
+
+// frozenBackupBoundaryForPosition returns the currently-persisted rolling backup
+// boundary for a position (0 when none). Used by the reconciler to register the
+// guard-owned backup stop price as tolerated (not churned, not double-placed).
+func (at *AutoTrader) frozenBackupBoundaryForPosition(symbol, side string, entryPrice float64) float64 {
+	if at.store == nil || entryPrice <= 0 || at.config.StrategyConfig == nil {
+		return 0
+	}
+	tf := at.config.StrategyConfig.ATRProtection.WithDefaults().Timeframe
+	sideUpper := "SHORT"
+	if actionFromPositionSide(side) == "open_long" {
+		sideUpper = "LONG"
+	}
+	key := frozenATRKey(at.id, symbol, tf, sideUpper)
+	state, err := at.store.LoadFrozenATRState()
+	if err != nil {
+		return 0
+	}
+	if rec, found := state.Records[key]; found && entrySamePosition(rec.EntryPrice, entryPrice) {
+		return rec.BackupBoundary
+	}
+	return 0
+}
+
+// syncStructuralBackupStop places / rolls / cancels the guard-owned physical intrabar
+// backup stop so exactly ONE backup order sits at the current BackupBoundary. It is
+// idempotent per cycle: it only acts when the desired backup price differs from the
+// order already recorded. Called after a ratchet may have moved BackupBoundary.
+//
+//   - desiredBackup <= 0            → no backup layer yet (pre-first-ratchet): cancel any
+//     stale backup order and clear the record.
+//   - desiredBackup unchanged       → nothing to do (the resting order is already correct).
+//   - desiredBackup moved (rolled)  → cancel the previous backup order by ID, place a new
+//     tagged resting stop at the new price, persist the new order ID. This is the
+//     "keep current + add tighter, drop farther" roll from the design.
+func (at *AutoTrader) syncStructuralBackupStop(symbol, side string, qty, entry float64, isLong bool, acfg store.ATRProtectionConfig) {
+	if at.store == nil {
+		return
+	}
+	tf := acfg.WithDefaults().Timeframe
+	sideUpper := "SHORT"
+	if isLong {
+		sideUpper = "LONG"
+	}
+	positionSide := sideUpper
+	key := frozenATRKey(at.id, symbol, tf, sideUpper)
+
+	state, err := at.store.LoadFrozenATRState()
+	if err != nil {
+		return
+	}
+	rec, found := state.Records[key]
+	if !found || !entrySamePosition(rec.EntryPrice, entry) {
+		return
+	}
+	desired := rec.BackupBoundary
+
+	// Sanity: a valid backup must sit on the protective side of entry (below for a long,
+	// above for a short). Anything else is treated as "no backup".
+	if desired > 0 {
+		if (isLong && desired >= entry) || (!isLong && desired <= entry) {
+			desired = 0
+		}
+	}
+
+	// The backup order is a physical resting stop keyed by its price. Detect whether one
+	// already sits at the desired price to stay idempotent across cycles/restarts.
+	openOrders, ooErr := at.trader.GetOpenOrders(symbol)
+	if ooErr == nil && desired > 0 && hasMatchingProtectionOrder(openOrders, positionSide, false, desired) &&
+		rec.BackupOrderID != "" {
+		return // already placed and recorded at the right price
+	}
+
+	// Roll: cancel the previously-recorded backup order (the superseded/farther level).
+	if rec.BackupOrderID != "" {
+		if canceller, ok := at.trader.(interface {
+			CancelOrder(symbol, orderID string) error
+		}); ok {
+			if cErr := canceller.CancelOrder(symbol, rec.BackupOrderID); cErr != nil {
+				logger.Warnf("⚠️ [StructuralSL] %s %s cancel prior backup stop %s failed: %v",
+					symbol, sideUpper, rec.BackupOrderID, cErr)
+			} else {
+				logger.Infof("🧹 [StructuralSL] %s %s canceled superseded backup stop %s",
+					symbol, sideUpper, rec.BackupOrderID)
+			}
+		}
+		rec.BackupOrderID = ""
+	}
+
+	// Place the new backup as a tagged resting intrabar stop at the desired price.
+	if desired > 0 {
+		if setter, ok := at.trader.(interface {
+			SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) (string, error)
+		}); ok {
+			algoID, sErr := setter.SetStopLossTagged(symbol, positionSide, qty, desired, "structural_backup_sl")
+			if sErr != nil {
+				logger.Warnf("⚠️ [StructuralSL] %s %s place backup stop @ %.6f failed: %v",
+					symbol, sideUpper, desired, sErr)
+			} else {
+				rec.BackupOrderID = algoID
+				at.recordProtectionIntent(symbol, positionSide, "structural_backup_sl", qty, desired, algoID)
+				logger.Infof("🛡 [StructuralSL] %s %s backup stop placed @ %.6f (intrabar, one step behind close-confirm)",
+					symbol, sideUpper, desired)
+			}
+		}
+	}
+
+	rec.UpdatedAt = time.Now().Unix()
+	if pErr := at.store.SaveFrozenATRRecord(key, rec); pErr != nil {
+		logger.Warnf("⚠️ [StructuralSL] %s %s persist backup order id failed: %v", symbol, sideUpper, pErr)
+	}
 }
 

@@ -80,6 +80,13 @@ func allowedProtectionPricesForPlan(plan *ProtectionPlan) ([]float64, []float64)
 	if plan.FallbackMaxLossPrice > 0 {
 		allowedStops = append(allowedStops, plan.FallbackMaxLossPrice)
 	}
+	// Guard-owned rolling backup stop(s): tolerated so the reconciler won't churn them,
+	// but intentionally NOT added to missing-detection (the guard owns placement/roll).
+	for _, p := range plan.AllowedExtraStopPrices {
+		if p > 0 {
+			allowedStops = append(allowedStops, p)
+		}
+	}
 	for _, target := range plan.TakeProfitOrders {
 		allowedTPs = append(allowedTPs, target.Price)
 	}

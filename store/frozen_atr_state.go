@@ -37,6 +37,20 @@ type FrozenATRRecord struct {
 	// TrailRatchets counts how many times TrailBoundary has tightened, enforced against
 	// TrailMaxRatchets. Persisted alongside the boundary.
 	TrailRatchets int `json:"trail_ratchets,omitempty"`
+	// BackupBoundary is the ONE-STEP-BEHIND structural level kept as a physical intrabar
+	// backstop when the ratchet tightens (rolling 2-level design). TrailBoundary is the
+	// newest (tightest) level enforced by the close-confirm software guard; BackupBoundary
+	// is the previous ratchet level (or the entry boundary right after the first ratchet)
+	// held as a resting exchange stop so a violent candle that blows past the close-confirm
+	// level intrabar is still caught before the wide 4.5-ATR backstop. Only the two most
+	// recent levels are ever kept: on each new ratchet the old TrailBoundary becomes the
+	// BackupBoundary and any older level is dropped. 0 = no backup layer yet (pre-first-ratchet).
+	BackupBoundary float64 `json:"backup_boundary,omitempty"`
+	// BackupOrderID is the exchange order/algo ID of the resting intrabar stop currently
+	// placed at BackupBoundary. The structural guard OWNS this order: on each ratchet roll
+	// it cancels this ID (the superseded backup) before placing the new one, so exactly one
+	// backup order exists at a time. Empty when no backup order is live.
+	BackupOrderID string `json:"backup_order_id,omitempty"`
 }
 
 type FrozenATRState struct {

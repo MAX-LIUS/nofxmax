@@ -183,6 +183,12 @@ type ProtectionPlan struct {
 	RequiresPartialClose        bool
 	DrawdownRunnerState         *DrawdownRunnerState
 	BreakEvenSuppressedByRunner bool
+	// AllowedExtraStopPrices are stop prices the reconciler must TOLERATE (not treat as
+	// unexpected/churn) but must NOT place or require itself. Used for the guard-owned
+	// rolling structural backup stop: the structural guard places/cancels/rolls it, and
+	// registering its live price here keeps the reconciler from cancelling it as a stray
+	// order. Not part of missing-detection, so the reconciler never double-places it.
+	AllowedExtraStopPrices []float64
 }
 
 // mergeProtectionPlans combines multiple protection plans into a single target exchange protection set.

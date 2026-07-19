@@ -251,6 +251,16 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 		}
 	}
 
+	// Register the guard-owned rolling structural backup stop as an ALLOWED (tolerated)
+	// price so the reconciler neither churns it nor double-places it. The structural
+	// guard owns its lifecycle (place/cancel/roll); here we only tell the reconciler the
+	// price is expected. Read the current BackupBoundary from the frozen record.
+	if plan != nil {
+		if bp := at.frozenBackupBoundaryForPosition(symbol, side, entryPrice); bp > 0 {
+			plan.AllowedExtraStopPrices = append(plan.AllowedExtraStopPrices, bp)
+		}
+	}
+
 	// Align the reconcile plan with what can ACTUALLY be placed on the exchange
 	// before computing missing/unexpected ownership (fix 2026-06-22 churn form-2).
 	//
