@@ -244,6 +244,18 @@
   ②追踪出场降尾 > ③减频/缩仓(给sub-cost edge减拖累；通道是减频的一种实现，非alpha)。方向判断不是病根。
 - **Reopen Condition**：maker执行需建模成交率+逆向选择(+29.9%是完美成交上界)；结论受2个月单一regime限制，跨regime需新样本。
 
+### DEC-0120  结构止损 backstop 过宽 + 0.8RR-cap 证伪（RangeSL 参数回测）
+- **Question**：owner 定的结构止损 `fallback_rr_cap_ratio=0.8` 合不合适？把 fallback 锚点从 TP4 改成 AI 权威 RR(first_target) 有无增量？结构止损 backstop(4.5×ATR) 该收紧吗？
+- **Data**：4 trader 真实 closed 仓位重放（GPT 379 / Claude 365 / Claude-R 321 / BN 125）；结构止损用 RangeSL 忠实重建（nearest-swing + clamp[floor,backstop] + fallback）；先无 horizon(rel_err~2000%,仅方向)，后 `-horizon 48 -proxy`(rel_err 降到 29.5%/30.7%/63% 可信,GPT 因实盘 PnL≈0 分母失真)。
+- **Evidence**：
+  - **分支统计坐实 0.8 几乎不参与**：结构止损三分支占比 structural~50% / floor(<1.5ATR)~46% / **fallback(>4.5ATR)仅 0.9~2.7%**。0.8RR 只活在 fallback 分支 → 实盘 <3% 触发。真正高频起作用的是 **1.5×ATR 地板**，非 0.8。
+  - **0.8 太紧被几何证实**：`0.8×first_target` 中位 GPT=1.39×ATR(53%<地板)、Claude-R=0.88×ATR(**85%<地板**)。锚在近目标(first_target 中位1.4~2.1%)时 0.8 比 1.5 地板还紧，被地板吞掉；锚在 TP4(中位4.1%)时 0.8=2.88×ATR 才正常。
+  - **RR-cap 全局化(AI RR 当权威)方案 PnL 证伪**：把 ratio×first_target 设为每笔止损上限(地板降0.5让其 bind)，高保真下 `rrcapAI-0.8` 每个 trader 都被同 trader 的"单纯收紧 backstop"打败(Claude-R -3.78 vs backstop-1.5 +9.81)。0.8 是该方案里最差档，2.0 普遍更优——但整个方向不值得走。
+  - **真信号=backstop 过宽（可信）**：3/4 trader 收紧 backstop 4.5→1.5×ATR **同时**升 PnL 降回撤：Claude +42.69(DD147→112,rel_err29.5%最可信)、BN +29.79(DD101→71)、Claude-R +9.81(DD37→28)。GPT 相反(要宽,但保真不可信)。代价：胜率降(Claude55.6→47.4)——更多小止损、单笔亏损更小。
+- **Improvement Src**：0.8RR-cap [INFO](伪杠杆,<3%触发,改了无感)；RR-cap全局化 [RISK](负,被 backstop 打败)；**backstop 收紧 [RISK](真,3/4 trader 升PnL降DD)**。
+- **Conclusion**：owner 的"0.8 偏紧"直觉对（锚 first_target 且 bind 时是最差档），但**该机制实盘 <3% 触发、不值得动**；把 AI RR 提为全局止损上限的方案四个 trader 全输给单纯收紧 backstop。真正可动的是 **per-trader `backstop_atr_mul`：Claude/Claude-R/BN 的 4.5 太宽，收紧到 ~1.5-2.0 升利降回撤**（呼应 DEC-0114/0119：改善在出场/风控端，非进场端）。GPT 维持宽。
+- **Reopen Condition**：单一 2 个月 regime、rel_err 仍 29~63%、replay 低估赢家(trusted 子集 replay 6.45 vs actual 19.79)；backstop 是 close_confirm 下盘中灾难兜底网,收紧=网贴近,须先单 trader(Claude)小步实盘验证再推广；跨 regime 需新样本。
+
 **入场端信号在本系统连续七次证伪**：DEC-0110(EMA距离)、DEC-0111(边缘逆MR)、
 DEC-0112(区间中部)、DEC-0113(横盘/单边状态化)、DEC-0114(边缘fade方向)、DEC-0115(横盘边缘方向门,
 真实账本上砍赢家、加重回撤)、DEC-0116(走势通道：日线通道识别层与随机游走不可分 z_max=1.72，

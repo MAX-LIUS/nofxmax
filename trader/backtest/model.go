@@ -48,6 +48,12 @@ type StructuralPlan struct {
 	SLPrice  float64           // AI structural stop (buffer included) — Variant A
 	SLAnchor float64           // bare structural level (no buffer)     — Variant B base
 	TPLegs   []StructuralTPLeg // AI structural TP ladder (absolute prices)
+	// FirstTargetPrice is the AI's risk_reward.first_target (absolute price) — the
+	// numerator of the AI's authoritative RR. Used as an alternative fallback RR-cap
+	// anchor (RangeSLFallbackAnchor="first_target") so the structural fallback and the
+	// AI RR speak the same language, instead of anchoring to the farthest TP leg.
+	// 0 when the decision carried no risk_reward.first_target.
+	FirstTargetPrice float64
 }
 
 // LadderLeg is one tier of the ladder TP/SL.
@@ -122,6 +128,36 @@ type ProtectionParams struct {
 	// RangeSLMaxTPTargetPct: the max TP target move (% of entry) across ladder tiers,
 	// the reference the fallback RR cap tightens against. Resolved by LiveConfigParams.
 	RangeSLMaxTPTargetPct float64
+	// RangeSLFallbackAnchor selects which target the fallback RR cap tightens against:
+	//   "" or "max_tp"      → live behavior: largest TP leg (RangeSLMaxTPTargetPct / TPLegs)
+	//   "first_target"      → the AI's risk_reward.first_target (per-entry, from Structural)
+	// The first_target anchor aligns the structural fallback with the AI's authoritative
+	// RR (same numerator), instead of the farthest, lowest-probability ladder rung.
+	RangeSLFallbackAnchor string
+	// RRCapPrimary, when true, applies the RR cap (RangeSLFallbackRRCapRatio × anchor
+	// TP) as a UNIVERSAL ceiling on EVERY structural stop distance — not just the rare
+	// no-near-structure fallback branch. This models the "AI RR is the authoritative RR"
+	// architecture: the structural stop is min(structural-clamped, ratio×first_target).
+	// RangeSLFloorATR still applies as the hard minimum afterward, so lower the floor to
+	// let a tight cap actually bind. Used only to sweep the RR-cap value; NOT live yet.
+	RRCapPrimary bool
+	// --- min-lot TP collapse modelling (mirrors validateProtectionPlanExecution) ---
+	// CollapseK, when >0, forces the TP ladder to collapse to K tiers, simulating the
+	// live case where per-leg qty < exchange min lot so only K tiers can be placed. The
+	// position closes 100% across those K tiers (no runner — matches the live collapse,
+	// which only triggers for positions too small to hold the configured ladder).
+	CollapseK int
+	// CollapseAnchor selects WHERE the collapsed TP(s) sit:
+	//   "nearest"  → live behavior: the K tiers nearest entry (K=1 → +1.1×ATR, tiny profit)
+	//   "aitarget" → re-anchor to the AI risk_reward.first_target (from Structural),
+	//                pulled toward entry by CollapseTolPct so it fills easier. K>=2 spaces
+	//                the extra tiers between entry and the target. Falls back to "nearest"
+	//                when no first_target is available for the entry.
+	CollapseAnchor string
+	// CollapseTolPct is the tolerance (% of entry) the aitarget anchor is pulled toward
+	// entry, so the TP is "easy to reach" rather than exactly at the target. Default 0.2
+	// (mirrors clampDrawdownRulesToTarget's 0.2% buffer).
+	CollapseTolPct float64
 	// RangeSLCloseConfirm models the live Phase-2 close-confirm structural stop:
 	// the tight structural boundary is NOT a resting intrabar stop — it fires
 	// only when a bar CLOSES beyond the boundary, filling at that close. A wide
@@ -130,6 +166,16 @@ type ProtectionParams struct {
 	// order. Without it the replay exits on an intrabar wick at the tight level,
 	// which is FAVORABLE vs live and understates full_sl losses.
 	RangeSLCloseConfirm bool
+
+	// ConfirmStopATR, when > 0, REPLACES the swing-derived close-confirm boundary with
+	// a FIXED adverse-excursion stop at ConfirmStopATR × ATR below(long)/above(short)
+	// entry, enforced on bar CLOSE (fill at close) and active even while underwater —
+	// unlike the live trail that only ratchets after profit. Models the proposed
+	// "close-confirm adverse-excursion stop": cut a trade whose thesis has failed
+	// (closed beyond N×ATR) without the intrabar-wick vulnerability of a resting stop.
+	// The wide RangeSLBackstopATR resting stop still covers intrabar catastrophes.
+	// Requires RangeSLCloseConfirm to take effect.
+	ConfirmStopATR float64
 
 	// Structural mode (UnitStructural): per-entry SL/TP come from Entry.Structural.
 	// StructBufferATR, when > 0, re-derives the stop from the bare structural
@@ -145,6 +191,58 @@ type ProtectionParams struct {
 	// ladder. This is the "structural TP + wide ATR SL" hybrid: capture profit at
 	// AI structural targets, but stop wide enough to avoid wick-outs.
 	StructUseATRSL bool
+
+	// --- Trailing structural stop (ratchet) — models the proposed live feature ---
+	// TrailStructEnabled turns on the ratcheting structural stop: once per CLOSED bar,
+	// recompute the nearest post-entry swing beyond the current price and move the
+	// close-confirm boundary TIGHTER toward locking profit (never looser). Requires
+	// RangeSLCloseConfirm (the tight boundary is only ever a close-confirm trigger; the
+	// wide backstop still guards intrabar catastrophes). No-op when RangeSLEnabled is off.
+	TrailStructEnabled bool
+	// TrailStructTolATR is the volatility tolerance buffer (in ATR multiples) added
+	// BEYOND the recomputed swing before it becomes the new boundary — so the trailing
+	// stop sits a cushion past structure, not exactly on it, avoiding whipsaw on a
+	// marginal re-test. Also the minimum tightening step: the boundary only ratchets
+	// when the new candidate is at least this far tighter than the current one (anti-jitter).
+	TrailStructTolATR float64
+	// TrailStructMode selects which timeframe's structure the trail follows:
+	//   "current" / ""  → this-period swings only (tightest, locks most profit)
+	//   "higher"        → higher-period swings only (widest, most whipsaw-resistant)
+	//   "both"          → the LOOSER of the two (higher-tf floor): trails current-tf
+	//                     structure but never tighter than the higher-tf swing — a
+	//                     middle ground preserving anti-volatility while still ratcheting.
+	TrailStructMode string
+	// TrailStructHigherMult is the higher-timeframe aggregation factor (base bars per
+	// higher bar), e.g. 4 → 4h structure when the replay runs on 1h. Used by "higher"
+	// and "both" modes. Default 4 when unset and a higher mode is selected.
+	TrailStructHigherMult int
+	// TrailStructMinProfitATR gates activation: the trail only starts ratcheting once
+	// the position's favorable excursion (peak) exceeds this many ATR from entry, so a
+	// just-opened position isn't immediately trailed into a tight noise stop. Default 1.0.
+	TrailStructMinProfitATR float64
+	// TrailStructAfterBE, when true, keeps the trail RATCHETING through the break-even
+	// phase and lets the ratcheted boundary act as the RUNNER's stop (tighter than the
+	// wide entry-frozen structural level it would otherwise revert to). This is where a
+	// trend-follow trail earns its keep: the runner rides the tightening structure
+	// instead of a fixed BE offset. When false, the trail only operates before BE arms.
+	TrailStructAfterBE bool
+	// TrailStructOnlyAfterBE is the SPLIT mode: BEFORE break-even the position keeps its
+	// tight current-period structural stop (the entry-frozen boundary, unchanged); once
+	// break-even ARMS, the runner is handed to a (typically looser, higher-period) trail
+	// that re-seeds from current structure and ratchets up. The break-even stop floors
+	// the runner at entry, so the higher trail only binds once structure climbs above
+	// breakeven. Pair with TrailStructMode="higher". Implies through-BE trailing.
+	TrailStructOnlyAfterBE bool
+	// TrailStructMaxRatchets caps how many times the boundary may tighten over the life
+	// of the position; once reached the boundary locks. 0 = unlimited (back-compatible).
+	// Mirrors live StructuralSLConfig.TrailMaxRatchets.
+	TrailStructMaxRatchets int
+	// TrailStructOnProfit / TrailStructOnLoss gate ratcheting by the position's current
+	// state relative to entry: OnProfit allows tightening while price is favorable, OnLoss
+	// while adverse. Both true = ratchet in every state (default). Mirrors live
+	// TrailOnProfit / TrailOnLoss. Defaults applied in LiveConfigParams (both true when unset).
+	TrailStructOnProfit bool
+	TrailStructOnLoss   bool
 
 	// CloseProxy models the non-price live close mechanisms the raw replay
 	// ignores (time-stop, max-hold, and a heuristic AI/discretionary exit). Off
@@ -199,6 +297,22 @@ type Entry struct {
 	// Structural carries the AI's per-entry structural SL/TP, populated only for
 	// entries loaded with structural plans (UnitStructural mode). Nil otherwise.
 	Structural *StructuralPlan
+
+	// StructBoundaryOverride, when > 0, forces the close-confirm structural boundary
+	// to this absolute price INSTEAD of computing it from the replay bars' pre-entry
+	// swing. Used by the structural-timeframe isolation sweep (structTFSweep) to feed
+	// a 15m/30m/1h-derived boundary into a replay whose ATR/TP/BE/DD/backstop are all
+	// held on the SAME (1h) ATR — so the ONLY variable is the structural stop's
+	// source timeframe. Zero (the default) preserves normal per-bar computation.
+	StructBoundaryOverride float64
+
+	// ATROverride, when > 0, forces ReplayEntry to use this ATR (price units) INSTEAD
+	// of computing it from the replay bars' pre-entry window. This lets the structural-
+	// TF isolation run each variant on its OWN bar granularity (15m/30m/1h — so the
+	// close-confirm fires at that timeframe's natural resolution) while ALL ATR-derived
+	// level distances (TP/BE/DD/backstop and the boundary clamp) stay pinned to the 1h
+	// ATR. That removes the ATR-shrink confound of a whole-engine small-TF replay.
+	ATROverride float64
 }
 
 // TradeResult is the outcome of replaying one entry under a ProtectionParams.
@@ -213,6 +327,12 @@ type TradeResult struct {
 	BarsHeld     int
 	CloseReasons []string // ordered list of what fired (sl/tp1/be1/dd/...)
 	FullyClosed  bool
+	// TrailRatchets counts how many times the trailing structural stop moved
+	// tighter over the trade's life (0 when trailing disabled or never armed).
+	TrailRatchets int
+	// TrailExit is true when the final close-confirm exit fired against a
+	// RATCHETED boundary (i.e. the trail — not the entry-frozen level — closed it).
+	TrailExit bool
 }
 
 // PortfolioResult aggregates many TradeResults.

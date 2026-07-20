@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"math"
 	"log"
 	"os"
 
@@ -30,10 +31,34 @@ func main() {
 	liveConfig := flag.Bool("liveconfig", false, "use the trader's LIVE strategy protection config (ATR/structural) as the replay baseline")
 	variants := flag.Bool("variants", false, "compare pre-specified single-change optimization variants derived from the live baseline (keeps the structural stop type; faithful to live)")
 	pertrade := flag.Bool("pertrade", false, "with -variants: decompose each variant vs baseline TRADE-BY-TRADE (winners cut early vs losers saved)")
+	trail := flag.Bool("trail", false, "sweep the ratcheting structural stop (TrailStruct*) vs the frozen baseline: fire count, profit locked, profit given up early (needs -liveconfig with a RangeSLCloseConfirm stop)")
+	entryQual := flag.Bool("entryqual", false, "profile ENTRY quality independent of stops: post-entry MAE/MFE in ATR, immediate-adverse rate, never-green rate. Isolates whether the entry price itself is bad.")
+	rewardATR := flag.Bool("rewardatr", false, "bucket entries by AI reward distance in ATR (first_target/entryATR) and by effective RR after floor/backstop clamp, with realized PnL per bucket, plus a reward-ATR floor-gate PnL simulation. Uses -slfloor/-slbackstop for the clamp band.")
+	slFloor := flag.Float64("slfloor", 1.5, "structural SL floor ATR multiple used by -rewardatr clamp")
+	slBackstop := flag.Float64("slbackstop", 4.5, "structural SL backstop ATR multiple used by -rewardatr clamp")
+	fbSweep := flag.Bool("fbsweep", false, "2D sweep of the structural stop band [floor, backstop], driving backstop DOWN toward the floor to find how tight the stop can get before net PnL degrades. Needs -liveconfig with a structural (RangeSL) baseline.")
+	ddSource := flag.Bool("ddsource", false, "localize big-drawdown source: bucket entries by post-entry MAE (ATR) with realized PnL + dominant close_reason, entry-bar-green split, and a no-progress early-exit PnL simulation.")
+	confirmStop := flag.Bool("confirmstop", false, "sweep a FIXED close-confirm adverse-excursion stop at N×ATR (active while underwater, close-confirmed, backstop kept for wicks) vs the live swing-confirm. Needs -liveconfig with a structural (RangeSL) baseline.")
+	combinedGate := flag.Bool("combinedgate", false, "replay full set under baseline vs entry-gate-only (skip target<minRewardATR) vs band-only (backstop tighten) vs both stacked. Needs -liveconfig.")
+	maxHold := flag.Bool("maxholdsweep", false, "sweep the max-hold time exit: live vs drop-profit-exemption vs disabled vs alternative hours. Needs -liveconfig -proxy.")
+	bsMin := flag.Float64("bsmin", 1.5, "min backstop ATR for -fbsweep fine grid")
+	bsMax := flag.Float64("bsmax", 4.5, "max backstop ATR for -fbsweep fine grid")
+	bsStep := flag.Float64("bsstep", 0.5, "backstop ATR step for -fbsweep fine grid")
 	configTrader := flag.String("configtrader", "", "when set with -liveconfig, load the protection CONFIG from THIS trader pattern while entries still come from -trader. Lets a large pooled entry set (many traders) be replayed under one trader's config (e.g. Claude-R 15m).")
 	horizonHours := flag.Int("horizon", 0, "when >0, replay OPEN-ENDED over this forward horizon (hours) past each entry instead of clamping at the live exit time. Makes time-based exits (max-hold/time-stop) testable. Uses a per-symbol disk bar cache (-barcache).")
 	barCachePath := flag.String("barcache", "/tmp/bt_barcache.gob", "path to the persisted per-symbol bar cache used by -horizon")
+	fakeRetest := flag.Bool("fakeretest", false, "sweep the structural_fit fake_retest_trap gate: current 0.15% fixed vs %-sweep vs ATR-scaled vs real closed-candle confirmation; splits PASS/BLOCK realized PnL to test whether the gate removes worse trades.")
+	confirmTFLadder := flag.Bool("confirmtfladder", false, "sweep the CONFIRMATION TIMEFRAME up a ladder (base→2×→4×→...) with a fixed wall-clock horizon, so you can read the best confirm TF RELATIVE to any primary TF (15m/1h/4h). Fetch with -tf 15m and -horizon (e.g. 48). Rule fixed at 1close+wick.")
+	confirmTiming := flag.Bool("confirmtiming", false, "study confirmation TIMING × TIMEFRAME: re-derive each entry from the anchor touch at 1/2/3-close (+wick) rules on 15m and 1h, measure fill%, bars-to-confirm, risk%, MFE/MAE in R and stop-hit% — the too-early(fakes) vs too-late(RR decay) tradeoff. Fetch with -tf 15m.")
+	structTF := flag.Bool("structtf", false, "ISOLATION: replay on the trader's NATIVE-TF bars (from a finer fetch) with ATR/TP/BE/DD/backstop fixed, sweeping ONLY the structural stop's source timeframe DOWN (1h native→1h/30m/15m; 15m native→15m/10m/5m). Requires -liveconfig with a close-confirm structural baseline; native TF is read from the config.")
+	exchange := flag.String("exchange", "okx", "bar-data exchange for replay: okx | binance. Binance (proxy-aware) is for binance-type traders like BN so the replay reads the exchange the trades executed on.")
 	flag.Parse()
+
+	// Select the bar provider by exchange so binance traders (BN) don't get OKX prices.
+	barProvider := backtest.OKXBars
+	if *exchange == "binance" {
+		barProvider = backtest.BinanceBars
+	}
 
 	db, err := sql.Open("sqlite", *dbPath)
 	if err != nil {
@@ -44,6 +69,14 @@ func main() {
 	entries, err := backtest.LoadClaudeEntries(db, *traderLike)
 	if err != nil {
 		log.Fatalf("load entries: %v", err)
+	}
+	// Attach structural plans + AI first_target so the RangeSL fallback-anchor
+	// sweep (fbanchor-firsttarget) can read risk_reward.first_target per entry.
+	// Match window = 2h before entry (nearest preceding open decision).
+	if n, aerr := backtest.AttachStructuralPlans(db, *traderLike, 2*60*60*1000, entries); aerr != nil {
+		fmt.Printf("(warn: could not attach structural plans: %v)\n", aerr)
+	} else {
+		fmt.Printf("attached structural plans (with AI first_target) to %d/%d entries\n", n, len(entries))
 	}
 	if *limit > 0 && *limit < len(entries) {
 		if *recent {
@@ -66,7 +99,7 @@ func main() {
 			log.Fatalf("load bar cache: %v", cerr)
 		}
 		var herr error
-		loaded, skipped, herr = backtest.PrepareEntriesHorizon(entries, *tf, *horizonHours, cache, backtest.OKXBars)
+		loaded, skipped, herr = backtest.PrepareEntriesHorizon(entries, *tf, *horizonHours, cache, barProvider)
 		if herr != nil {
 			log.Fatalf("prepare horizon: %v", herr)
 		}
@@ -75,7 +108,7 @@ func main() {
 		}
 	} else {
 		fmt.Println("fetching OKX history per entry (network-bound, please wait)...")
-		loaded, skipped = backtest.PrepareEntries(entries, *tf, backtest.OKXBars)
+		loaded, skipped = backtest.PrepareEntries(entries, *tf, barProvider)
 	}
 	fmt.Printf("prepared %d entries (%d skipped: no/short data)\n", len(loaded), skipped)
 	if len(loaded) == 0 {
@@ -117,6 +150,26 @@ func main() {
 	//     replay can/can't reproduce, and how much PnL error each contributes.
 	fmt.Println("==== FIDELITY BY CLOSE MECHANISM ====")
 	fmt.Print(backtest.FormatMechanismFidelity(loaded, baseline))
+
+	// 1c) Structural-SL branch mix: how often the fallback branch (the ONLY place the
+	//     0.8 RR cap / 3.0 ATR fallback participate) actually fires vs the normal
+	//     clamped-structural path. Only meaningful with the live RangeSL spec.
+	if *liveConfig && baseline.RangeSLEnabled {
+		fmt.Println("==== STRUCTURAL-SL BRANCH MIX ====")
+		fmt.Println(backtest.FormatStructuralBranchStats(backtest.ComputeStructuralBranchStats(baseline, loaded)))
+		// RR-cap distribution: what ATR-multiple does ratio×TP impose, and is it
+		// masked by the floor? Shows whether 0.8 even binds, under both anchors.
+		fmt.Println("==== RR-CAP DISTRIBUTION (does 0.8 ever bind, or is the floor tighter?) ====")
+		for _, anchor := range []string{"max_tp", "first_target"} {
+			for _, r := range []float64{0.8, 1.25, 2.0} {
+				fmt.Println(backtest.FormatRRCapStat(backtest.ComputeRRCapStat(baseline, loaded, anchor, r)))
+			}
+		}
+		// Min-lot TP collapse: nearest tier vs AI first_target re-anchor (tol 0.2%).
+		fmt.Println("==== TP-COLLAPSE ANCHOR (min-lot: nearest tier vs AI first_target+tol) ====")
+		crows, cn := backtest.CompareCollapseAnchors(loaded, baseline, 0.2)
+		fmt.Print(backtest.FormatStructCompare(crows, cn))
+	}
 
 	// 2) ATR-multiple parameter sweep.
 	fmt.Println("==== ATR-MULTIPLE SWEEP (best by total PnL) ====")
@@ -178,4 +231,199 @@ func main() {
 			}
 		}
 	}
+
+	// 5) Trailing (ratchet) structural-stop sweep: how often it fires, how much
+	//    PnL it adds vs the frozen boundary, and how much profit it gives up early.
+	if *trail {
+		if !*liveConfig {
+			fmt.Println("\n(-trail requires -liveconfig for the real structural spec; skipping)")
+			return
+		}
+		if !baseline.RangeSLEnabled || !baseline.RangeSLCloseConfirm {
+			fmt.Println("\n(-trail needs a RangeSLCloseConfirm structural baseline; this trader's config doesn't run one; skipping)")
+			return
+		}
+		fmt.Println("\n==== TRAILING STRUCTURAL-STOP SWEEP (ratchet vs frozen boundary) ====")
+		fmt.Print(backtest.FormatTrailDiag(baseline, loaded))
+		fmt.Print(backtest.FormatTrailStats(baseline, loaded))
+		fmt.Println("\n==== HIGHER-PERIOD STOP SWEEP (loose higher-TF structure as a tighter stop) ====")
+		fmt.Print(backtest.FormatHigherTFStopStats(baseline, loaded))
+	}
+
+	// 5z) Reward-ATR bucket analysis: does "target too close" lose money?
+	if *rewardATR {
+		fmt.Println()
+		fmt.Print(backtest.FormatRewardATRBuckets(*traderLike, loaded, *slFloor, *slBackstop))
+		fmt.Println()
+		return
+	}
+
+	// 5z-2) Max-hold time-exit sweep.
+	if *maxHold {
+		fmt.Println()
+		fmt.Print(backtest.FormatMaxHoldSweep(*traderLike, baseline, loaded))
+		fmt.Println()
+		return
+	}
+
+	// 5z-1) Combined entry-gate + band replay. Uses -slbackstop for the band.
+	if *combinedGate {
+		fmt.Println()
+		fmt.Print(backtest.FormatCombinedGate(*traderLike, baseline, loaded, 1.0, *slBackstop))
+		fmt.Println()
+		return
+	}
+
+	// 5z0) Close-confirm adverse-excursion stop sweep.
+	if *confirmStop {
+		fmt.Println()
+		stops := []float64{1.5, 2.0, 2.25, 2.5, 3.0, 3.5}
+		fmt.Print(backtest.FormatConfirmStopSweep(*traderLike, baseline, loaded, stops))
+		fmt.Println()
+		return
+	}
+
+	// 5z1) Drawdown source localization.
+	if *ddSource {
+		fmt.Println()
+		fmt.Print(backtest.FormatDrawdownSource(*traderLike, loaded))
+		fmt.Println()
+		return
+	}
+
+	// 5z2) Floor×backstop 2D sweep: how tight can the backstop get?
+	if *fbSweep {
+		fmt.Println()
+		floors := []float64{*slFloor}
+		// Fine backstop grid over [bsMin, bsMax] at bsStep resolution.
+		backstops := []float64{}
+		for b := *bsMin; b <= *bsMax+1e-9; b += *bsStep {
+			backstops = append(backstops, roundTo(b, 1))
+		}
+		fmt.Print(backtest.FormatFloorBackstopSweep(*traderLike, baseline, loaded, floors, backstops))
+		fmt.Println()
+		return
+	}
+
+	// 6) Entry-quality profile: is the ENTRY itself bad, independent of stops?
+	if *entryQual {
+		fmt.Println()
+		fmt.Print(backtest.FormatEntryQuality(*traderLike, loaded, 10))
+		fmt.Println()
+		// Split by the LIVE chart_trend gate (BN's enforce gate) to see whether it
+		// selects better entries: win=30 align>=0.55 r2>=0.60 (the live params).
+		fmt.Print(backtest.FormatGateEntryQuality(*traderLike, loaded, 30, 0.55, 0.60))
+		fmt.Println()
+		// Timing-filter sweep: does confirmation / delay / spike-avoidance help?
+		fmt.Print(backtest.FormatTimingFilters(*traderLike, baseline, loaded))
+		fmt.Println()
+		// Stack the direction gate with the causal timing filter.
+		fmt.Print(backtest.FormatGatePlusTiming(*traderLike, baseline, loaded, 30, 0.55, 0.60))
+		fmt.Println()
+		// Decompose WHY shift-confirm helps/hurts: dropped winners/losers + slippage.
+		fmt.Print(backtest.FormatShiftConfirmDecomp(*traderLike, baseline, loaded))
+		fmt.Println()
+		// Isolate slippage: enter at bar+1 OPEN vs CLOSE.
+		fmt.Print(backtest.FormatShiftConfirmOpen(*traderLike, baseline, loaded))
+		fmt.Println()
+		// #1 CAUSAL intrabar momentum-confirm: stop-entry at entry+k*ATR.
+		fmt.Print(backtest.FormatTriggerEntry(*traderLike, baseline, loaded))
+		fmt.Println()
+		// #1b RIGOROUS full 2D sweep with 3-force decomposition + robustness.
+		fmt.Print(backtest.FormatTriggerEntrySweep(*traderLike, baseline, loaded))
+		fmt.Println()
+		// #1c SKEPTIC battery: placebo, out-of-sample, decomposition.
+		fmt.Print(backtest.FormatTriggerEntryValidate(*traderLike, baseline, loaded, 0.05, 5))
+		fmt.Println()
+		fmt.Print(backtest.FormatTriggerEntryValidate(*traderLike, baseline, loaded, 0.10, 5))
+	}
+
+	// 7) Structural-TF isolation: engine on 1h bars, ONLY the structural stop's
+	//    source timeframe changes (1h/30m/15m). Removes the ATR-shrink confound of
+	//    a whole-engine -tf 15m replay. Requires -tf 15m so we hold the 15m fetch.
+	if *fakeRetest {
+		fmt.Println()
+		fmt.Print(backtest.FormatFakeRetestSweep(*traderLike, loaded))
+	}
+
+	if *confirmTiming {
+		fmt.Println()
+		fmt.Print(backtest.FormatConfirmTiming(*traderLike, loaded, 32))
+	}
+
+	if *confirmTFLadder {
+		fmt.Println()
+		hzn := float64(*horizonHours)
+		if hzn <= 0 {
+			hzn = 48 // default wall-clock horizon
+		}
+		// ladder rungs adapt to the base TF so the rung labels land on real TFs.
+		//   base 15m → 15m,30m,1h,2h,4h   (mult 1,2,4,8,16)
+		//   base 5m  → 5m,10m,15m,30m,1h  (mult 1,2,3,6,12)
+		mults := []int{1, 2, 4, 8, 16}
+		if *tf == "5m" {
+			mults = []int{1, 2, 3, 6, 12}
+		}
+		fmt.Print(backtest.FormatConfirmTFLadder(*traderLike, *tf, loaded, mults, hzn))
+	}
+
+	if *structTF {
+		if !*liveConfig {
+			fmt.Println("\n(-structtf requires -liveconfig for the real structural spec; skipping)")
+			return
+		}
+		if !baseline.RangeSLEnabled || !baseline.RangeSLCloseConfirm {
+			fmt.Println("\n(-structtf needs a RangeSLCloseConfirm structural baseline; skipping)")
+			return
+		}
+		// Configure the isolation plan from the trader's NATIVE (config primary) TF, so
+		// every non-structural lever pins at the native TF and only the structural
+		// boundary source is swept DOWN. 1h native → sweep 1h/30m/15m; 15m native
+		// (claude-r) → sweep 15m/10m/5m.
+		_, ctf, cerr := backtest.LoadTraderStrategyConfig(db, cfgPatternForStructTF(*traderLike, *configTrader))
+		if cerr != nil {
+			fmt.Printf("\n(-structtf: cannot read native TF: %v; skipping)\n", cerr)
+			return
+		}
+		baseTF, ok := backtest.SetStructTFPlan(ctf)
+		if !ok {
+			fmt.Printf("\n(-structtf: native TF %q not supported (only 1h/15m); skipping)\n", ctf)
+			return
+		}
+		// Re-fetch with MORE pre-entry base bars so the aggregated native series spans
+		// the structural lookback (24 native bars) + ATR warmup. A thin fetch leaves the
+		// native reference without a computable boundary (degenerate ref). 120 base bars
+		// covers 24×refMult for both plans (1h: 96 15m; 15m: 72 5m) plus ATR warmup.
+		fmt.Printf("\n(structtf: native TF=%s → fetching %s base with 200 pre-entry bars for a faithful reference...)\n", ctf, baseTF)
+		stfLoaded, stfSkipped := backtest.PrepareEntriesPre(entries, baseTF, 200, barProvider)
+		fmt.Printf("structtf prepared %d entries (%d skipped)\n", len(stfLoaded), stfSkipped)
+		fmt.Println()
+		fmt.Print(backtest.FormatEntryPriceSanity(stfLoaded))
+		// Drop phantom-fill entries (DB entry_price outside the bar range >1%) so the
+		// risk metrics aren't polluted by fabricated backstop losses.
+		var stfDropped int
+		stfLoaded, stfDropped = backtest.FilterAlignedEntries(stfLoaded, 1.0)
+		fmt.Printf("\n(filtered %d phantom-fill entries; %d clean entries remain)\n", stfDropped, len(stfLoaded))
+		fmt.Println()
+		fmt.Print(backtest.FormatStructTFStats(baseline, stfLoaded))
+		fmt.Println()
+		fmt.Print(backtest.FormatStructTFForensic(baseline, stfLoaded, 15))
+		fmt.Println()
+		fmt.Print(backtest.TraceWorstLoss(baseline, stfLoaded))
+	}
+}
+
+// cfgPatternForStructTF picks the trader pattern whose LIVE config supplies the native
+// timeframe: the explicit -configtrader when set, else the -trader pattern.
+func cfgPatternForStructTF(traderLike, configTrader string) string {
+	if configTrader != "" {
+		return configTrader
+	}
+	return traderLike
+}
+
+// roundTo rounds x to n decimal places (used to clean float accumulation in grids).
+func roundTo(x float64, n int) float64 {
+	p := math.Pow(10, float64(n))
+	return math.Round(x*p) / p
 }

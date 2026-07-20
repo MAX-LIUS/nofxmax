@@ -24,6 +24,9 @@ type loadedEntry struct {
 // returned by both PrepareEntries and PrepareEntriesHorizon.
 type LoadedEntry = loadedEntry
 
+// EntryVal returns the entry value (for cross-package access without exporting fields).
+func (l loadedEntry) EntryVal() Entry { return l.entry }
+
 // PrepareEntries fetches bars once for every entry (the slow, network-bound
 // step). Entries whose bars can't be fetched are skipped and counted.
 func PrepareEntries(entries []Entry, tf string, provider BarsProvider) ([]loadedEntry, int) {
@@ -96,4 +99,23 @@ func absf(v float64) float64 {
 		return -v
 	}
 	return v
+}
+
+// PrepareEntriesPre is PrepareEntries with a caller-set pre-entry bar count. The
+// structural-TF isolation aggregates 15m→1h, so it needs enough 15m history that
+// the aggregated 1h series still spans the structural lookback (24 1h bars = 96
+// 15m bars) plus the ATR warmup. The default preBarsForATR (60) is too few and
+// leaves the 1h reference without a computable boundary.
+func PrepareEntriesPre(entries []Entry, tf string, preBars int, provider BarsProvider) ([]loadedEntry, int) {
+	var loaded []loadedEntry
+	skipped := 0
+	for _, e := range entries {
+		bars, idx, err := fetchEntryBars(e, tf, preBars, maxHoldHoursDefault, provider)
+		if err != nil || idx < 0 {
+			skipped++
+			continue
+		}
+		loaded = append(loaded, loadedEntry{entry: e, bars: bars, entryIdx: idx})
+	}
+	return loaded, skipped
 }

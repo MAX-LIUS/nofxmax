@@ -35,9 +35,13 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 	}
 	isLong := strings.EqualFold(e.Side, "long")
 
-	// ATR as of entry, from preceding bars (no look-ahead).
+	// ATR as of entry, from preceding bars (no look-ahead). An explicit override
+	// pins ATR across bar granularities (structural-TF isolation) so only the
+	// stop's source timeframe — not the ATR-derived level distances — varies.
 	atr := 0.0
-	if entryIdx >= atrLookback {
+	if e.ATROverride > 0 {
+		atr = e.ATROverride
+	} else if entryIdx >= atrLookback {
 		h, l, c := sliceOHLC(bars[:entryIdx], entryIdx-1)
 		atr = wilderATR(h, l, c, atrLookback)
 	}
@@ -71,7 +75,27 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 		// clamped to [floor, backstop] ATR. Falls back to the flat StopLossATR
 		// when the range has no edge (entered at/through the boundary).
 		tight, hasEdge := rangeStructuralSLPrice(p, e, bars, entryIdx, atr, isLong)
-		if p.RangeSLCloseConfirm && hasEdge {
+		// Isolation override: when the entry carries a precomputed structural
+		// boundary (from a specific source timeframe), use it verbatim as the
+		// close-confirm level so the ONLY variable vs the reference is the
+		// structural stop's timeframe — ATR/backstop stay from these (1h) bars.
+		if e.StructBoundaryOverride > 0 && p.RangeSLCloseConfirm {
+			confirmBoundary = e.StructBoundaryOverride
+			backDist := p.RangeSLBackstopATR
+			if backDist <= 0 {
+				backDist = 4.5
+			}
+			slPrice = priceAtDistance(e.EntryPrice, backDist*atr/e.EntryPrice*100, isLong, false /*adverse*/)
+		} else if p.RangeSLCloseConfirm && p.ConfirmStopATR > 0 {
+			// Proposed: FIXED adverse-excursion close-confirm stop at N×ATR, active
+			// even underwater. Backstop resting stop still covers intrabar wicks.
+			confirmBoundary = priceAtDistance(e.EntryPrice, p.ConfirmStopATR*atr/e.EntryPrice*100, isLong, false /*adverse*/)
+			backDist := p.RangeSLBackstopATR
+			if backDist <= 0 {
+				backDist = 4.5
+			}
+			slPrice = priceAtDistance(e.EntryPrice, backDist*atr/e.EntryPrice*100, isLong, false /*adverse*/)
+		} else if p.RangeSLCloseConfirm && hasEdge {
 			// Live Phase-2: tight structural level enforced on bar CLOSE only; the
 			// resting exchange stop sits at the wide backstop for intrabar wicks.
 			confirmBoundary = tight
@@ -91,11 +115,6 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 		slPrice = priceAtDistance(e.EntryPrice, slDist, isLong, false /*adverse*/)
 	}
 
-	type tpLevel struct {
-		price float64
-		frac  float64
-		fired bool
-	}
 	tps := make([]tpLevel, 0, len(p.TPLegs))
 	if p.Unit == UnitStructural && e.Structural != nil && len(e.Structural.TPLegs) > 0 {
 		for _, leg := range e.Structural.TPLegs {
@@ -114,12 +133,34 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 		}
 	}
 
+	// Min-lot TP collapse: when the position is too small to place the configured
+	// ladder, only K tiers survive and the position closes 100% across them. Model the
+	// two collapse anchors (nearest vs AI first_target) to compare exit quality.
+	if p.CollapseK > 0 && len(tps) > 0 {
+		tps = collapseTPs(tps, p, e, atr, isLong)
+	}
+
 	remaining := 1.0
 	peak := 0.0      // peak PnL% (percent-give-back model)
 	peakPrice := 0.0 // peak favorable PRICE (ATR-give-back model)
 	beStop := 0.0    // 0 = not armed
 	beArmedTier := -1
 	ddFired := make([]bool, len(p.DDRules))
+
+	// Trailing structural stop (ratchet). Only active alongside the close-confirm
+	// structural model; it recomputes the nearest post-entry swing once per closed
+	// bar and moves confirmBoundary tighter, gated by a min-profit excursion.
+	trailOn := p.TrailStructEnabled && p.RangeSLCloseConfirm && confirmBoundary > 0 && atr > 0
+	ts := &trailState{isLong: isLong, atr: atr, boundary: confirmBoundary}
+	// minProfitATR<=0 DISABLES the min-profit gate (mirrors live computeTrailBoundary):
+	// the ratchet may arm immediately, gated only by the on-profit/on-loss side checks.
+	minProfitATR := p.TrailStructMinProfitATR
+	// SPLIT mode: before BE keep the tight current-period stop untouched; only once BE
+	// has EVER armed does the (higher-period) runner trail engage, re-seeded from the
+	// current boundary so a looser higher structure can take over. beEverArmed latches
+	// so the trail stays active after the BE portion fills (beStop resets to 0 then).
+	splitAfterBE := trailOn && p.TrailStructOnlyAfterBE
+	beEverArmed := false
 
 	var exitNotional, exitFrac float64 // for VWAP exit price
 	addExit := func(price, frac float64) {
@@ -181,13 +222,23 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 
 		// --- close-confirm structural stop: fires only when a bar CLOSES beyond
 		// the tight boundary (fill at close), modelling live runStructuralSLGuard.
-		// The wide backstop above already covers intrabar catastrophes. Only while
-		// the full structural stop is in force (BE not yet armed).
-		if confirmBoundary > 0 && beStop == 0 {
-			confirmed := (isLong && bar.Close < confirmBoundary) || (!isLong && bar.Close > confirmBoundary)
+		// The wide backstop above already covers intrabar catastrophes. Normally
+		// only while the full structural stop is in force (BE not yet armed); with
+		// TrailStructAfterBE the ratcheted boundary ALSO stops the runner during the
+		// BE phase, but only when it sits TIGHTER than the BE stop (else BE already
+		// handles it) so the runner rides the tightening structure.
+		runnerTrail := trailOn && (p.TrailStructAfterBE || (splitAfterBE && beEverArmed)) && beStop > 0
+		if confirmBoundary > 0 && (beStop == 0 || runnerTrail) {
+			tighterThanBE := beStop == 0 ||
+				(isLong && confirmBoundary > beStop) || (!isLong && confirmBoundary < beStop)
+			confirmed := tighterThanBE &&
+				((isLong && bar.Close < confirmBoundary) || (!isLong && bar.Close > confirmBoundary))
 			if confirmed {
 				addExit(bar.Close, remaining)
 				res.CloseReasons = append(res.CloseReasons, "structural_sl")
+				if res.TrailRatchets > 0 {
+					res.TrailExit = true // a ratcheted boundary (not the entry-frozen level) closed it
+				}
 				continue
 			}
 		}
@@ -236,6 +287,14 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 				off := beOffsetPct(p.BELegs[ti], p.Unit, e.EntryPrice, atr)
 				beStop = priceAtDistance(e.EntryPrice, off, isLong, true /*favorable: above entry for long*/)
 				beArmedTier = ti
+				// SPLIT mode: at the FIRST BE arm, hand the runner to the higher-period
+				// trail by re-seeding its boundary from the current entry-frozen level.
+				// The next recompute then lets a (looser) higher structure take over;
+				// the BE stop floors the runner at entry until that structure climbs.
+				if splitAfterBE && !beEverArmed {
+					ts.boundary = confirmBoundary
+				}
+				beEverArmed = true
 			}
 		}
 
@@ -304,6 +363,60 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 					addExit(bar.Close, remaining)
 					res.CloseReasons = append(res.CloseReasons, "ai_proxy")
 					continue
+				}
+			}
+		}
+
+		// --- trailing structural stop: once per CLOSED bar, ratchet the confirm
+		// boundary tighter. Default: runs before BE arms. TrailStructAfterBE: also
+		// keeps ratcheting through the BE phase. SPLIT (TrailStructOnlyAfterBE): runs
+		// ONLY once BE has armed (before BE the tight current-period stop is untouched).
+		// Gated by minProfitATR.
+		trailRecompute := false
+		switch {
+		case !trailOn:
+			trailRecompute = false
+		case splitAfterBE:
+			trailRecompute = beEverArmed
+		case p.TrailStructAfterBE:
+			trailRecompute = true
+		default:
+			trailRecompute = beStop == 0
+		}
+		if trailRecompute {
+			var favATR float64
+			if isLong {
+				favATR = (bar.Close - e.EntryPrice) / atr
+			} else {
+				favATR = (e.EntryPrice - bar.Close) / atr
+			}
+			// side gate: only ratchet in the allowed profit/loss state (mirrors live
+			// TrailOnProfit / TrailOnLoss). favATR>0 => favorable (profit) side.
+			sideOK := (favATR >= 0 && p.TrailStructOnProfit) || (favATR < 0 && p.TrailStructOnLoss)
+			// ratchet-count cap: once TrailStructMaxRatchets tightenings have happened
+			// the boundary locks (0 = unlimited).
+			capOK := p.TrailStructMaxRatchets <= 0 || res.TrailRatchets < p.TrailStructMaxRatchets
+			// min-profit gate only binds when >0 (mirrors live: 0 disables it, leaving
+			// sideOK to govern). Positive keeps the "up N ATR before trailing" cushion.
+			minProfOK := minProfitATR <= 0 || favATR >= minProfitATR
+			if minProfOK && sideOK && capOK {
+				prev := ts.boundary
+				// Rolling structural lookback ending at the just-closed bar (mirrors
+				// live LookbackBars). Includes pre-entry structure so the higher-tf
+				// aggregation has enough bars to form swings, not just post-entry.
+				lb := p.RangeSLLookback
+				if lb <= 0 {
+					lb = 24
+				}
+				start := i + 1 - lb
+				if start < 0 {
+					start = 0
+				}
+				window := bars[start : i+1]
+				nb := recomputeTrailBoundary(ts, p, window, bar.Close, atr)
+				if movedTighter(prev, nb, isLong) {
+					confirmBoundary = nb
+					res.TrailRatchets++
 				}
 			}
 		}

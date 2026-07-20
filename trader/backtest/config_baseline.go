@@ -72,6 +72,20 @@ func LiveConfigParams(cfg *store.StrategyConfig, tfHours float64) ProtectionPara
 		// Phase-2 close-confirm: tight boundary enforced on bar close, wide
 		// backstop is the resting intrabar stop. Mirrors runStructuralSLGuard.
 		p.RangeSLCloseConfirm = ss.CloseConfirm
+		// --- Ratcheting (trailing) structural stop ---
+		// Faithfully carry the live trail spec so GPT/BN (trail_enabled=true,
+		// max_ratchets=1, trail_on_profit=false) replay with the same behavior.
+		if ss.TrailEnabled {
+			p.TrailStructEnabled = true
+			p.TrailStructTolATR = ss.TrailTolATR
+			p.TrailStructMode = ss.TrailMode
+			p.TrailStructHigherMult = ss.TrailHigherMult
+			p.TrailStructMinProfitATR = ss.TrailMinProfitATR
+			p.TrailStructMaxRatchets = ss.TrailMaxRatchets
+			// side gates default to true (ratchet in every state) when unset in JSON.
+			p.TrailStructOnProfit = ss.TrailOnProfit == nil || *ss.TrailOnProfit
+			p.TrailStructOnLoss = ss.TrailOnLoss == nil || *ss.TrailOnLoss
+		}
 		// Keep StopLossATR as the flat fallback (used when range has no edge).
 		p.StopLossATR = ss.BackstopATRMul
 	} else if ss.Enabled && ss.BackstopATRMul > 0 {
@@ -186,10 +200,30 @@ func (p ProtectionParams) maxTPTargetPct(atr, entryPrice float64) float64 {
 	return maxPct
 }
 
+// anchorTPTargetPct returns the RR-cap reference target (% of entry) per the
+// configured RangeSLFallbackAnchor. "first_target" uses the AI's per-entry
+// risk_reward.first_target (falling back to max-TP when the decision carried none);
+// anything else uses the largest TP leg (live behavior). Returns 0 when no usable
+// anchor exists (caller then skips the RR cap).
+func (p ProtectionParams) anchorTPTargetPct(e Entry, atr, entryPrice float64) float64 {
+	if p.RangeSLFallbackAnchor == "first_target" && e.Structural != nil && e.Structural.FirstTargetPrice > 0 && entryPrice > 0 {
+		ft := e.Structural.FirstTargetPrice
+		pct := (ft - entryPrice) / entryPrice * 100
+		if pct < 0 {
+			pct = -pct
+		}
+		if pct > 0 {
+			return pct
+		}
+	}
+	return p.maxTPTargetPct(atr, entryPrice)
+}
+
 // fallbackMultWithRRCap returns the ATR multiple used on the NO-NEAR-STRUCTURE path:
 // RangeSLFallbackATR, additionally tightened so fallbackSL% <= ratio × TP target, with
-// RangeSLFloorATR as a hard minimum. Mirrors live fallbackMultWithRRCap.
-func (p ProtectionParams) fallbackMultWithRRCap(atr, entryPrice float64) float64 {
+// RangeSLFloorATR as a hard minimum. Mirrors live fallbackMultWithRRCap. anchorTPPct is
+// the RR-cap reference target (resolved per RangeSLFallbackAnchor by the caller).
+func (p ProtectionParams) fallbackMultWithRRCap(atr, entryPrice, anchorTPPct float64) float64 {
 	mult := p.RangeSLFallbackATR
 	if mult <= 0 {
 		mult = 3.0
@@ -200,7 +234,7 @@ func (p ProtectionParams) fallbackMultWithRRCap(atr, entryPrice float64) float64
 	}
 	ratio := p.RangeSLFallbackRRCapRatio
 	if ratio > 0 && atr > 0 && entryPrice > 0 {
-		if tpPct := p.maxTPTargetPct(atr, entryPrice); tpPct > 0 {
+		if tpPct := anchorTPPct; tpPct > 0 {
 			atrPct := atr / entryPrice * 100
 			if atrPct > 0 {
 				if capMult := (ratio * tpPct) / atrPct; capMult < mult {
@@ -224,7 +258,11 @@ func (p ProtectionParams) fallbackMultWithRRCap(atr, entryPrice float64) float64
 // computeStructuralBoundary + structuralSLPercent (2026-07 nearest-swing fix).
 // Returns (price, ok); ok=false when no structure is on the correct side of entry
 // (entered at/through the boundary) so the caller falls back to the flat ATR stop.
-func rangeStructuralSLPrice(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int, atr float64, isLong bool) (float64, bool) {
+// rangeStructuralBoundary returns the NEAREST pre-entry swing beyond entry (the raw
+// structural boundary, unclamped) over the RangeSLLookback CLOSED bars before entry.
+// Mirrors live computeStructuralBoundary (fractal pivot, else nearest bar extreme).
+// Returns (boundary, ok); ok=false when no structure is on the correct side of entry.
+func rangeStructuralBoundary(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int, isLong bool) (float64, bool) {
 	lb := p.RangeSLLookback
 	if lb <= 0 {
 		lb = 24
@@ -286,35 +324,38 @@ func rangeStructuralSLPrice(p ProtectionParams, e Entry, bars []market.Kline, en
 		return best, found
 	}
 
-	boundary := 0.0
 	if b, ok := nearestSwing(); ok {
-		boundary = b
-	} else {
-		// No fractal pivot — nearest bar extreme on the correct side of entry (still
-		// the CLOSEST level, not the absolute spike).
-		best := 0.0
-		found := false
-		for i := 0; i < len(window); i++ {
-			if !isLong {
-				h := window[i].High
-				if h > entry && (!found || h < best) {
-					best, found = h, true
-				}
-			} else {
-				l := window[i].Low
-				if l < entry && (!found || l > best) {
-					best, found = l, true
-				}
+		return b, true
+	}
+	// No fractal pivot — nearest bar extreme on the correct side of entry (still
+	// the CLOSEST level, not the absolute spike).
+	best := 0.0
+	found := false
+	for i := 0; i < len(window); i++ {
+		if !isLong {
+			h := window[i].High
+			if h > entry && (!found || h < best) {
+				best, found = h, true
+			}
+		} else {
+			l := window[i].Low
+			if l < entry && (!found || l > best) {
+				best, found = l, true
 			}
 		}
-		if !found || best <= 0 {
-			return 0, false
-		}
-		boundary = best
 	}
-	if boundary <= 0 {
+	if !found || best <= 0 {
 		return 0, false
 	}
+	return best, true
+}
+
+func rangeStructuralSLPrice(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int, atr float64, isLong bool) (float64, bool) {
+	boundary, ok := rangeStructuralBoundary(p, e, bars, entryIdx, isLong)
+	if !ok || boundary <= 0 {
+		return 0, false
+	}
+	entry := e.EntryPrice
 	// Clamp the entry→boundary distance to [floor, backstop] ATR multiples; when
 	// beyond the backstop (no near structure) use the RR-capped fallback multiple.
 	dist := entry - boundary
@@ -322,11 +363,26 @@ func rangeStructuralSLPrice(p ProtectionParams, e Entry, bars []market.Kline, en
 		dist = -dist
 	}
 	mult := dist / atr
+	// Normal path: clamp to [floor, backstop]; beyond backstop use the RR-capped fallback.
+	if p.RangeSLBackstopATR > 0 && mult > p.RangeSLBackstopATR {
+		mult = p.fallbackMultWithRRCap(atr, entry, p.anchorTPTargetPct(e, atr, entry))
+	}
+	// RRCapPrimary: apply the RR cap as a UNIVERSAL ceiling on the structural stop,
+	// not just the fallback branch. Models "AI RR authoritative": stop distance must
+	// not exceed ratio × anchor-TP (typically first_target). Applied BEFORE the floor
+	// so the floor still guards the noise minimum.
+	if p.RRCapPrimary && p.RangeSLFallbackRRCapRatio > 0 && entry > 0 {
+		if tpPct := p.anchorTPTargetPct(e, atr, entry); tpPct > 0 {
+			atrPct := atr / entry * 100
+			if atrPct > 0 {
+				if capMult := p.RangeSLFallbackRRCapRatio * tpPct / atrPct; capMult < mult {
+					mult = capMult
+				}
+			}
+		}
+	}
 	if p.RangeSLFloorATR > 0 && mult < p.RangeSLFloorATR {
 		mult = p.RangeSLFloorATR
-	}
-	if p.RangeSLBackstopATR > 0 && mult > p.RangeSLBackstopATR {
-		mult = p.fallbackMultWithRRCap(atr, entry)
 	}
 	distPct := mult * atr / entry * 100
 	return priceAtDistance(entry, distPct, isLong, false /*adverse*/), true

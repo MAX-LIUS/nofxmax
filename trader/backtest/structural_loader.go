@@ -127,36 +127,24 @@ func LoadStructuralEntries(db *sql.DB, traderIDLike string, matchWindowMs int64)
 		return nil, 0, err
 	}
 
-	rows, err := db.Query(`
-		SELECT timestamp, decision_json
-		FROM decision_records
-		WHERE trader_id LIKE ? AND decision_json LIKE '%protection_plan%'
-		ORDER BY timestamp ASC`, traderIDLike)
+	decisions, err := loadDecisionRows(db, traderIDLike)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer rows.Close()
+	matched := attachStructuralFromDecisions(entries, decisions, matchWindowMs)
+	return entries, matched, nil
+}
 
-	type decRow struct {
-		tsMs int64
-		decs []kernel.Decision
-	}
-	var decisions []decRow
-	for rows.Next() {
-		var tsStr, dj string
-		if err := rows.Scan(&tsStr, &dj); err != nil {
-			return nil, 0, err
-		}
-		var ds []kernel.Decision
-		if err := json.Unmarshal([]byte(dj), &ds); err != nil {
-			continue
-		}
-		decisions = append(decisions, decRow{tsMs: parseTSms(tsStr), decs: ds})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, err
-	}
+// decRow is one parsed decision_records row (timestamp + its decisions).
+type decRow struct {
+	tsMs int64
+	decs []kernel.Decision
+}
 
+// attachStructuralFromDecisions matches each entry to its nearest preceding open
+// decision (same symbol, within matchWindowMs) and attaches the structural plan +
+// AI first_target. Mutates entries in place; returns the matched count.
+func attachStructuralFromDecisions(entries []Entry, decisions []decRow, matchWindowMs int64) int {
 	matched := 0
 	for i := range entries {
 		e := &entries[i]
@@ -187,12 +175,60 @@ func LoadStructuralEntries(db *sql.DB, traderIDLike string, matchWindowMs int64)
 		}
 		if best != nil {
 			if sp := extractStructuralPlan(best.Action, best.ProtectionPlan, e.EntryPrice); sp != nil {
+				// Attach the AI's risk_reward.first_target (the numerator of the AI's
+				// authoritative RR) as an alternative fallback RR-cap anchor. Sanity:
+				// must be on the favorable side of entry.
+				if best.EntryProtection != nil {
+					ft := best.EntryProtection.RiskReward.FirstTarget
+					isLong := strings.Contains(strings.ToLower(best.Action), "long")
+					if ft > 0 && ((isLong && ft > e.EntryPrice) || (!isLong && ft < e.EntryPrice)) {
+						sp.FirstTargetPrice = ft
+					}
+				}
 				e.Structural = sp
 				matched++
 			}
 		}
 	}
-	return entries, matched, nil
+	return matched
+}
+
+// AttachStructuralPlans enriches already-loaded entries in place with their
+// structural plan + AI first_target, by re-reading decision_records for the given
+// trader. Lets the standard (LoadClaudeEntries) path gain structural anchors for
+// the RangeSL fallback-anchor sweep without switching loaders. Returns matched count.
+func AttachStructuralPlans(db *sql.DB, traderIDLike string, matchWindowMs int64, entries []Entry) (int, error) {
+	decisions, err := loadDecisionRows(db, traderIDLike)
+	if err != nil {
+		return 0, err
+	}
+	return attachStructuralFromDecisions(entries, decisions, matchWindowMs), nil
+}
+
+// loadDecisionRows reads and parses the trader's decision_records into decRows.
+func loadDecisionRows(db *sql.DB, traderIDLike string) ([]decRow, error) {
+	rows, err := db.Query(`
+		SELECT timestamp, decision_json
+		FROM decision_records
+		WHERE trader_id LIKE ? AND decision_json LIKE '%protection_plan%'
+		ORDER BY timestamp ASC`, traderIDLike)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var decisions []decRow
+	for rows.Next() {
+		var tsStr, dj string
+		if err := rows.Scan(&tsStr, &dj); err != nil {
+			return nil, err
+		}
+		var ds []kernel.Decision
+		if err := json.Unmarshal([]byte(dj), &ds); err != nil {
+			continue
+		}
+		decisions = append(decisions, decRow{tsMs: parseTSms(tsStr), decs: ds})
+	}
+	return decisions, rows.Err()
 }
 
 // parseTSms parses the decision_records timestamp to epoch ms (0 on failure).

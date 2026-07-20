@@ -632,7 +632,7 @@ func (c StructuralSLConfig) WithDefaults() StructuralSLConfig {
 		c.FloorATRMul = 1.5
 	}
 	if c.BackstopATRMul <= 0 {
-		c.BackstopATRMul = 4.5
+		c.BackstopATRMul = 2.5
 	}
 	if c.LookbackBars <= 0 {
 		c.LookbackBars = 24
@@ -641,7 +641,7 @@ func (c StructuralSLConfig) WithDefaults() StructuralSLConfig {
 		c.PivotStrength = 2
 	}
 	if c.FallbackATRMul <= 0 {
-		c.FallbackATRMul = 3.0
+		c.FallbackATRMul = 2.5
 	}
 	// Fallback must never exceed the backstop (it is meant to be the tighter cap).
 	if c.FallbackATRMul > c.BackstopATRMul {

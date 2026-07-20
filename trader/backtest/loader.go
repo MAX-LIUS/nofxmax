@@ -59,6 +59,13 @@ func OKXBars(symbol, timeframe string, start, end time.Time) ([]market.Kline, er
 	return market.GetKlinesRangeOKX(symbol, timeframe, start, end)
 }
 
+// BinanceBars is the provider backed by Binance futures klines (proxy-aware via
+// BINANCE_PROXY_URL). Used for binance-type traders (e.g. BN) so their replay reads
+// the SAME exchange the trades executed on.
+func BinanceBars(symbol, timeframe string, start, end time.Time) ([]market.Kline, error) {
+	return market.GetKlinesRange(symbol, timeframe, start, end)
+}
+
 // tfDuration returns the wall-clock duration of one bar for a timeframe token.
 // Defaults to 1h for unknown tokens so callers never get a zero window.
 func tfDuration(tf string) time.Duration {

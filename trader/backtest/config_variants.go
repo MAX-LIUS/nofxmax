@@ -153,5 +153,57 @@ func LiveVariants(base ProtectionParams) []ConfigVariant {
 		vs = append(vs, ConfigVariant{Name: "combined-tight", P: v})
 	}
 
+	// --- fallback RR-cap anchor: first_target vs live max-TP ---
+	// The live fallback (no-near-structure path) RR-caps the stop against the FARTHEST
+	// TP leg (lowest fill probability), inflating the "guaranteed" RR. These variants
+	// re-anchor the cap to the AI's risk_reward.first_target — the numerator of the AI's
+	// authoritative RR — so the structural fallback and the AI RR use one yardstick.
+	// Also sweep the cap ratio (live 0.8 was hand-picked, not backtested).
+	if base.RangeSLEnabled {
+		// Pure anchor switch at the live ratio.
+		va := clone(base)
+		va.RangeSLFallbackAnchor = "first_target"
+		vs = append(vs, ConfigVariant{Name: "fbanchor-firsttarget", P: va})
+
+		// Cap-ratio sweep under the live (max-TP) anchor — isolates the ratio effect.
+		for _, r := range []float64{0.6, 0.8, 1.0, 1.25} {
+			v := clone(base)
+			v.RangeSLFallbackRRCapRatio = r
+			vs = append(vs, ConfigVariant{Name: "fbratio-" + trimHours(r) + "-maxtp", P: v})
+		}
+		// Cap-ratio sweep under the first_target anchor — the combined proposal.
+		for _, r := range []float64{0.6, 0.8, 1.0, 1.25} {
+			v := clone(base)
+			v.RangeSLFallbackAnchor = "first_target"
+			v.RangeSLFallbackRRCapRatio = r
+			vs = append(vs, ConfigVariant{Name: "fbratio-" + trimHours(r) + "-firsttarget", P: v})
+		}
+	}
+
+	// --- RR-cap AS PRIMARY: "AI RR is the authoritative RR" architecture ---
+	// The RR cap (ratio × first_target) becomes a UNIVERSAL ceiling on every structural
+	// stop, not just the rare fallback branch. Floor lowered to 0.5×ATR so a tight cap
+	// actually binds (otherwise the 1.5 floor swallows it, as the diagnostic showed).
+	// This directly tests whether tightening stops to a fraction of the AI first_target
+	// helps or hurts, and what ratio is optimal. NOT a live change — sweep only.
+	if base.RangeSLEnabled {
+		for _, r := range []float64{0.8, 1.0, 1.25, 1.5, 2.0} {
+			v := clone(base)
+			v.RRCapPrimary = true
+			v.RangeSLFallbackAnchor = "first_target"
+			v.RangeSLFallbackRRCapRatio = r
+			v.RangeSLFloorATR = 0.5 // let the cap bind below the live 1.5 floor
+			vs = append(vs, ConfigVariant{Name: "rrcapAI-" + trimHours(r) + "-floor0.5", P: v})
+		}
+		// Same sweep keeping the live 1.5 floor, to isolate the floor's protective role.
+		for _, r := range []float64{0.8, 1.25, 2.0} {
+			v := clone(base)
+			v.RRCapPrimary = true
+			v.RangeSLFallbackAnchor = "first_target"
+			v.RangeSLFallbackRRCapRatio = r
+			vs = append(vs, ConfigVariant{Name: "rrcapAI-" + trimHours(r) + "-floor1.5", P: v})
+		}
+	}
+
 	return vs
 }
