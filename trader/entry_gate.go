@@ -706,42 +706,231 @@ func evaluateStructuralFitGate(input entryGateInput) []EntryGateCheck {
 		}
 	}
 
-	// 2f. Fake retest trap detection: entry price too close to anchor level
-	// If entry is within 0.15% of the anchor (structural level), price just arrived
-	// and hasn't had time to confirm rejection — high probability of fake bounce/rejection
+	// 2f. Fake retest trap detection: long-at-support / short-at-resistance that has
+	// NOT yet earned a closed-candle confirmation on the confirmation timeframe.
+	//
+	// The old rule blocked purely on geometric distance (<0.15% from the anchor). That
+	// was a near-no-op proxy: it inferred "price just arrived" from proximity and never
+	// looked at candles, so it both missed real fake-retests (entry >0.15% away but no
+	// confirmation) and occasionally blocked good entries that had already confirmed.
+	//
+	// The replacement reproduces the rule that won the confirmation-TF backtest
+	// (claude/GPT/BN, 48h wall-clock horizon): on the timeframe ONE STEP BELOW the
+	// primary (1h primary → 15m confirm), require that after price touched the anchor a
+	// candle CLOSED on the correct side (hold) OR a wick-rejection printed (wick ≥1.5×
+	// body). Confirmed → pass. Touched-but-not-confirmed, or arriving only on the still-
+	// forming bar → block. When confirmation-TF candles are unavailable we fall back to
+	// the old distance-only block so the gate degrades gracefully.
 	if d.EntryProtection != nil && len(d.EntryProtection.Anchors) > 0 {
 		entry := d.EntryProtection.RiskReward.Entry
 		if entry > 0 {
+			isLong := strings.Contains(strings.ToLower(d.Action), "long")
+			confBars, confTF := confirmationTFBars(input.StrategyConfig, input.MarketData)
 			for _, anchor := range d.EntryProtection.Anchors {
 				if anchor.Price <= 0 {
 					continue
 				}
+				anchorIsSupport := strings.Contains(strings.ToLower(anchor.Type), "support")
+				anchorIsResistance := strings.Contains(strings.ToLower(anchor.Type), "resistance")
+				// Only long-at-support / short-at-resistance is a fake-retest setup.
+				if !((isLong && anchorIsSupport) || (!isLong && anchorIsResistance)) {
+					continue
+				}
 				distPct := math.Abs(entry-anchor.Price) / entry * 100
-				// If entry is within 0.15% of the anchor, it's likely a "just arrived" situation
-				if distPct < 0.15 {
-					isLong := strings.Contains(strings.ToLower(d.Action), "long")
-					anchorIsSupport := strings.Contains(strings.ToLower(anchor.Type), "support")
-					anchorIsResistance := strings.Contains(strings.ToLower(anchor.Type), "resistance")
-					// Long at support or short at resistance = potential fake retest
-					isFakeRetestRisk := (isLong && anchorIsSupport) || (!isLong && anchorIsResistance)
-					if isFakeRetestRisk {
-						check := EntryGateCheck{
+				// Proximity trigger: only evaluate anchors the entry actually sits on
+				// (a retest). 0.30% band (was 0.15%) so we catch "just arrived" entries
+				// that the old threshold let slip through.
+				if distPct >= 0.30 {
+					continue
+				}
+
+				// Graceful degradation: no confirmation-TF candles → old distance block.
+				if len(confBars) < 3 {
+					if distPct < 0.15 {
+						checks = append(checks, EntryGateCheck{
 							Code:     "fake_retest_trap",
 							Stage:    string(EntryGateStageStructuralFit),
 							Passed:   false,
 							Enforced: true,
-							Detail:   fmt.Sprintf("entry %.4f is only %.2f%% from anchor %s@%.4f — price just arrived at level, no multi-candle confirmation possible", entry, distPct, anchor.Type, anchor.Price),
-							Values:   fmt.Sprintf("entry=%.6f anchor=%.6f dist_pct=%.3f type=%s", entry, anchor.Price, distPct, anchor.Type),
-						}
-						checks = append(checks, check)
+							Detail:   fmt.Sprintf("entry %.4f is only %.2f%% from anchor %s@%.4f — price just arrived at level and no confirmation-TF candles are available to verify a close-confirmed rejection", entry, distPct, anchor.Type, anchor.Price),
+							Values:   fmt.Sprintf("entry=%.6f anchor=%.6f dist_pct=%.3f type=%s conf_tf=none", entry, anchor.Price, distPct, anchor.Type),
+						})
 						break
 					}
+					continue
 				}
+
+				// Real closed-candle confirmation on the confirmation TF.
+				if fakeRetestConfirmed(confBars, anchor.Price, isLong) {
+					continue // rejection already close-confirmed — allow
+				}
+				checks = append(checks, EntryGateCheck{
+					Code:     "fake_retest_trap",
+					Stage:    string(EntryGateStageStructuralFit),
+					Passed:   false,
+					Enforced: true,
+					Detail:   fmt.Sprintf("entry %.4f is %.2f%% from anchor %s@%.4f but no closed %s candle has confirmed the rejection (need a hold-close on the correct side or a wick-rejection) — likely a fake retest / still arriving at the level", entry, distPct, anchor.Type, anchor.Price, confTF),
+					Values:   fmt.Sprintf("entry=%.6f anchor=%.6f dist_pct=%.3f type=%s conf_tf=%s", entry, anchor.Price, distPct, anchor.Type, confTF),
+				})
+				break
 			}
 		}
 	}
 
 	return checks
+}
+
+// tfMinutes maps a timeframe token to its duration in minutes (0 = unknown).
+func tfMinutes(tf string) int {
+	switch strings.ToLower(strings.TrimSpace(tf)) {
+	case "1m":
+		return 1
+	case "3m":
+		return 3
+	case "5m":
+		return 5
+	case "15m":
+		return 15
+	case "30m":
+		return 30
+	case "1h":
+		return 60
+	case "2h":
+		return 120
+	case "4h":
+		return 240
+	case "6h":
+		return 360
+	case "8h":
+		return 480
+	case "12h":
+		return 720
+	case "1d":
+		return 1440
+	default:
+		return 0
+	}
+}
+
+// confirmationTFBars picks the confirmation timeframe (one step below the primary,
+// among the selected timeframes) and returns its closed candles oldest→latest. The
+// still-forming latest bar is dropped so confirmation only trusts closed candles.
+// Returns (nil, "") when no suitable timeframe series is available.
+func confirmationTFBars(cfg *store.StrategyConfig, data *market.Data) ([]market.KlineBar, string) {
+	if cfg == nil || data == nil || len(data.TimeframeData) == 0 {
+		return nil, ""
+	}
+	primary := cfg.Indicators.Klines.PrimaryTimeframe
+	primMin := tfMinutes(primary)
+
+	// Prefer the largest selected TF strictly below the primary; fall back to the
+	// primary itself when nothing smaller is configured.
+	confTF := ""
+	confMin := 0
+	for _, tf := range cfg.Indicators.Klines.SelectedTimeframes {
+		m := tfMinutes(tf)
+		if m <= 0 {
+			continue
+		}
+		if primMin > 0 && m >= primMin {
+			continue
+		}
+		if _, ok := data.TimeframeData[tf]; !ok {
+			continue
+		}
+		if m > confMin {
+			confMin, confTF = m, tf
+		}
+	}
+	if confTF == "" {
+		if _, ok := data.TimeframeData[primary]; ok {
+			confTF = primary
+		}
+	}
+	if confTF == "" {
+		return nil, ""
+	}
+	series := data.TimeframeData[confTF]
+	if series == nil || len(series.Klines) < 4 {
+		return nil, ""
+	}
+	// Drop the last bar: it may still be forming and confirmation trusts closed candles only.
+	closed := series.Klines[:len(series.Klines)-1]
+	return closed, confTF
+}
+
+// fakeRetestConfirmed reports whether the confirmation-TF candles show a
+// close-confirmed rejection of the anchor: after price last touched the level, a
+// candle either closed on the correct side (hold) or printed a wick-rejection
+// (wick ≥1.5× body with a correct-side close). Mirrors the backtest's winning
+// 1close+wick rule. bars are closed candles oldest→latest.
+func fakeRetestConfirmed(bars []market.KlineBar, anchor float64, isLong bool) bool {
+	if anchor <= 0 || len(bars) < 2 {
+		return false
+	}
+	const (
+		touchTol = 0.001 // 0.1% touch tolerance
+		wickMult = 1.5
+		lookback = 8 // only consider a recent touch (~last 8 confirmation bars)
+	)
+	lo := len(bars) - lookback
+	if lo < 0 {
+		lo = 0
+	}
+	// Find the most recent touch of the anchor within the lookback window.
+	touchIdx := -1
+	for i := len(bars) - 1; i >= lo; i-- {
+		b := bars[i]
+		if isLong {
+			if b.Low <= anchor*(1+touchTol) {
+				touchIdx = i
+				break
+			}
+		} else if b.High >= anchor*(1-touchTol) {
+			touchIdx = i
+			break
+		}
+	}
+	if touchIdx < 0 {
+		// Price hasn't touched this anchor on the confirmation TF recently — the entry
+		// sits near it geometrically but there's no retest to confirm. Treat as
+		// unconfirmed so the proximity block stands.
+		return false
+	}
+	// A wick-rejection ON the touch bar itself confirms immediately.
+	if isWickRejectBar(bars[touchIdx], anchor, isLong, wickMult) {
+		return true
+	}
+	// Otherwise require a later CLOSED candle that holds on the correct side, or a
+	// wick-rejection, printed after the touch bar.
+	for i := touchIdx + 1; i < len(bars); i++ {
+		b := bars[i]
+		if isWickRejectBar(b, anchor, isLong, wickMult) {
+			return true
+		}
+		if isLong && b.Close > anchor {
+			return true
+		}
+		if !isLong && b.Close < anchor {
+			return true
+		}
+	}
+	return false
+}
+
+// isWickRejectBar reports whether bar b is a strong wick-rejection of the anchor on
+// the correct side (wick ≥ wickMult×body AND close decisively on the correct side).
+func isWickRejectBar(b market.KlineBar, anchor float64, isLong bool, wickMult float64) bool {
+	body := math.Abs(b.Close - b.Open)
+	if body <= 0 {
+		body = 1e-9
+	}
+	if isLong {
+		lowerWick := math.Min(b.Open, b.Close) - b.Low
+		return lowerWick >= wickMult*body && b.Close > anchor
+	}
+	upperWick := b.High - math.Max(b.Open, b.Close)
+	return upperWick >= wickMult*body && b.Close < anchor
 }
 
 // ════════════════════════════════════════════════════════════════════════
