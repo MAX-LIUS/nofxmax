@@ -381,6 +381,173 @@ export function RiskControlEditor({
         </div>
       </div>
 
+      {/* Risk-based position sizing */}
+      <div>
+        <div
+          className="p-3 rounded-lg"
+          style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
+        >
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div className="flex-1">
+              <label
+                className="block text-sm mb-1"
+                style={{ color: '#EAECEF' }}
+              >
+                {ts(riskControl.riskSizing, language)}
+              </label>
+              <p className="text-[11px]" style={{ color: '#848E9C' }}>
+                {ts(riskControl.riskSizingDesc, language)}
+              </p>
+            </div>
+            <label
+              className="relative inline-flex items-center cursor-pointer shrink-0"
+              style={{ opacity: disabled ? 0.5 : 1 }}
+            >
+              <input
+                type="checkbox"
+                className="sr-only peer"
+                checked={config.risk_sizing_enabled ?? false}
+                disabled={disabled}
+                onChange={(e) =>
+                  updateField('risk_sizing_enabled', e.target.checked)
+                }
+              />
+              <div
+                className="w-11 h-6 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all"
+                style={{
+                  background:
+                    (config.risk_sizing_enabled ?? false)
+                      ? '#F0B90B'
+                      : '#2B3139',
+                }}
+              />
+            </label>
+          </div>
+          {(config.risk_sizing_enabled ?? false) && (
+            <div>
+              <label
+                className="block text-sm mb-1"
+                style={{ color: '#EAECEF' }}
+              >
+                {ts(riskControl.riskPerTradePct, language)}
+              </label>
+              <p className="text-[11px] mb-2" style={{ color: '#848E9C' }}>
+                {ts(riskControl.riskPerTradePctDesc, language)}
+              </p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  value={config.risk_per_trade_pct_of_equity ?? 3}
+                  onChange={(e) =>
+                    updateField(
+                      'risk_per_trade_pct_of_equity',
+                      parseFloat(e.target.value) || 3
+                    )
+                  }
+                  disabled={disabled}
+                  min={0.5}
+                  max={50}
+                  step={0.5}
+                  className="w-20 px-3 py-2 rounded"
+                  style={{
+                    background: '#1E2329',
+                    border: '1px solid #2B3139',
+                    color: '#EAECEF',
+                  }}
+                />
+                <span style={{ color: '#848E9C' }}>%</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Session pre-open block (stocks/commodities) */}
+      <div>
+        <div
+          className="p-3 rounded-lg"
+          style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
+        >
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div className="flex-1">
+              <label
+                className="block text-sm mb-1"
+                style={{ color: '#EAECEF' }}
+              >
+                {ts(riskControl.sessionPreOpen, language)}
+              </label>
+              <p className="text-[11px]" style={{ color: '#848E9C' }}>
+                {ts(riskControl.sessionPreOpenDesc, language)}
+              </p>
+            </div>
+            <label
+              className="relative inline-flex items-center cursor-pointer shrink-0"
+              style={{ opacity: disabled ? 0.5 : 1 }}
+            >
+              <input
+                type="checkbox"
+                className="sr-only peer"
+                checked={config.session_pre_open_block_enabled ?? false}
+                disabled={disabled}
+                onChange={(e) =>
+                  updateField(
+                    'session_pre_open_block_enabled',
+                    e.target.checked
+                  )
+                }
+              />
+              <div
+                className="w-11 h-6 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all"
+                style={{
+                  background:
+                    (config.session_pre_open_block_enabled ?? false)
+                      ? '#F0B90B'
+                      : '#2B3139',
+                }}
+              />
+            </label>
+          </div>
+          {(config.session_pre_open_block_enabled ?? false) && (
+            <div>
+              <label
+                className="block text-sm mb-1"
+                style={{ color: '#EAECEF' }}
+              >
+                {ts(riskControl.sessionPreOpenWindow, language)}
+              </label>
+              <p className="text-[11px] mb-2" style={{ color: '#848E9C' }}>
+                {ts(riskControl.sessionPreOpenWindowDesc, language)}
+              </p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  value={config.session_pre_open_window_minutes ?? 60}
+                  onChange={(e) =>
+                    updateField(
+                      'session_pre_open_window_minutes',
+                      parseInt(e.target.value) || 60
+                    )
+                  }
+                  disabled={disabled}
+                  min={5}
+                  max={240}
+                  step={5}
+                  className="w-20 px-3 py-2 rounded"
+                  style={{
+                    background: '#1E2329',
+                    border: '1px solid #2B3139',
+                    color: '#EAECEF',
+                  }}
+                />
+                <span style={{ color: '#848E9C' }}>
+                  {language === 'zh' ? '分钟' : 'min'}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* Binance USDC Maker Mode (Binance-only feature) */}
       <div>
         <div

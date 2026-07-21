@@ -23,9 +23,9 @@ func TestStructuralSLPercent_ClampAndConvert(t *testing.T) {
 		t.Fatalf("floor want 3%%, got %.4f ok=%v", pct, ok)
 	}
 	// Boundary 20 below entry (80) → 10 ATR → beyond backstop 4.5 → falls back to
-	// FallbackATRMul (default 3.0) → 6% (was 9% before the nearest-structure fix).
-	if pct, ok := structuralSLPercent(entry, 80.0, atr, 0, ss, acfg); !ok || math.Abs(pct-6.0) > 1e-9 {
-		t.Fatalf("beyond-backstop fallback want 6%%, got %.4f ok=%v", pct, ok)
+	// FallbackATRMul (default 2.5) → 5% (was 9% before the nearest-structure fix).
+	if pct, ok := structuralSLPercent(entry, 80.0, atr, 0, ss, acfg); !ok || math.Abs(pct-5.0) > 1e-9 {
+		t.Fatalf("beyond-backstop fallback want 5%%, got %.4f ok=%v", pct, ok)
 	}
 }
 

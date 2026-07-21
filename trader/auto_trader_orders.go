@@ -85,6 +85,26 @@ func (at *AutoTrader) applyRegimeGateToActionRecord(decision *kernel.Decision, a
 }
 
 // executeDecisionWithRecord executes AI decision and records detailed information
+// sessionPreOpenBlocked reports whether opening a new position in symbol must be
+// blocked right now because its underlying cash market opens within the configured
+// pre-open window. Returns (false, "") for crypto, when disabled, or when config is
+// nil. Only gates NEW opens — callers invoke it exclusively on the open paths, never
+// on exits or protection.
+func (at *AutoTrader) sessionPreOpenBlocked(symbol string) (bool, string) {
+	if at.config.StrategyConfig == nil {
+		return false, ""
+	}
+	rc := at.config.StrategyConfig.RiskControl
+	if !rc.SessionPreOpenBlockEnabled {
+		return false, ""
+	}
+	win := rc.SessionPreOpenWindowMinutes
+	if win <= 0 {
+		win = 60 // sensible default when enabled without an explicit window
+	}
+	return market.InPreOpenBlock(symbol, time.Now(), win)
+}
+
 func (at *AutoTrader) executeDecisionWithRecord(decision *kernel.Decision, actionRecord *store.DecisionAction) error {
 	switch decision.Action {
 	case "open_long":
@@ -110,6 +130,13 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 	// [CODE ENFORCED] Post-loss cooldown check
 	if cooling, remaining := at.cooldownManager.IsCoolingDown(decision.Symbol); cooling {
 		return fmt.Errorf("⏳ entry cooldown active for %s (%v remaining after stop-loss)", decision.Symbol, remaining.Round(time.Minute))
+	}
+
+	// [CODE ENFORCED] Session pre-open gate: block NEW opens on tokenized stock/
+	// commodity symbols during the pre-open window (max overnight-gap risk). Crypto
+	// and disabled config pass through. Exits/protection are never gated.
+	if blocked, mkt := at.sessionPreOpenBlocked(decision.Symbol); blocked {
+		return fmt.Errorf("⏰ %s pre-open window (%s): opening blocked to avoid open-gap risk", decision.Symbol, mkt)
 	}
 
 	// ⚠️ Get current positions for multiple checks
@@ -184,6 +211,15 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 		equity = eq
 	} else {
 		equity = availableBalance
+	}
+
+	// [CODE ENFORCED] Risk-based sizing: reverse-compute position size from the stop
+	// distance so a single trade risks at most RiskPerTradePctOfEquity% of equity.
+	// Runs BEFORE volatility sizing so the vol-shrink and all caps apply on top. When
+	// disabled or unsizable, leaves the AI-provided size untouched.
+	if newSize, applied, reason := riskBasedPositionSizeGuarded(at.config.StrategyConfig, decision, marketData.CurrentPrice, at.extractExecutionATR14(marketData), equity); applied {
+		logger.Infof("  🎯 [RiskSizing] %s long: AI size %.2f → %.2f (%s)", decision.Symbol, decision.PositionSizeUSD, newSize, reason)
+		decision.PositionSizeUSD = newSize
 	}
 
 	// [CODE ENFORCED] Volatility-targeted sizing: shrink size on high-ATR symbols before
@@ -306,6 +342,13 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 		return fmt.Errorf("⏳ entry cooldown active for %s (%v remaining after stop-loss)", decision.Symbol, remaining.Round(time.Minute))
 	}
 
+	// [CODE ENFORCED] Session pre-open gate: block NEW opens on tokenized stock/
+	// commodity symbols during the pre-open window (max overnight-gap risk). Crypto
+	// and disabled config pass through. Exits/protection are never gated.
+	if blocked, mkt := at.sessionPreOpenBlocked(decision.Symbol); blocked {
+		return fmt.Errorf("⏰ %s pre-open window (%s): opening blocked to avoid open-gap risk", decision.Symbol, mkt)
+	}
+
 	// ⚠️ Get current positions for multiple checks
 	positions, err := at.trader.GetPositions()
 	if err != nil {
@@ -374,6 +417,15 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 		equity = eq
 	} else {
 		equity = availableBalance
+	}
+
+	// [CODE ENFORCED] Risk-based sizing: reverse-compute position size from the stop
+	// distance so a single trade risks at most RiskPerTradePctOfEquity% of equity.
+	// Runs BEFORE volatility sizing so the vol-shrink and all caps apply on top. When
+	// disabled or unsizable, leaves the AI-provided size untouched.
+	if newSize, applied, reason := riskBasedPositionSizeGuarded(at.config.StrategyConfig, decision, marketData.CurrentPrice, at.extractExecutionATR14(marketData), equity); applied {
+		logger.Infof("  🎯 [RiskSizing] %s short: AI size %.2f → %.2f (%s)", decision.Symbol, decision.PositionSizeUSD, newSize, reason)
+		decision.PositionSizeUSD = newSize
 	}
 
 	// [CODE ENFORCED] Volatility-targeted sizing: shrink size on high-ATR symbols before

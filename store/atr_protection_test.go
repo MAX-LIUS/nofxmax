@@ -54,8 +54,8 @@ func TestStructuralSLConfig_WithDefaults(t *testing.T) {
 	if got.FloorATRMul != 1.5 {
 		t.Fatalf("floor default want 1.5, got %.3f", got.FloorATRMul)
 	}
-	if got.BackstopATRMul != 4.5 {
-		t.Fatalf("backstop default want 4.5, got %.3f", got.BackstopATRMul)
+	if got.BackstopATRMul != 2.5 {
+		t.Fatalf("backstop default want 2.5, got %.3f", got.BackstopATRMul)
 	}
 	if got.LookbackBars != 24 {
 		t.Fatalf("lookback default want 24, got %d", got.LookbackBars)

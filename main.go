@@ -7,6 +7,7 @@ import (
 	"nofx/crypto"
 	"nofx/logger"
 	"nofx/manager"
+	"nofx/market"
 	_ "nofx/mcp/payment"
 	_ "nofx/mcp/provider"
 	"nofx/proxyhook"
@@ -17,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -102,6 +104,12 @@ func main() {
 	// logger.Info("📊 WebSocket market monitor started")
 	// time.Sleep(500 * time.Millisecond)
 	logger.Info("📊 Market data: exchange API (primary) → Binance (secondary) → CoinAnk (fallback)")
+
+	// Asset-class classifier: fetch stock/commodity/crypto metadata from exchange
+	// instruments endpoints (OKX instCategory / Binance underlyingType) and refresh
+	// hourly. Read-only; on failure every symbol falls back to crypto (24/7, no
+	// session restriction) so live trading is unaffected.
+	market.StartAssetClassRefresher(time.Hour, logger.Infof)
 
 	// Create TraderManager
 	traderManager := manager.NewTraderManager()

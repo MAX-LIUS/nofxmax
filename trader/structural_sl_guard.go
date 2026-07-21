@@ -100,7 +100,18 @@ func (at *AutoTrader) evaluateStructuralSLClose(symbol, side string, entry, qty 
 			fetch = 8
 		}
 	}
-	bars, err := market.GetKlines(symbol, c.Timeframe, at.exchange, fetch)
+	// Method 4: asset-adaptive confirmation timeframe. When enabled, crypto confirms
+	// the close-confirm breach on a ~2×-finer TF (backtested optimum) while stocks/
+	// commodities keep native (fine TFs whipsaw worst on their session microstructure).
+	// Off (default) → native TF, current behaviour. The tighter confirm TF only changes
+	// WHICH bar-close we test; boundary/backstop math is unchanged.
+	confirmTF := c.Timeframe
+	if ss.AssetAdaptiveConfirmTF {
+		if adaptive := market.ConfirmTimeframe(c.Timeframe, symbol); adaptive != "" {
+			confirmTF = adaptive
+		}
+	}
+	bars, err := market.GetKlines(symbol, confirmTF, at.exchange, fetch)
 	if err != nil || len(bars) < 2 {
 		return
 	}

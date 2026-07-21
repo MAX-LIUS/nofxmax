@@ -272,6 +272,11 @@ export interface StructuralSLConfig {
   // true = every state; only one = that side; both false = never. Default both true.
   trail_on_profit?: boolean
   trail_on_loss?: boolean
+  // asset_adaptive_confirm_tf (Method 4): confirm the close-confirm breach on an
+  // asset-aware timeframe. Crypto refines ~2× finer than native (backtest: 1h→30m
+  // +10.81 PnL, drawdown 88→77) when a clean 2× step exists; stocks/commodities keep
+  // native (fine TFs whipsaw worst on session microstructure). Off = native everywhere.
+  asset_adaptive_confirm_tf?: boolean
 }
 
 export interface LadderTPSLConfig {
@@ -597,6 +602,16 @@ export interface RiskControlConfig {
   min_position_size: number // Min position size in USDT (CODE ENFORCED)
   min_risk_reward_ratio: number // Min take_profit / stop_loss ratio (AI guided)
   min_confidence: number // Min AI confidence to open position (AI guided)
+
+  // Risk-based position sizing: reverse-compute size from stop distance so a single
+  // trade risks at most risk_per_trade_pct_of_equity % of equity. Off = AI-provided size.
+  risk_sizing_enabled?: boolean
+  risk_per_trade_pct_of_equity?: number // e.g. 3.0 = risk 3% of equity per trade
+  // session_pre_open_block_enabled: forbid OPENING new positions in tokenized stock/
+  // commodity symbols during the pre-open window before their underlying cash market
+  // opens (max overnight-gap risk). Crypto unaffected; exits never gated.
+  session_pre_open_block_enabled?: boolean
+  session_pre_open_window_minutes?: number // window length; 0 → 60-min default
 
   // Execution constraints
   entry_cooldown_minutes?: number // Post-loss cooldown per symbol (default: 90)

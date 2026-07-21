@@ -664,6 +664,46 @@ export const riskControl = {
     en: 'Max allowed gap between AI planned price and execution price',
     es: 'Brecha máx. entre precio AI y ejecución',
   },
+  riskSizing: {
+    zh: '风险反算仓位',
+    en: 'Risk-based sizing',
+    es: 'Tamaño basado en riesgo',
+  },
+  riskSizingDesc: {
+    zh: '开启后，按止损距离反算仓位，使单笔最大亏损不超过权益的设定百分比（取 AI 止损与结构止损的较宽者）。仓位过小低于最小可执行值时自动跳过该单。',
+    en: 'When on, position size is reverse-computed from the stop distance so a single trade loses at most the set % of equity (uses the WIDER of AI stop and structural stop). Trades whose size falls below the executable floor are skipped.',
+    es: 'Cuando está activo, el tamaño se calcula desde la distancia del stop para que una operación pierda como máximo el % de capital fijado.',
+  },
+  riskPerTradePct: {
+    zh: '单笔风险占权益 %',
+    en: 'Risk per trade (% of equity)',
+    es: 'Riesgo por operación (% del capital)',
+  },
+  riskPerTradePctDesc: {
+    zh: '单笔交易允许的最大亏损占账户权益的百分比，例如 3 = 最多亏 3%',
+    en: 'Max loss a single trade may incur as a % of account equity, e.g. 3 = at most 3%',
+    es: 'Pérdida máxima de una operación como % del capital, p. ej. 3 = máx. 3%',
+  },
+  sessionPreOpen: {
+    zh: '开盘前禁止开仓（股票/商品）',
+    en: 'Block opens pre-market (stocks/commodities)',
+    es: 'Bloquear aperturas pre-mercado (acciones/materias primas)',
+  },
+  sessionPreOpenDesc: {
+    zh: '代币化股票/商品在其对应现货市场开盘前的敏感窗口内禁止新开仓（跳空风险最大时段）。加密货币不受影响，平仓和已有持仓保护不受影响。',
+    en: 'Forbid opening new positions in tokenized stock/commodity symbols during the window before their underlying cash market opens (max overnight-gap risk). Crypto is unaffected; exits and existing-position protection are never gated.',
+    es: 'Prohibir abrir nuevas posiciones en acciones/materias primas tokenizadas durante la ventana previa a la apertura del mercado subyacente. Las criptos no se ven afectadas.',
+  },
+  sessionPreOpenWindow: {
+    zh: '开盘前窗口时长',
+    en: 'Pre-open window length',
+    es: 'Duración de la ventana pre-apertura',
+  },
+  sessionPreOpenWindowDesc: {
+    zh: '开盘前多少分钟内禁止开仓，默认 60 分钟。',
+    en: 'How many minutes before the cash-market open new opens are blocked. Default 60.',
+    es: 'Cuántos minutos antes de la apertura se bloquean nuevas posiciones. Predeterminado 60.',
+  },
 }
 
 // ============================================================================

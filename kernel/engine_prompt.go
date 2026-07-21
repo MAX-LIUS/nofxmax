@@ -89,52 +89,20 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 		sb.WriteString("## Mode: Scalping\n- Focus on short-term momentum, smaller profit targets but require quick action\n- If price doesn't move as expected within two bars, immediately reduce position or stop-loss\n\n")
 	}
 
-	// 2b. Trading principles
+	// 2b. Trading principles — factual backend-gate awareness only; method/analysis
+	// prescriptions removed so the AI reasons autonomously.
 	sb.WriteString("## Trading Principles\n\n")
-	sb.WriteString("- Seek structural depth: entry near a tested support/resistance level, invalidation beyond a deeper level, target at higher-TF structure.\n")
-	sb.WriteString("- Every open must name three things: the structural level, where invalidation sits, where the target sits.\n")
-	sb.WriteString("- Backend quantitative gates (ATR distance, RR ratio, regime alignment, confidence floor) reject trades below threshold. Focus on setup quality, not on guessing exact numbers.\n\n")
+	sb.WriteString("- Backend quantitative gates (ATR distance, RR ratio, regime alignment, confidence floor) reject trades below threshold. Focus on setup quality; the exact numbers are enforced by the backend.\n")
+	sb.WriteString("- You decide the analysis method, the setup, the entry/invalidation/target, and when a setup is good enough. Use your own judgment.\n\n")
 
-	// 2c. Trigger gate — the most critical entry quality filter
-	sb.WriteString("## Entry Trigger Gate (MANDATORY)\n\n")
-	sb.WriteString("Open only when thesis + trigger + invalidation + target are ALL clear. Longs and shorts are held to the SAME evidential bar — neither direction is preferred.\n\n")
-	sb.WriteString("`trigger_type` is REQUIRED on every open. It must be one of these 6 (3 long / 3 short mirror pairs):\n\n")
-	sb.WriteString("| Long trigger | Short mirror |\n")
-	sb.WriteString("|--------------|--------------|\n")
-	sb.WriteString("| `support_rejection_confirmed`: touches/enters support, then 15m/1h closes back above | `resistance_rejection_confirmed`: touches/enters resistance, then 15m/1h closes back below |\n")
-	sb.WriteString("| `resistance_breakout_retest_successful`: breaks resistance, pulls back, holds and closes above | `support_breakdown_retest_failed`: breaks support, pulls back, fails and closes below |\n")
-	sb.WriteString("| `higher_low_breakout_confirmed`: forms higher low above support, then breaks trigger-candle high | `lower_high_breakdown_confirmed`: forms lower high below resistance, then breaks trigger-candle low |\n\n")
-	sb.WriteString("**Confirmation rules (apply identically to long and short):**\n")
-	sb.WriteString("- Proximity is NOT a trigger. \"Near\" a level, or price moving toward a level, does not qualify — output wait.\n")
-	sb.WriteString("- A trigger needs multi-candle confirmation, ONE of: (a) 2 consecutive closed 15m candles confirming direction after the level interaction; (b) 1 closed 1h candle with clear rejection (wick ≥ 50% of body on the rejection side); (c) a higher-low / lower-high pattern (3+ candles).\n")
-	sb.WriteString("- FAKE RETEST TRAP (top loss pattern, both directions): one candle closes on the 'correct' side, then reverses. The candle AFTER the touch candle must also close in your direction. If it closes against you, the trigger is INVALID — output wait.\n")
-	sb.WriteString("- A single wick-rejection candle counts only if the wick is ≥ 1.5× the body AND the close is decisively (not marginally) on the correct side.\n")
-	sb.WriteString("- Only reference structural zones present in the market data. Do not invent levels. If the trigger is missing or unclear, output wait.\n\n")
-
-	// 2d. Trend Phase Discipline — the most important strategic principle
-	sb.WriteString("## Trend Phase Discipline (CRITICAL)\n\n")
-	sb.WriteString("Trade WITH the trend, at the RIGHT phase. Direction alone is insufficient — you must also locate where in the trend lifecycle price is.\n\n")
-	sb.WriteString("### Step 1 — Direction (symmetric):\n")
-	sb.WriteString("- 4h change > +1% AND price > EMA20 → UP: take LONG setups only.\n")
-	sb.WriteString("- 4h change < -1% AND price < EMA20 → DOWN: take SHORT setups only.\n")
-	sb.WriteString("- 4h change within ±1% → range: both directions valid, only at structural edges.\n\n")
-	sb.WriteString("### Step 2 — Phase (from `trend_phase` field):\n")
-	sb.WriteString("| Phase | Condition | Action |\n")
-	sb.WriteString("|-------|-----------|--------|\n")
-	sb.WriteString("| establishment | 4h 0.5-1.5%, EMA20 dev <0.8% | Best entry window. 15m trigger OK. |\n")
-	sb.WriteString("| continuation | 4h 1.5-2.5%, EMA20 dev 0.8-1.8% | Enter only on pullback to within 0.5% of EMA20. Require 1h trigger. |\n")
-	sb.WriteString("| extension | 4h >2.5% or EMA20 dev >1.8% | DO NOT open trend-following. Wait for pullback to EMA20. |\n")
-	sb.WriteString("| exhaustion | 4h >3.5% or momentum decay <0.15 | DO NOT open. Output wait. |\n\n")
-	sb.WriteString("Backend BLOCKS extension/exhaustion entries — do not spend analysis on them. In extension/exhaustion a small-TF bounce/rejection is noise, not a trigger.\n\n")
-
-	// 2e. Position-in-range discipline — symmetric guardrail against chasing extremes
-	sb.WriteString("## Position-In-Range Discipline (symmetric anti-chase guardrail)\n\n")
-	sb.WriteString("Where price sits inside its recent range gates which \"dip/bounce\" theses are legitimate. This rule is fully symmetric:\n")
-	sb.WriteString("- When price is in the UPPER part of its recent range (near range highs), you MUST NOT open long on a \"pullback to support / dip-buy\" thesis — near the high there is no dip to buy, that is chasing. A long there needs a genuine breakout-retest trigger, not a support-bounce story.\n")
-	sb.WriteString("- When price is in the LOWER part of its recent range (near range lows), you MUST NOT open short on a \"rejection at resistance / bounce-sell\" thesis — near the low there is no bounce to fade, that is chasing down. A short there needs a genuine breakdown-retest trigger, not a resistance-rejection story.\n")
-	sb.WriteString("- A support-bounce long is only valid when price is actually in the lower/mid range; a resistance-rejection short is only valid when price is actually in the upper/mid range. Never relabel an extreme as its opposite to justify an entry.\n")
-	sb.WriteString("- Counter-trend trades are FORBIDDEN unless ALL hold: 4h+ structural level + exhaustion evidence + completed-candle confirmation. This bar is identical for counter-trend longs and counter-trend shorts.\n")
-	sb.WriteString("- When no legitimate setup exists, `wait` is a fully correct, encouraged answer for either direction.\n\n")
+	// 2c. Trigger type — trigger_type is backend-enforced (must be one of the 6 enum
+	// values); the prescriptive confirmation prose has been removed so the AI decides
+	// autonomously WHEN a trigger is confirmed enough.
+	sb.WriteString("## Entry Trigger (trigger_type required)\n\n")
+	sb.WriteString("`trigger_type` is REQUIRED on every open and must be one of these 6 (3 long / 3 short mirror pairs):\n")
+	sb.WriteString("- long: `support_rejection_confirmed`, `resistance_breakout_retest_successful`, `higher_low_breakout_confirmed`\n")
+	sb.WriteString("- short: `resistance_rejection_confirmed`, `support_breakdown_retest_failed`, `lower_high_breakdown_confirmed`\n")
+	sb.WriteString("Choose whichever trigger fits, and decide for yourself when confirmation is sufficient. Only reference structural zones present in the market data.\n\n")
 
 	// 3. Hard constraints (risk control)
 	btcEthPosValueRatio := riskControl.BTCETHMaxPositionValueRatio
@@ -185,6 +153,18 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 		accountEquity, btcEthPosValueRatio, accountEquity*btcEthPosValueRatio))
 	sb.WriteString(fmt.Sprintf("- For any open decision, `position_size_usd` must stay above the executable floor. On this account, BTC/ETH opens should generally not be below about %.0f USDT unless venue constraints explicitly allow it. Avoid tiny probe sizes that are likely to fail validation or venue minimums.\n", btcEthExecutableMin))
 	sb.WriteString("- **DO NOT** just use available_balance as position_size_usd. Use the Position Value Limits!\n\n")
+
+	// Risk-based sizing notice: when the strategy reverse-computes size from the stop
+	// distance, the AI's position_size_usd is a hint only — the backend overwrites it so
+	// a single trade risks at most RiskPerTradePctOfEquity% of equity. What matters then
+	// is a REALISTIC stop_loss, because the stop distance directly drives the size.
+	if riskControl.RiskSizingEnabled && riskControl.RiskPerTradePctOfEquity > 0 {
+		sb.WriteString("## ⚠️ Risk-Based Sizing is ACTIVE (this overrides your position_size_usd)\n")
+		sb.WriteString(fmt.Sprintf("- The backend REVERSE-COMPUTES position size from your stop distance so a single trade loses at most **%.1f%% of equity**. Your `position_size_usd` is only a fallback hint; the risk formula wins.\n", riskControl.RiskPerTradePctOfEquity))
+		sb.WriteString("- Formula: `size = equity × risk%% ÷ effective_stop_distance%%`, where effective stop = the WIDER of your `stop_loss` and the strategy's structural stop. A TIGHT, well-placed stop → larger size; a FAR/sloppy stop → smaller size.\n")
+		sb.WriteString("- Therefore your ONE job on sizing is a **realistic, structurally-justified `stop_loss`**. Do not pad the stop \"for safety\" — a needlessly wide stop shrinks your size and wastes the setup. Do not set an artificially tight stop to inflate size — it will just get swept.\n")
+		sb.WriteString("- If your stop is so far that the computed size falls below the executable floor, the trade is SKIPPED. That is correct behavior: the setup's risk/structure did not justify a viable size.\n\n")
+	}
 
 	// 4. Trading frequency (editable)
 	if promptSections.TradingFrequency != "" {
@@ -238,11 +218,11 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString(fmt.Sprintf("- **FIRST_LOCK = ~%.1f× risk** (floored at MIN_REWARD). Data: 72%% of reverting trades had reached 0.5× risk and 54%% reached 1× risk before giving it back. Lock the first profit tier here, keep 20-35%% as a runner to the higher-TF target.\n", realisticRiskMul))
 	sb.WriteString("- **first_target distance must be >= 1.2× the stop distance AND <= TARGET_CEILING.**\n\n")
 
-	sb.WriteString("## Placement rules (symmetric long/short)\n")
-	sb.WriteString("- **Entry**: near tested support (long) / resistance (short), never in no-man's land. Direction must satisfy: long → invalidation < entry < first_target; short → invalidation > entry > first_target.\n")
-	sb.WriteString("- **Stop loss**: beyond the nearest primary-TF invalidation (support for long, resistance for short) + buffer so total distance >= MIN_SL_DIST. Do not place naked on a crowded level — invalidation requires an effective break, not a one-tick touch.\n")
-	sb.WriteString("- **Take profit**: main target from a higher-TF level (resistance for long, support for short), within [MIN_REWARD, TARGET_CEILING]. Lower-TF levels are for partial/intermediate tiers only.\n")
-	sb.WriteString("- **Anchoring**: derive all prices from actual structural distances + ATR buffer. Never use arbitrary round percentages (1%/2%/3%).\n\n")
+	sb.WriteString("## Placement rules (backend-checked facts, symmetric long/short)\n")
+	sb.WriteString("- **Direction sanity (enforced)**: long → invalidation < entry < first_target; short → invalidation > entry > first_target.\n")
+	sb.WriteString("- **Stop loss**: total distance from entry must be >= MIN_SL_DIST (closer stops are auto-widened by the backend). Where exactly to place it is your call.\n")
+	sb.WriteString("- **Take profit**: first_target within [MIN_REWARD, TARGET_CEILING] (the backend caps an over-far first_target and recomputes RR). Level selection is your call.\n")
+	sb.WriteString("- **Anchoring**: derive prices however you judge best; the backend does not require any particular level source.\n\n")
 
 	sb.WriteString("## Required output arrays for every open\n")
 	sb.WriteString("- `selected_levels`: every level you used for SL/TP/entry, each with price, type, timeframe, source, used_for, basis_type (structural/atr_based/percentage/fibonacci), brief reason. If no structural level fits, use atr_based/percentage and say why.\n")

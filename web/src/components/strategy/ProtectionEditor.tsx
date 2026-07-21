@@ -1739,6 +1739,31 @@ export function ProtectionEditor({
                   </span>
                 </label>
 
+                {/* Method 4: asset-adaptive confirmation timeframe — requires close-confirm */}
+                <label
+                  className="flex items-start gap-2 text-xs"
+                  style={{ color: '#EAECEF' }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={structuralSL.asset_adaptive_confirm_tf ?? false}
+                    onChange={(e) =>
+                      updateStructuralSL({
+                        asset_adaptive_confirm_tf: e.target.checked,
+                      })
+                    }
+                    disabled={
+                      disabled || !(structuralSL.close_confirm ?? false)
+                    }
+                    className="mt-0.5"
+                  />
+                  <span>
+                    {isZh
+                      ? '资产自适应确认周期（方案4）：加密货币在更细一档（约2×，如1h→30m）确认收盘跌破，回测更优（+10.81 PnL，回撤88→77）；股票/商品保持原生周期（细周期插针最严重）。需先开启收盘确认。'
+                      : 'Asset-adaptive confirm TF (Method 4): crypto confirms the close-confirm breach ~2× finer (e.g. 1h→30m) — backtest +10.81 PnL, drawdown 88→77; stocks/commodities keep native (fine TFs whipsaw worst). Requires close-confirm.'}
+                  </span>
+                </label>
+
                 {/* Ratcheting (trailing) structural stop — requires close-confirm */}
                 <label
                   className="flex items-start gap-2 text-xs"

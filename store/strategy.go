@@ -624,6 +624,14 @@ type StructuralSLConfig struct {
 	// trail never ratchets (equivalent to TrailEnabled off). Default: both true.
 	TrailOnProfit *bool `json:"trail_on_profit,omitempty"`
 	TrailOnLoss   *bool `json:"trail_on_loss,omitempty"`
+
+	// AssetAdaptiveConfirmTF (Method 4): when true, the close-confirm bar-close check
+	// runs on an asset-aware confirmation timeframe instead of the native ATR
+	// timeframe. Crypto refines ~2× FINER than native (backtest: 1h→30m gave +10.81
+	// PnL, drawdown 88→77) but ONLY when a clean 2× ladder step exists; stocks and
+	// commodities keep the native TF (fine TFs whipsaw worst on open-gap/session
+	// microstructure). Zero value = off = native TF everywhere (current behaviour).
+	AssetAdaptiveConfirmTF bool `json:"asset_adaptive_confirm_tf,omitempty"`
 }
 
 // WithDefaults fills unset structural-SL fields with safe, backtested defaults.
@@ -1277,6 +1285,28 @@ type RiskControlConfig struct {
 	ReplaceMinHoldMinutes      int     `json:"replace_min_hold_minutes,omitempty"`      // victim must be held at least this long, e.g. 30
 	ReplaceMaxVictimProfitPct  float64 `json:"replace_max_victim_profit_pct,omitempty"` // never cut a winner above this pnl%, e.g. 1.0
 	ReplaceMinConfidenceMargin int     `json:"replace_min_confidence_margin,omitempty"` // new conf must beat victim entry conf by this, e.g. 5
+
+	// Risk-based position sizing (CODE ENFORCED): when enabled, position size is
+	// REVERSE-COMPUTED from the stop-loss distance so a single trade can lose at most
+	// RiskPerTradePctOfEquity % of equity. size_usd = (equity × pct/100) / stopDistPct,
+	// where stopDistPct = |entry - stop| / entry. A far stop → small size; a tight stop
+	// → larger size (capped by the position-value ratio downstream). This replaces the
+	// AI's notional guess as the sizing basis, killing the "300 USDT position on a 160
+	// equity account with a wide stop = -24 USDT disaster" pattern. When the reverse-
+	// computed size falls below the executable floor, the open is SKIPPED (not forced).
+	// 0/unset or disabled = keep the AI-provided position_size_usd (legacy behavior).
+	RiskSizingEnabled          bool    `json:"risk_sizing_enabled,omitempty"`
+	RiskPerTradePctOfEquity    float64 `json:"risk_per_trade_pct_of_equity,omitempty"` // e.g. 3.0 = risk 3% of equity per trade
+
+	// SessionPreOpenBlockEnabled (session management): forbid OPENING new positions in
+	// tokenized stock/commodity symbols during the pre-open window before their
+	// underlying cash market opens — the moment of maximal overnight-gap risk. Only
+	// blocks NEW opens; never touches exits or existing-position protection. Crypto is
+	// unaffected (24/7, no scheduled open). Zero value = off = current behaviour.
+	SessionPreOpenBlockEnabled bool `json:"session_pre_open_block_enabled,omitempty"`
+	// SessionPreOpenWindowMinutes is the block window length in minutes before the
+	// cash-market open. 0 with the block enabled falls back to a 60-minute default.
+	SessionPreOpenWindowMinutes int `json:"session_pre_open_window_minutes,omitempty"`
 }
 
 // ResolveBinanceUSDCMaker returns whether the USDC-pair + maker-TP feature should
