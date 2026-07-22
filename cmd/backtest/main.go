@@ -41,6 +41,9 @@ func main() {
 	confirmStop := flag.Bool("confirmstop", false, "sweep a FIXED close-confirm adverse-excursion stop at N×ATR (active while underwater, close-confirmed, backstop kept for wicks) vs the live swing-confirm. Needs -liveconfig with a structural (RangeSL) baseline.")
 	combinedGate := flag.Bool("combinedgate", false, "replay full set under baseline vs entry-gate-only (skip target<minRewardATR) vs band-only (backstop tighten) vs both stacked. Needs -liveconfig.")
 	maxHold := flag.Bool("maxholdsweep", false, "sweep the max-hold time exit: live vs drop-profit-exemption vs disabled vs alternative hours. Needs -liveconfig -proxy.")
+	anchorProx := flag.Bool("anchorprox", false, "bucket entries by entry→SL-anchor distance in ATR with realized PnL, plus a gate sim blocking entries whose confirmed anchor is farther than N×ATR (no-mans-land detection).")
+	minSLGate := flag.Bool("minslgate", false, "simulate the sl_distance_below_atr_min entry gate across thresholds (0.5-1.5): realized PnL kept vs blocked, to size the frequency/PnL tradeoff of raising the min-SL floor.")
+	provenSL := flag.Bool("provensl", false, "compare the baseline structural stop (fractal pivot) vs PreferProvenLevels (order-block edge, never wider than pivot): realized PnL, win%, drawdown, stop-hit% for fractal vs proven. Needs -liveconfig with a RangeSL baseline.")
 	bsMin := flag.Float64("bsmin", 1.5, "min backstop ATR for -fbsweep fine grid")
 	bsMax := flag.Float64("bsmax", 4.5, "max backstop ATR for -fbsweep fine grid")
 	bsStep := flag.Float64("bsstep", 0.5, "backstop ATR step for -fbsweep fine grid")
@@ -258,6 +261,22 @@ func main() {
 		return
 	}
 
+	// 5z-4) Min-SL-distance gate simulation.
+	if *minSLGate {
+		fmt.Println()
+		fmt.Print(backtest.FormatMinSLGate(*traderLike, loaded, []float64{0.5, 0.8, 1.0, 1.2, 1.5}))
+		fmt.Println()
+		return
+	}
+
+	// 5z-3) Anchor-proximity analysis.
+	if *anchorProx {
+		fmt.Println()
+		fmt.Print(backtest.FormatAnchorProximity(*traderLike, loaded))
+		fmt.Println()
+		return
+	}
+
 	// 5z-2) Max-hold time-exit sweep.
 	if *maxHold {
 		fmt.Println()
@@ -270,6 +289,14 @@ func main() {
 	if *combinedGate {
 		fmt.Println()
 		fmt.Print(backtest.FormatCombinedGate(*traderLike, baseline, loaded, 1.0, *slBackstop))
+		fmt.Println()
+		return
+	}
+
+	// 5y) PreferProvenLevels A/B: baseline (fractal pivot) vs proven (order-block edge).
+	if *provenSL {
+		fmt.Println()
+		fmt.Print(backtest.FormatProvenSLCompare(baseline, loaded))
 		fmt.Println()
 		return
 	}

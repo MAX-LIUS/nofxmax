@@ -324,8 +324,28 @@ func rangeStructuralBoundary(p ProtectionParams, e Entry, bars []market.Kline, e
 		return best, found
 	}
 
-	if b, ok := nearestSwing(); ok {
-		return b, true
+	fractal, haveFractal := nearestSwing()
+
+	// PreferProvenLevels: mirror live nearestProvenBoundary — prefer an order-block
+	// edge on the protective side of entry over the raw fractal, but only when it does
+	// not widen the stop past the nearest pivot. Uses the pre-entry window only (no
+	// look-ahead: bars[start:entryIdx] excludes the entry bar and everything after).
+	if p.RangeSLPreferProven {
+		if proven, ok := provenBoundaryBT(window, entry, isLong); ok {
+			if !haveFractal {
+				return proven, true
+			}
+			if isLong && proven >= fractal { // higher low = tighter for a long
+				return proven, true
+			}
+			if !isLong && proven <= fractal { // lower high = tighter for a short
+				return proven, true
+			}
+		}
+	}
+
+	if haveFractal {
+		return fractal, true
 	}
 	// No fractal pivot — nearest bar extreme on the correct side of entry (still
 	// the CLOSEST level, not the absolute spike).
@@ -348,6 +368,42 @@ func rangeStructuralBoundary(p ProtectionParams, e Entry, bars []market.Kline, e
 		return 0, false
 	}
 	return best, true
+}
+
+// provenBoundaryBT mirrors live AutoTrader.nearestProvenBoundary for the backtest:
+// it detects order blocks over the pre-entry window and returns the closest
+// protective-side block edge (demand High for a long, supply Low for a short).
+// window must be the pre-entry bars only (no look-ahead).
+func provenBoundaryBT(window []market.Kline, entry float64, isLong bool) (float64, bool) {
+	if len(window) < 20 {
+		return 0, false
+	}
+	// Wilder ATR14 over the window (drop the last bar to match live warmup shape).
+	end := len(window) - 1
+	if end < 15 {
+		return 0, false
+	}
+	h, l, c := sliceOHLC(window[:end], end-1)
+	atr14 := wilderATR(h, l, c, 14)
+	if atr14 <= 0 {
+		return 0, false
+	}
+	_, orderBlocks := market.DetectStructureBreaks(window, atr14, entry, "")
+	best := 0.0
+	found := false
+	for _, ob := range orderBlocks {
+		if isLong && ob.Direction == "demand" && ob.High < entry {
+			if !found || ob.High > best {
+				best, found = ob.High, true
+			}
+		}
+		if !isLong && ob.Direction == "supply" && ob.Low > entry {
+			if !found || ob.Low < best {
+				best, found = ob.Low, true
+			}
+		}
+	}
+	return best, found
 }
 
 func rangeStructuralSLPrice(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int, atr float64, isLong bool) (float64, bool) {

@@ -248,6 +248,12 @@ type ProtectionParams struct {
 	// ignores (time-stop, max-hold, and a heuristic AI/discretionary exit). Off
 	// by default so existing sweeps are unchanged; enabled to raise fidelity.
 	CloseProxy CloseProxyParams
+
+	// RangeSLPreferProven mirrors live StructuralSLConfig.PreferProvenLevels: when
+	// true the structural boundary prefers an order-block edge on the protective side
+	// of entry over the raw fractal swing pivot, but only when it does not widen the
+	// stop past the nearest pivot. Off = fractal-only (baseline), for A/B comparison.
+	RangeSLPreferProven bool
 }
 
 // CloseProxyParams approximates live closes that are NOT fixed price levels.
