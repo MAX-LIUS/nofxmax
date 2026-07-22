@@ -33,10 +33,33 @@ Anchored VWAP、K线FVG、Equal H/L流动性池、反应强度+OI变化。
   types.go(FairValueGaps/LiquidityPools) + formatFVGAndLiquidity()(仅显示未回补FVG+最近3个池).
   primaryATR14 从 timeframeData[primaryTimeframe].ATR14 取.
 
-## Phase 1 完成 (4新检测器全部纯证据接入, 未碰gate)
-仍缺(专家Phase1剩余,但部分已被现有zone覆盖): BOS/CHOCH+回踩区, 供需区(order block).
-range顶/底/中轴已由zone近似; 多TF swing/测试次数已有.
-- [ ] Phase2: zone状态机 + 5角色 + 反应强度/OI
+## Phase 1 完成 ✅ (6新检测器全部纯证据接入, 未碰gate)
+提交: ffedb4c(VP/AVWAP/周期位/FVG/流动性池) + d12f789(BOS/CHoCH+order block).
+- market/bos_choch.go: DetectStructureBreaks(klines,atr14,curPrice,tf)->([]StructureBreak,[]OrderBlock).
+  按时间序扫swing pivot; 首个决定性收盘破位=break; 顺势=BOS 逆势=CHoCH; 冲量前最后反向K=order block;
+  回踩/mitigation跟踪; dedup+recency cap. 常量 bosMinMoveATR=0.5 bosRetestBandF=0.25.
+- StructureBreak{Type,Direction,BreakLevel,BarsAgo,RetestLow/High,Retested,SizeATR}
+- OrderBlock{Low,High,Mid,Direction(demand/supply),BarsAgo,Mitigated,SizeATR}
+- types.go: Data + TimeframeSeriesData 均加 StructureBreaks/OrderBlocks.
+- data.go: per-TF(~261) + primary(~457) 两处接入.
+- formatter_structural.go: formatStructureBreaks() 双语, **bold**头 matching siblings, formatAIFloat价格.
+- range顶/底/中轴已由zone近似; 多TF swing/测试次数已有.
+- 提交 26af75f: roundSig 回踩区取整(去float噪声). 已上线验证(PID 1698880, 决策21699起7板块全渲染).
+## Phase 2 核心完成 ✅ (状态机+角色+反应强度, 纯证据未碰gate)
+提交: 8ad3000(初版) + 0cc0806(修all-flipped bug).
+- market/zone_state.go: AnnotateZoneLifecycle(zones,klines,atr14,curPrice).
+  scanZoneInteractions只做touch事件(不做整史break扫描—那会把几乎所有位判flipped).
+  flip状态读 z.Flipped(ApplyFlipLogic已按近3根设,recency正确).
+  状态: fresh/first_test/reacted/retested/weakened/invalid(+flipped来自上游). broken常量保留未用.
+  角色: reversal/continuation/acceptance/acceleration_boundary/liquidity_target.
+  反应强度 measureReaction: 测试后10根内离场最大幅度/ATR. staleBars40+dist4ATR->invalid.
+  常量 reactionStrongATR=1.5 reactionWeakATR=0.5 reactionLookahead=10.
+- StructuralZone 加 State/Role/TestCount/MaxReactionATR/AvgReactionATR.
+- data.go per-TF: ApplyFlipLogic 后接 AnnotateZoneLifecycle. 主zone经collectAllZones继承.
+- formatter formatZoneRow(z,atr,cur,zh) 双语 state/role/reaction; translateZoneState/Role.
+- 上线验证(PID 1704323, 决策21709): 分布健康 reacted/reversal 27, flipped/continuation 10, retested/acceptance 3, invalid/continuation 3.
+- 仍缺(Phase2): 每根OI序列对齐zone(OI-at-level) — 需OI历史fetch+cache, API成本, 暂缓.
+- [ ] Phase2剩余: OI-at-level(需per-bar OI序列)
 - [ ] Phase3: 门禁哲学重构(硬门→信心加分,仅失效位保留硬门) — 风险最高单独做
 - [ ] 后期: 图表显示、止损、选币过滤强化
 
