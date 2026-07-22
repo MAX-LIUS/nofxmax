@@ -71,9 +71,27 @@ regime_cross_validation_failed / protection_policy_rejected / fake_retest_trap.
   fake_retest_trap/protection_policy_rejected 永远保持硬门(真失效/陷阱).
   trader/entry_gate.go: Enforced=!softFit; 惩罚20已注册; 3测试(默认关/显式真/硬vs软语义).
 - 已上线(PID 1707471), 默认关闭=零行为变化, 仅落地机制.
-- [ ] Phase3下一步: 灰度对单个trader开启 SoftRegimeStructureFit 观察; 评估其余软化候选(range_middle等).
+## Phase 3 灰度 (2026-07-22): claude trader 已开启 SoftRegimeStructureFit
+- claude strategy_id=0d1c8446-26c7-40d3-9cc9-ba531b3facb6. DB strategies.config JSON
+  entry_structure.entry_gate.soft_regime_structure_fit=true. 备份于 .backups/claude_strategy_config_*.json.
+- 其余 trader(GPT/Claude-R/BN) 仍硬门. 重启生效 PID 1709302.
+- 观察点: claude 后续决策 gate 出现 regime_structure_mismatch 且 soft=true 时不阻断只扣分(20).
+- 回滚: 恢复备份 config 或删该 key, 重启.
+- [ ] Phase3下一步: 观察claude灰度效果; 评估其余软化候选(range_middle等).
+
+## 并行工作 (用户批准 2026-07-22 "可以同时推进其余工作")
+- [x] 选币过滤强化: 结构位质量分(0-100 A/B/C/D)已上线. 提交 fa6709d/6e4e422/03ca538.
+  - CalculateStructuralQuality: zone.30/reaction.25/clarity.20/profile.15/confluence.10, 邻近加权.
+  - 评级边界重校准(预筛候选群): A>=80/B>=65/C>=50 (原 75/55/35 全A无区分度).
+  - 已上线 PID 1717236, 实盘分布健康: 16 A / 11 B, 分值 73-92 分散.
+- [~] 结构位优化止损: opt-in PreferProvenLevels 已提交 90fbe53 (默认关, 休眠待回测).
+  - computeStructuralBoundary 原锚定裸 fractal 摆动枢轴. 新增: 开启后优先锚定
+    entry保护侧的订单块边缘(多单demand OB High/空单supply OB Low), 仅当不比最近枢轴更宽时采用.
+  - nearestProvenBoundary helper + 3测试(Long/NoBlockOnSide/TooFewBars). store/trader全测试通过.
+  - Mitigation 不作否决: 被测试且守住的块是更强支撑, 非更弱. 侧向检查+不放宽保证安全.
+  - [ ] 下一步: 回测验证(trader/backtest 有 trail_sweep/confirm_timing 工具), 通过后择一 trader 灰度开启.
+- [ ] 图表层展示新结构数据(VP/AVWAP/BOS/供需区/zone状态) — 前端 web/src/components/charts (React/TS 编译), 单独较大工程.
 - [ ] Phase3: 门禁哲学重构(硬门→信心加分,仅失效位保留硬门) — 风险最高单独做
-- [ ] 后期: 图表显示、止损、选币过滤强化
 
 ## 注意
 - go 在 /usr/local/go/bin (PATH需export). `go build ./...` 会超时,按包 build ./market/ ./kernel/.
