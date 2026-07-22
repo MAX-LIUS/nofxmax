@@ -32,9 +32,10 @@ type Data struct {
 	PeriodLevels       *PeriodLevels     `json:"period_levels,omitempty"`
 	FairValueGaps      []FairValueGap    `json:"fair_value_gaps,omitempty"`
 	LiquidityPools     []LiquidityPool   `json:"liquidity_pools,omitempty"`
-	StructureBreaks    []StructureBreak  `json:"structure_breaks,omitempty"`
-	OrderBlocks        []OrderBlock      `json:"order_blocks,omitempty"`
-	QuantContext       *QuantContext     `json:"quant_context,omitempty"`
+	StructureBreaks    []StructureBreak   `json:"structure_breaks,omitempty"`
+	OrderBlocks        []OrderBlock       `json:"order_blocks,omitempty"`
+	StructuralQuality  *StructuralQuality `json:"structural_quality,omitempty"`
+	QuantContext       *QuantContext      `json:"quant_context,omitempty"`
 	FundingRateHistory []float64         // last 8 funding rates (newest first)
 	OIHistory1h        float64           // OI value from 1h ago
 	OIHistory4h        float64           // OI value from 4h ago

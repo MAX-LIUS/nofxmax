@@ -44,6 +44,10 @@ func buildFullStructureData() *market.Data {
 			{Low: 98600, High: 99100, Mid: 98850, Direction: "demand", BarsAgo: 22, Mitigated: false, SizeATR: 2.5},
 			{Low: 101200, High: 101700, Mid: 101450, Direction: "supply", BarsAgo: 6, Mitigated: true, SizeATR: 1.8},
 		},
+		StructuralQuality: &market.StructuralQuality{
+			Score: 78, Grade: "A",
+			Reasons: []string{"clean nearby S/R zone (high grade/confidence)", "clear bullish structure (aligned BOS)"},
+		},
 		TimeframeData: map[string]*market.TimeframeSeriesData{
 			"1h": {Timeframe: "1h", ATR14: 900},
 		},
@@ -62,6 +66,7 @@ func TestStructureRender_AllSectionsPresent(t *testing.T) {
 		"结构突破", "CHOCH", "BOS", "回踩区",
 		"供需区", "需求", "供给",
 		"强反应", "反转位", "已翻转", "延续位",
+		"结构质量", "选币证据",
 	}
 	for _, s := range must {
 		if !strings.Contains(out, s) {

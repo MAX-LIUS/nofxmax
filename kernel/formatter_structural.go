@@ -322,6 +322,10 @@ func formatStructuralZones(mdata *market.Data, zh bool) string {
 			formatAIFloat(currentPrice), formatAIFloat(atr14), atrPct))
 	}
 
+	// Structural-quality headline: aggregate 0-100 signal to help prioritize this
+	// symbol vs other candidates. Evidence for coin selection, not a hard filter.
+	sb.WriteString(formatStructuralQuality(mdata.StructuralQuality, zh))
+
 	// Resistance zones
 	if len(resistance) > 0 {
 		if zh {
@@ -885,6 +889,29 @@ func formatEvaluatedLevelExtra(l market.EvaluatedLevel) string {
 		return ""
 	}
 	return " " + strings.Join(parts, " ")
+}
+
+// formatStructuralQuality renders the aggregate structural-quality headline.
+// Empty string when no score is available.
+func formatStructuralQuality(sq *market.StructuralQuality, zh bool) string {
+	if sq == nil {
+		return ""
+	}
+	reasons := strings.Join(sq.Reasons, "; ")
+	if zh {
+		line := fmt.Sprintf("- 结构质量: %.0f/100 (%s级", sq.Score, sq.Grade)
+		if reasons != "" {
+			line += " — " + reasons
+		}
+		line += ") [选币证据, 非硬性过滤]\n\n"
+		return line
+	}
+	line := fmt.Sprintf("- Structural Quality: %.0f/100 (grade %s", sq.Score, sq.Grade)
+	if reasons != "" {
+		line += " — " + reasons
+	}
+	line += ") [screening evidence, not a hard filter]\n\n"
+	return line
 }
 
 // extractPrimaryATR14 gets ATR14 from the best available timeframe in market data

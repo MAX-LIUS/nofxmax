@@ -462,6 +462,10 @@ func GetWithTimeframesExchange(symbol string, timeframes []string, primaryTimefr
 	allZones := collectAllZones(timeframeData, currentPrice)
 	data.StructuralZones = allZones
 
+	// Aggregate structural-quality signal (evidence for candidate prioritization
+	// / coin screening). Computed last so all structure fields are populated.
+	data.StructuralQuality = CalculateStructuralQuality(data)
+
 	return data, nil
 }
 
