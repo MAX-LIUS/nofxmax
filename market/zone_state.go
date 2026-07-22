@@ -10,7 +10,7 @@ const (
 	ZoneStateReacted   = "reacted"    // a test produced a strong (>= threshold) reaction
 	ZoneStateRetested  = "retested"   // held through 2+ tests without breaking
 	ZoneStateWeakened  = "weakened"   // multiple tests with fading reaction (being absorbed)
-	ZoneStateBroken    = "broken"     // price closed decisively through and has not reclaimed
+	ZoneStateBroken    = "broken"     // reserved: break+flip is handled upstream by ApplyFlipLogic (-> flipped)
 	ZoneStateFlipped   = "flipped"    // broken, then acted as opposite-role S/R on retest
 	ZoneStateInvalid   = "invalid"    // broken long ago and price left the area (stale)
 )
@@ -50,7 +50,7 @@ func AnnotateZoneLifecycle(zones []StructuralZone, klines []Kline, atr14, curren
 	n := len(klines)
 	for i := range zones {
 		z := &zones[i]
-		events, breakIdx, reclaimed := scanZoneInteractions(*z, klines, atr14)
+		events := scanZoneInteractions(*z, klines, atr14)
 
 		// reaction metrics
 		var maxReact, sumReact float64
@@ -66,19 +66,27 @@ func AnnotateZoneLifecycle(zones []StructuralZone, klines []Kline, atr14, curren
 			z.AvgReactionATR = roundSig(sumReact/float64(len(events)), 4)
 		}
 
-		z.State = classifyZoneState(*z, events, breakIdx, reclaimed, klines, atr14, currentPrice, n)
-		z.Role = classifyZoneRole(*z, events)
+		// bars since the last test ended (for staleness classification)
+		lastTouchBars := -1
+		if len(events) > 0 {
+			lastTouchBars = n - 1 - events[len(events)-1].endIdx
+		}
+
+		z.State = classifyZoneState(*z, events, lastTouchBars, atr14, currentPrice)
+		z.Role = classifyZoneRole(*z)
 	}
 	return zones
 }
 
-// scanZoneInteractions replays klines and returns test events, the index of a
-// decisive break (or -1), and whether price reclaimed the zone after a break.
-func scanZoneInteractions(z StructuralZone, klines []Kline, atr14 float64) ([]testEvent, int, bool) {
+// scanZoneInteractions replays klines and returns the test events (contiguous
+// touch runs) with their post-test reaction magnitudes. Break/flip detection is
+// intentionally NOT done here — ApplyFlipLogic already sets z.Flipped from the
+// last few candles in a recency-correct way; a whole-history break scan would
+// mark almost every level as flipped (any zone price ever crossed) and destroy
+// the signal.
+func scanZoneInteractions(z StructuralZone, klines []Kline, atr14 float64) []testEvent {
 	n := len(klines)
 	var events []testEvent
-	breakIdx := -1
-	reclaimed := false
 
 	inTouch := false
 	touchStart := 0
@@ -100,35 +108,7 @@ func scanZoneInteractions(z StructuralZone, klines []Kline, atr14 float64) ([]te
 		ev.reactionATR = measureReaction(z, klines, n-1, atr14)
 		events = append(events, ev)
 	}
-
-	// decisive break: 2 consecutive closes beyond the far side
-	for i := 1; i < n; i++ {
-		if z.Type == "support" {
-			if klines[i-1].Close < z.Low && klines[i].Close < z.Low {
-				breakIdx = i
-				break
-			}
-		} else { // resistance
-			if klines[i-1].Close > z.High && klines[i].Close > z.High {
-				breakIdx = i
-				break
-			}
-		}
-	}
-	// reclaimed: after a break, a later close returns to the original side
-	if breakIdx >= 0 {
-		for i := breakIdx + 1; i < n; i++ {
-			if z.Type == "support" && klines[i].Close > z.High {
-				reclaimed = true
-				break
-			}
-			if z.Type == "resistance" && klines[i].Close < z.Low {
-				reclaimed = true
-				break
-			}
-		}
-	}
-	return events, breakIdx, reclaimed
+	return events
 }
 
 // measureReaction returns the max favorable move away from the zone in ATR over
@@ -154,18 +134,21 @@ func measureReaction(z StructuralZone, klines []Kline, endIdx int, atr14 float64
 	return best
 }
 
-// classifyZoneState maps interactions to a lifecycle state.
-func classifyZoneState(z StructuralZone, events []testEvent, breakIdx int, reclaimed bool, klines []Kline, atr14, currentPrice float64, n int) string {
-	if breakIdx >= 0 {
-		if reclaimed || z.Flipped {
-			return ZoneStateFlipped
-		}
-		barsSinceBreak := n - 1 - breakIdx
-		dist := math.Abs(currentPrice-z.MidPrice) / atr14
-		if barsSinceBreak >= staleBarsInvalid && dist >= staleDistInvalid {
+// classifyZoneState maps interactions to a lifecycle state. Flip status comes
+// from ApplyFlipLogic (z.Flipped, recency-correct); this function adds the
+// test/reaction dimension. A stale zone (tested long ago, price now far away)
+// is marked invalid so the AI can down-weight it.
+func classifyZoneState(z StructuralZone, events []testEvent, lastTouchBars int, atr14, currentPrice float64) string {
+	if z.Flipped {
+		return ZoneStateFlipped
+	}
+
+	// Stale: last test was long ago AND price has since travelled far. Only
+	// meaningful once the zone has actually been tested.
+	if len(events) > 0 && lastTouchBars >= staleBarsInvalid {
+		if math.Abs(currentPrice-z.MidPrice)/atr14 >= staleDistInvalid {
 			return ZoneStateInvalid
 		}
-		return ZoneStateBroken
 	}
 
 	switch len(events) {
@@ -177,9 +160,12 @@ func classifyZoneState(z StructuralZone, events []testEvent, breakIdx int, recla
 		}
 		return ZoneStateFirstTest
 	default:
-		// multiple tests, not broken. Weakening if reactions are fading.
+		// multiple tests: weakening if reactions are fading, else holding.
 		if reactionsFading(events) {
 			return ZoneStateWeakened
+		}
+		if z.MaxReactionATR >= reactionStrongATR {
+			return ZoneStateReacted
 		}
 		return ZoneStateRetested
 	}
@@ -208,11 +194,11 @@ func reactionsFading(events []testEvent) bool {
 }
 
 // classifyZoneRole infers the most likely behaviour from state and reactions.
-func classifyZoneRole(z StructuralZone, events []testEvent) string {
+func classifyZoneRole(z StructuralZone) string {
 	switch z.State {
 	case ZoneStateFlipped:
 		return ZoneRoleContinuation // flipped levels tend to support trend continuation
-	case ZoneStateBroken, ZoneStateInvalid:
+	case ZoneStateInvalid:
 		return ZoneRoleContinuation
 	case ZoneStateReacted, ZoneStateRetested:
 		if z.MaxReactionATR >= reactionStrongATR {

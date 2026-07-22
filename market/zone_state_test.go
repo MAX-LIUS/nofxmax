@@ -49,47 +49,43 @@ func TestAnnotate_Reacted(t *testing.T) {
 	}
 }
 
-// TestAnnotate_Broken: support decisively broken and price far away.
-func TestAnnotate_Broken(t *testing.T) {
+// TestAnnotate_Invalid: a support tested long ago, price now far away and never
+// returned -> stale/invalid so the AI down-weights it.
+func TestAnnotate_Invalid(t *testing.T) {
 	zones := []StructuralZone{
 		{Low: 98, High: 99, MidPrice: 98.5, Type: "support", ATRWidth: 0.5},
 	}
 	var ks []Kline
-	for i := 0; i < 5; i++ {
-		ks = append(ks, zbar(100, 101, 99.5, 100))
+	// one early test of the zone
+	ks = append(ks, zbar(100, 100, 98.5, 99))
+	// then price runs far above and stays there for many bars (> staleBarsInvalid)
+	for i := 0; i < 50; i++ {
+		p := 105.0 + float64(i)
+		ks = append(ks, zbar(p, p+1, p-1, p))
 	}
-	// break below and stay below (2 consecutive closes < 98)
-	ks = append(ks, zbar(99, 99, 96, 97))
-	ks = append(ks, zbar(97, 97.5, 95, 96))
-	for i := 0; i < 5; i++ {
-		ks = append(ks, zbar(96, 96.5, 95, 95.5))
-	}
-	out := AnnotateZoneLifecycle(zones, ks, 1.0, 95.5)
-	if out[0].State != ZoneStateBroken {
-		t.Errorf("expected broken, got %s", out[0].State)
+	last := ks[len(ks)-1].Close
+	out := AnnotateZoneLifecycle(zones, ks, 1.0, last)
+	if out[0].State != ZoneStateInvalid {
+		t.Errorf("expected invalid, got %s (lastPrice=%.0f)", out[0].State, last)
 	}
 }
 
-// TestAnnotate_Flipped: support broken then reclaimed -> flipped.
+// TestAnnotate_Flipped: z.Flipped set by ApplyFlipLogic upstream -> flipped
+// state regardless of test history (flip status is authoritative).
 func TestAnnotate_Flipped(t *testing.T) {
 	zones := []StructuralZone{
-		{Low: 98, High: 99, MidPrice: 98.5, Type: "support", ATRWidth: 0.5},
+		{Low: 98, High: 99, MidPrice: 98.5, Type: "support", ATRWidth: 0.5, Flipped: true, FlipCount: 1},
 	}
 	var ks []Kline
-	for i := 0; i < 5; i++ {
-		ks = append(ks, zbar(100, 101, 99.5, 100))
-	}
-	// break below
-	ks = append(ks, zbar(99, 99, 96, 97))
-	ks = append(ks, zbar(97, 97.5, 95, 96))
-	// reclaim above zone high 99
-	ks = append(ks, zbar(97, 100, 97, 100))
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 20; i++ {
 		ks = append(ks, zbar(101, 102, 100, 101))
 	}
 	out := AnnotateZoneLifecycle(zones, ks, 1.0, 101)
 	if out[0].State != ZoneStateFlipped {
 		t.Errorf("expected flipped, got %s", out[0].State)
+	}
+	if out[0].Role != ZoneRoleContinuation {
+		t.Errorf("expected continuation role for flipped, got %s", out[0].Role)
 	}
 }
 
