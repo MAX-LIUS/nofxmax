@@ -41,6 +41,11 @@ type ProtectionRow = {
   statusCls: string
   detail?: string
   isCurrentPrice?: boolean
+  // exchangeFailed marks a dynamic tier whose native exchange trailing order
+  // failed to place — the LOCAL managed-drawdown monitor is protecting instead.
+  // Drives a reverse-colour (red-filled) tile so it can't be mistaken for a
+  // resting exchange order.
+  exchangeFailed?: boolean
 }
 
 // FAMILY_CLS maps a family to its Tailwind text+border classes. Kept in one place
@@ -69,6 +74,7 @@ interface ScheduledTier {
   stage_name: string
   reason_anchor: string
   execution_mode: string
+  exchange_order_failed?: boolean
 }
 
 function normalizeSide(side?: string): string {
@@ -210,7 +216,13 @@ function buildProtectionRows(
 
     let status: string
     let statusCls: string
-    if (tier.is_triggered) {
+    if (tier.exchange_order_failed) {
+      // Exchange trailing order failed to place; the LOCAL managed-drawdown
+      // monitor is enforcing the same peak+drawdown rule in-process. Reverse-
+      // colour warning so this is never mistaken for a resting exchange order.
+      status = language === 'zh' ? '交易所挂单失败·本地保护' : 'Exch. Failed · Local'
+      statusCls = 'text-white bg-nofx-red px-1 rounded'
+    } else if (tier.is_triggered) {
       status = language === 'zh' ? '已触发' : 'Triggered'
       statusCls = 'text-nofx-red'
     } else if (isActivated) {
@@ -228,7 +240,12 @@ function buildProtectionRows(
     // show the configured activation/callback distances (callback % == price
     // retracement % under the unified trailing semantics).
     let detail: string
-    if (isActivated && peakPnlPct > 0) {
+    if (tier.exchange_order_failed) {
+      detail =
+        language === 'zh'
+          ? '交易所挂单失败，本地监控保护中（无交易所单）'
+          : 'exchange order failed — local monitor active (no exchange order)'
+    } else if (isActivated && peakPnlPct > 0) {
       detail = `peak${formatPct(peakPnlPct, 1)} cb${(callbackRate * 100).toFixed(1)}%`
     } else {
       detail = `min${tier.min_profit_pct.toFixed(1)}% dd${tier.max_drawdown_pct.toFixed(1)}%`
@@ -246,6 +263,7 @@ function buildProtectionRows(
       status,
       statusCls,
       detail,
+      exchangeFailed: tier.exchange_order_failed,
     })
   }
 
@@ -741,17 +759,29 @@ const PositionCard = memo(function PositionCard({
                     ? 'bg-red-400'
                     : 'bg-white/30'
 
+              // Reverse-colour warning tile: the native exchange trailing order
+              // failed to place and the LOCAL monitor is protecting instead. A
+              // red-filled border makes it impossible to mistake for a resting
+              // exchange order (which would silently erode profit).
+              const tileCls = row.exchangeFailed
+                ? 'flex flex-col px-2 py-1 rounded border border-nofx-red bg-nofx-red/20 hover:bg-nofx-red/30 shrink-0 min-w-[78px] animate-pulse'
+                : `flex flex-col px-2 py-1 rounded border bg-black/20 hover:bg-white/5 shrink-0 min-w-[78px] ${zoneCls}`
+
               return (
                 <div
                   key={`row-${ri}`}
-                  className={`flex flex-col px-2 py-1 rounded border bg-black/20 hover:bg-white/5 shrink-0 min-w-[78px] ${zoneCls}`}
+                  className={tileCls}
                   title={row.detail || ''}
                 >
                   <div className="flex items-center justify-between gap-1">
                     <span
-                      className={`text-[10px] font-bold ${zoneCls.split(' ')[0]}`}
+                      className={`text-[10px] font-bold ${row.exchangeFailed ? 'text-nofx-red' : zoneCls.split(' ')[0]}`}
                     >
-                      {row.zone}
+                      {row.exchangeFailed
+                        ? language === 'zh'
+                          ? '⚠ 本地'
+                          : '⚠ Local'
+                        : row.zone}
                     </span>
                     <span
                       className={`w-1.5 h-1.5 rounded-full ${statusDot}`}

@@ -1775,6 +1775,37 @@ func (at *AutoTrader) applyManagedDrawdownFallback(symbol, side string, entryPri
 	return true
 }
 
+// applyExchangeFailedLocalMonitor is the bottom-line fallback when a native
+// trailing order could NOT be placed correctly on the exchange — either the
+// placement call failed, or the read-back showed the exchange dropped/misplaced
+// the activation price and the adapter cancelled the mis-registered order.
+//
+// Product decision (per user): rather than leaving an exchange order that would
+// trigger at entry instead of the peak (eroding profit), the adapter places
+// NOTHING on the exchange. This helper then arms the in-process managed-drawdown
+// monitor, which enforces the exact same peak+drawdown rule locally with no
+// exchange order (ExchangeOrderID=""). It also upgrades the protection state to
+// the "exchange_failed" variant so the protection panel can surface a
+// reverse-colour warning: local monitor is active, but the exchange order failed.
+func (at *AutoTrader) applyExchangeFailedLocalMonitor(symbol, side string, entryPrice float64, rule store.DrawdownTakeProfitRule, activationPrice, callbackRatio float64) bool {
+	if !at.applyManagedDrawdownFallback(symbol, side, entryPrice, rule, activationPrice, callbackRatio) {
+		logger.Warnf("❌ Exchange trailing placement failed AND local managed-drawdown monitor could not arm: %s %s — position may be UNPROTECTED", symbol, side)
+		return false
+	}
+	// Upgrade the state from the normal managed-drawdown-armed value so the panel
+	// can distinguish a deliberate managed-drawdown arm from an exchange-arm
+	// failure that dropped to local monitoring.
+	switch at.getProtectionState(symbol, side) {
+	case "managed_drawdown_armed":
+		at.setProtectionState(symbol, side, "managed_drawdown_exchange_failed_armed")
+	case "managed_partial_drawdown_armed":
+		at.setProtectionState(symbol, side, "managed_partial_drawdown_exchange_failed_armed")
+	}
+	logger.Warnf("⚠️ Exchange trailing placement FAILED — LOCAL managed-drawdown monitor ACTIVE (panel warning set): %s %s | activation=%.6f callbackRatio=%.6f close=%.1f%%",
+		symbol, side, activationPrice, callbackRatio, rule.CloseRatioPct)
+	return true
+}
+
 func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPrice, markPrice float64, rule store.DrawdownTakeProfitRule) bool {
 	if !at.supportsNativeTrailingStop() {
 		return false
@@ -1967,7 +1998,13 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 						at.cancelImmediateTrailing(symbol, side)
 						return true
 					} else {
-						logger.Infof("❌ Native partial trailing drawdown apply failed (%s %s, binance): %v", symbol, side, err)
+						// Bottom-line fallback: the adapter refuses to leave a
+						// mis-registered (immediate-triggering) exchange order, so a
+						// failure here means NO exchange trailing order exists. Drop to
+						// the LOCAL managed-drawdown monitor and flag the panel that the
+						// exchange order failed, rather than leaving profit unprotected.
+						logger.Warnf("❌ Native partial trailing drawdown apply failed (%s %s, binance): %v — falling back to LOCAL monitor", symbol, side, err)
+						return at.applyExchangeFailedLocalMonitor(symbol, side, entryPrice, rule, activationPrice, priceBasedCallbackRatio)
 					}
 				}
 			case "bitget":
@@ -2155,8 +2192,15 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 			// Phase 1a: pass decimal ratio directly (adapter converts internally)
 			placedOrderID, err = tagged.SetTrailingStopLossTaggedWithID(symbol, positionSide, activationPrice, priceBasedCallbackRatio, 0, "native_trailing")
 			if err != nil {
-				logger.Infof("❌ Native trailing drawdown apply failed (%s %s): %v", symbol, side, err)
-				return false
+				// Product decision: the adapter refuses to leave a mis-registered
+				// (immediate-triggering) exchange order — it returns an error and
+				// places NOTHING rather than an order without the peak activation.
+				// So a failure here means there is NO exchange trailing order. Drop
+				// to the LOCAL managed-drawdown monitor (which enforces the same
+				// peak+drawdown rule in-process) and flag the panel that the exchange
+				// order failed, so profit is never left unprotected.
+				logger.Warnf("❌ Native trailing exchange placement failed (%s %s): %v — falling back to LOCAL monitor", symbol, side, err)
+				return at.applyExchangeFailedLocalMonitor(symbol, side, entryPrice, rule, activationPrice, priceBasedCallbackRatio)
 			}
 		} else {
 			return false

@@ -95,7 +95,7 @@ func (at *AutoTrader) reconcilePositionProtections() {
 
 		if result.ExchangeVerified {
 			currentState := at.getProtectionState(symbol, side)
-			if currentState == "native_trailing_armed" || currentState == "native_partial_trailing_armed" || currentState == "native_trailing_arming" || currentState == "native_partial_trailing_arming" || currentState == "managed_partial_drawdown_armed" {
+			if currentState == "native_trailing_armed" || currentState == "native_partial_trailing_armed" || currentState == "native_trailing_arming" || currentState == "native_partial_trailing_arming" || currentState == "managed_partial_drawdown_armed" || currentState == "managed_drawdown_exchange_failed_armed" || currentState == "managed_partial_drawdown_exchange_failed_armed" {
 				logger.Infof("✅ Protection reconciler: %s %s exchange protection verified (preserving dynamic state=%s)", symbol, side, currentState)
 			} else {
 				at.setProtectionState(symbol, side, "exchange_protection_verified")
@@ -506,7 +506,7 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 
 	if !result.ExchangeVerified && hasMissingMandatoryLadderStops(openOrders, positionSide, plan) {
 		result.Summary = "mandatory ladder SL missing; dynamic protection cannot satisfy static ladder ownership"
-	} else if !result.ExchangeVerified && (at.getBreakEvenState(symbol, side) == "armed" || at.getProtectionState(symbol, side) == "native_trailing_armed" || at.getProtectionState(symbol, side) == "native_partial_trailing_armed" || at.getProtectionState(symbol, side) == "native_trailing_arming" || at.getProtectionState(symbol, side) == "native_partial_trailing_arming" || at.getProtectionState(symbol, side) == "managed_drawdown_armed") {
+	} else if !result.ExchangeVerified && (at.getBreakEvenState(symbol, side) == "armed" || at.getProtectionState(symbol, side) == "native_trailing_armed" || at.getProtectionState(symbol, side) == "native_partial_trailing_armed" || at.getProtectionState(symbol, side) == "native_trailing_arming" || at.getProtectionState(symbol, side) == "native_partial_trailing_arming" || at.getProtectionState(symbol, side) == "managed_drawdown_armed" || at.getProtectionState(symbol, side) == "managed_drawdown_exchange_failed_armed" || at.getProtectionState(symbol, side) == "managed_partial_drawdown_exchange_failed_armed") {
 		result.Summary = "dynamic protection owner armed; exchange static ownership not fully verified"
 	}
 	return result, nil
@@ -1140,6 +1140,11 @@ func (at *AutoTrader) clearBreakEvenState(symbol, side string) {
 
 func (at *AutoTrader) getDrawdownExecutionMode(symbol, side string) string {
 	state := at.getProtectionState(symbol, side)
+	if state == "managed_drawdown_exchange_failed_armed" || state == "managed_partial_drawdown_exchange_failed_armed" {
+		// Local monitor is active but the exchange trailing order failed to place;
+		// the panel renders this as a reverse-colour warning.
+		return "managed_drawdown_exchange_failed"
+	}
 	if state == "managed_partial_drawdown_armed" {
 		return "managed_partial_drawdown"
 	}

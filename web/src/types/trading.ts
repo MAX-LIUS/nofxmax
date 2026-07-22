@@ -73,6 +73,7 @@ export interface ProtectionRuntimeTier {
   planned_quantity: number
   source: string
   execution_mode: string
+  exchange_order_failed?: boolean
   drawdown_stage?: string
   runner_mode_active?: boolean
   runner_keep_pct?: number

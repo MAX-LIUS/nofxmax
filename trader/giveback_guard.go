@@ -468,6 +468,7 @@ func (at *AutoTrader) positionHasArmedProtection(symbol, side string, entryPrice
 	state := at.getProtectionState(symbol, side)
 	if isNativeTrailingProtectionState(state) ||
 		state == "managed_drawdown_armed" || state == "managed_partial_drawdown_armed" ||
+		state == "managed_drawdown_exchange_failed_armed" || state == "managed_partial_drawdown_exchange_failed_armed" ||
 		state == "exchange_protection_verified" {
 		return true
 	}
