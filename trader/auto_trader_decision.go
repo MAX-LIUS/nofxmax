@@ -1163,7 +1163,7 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 			source := executionMode
 			if executionMode == "native_partial_trailing" || executionMode == "native_trailing_full" {
 				source = "native"
-			} else if executionMode == "managed_partial_drawdown" {
+			} else if executionMode == "managed_partial_drawdown" || executionMode == "managed_drawdown_exchange_failed" {
 				source = "managed"
 			}
 			plannedActivationPrice := 0.0
@@ -1253,6 +1253,12 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 				"planned_quantity":            quantity * rule.CloseRatioPct / 100.0,
 				"source":                      source,
 				"execution_mode":              executionMode,
+				// exchange_order_failed: the native trailing order could not be placed
+				// (or was cancelled after read-back divergence) and protection dropped
+				// to the LOCAL managed-drawdown monitor. Drives the panel's
+				// reverse-colour warning so profit is never silently left on a
+				// mis-registered (immediate-triggering) exchange order.
+				"exchange_order_failed": executionMode == "managed_drawdown_exchange_failed",
 				// is_armed: a trailing order for this tier exists on the exchange
 				// (or a managed tier is tracking) — i.e. protection is in place but
 				// not necessarily activated. is_activated: the peak profit actually
