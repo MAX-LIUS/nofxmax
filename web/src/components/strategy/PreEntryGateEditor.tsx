@@ -1,5 +1,11 @@
 import { type ReactNode } from 'react'
-import { Filter, Shield, Radio, Layers } from 'lucide-react'
+import {
+  Filter,
+  Layers,
+  Target,
+  Activity,
+  SlidersHorizontal,
+} from 'lucide-react'
 import type {
   RegimeFilterConfig,
   EntryStructureConfig,
@@ -20,11 +26,6 @@ const inputStyle = {
   background: '#1E2329',
   border: '1px solid #2B3139',
   color: '#EAECEF',
-}
-
-const sectionStyle = {
-  background: '#0B0E11',
-  border: '1px solid #2B3139',
 }
 
 const regimeOptions = [
@@ -152,6 +153,81 @@ function EntryGateInput({
   )
 }
 
+// Stage — a top-level numbered category (①..⑤). Gives every stage a consistent
+// header (icon + title) and a subtle accent border so the 5 stages read as
+// distinct blocks. Visual only; contains whatever gate cards belong to it.
+function Stage({
+  icon,
+  title,
+  accent,
+  children,
+}: {
+  icon: ReactNode
+  title: string
+  accent: string
+  children: ReactNode
+}) {
+  return (
+    <div
+      className="p-3 rounded-lg space-y-3"
+      style={{ background: '#0B0E11', border: `1px solid ${accent}44` }}
+    >
+      <div className="flex items-center gap-2">
+        <span style={{ color: accent }}>{icon}</span>
+        <h4 className="text-sm font-semibold" style={{ color: '#EAECEF' }}>
+          {title}
+        </h4>
+      </div>
+      {children}
+    </div>
+  )
+}
+
+// SubCard — a labelled sub-group inside a Stage. Bundles a title + one-line
+// beginner description with its own controls so related params stay together.
+// `tag` shows whether the group is a hard gate or a score penalty.
+function SubCard({
+  title,
+  description,
+  tag,
+  children,
+}: {
+  title: string
+  description?: string
+  tag?: { text: string; color: string }
+  children: ReactNode
+}) {
+  return (
+    <div
+      className="p-3 rounded-lg space-y-2"
+      style={{ background: '#11161C', border: '1px solid #2B3139' }}
+    >
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-sm font-medium" style={{ color: '#EAECEF' }}>
+          {title}
+        </span>
+        {tag && (
+          <span
+            className="px-1.5 py-0.5 rounded text-[10px] font-medium"
+            style={{ background: `${tag.color}22`, color: tag.color }}
+          >
+            {tag.text}
+          </span>
+        )}
+      </div>
+      {description && (
+        <div
+          className="text-[11px] leading-relaxed"
+          style={{ color: '#848E9C' }}
+        >
+          {description}
+        </div>
+      )}
+      {children}
+    </div>
+  )
+}
+
 export function PreEntryGateEditor({
   config,
   onChange,
@@ -159,6 +235,15 @@ export function PreEntryGateEditor({
   language,
 }: PreEntryGateEditorProps) {
   const isZh = language === 'zh'
+  // Shared hard-gate / penalty tags for SubCard headers.
+  const tagHard = {
+    text: isZh ? '硬门·拒单' : 'hard gate',
+    color: '#F6465D',
+  }
+  const tagPenalty = {
+    text: isZh ? '降分·缩仓' : 'penalty',
+    color: '#F0B90B',
+  }
 
   const update = <K extends keyof RegimeFilterConfig>(
     key: K,
@@ -192,7 +277,7 @@ export function PreEntryGateEditor({
 
   return (
     <div className="space-y-4">
-      {/* Header + Gate Flow */}
+      {/* Header + how the gate works */}
       <div
         className="p-3 rounded-lg"
         style={{ background: '#0B0E11', border: '1px solid #38BDF833' }}
@@ -216,6 +301,12 @@ export function PreEntryGateEditor({
           />
         </div>
         <div
+          className="text-[11px] leading-relaxed mb-3"
+          style={{ color: '#848E9C' }}
+        >
+          {ts(preEntryGate.howGateWorks, language)}
+        </div>
+        <div
           className="p-3 rounded-lg font-mono text-xs"
           style={{
             background: '#11161C',
@@ -230,114 +321,120 @@ export function PreEntryGateEditor({
         </div>
       </div>
 
-      {/* Section 1: Market State Gate */}
-      <div className="p-3 rounded-lg space-y-2" style={sectionStyle}>
-        <div className="flex items-center gap-2">
-          <Filter className="w-4 h-4" style={{ color: '#38BDF8' }} />
-          <h4 className="text-sm font-medium" style={{ color: '#EAECEF' }}>
-            ① {ts(preEntryGate.marketStateGate, language)}
-          </h4>
-        </div>
-
-        {/* Allowed Regimes */}
-        <div>
-          <label className="block text-xs mb-2" style={{ color: '#848E9C' }}>
-            {ts(preEntryGate.allowedRegimes, language)}
-          </label>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-            {regimeOptions.map((option) => {
-              const active = (config.allowed_regimes || []).includes(
-                option.value
-              )
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => toggleRegime(option.value)}
+      {/* Stage ① Market Access */}
+      <Stage
+        icon={<Filter className="w-4 h-4" />}
+        title={ts(preEntryGate.stageMarketAccess, language)}
+        accent="#38BDF8"
+      >
+        {/* Market regime + funding + volatility */}
+        <SubCard
+          title={ts(preEntryGate.grpMarketState, language)}
+          description={ts(preEntryGate.grpMarketStateDesc, language)}
+          tag={tagHard}
+        >
+          <div>
+            <label className="block text-xs mb-2" style={{ color: '#848E9C' }}>
+              {ts(preEntryGate.allowedRegimes, language)}
+            </label>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              {regimeOptions.map((option) => {
+                const active = (config.allowed_regimes || []).includes(
+                  option.value
+                )
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => toggleRegime(option.value)}
+                    disabled={disabled}
+                    className="px-3 py-2 rounded text-sm border"
+                    style={{
+                      background: active ? '#1E3A5F' : '#11161C',
+                      borderColor: active ? '#38BDF8' : '#2B3139',
+                      color: active ? '#EAECEF' : '#848E9C',
+                    }}
+                  >
+                    {isZh ? option.zh : option.en}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <input
+                  type="checkbox"
+                  checked={config.block_high_funding}
+                  onChange={(e) =>
+                    update('block_high_funding', e.target.checked)
+                  }
                   disabled={disabled}
-                  className="px-3 py-2 rounded text-sm border"
-                  style={{
-                    background: active ? '#1E3A5F' : '#11161C',
-                    borderColor: active ? '#38BDF8' : '#2B3139',
-                    color: active ? '#EAECEF' : '#848E9C',
-                  }}
-                >
-                  {isZh ? option.zh : option.en}
-                </button>
-              )
-            })}
-          </div>
-        </div>
-
-        {/* Funding Rate */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div>
-            <div className="flex items-center gap-2 mb-1">
+                  className="h-4 w-4 accent-sky-500"
+                />
+                <label className="text-sm" style={{ color: '#EAECEF' }}>
+                  {ts(preEntryGate.blockHighFunding, language)}
+                </label>
+              </div>
               <input
-                type="checkbox"
-                checked={config.block_high_funding}
-                onChange={(e) => update('block_high_funding', e.target.checked)}
-                disabled={disabled}
-                className="h-4 w-4 accent-sky-500"
-              />
-              <label className="text-sm" style={{ color: '#EAECEF' }}>
-                {ts(preEntryGate.blockHighFunding, language)}
-              </label>
-            </div>
-            <input
-              type="number"
-              value={config.max_funding_rate_abs}
-              min={0}
-              step={0.001}
-              onChange={(e) =>
-                update('max_funding_rate_abs', parseFloat(e.target.value) || 0)
-              }
-              disabled={disabled || !config.block_high_funding}
-              className="w-full px-3 py-2 rounded"
-              style={inputStyle}
-            />
-            <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
-              {ts(preEntryGate.fundingRateUnit, language)}
-            </div>
-          </div>
-
-          <div>
-            <div className="flex items-center gap-2 mb-1">
-              <input
-                type="checkbox"
-                checked={config.block_high_volatility}
+                type="number"
+                value={config.max_funding_rate_abs}
+                min={0}
+                step={0.001}
                 onChange={(e) =>
-                  update('block_high_volatility', e.target.checked)
+                  update(
+                    'max_funding_rate_abs',
+                    parseFloat(e.target.value) || 0
+                  )
                 }
-                disabled={disabled}
-                className="h-4 w-4 accent-sky-500"
+                disabled={disabled || !config.block_high_funding}
+                className="w-full px-3 py-2 rounded"
+                style={inputStyle}
               />
-              <label className="text-sm" style={{ color: '#EAECEF' }}>
-                {ts(preEntryGate.blockHighVolatility, language)}
-              </label>
+              <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+                {ts(preEntryGate.fundingRateUnit, language)}
+              </div>
             </div>
-            <input
-              type="number"
-              value={config.max_atr14_pct}
-              min={0}
-              step={0.1}
-              onChange={(e) =>
-                update('max_atr14_pct', parseFloat(e.target.value) || 0)
-              }
-              disabled={disabled || !config.block_high_volatility}
-              className="w-full px-3 py-2 rounded"
-              style={inputStyle}
-            />
-            <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
-              {ts(preEntryGate.atrUnit, language)}
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <input
+                  type="checkbox"
+                  checked={config.block_high_volatility}
+                  onChange={(e) =>
+                    update('block_high_volatility', e.target.checked)
+                  }
+                  disabled={disabled}
+                  className="h-4 w-4 accent-sky-500"
+                />
+                <label className="text-sm" style={{ color: '#EAECEF' }}>
+                  {ts(preEntryGate.blockHighVolatility, language)}
+                </label>
+              </div>
+              <input
+                type="number"
+                value={config.max_atr14_pct}
+                min={0}
+                step={0.1}
+                onChange={(e) =>
+                  update('max_atr14_pct', parseFloat(e.target.value) || 0)
+                }
+                disabled={disabled || !config.block_high_volatility}
+                className="w-full px-3 py-2 rounded"
+                style={inputStyle}
+              />
+              <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+                {ts(preEntryGate.atrUnit, language)}
+              </div>
             </div>
           </div>
-        </div>
+        </SubCard>
 
-        {/* Trend Alignment */}
-        <div
-          className="space-y-2 rounded-lg p-3"
-          style={{ background: '#11161C', border: '1px solid #2B3139' }}
+        {/* Trend alignment */}
+        <SubCard
+          title={ts(preEntryGate.grpTrendAlign, language)}
+          description={ts(preEntryGate.grpTrendAlignDesc, language)}
+          tag={tagHard}
         >
           <label
             className="flex items-center gap-2 text-sm"
@@ -453,200 +550,195 @@ export function PreEntryGateEditor({
                   : 'Only applies to setup_type=range_edge; price must be near a band/structure edge, momentum must not be extreme, and RR/structure/protection gates still apply.'}
               </div>
             )}
-        </div>
-      </div>
+        </SubCard>
 
-      {/* Section 1.5: Coin Momentum Gate */}
-      <div className="p-3 rounded-lg space-y-2" style={sectionStyle}>
-        <div className="flex items-center gap-2">
-          <Radio className="w-4 h-4" style={{ color: '#F59E0B' }} />
-          <h4 className="text-sm font-medium" style={{ color: '#EAECEF' }}>
-            {ts(preEntryGate.momentumGate, language)}
-          </h4>
-        </div>
-        <div className="text-[11px]" style={{ color: '#848E9C' }}>
-          {ts(preEntryGate.momentumGateDesc, language)}
-        </div>
-
-        <label
-          className="flex items-center gap-2 text-sm"
-          style={{ color: '#EAECEF' }}
+        {/* Coin momentum gate */}
+        <SubCard
+          title={ts(preEntryGate.momentumGate, language)}
+          description={ts(preEntryGate.momentumGateDesc, language)}
+          tag={tagHard}
         >
-          <input
-            type="checkbox"
-            checked={config.momentum_gate_enabled ?? false}
-            onChange={(e) => update('momentum_gate_enabled', e.target.checked)}
-            disabled={disabled}
-            className="h-4 w-4 accent-amber-500"
-          />
-          {ts(preEntryGate.enableMomentumGate, language)}
-        </label>
+          <label
+            className="flex items-center gap-2 text-sm"
+            style={{ color: '#EAECEF' }}
+          >
+            <input
+              type="checkbox"
+              checked={config.momentum_gate_enabled ?? false}
+              onChange={(e) =>
+                update('momentum_gate_enabled', e.target.checked)
+              }
+              disabled={disabled}
+              className="h-4 w-4 accent-amber-500"
+            />
+            {ts(preEntryGate.enableMomentumGate, language)}
+          </label>
+          {config.momentum_gate_enabled && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label
+                  className="block text-xs mb-1"
+                  style={{ color: '#848E9C' }}
+                >
+                  {ts(preEntryGate.momentumStaleChg1h, language)}
+                </label>
+                <input
+                  type="number"
+                  value={config.momentum_stale_chg1h ?? 0.15}
+                  min={0}
+                  step={0.01}
+                  onChange={(e) =>
+                    update(
+                      'momentum_stale_chg1h',
+                      parseFloat(e.target.value) || 0
+                    )
+                  }
+                  disabled={disabled}
+                  className="w-full px-3 py-2 rounded"
+                  style={inputStyle}
+                />
+                <div className="text-[10px] mt-1" style={{ color: '#848E9C' }}>
+                  {ts(preEntryGate.momentumStaleDesc, language)}
+                </div>
+              </div>
+              <div>
+                <label
+                  className="block text-xs mb-1"
+                  style={{ color: '#848E9C' }}
+                >
+                  {ts(preEntryGate.momentumStaleChg4h, language)}
+                </label>
+                <input
+                  type="number"
+                  value={config.momentum_stale_chg4h ?? 0.4}
+                  min={0}
+                  step={0.1}
+                  onChange={(e) =>
+                    update(
+                      'momentum_stale_chg4h',
+                      parseFloat(e.target.value) || 0
+                    )
+                  }
+                  disabled={disabled}
+                  className="w-full px-3 py-2 rounded"
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <label
+                  className="block text-xs mb-1"
+                  style={{ color: '#848E9C' }}
+                >
+                  {ts(preEntryGate.momentumExhaustedChg4h, language)}
+                </label>
+                <input
+                  type="number"
+                  value={config.momentum_exhausted_chg4h ?? 4.5}
+                  min={0}
+                  step={0.5}
+                  onChange={(e) =>
+                    update(
+                      'momentum_exhausted_chg4h',
+                      parseFloat(e.target.value) || 0
+                    )
+                  }
+                  disabled={disabled}
+                  className="w-full px-3 py-2 rounded"
+                  style={inputStyle}
+                />
+                <div className="text-[10px] mt-1" style={{ color: '#848E9C' }}>
+                  {ts(preEntryGate.momentumExhaustedDesc, language)}
+                </div>
+              </div>
+              <div>
+                <label
+                  className="block text-xs mb-1"
+                  style={{ color: '#848E9C' }}
+                >
+                  {ts(preEntryGate.momentumCounterChg1h, language)}
+                </label>
+                <input
+                  type="number"
+                  value={config.momentum_counter_chg1h ?? 0.3}
+                  min={0}
+                  step={0.05}
+                  onChange={(e) =>
+                    update(
+                      'momentum_counter_chg1h',
+                      parseFloat(e.target.value) || 0
+                    )
+                  }
+                  disabled={disabled}
+                  className="w-full px-3 py-2 rounded"
+                  style={inputStyle}
+                />
+                <div className="text-[10px] mt-1" style={{ color: '#848E9C' }}>
+                  {ts(preEntryGate.momentumCounterDesc, language)}
+                </div>
+              </div>
+              <div>
+                <label
+                  className="block text-xs mb-1"
+                  style={{ color: '#848E9C' }}
+                >
+                  {ts(preEntryGate.momentumFadingChg4h, language)}
+                </label>
+                <input
+                  type="number"
+                  value={config.momentum_fading_chg4h ?? 2.5}
+                  min={0}
+                  step={0.5}
+                  onChange={(e) =>
+                    update(
+                      'momentum_fading_chg4h',
+                      parseFloat(e.target.value) || 0
+                    )
+                  }
+                  disabled={disabled}
+                  className="w-full px-3 py-2 rounded"
+                  style={inputStyle}
+                />
+                <div className="text-[10px] mt-1" style={{ color: '#848E9C' }}>
+                  {ts(preEntryGate.momentumFadingDesc, language)}
+                </div>
+              </div>
+              <div>
+                <label
+                  className="block text-xs mb-1"
+                  style={{ color: '#848E9C' }}
+                >
+                  {ts(preEntryGate.maxSlDistancePct, language)}
+                </label>
+                <input
+                  type="number"
+                  value={config.max_sl_distance_pct ?? 2.0}
+                  min={0.5}
+                  step={0.5}
+                  onChange={(e) =>
+                    update(
+                      'max_sl_distance_pct',
+                      parseFloat(e.target.value) || 0
+                    )
+                  }
+                  disabled={disabled}
+                  className="w-full px-3 py-2 rounded"
+                  style={inputStyle}
+                />
+                <div className="text-[10px] mt-1" style={{ color: '#848E9C' }}>
+                  {ts(preEntryGate.maxSlDistanceDesc, language)}
+                </div>
+              </div>
+            </div>
+          )}
+        </SubCard>
+      </Stage>
 
-        {config.momentum_gate_enabled && (
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label
-                className="block text-xs mb-1"
-                style={{ color: '#848E9C' }}
-              >
-                {ts(preEntryGate.momentumStaleChg1h, language)}
-              </label>
-              <input
-                type="number"
-                value={config.momentum_stale_chg1h ?? 0.15}
-                min={0}
-                step={0.01}
-                onChange={(e) =>
-                  update(
-                    'momentum_stale_chg1h',
-                    parseFloat(e.target.value) || 0
-                  )
-                }
-                disabled={disabled}
-                className="w-full px-3 py-2 rounded"
-                style={inputStyle}
-              />
-              <div className="text-[10px] mt-1" style={{ color: '#848E9C' }}>
-                {ts(preEntryGate.momentumStaleDesc, language)}
-              </div>
-            </div>
-            <div>
-              <label
-                className="block text-xs mb-1"
-                style={{ color: '#848E9C' }}
-              >
-                {ts(preEntryGate.momentumStaleChg4h, language)}
-              </label>
-              <input
-                type="number"
-                value={config.momentum_stale_chg4h ?? 0.4}
-                min={0}
-                step={0.1}
-                onChange={(e) =>
-                  update(
-                    'momentum_stale_chg4h',
-                    parseFloat(e.target.value) || 0
-                  )
-                }
-                disabled={disabled}
-                className="w-full px-3 py-2 rounded"
-                style={inputStyle}
-              />
-            </div>
-            <div>
-              <label
-                className="block text-xs mb-1"
-                style={{ color: '#848E9C' }}
-              >
-                {ts(preEntryGate.momentumExhaustedChg4h, language)}
-              </label>
-              <input
-                type="number"
-                value={config.momentum_exhausted_chg4h ?? 4.5}
-                min={0}
-                step={0.5}
-                onChange={(e) =>
-                  update(
-                    'momentum_exhausted_chg4h',
-                    parseFloat(e.target.value) || 0
-                  )
-                }
-                disabled={disabled}
-                className="w-full px-3 py-2 rounded"
-                style={inputStyle}
-              />
-              <div className="text-[10px] mt-1" style={{ color: '#848E9C' }}>
-                {ts(preEntryGate.momentumExhaustedDesc, language)}
-              </div>
-            </div>
-            <div>
-              <label
-                className="block text-xs mb-1"
-                style={{ color: '#848E9C' }}
-              >
-                {ts(preEntryGate.momentumCounterChg1h, language)}
-              </label>
-              <input
-                type="number"
-                value={config.momentum_counter_chg1h ?? 0.3}
-                min={0}
-                step={0.05}
-                onChange={(e) =>
-                  update(
-                    'momentum_counter_chg1h',
-                    parseFloat(e.target.value) || 0
-                  )
-                }
-                disabled={disabled}
-                className="w-full px-3 py-2 rounded"
-                style={inputStyle}
-              />
-              <div className="text-[10px] mt-1" style={{ color: '#848E9C' }}>
-                {ts(preEntryGate.momentumCounterDesc, language)}
-              </div>
-            </div>
-            <div>
-              <label
-                className="block text-xs mb-1"
-                style={{ color: '#848E9C' }}
-              >
-                {ts(preEntryGate.momentumFadingChg4h, language)}
-              </label>
-              <input
-                type="number"
-                value={config.momentum_fading_chg4h ?? 2.5}
-                min={0}
-                step={0.5}
-                onChange={(e) =>
-                  update(
-                    'momentum_fading_chg4h',
-                    parseFloat(e.target.value) || 0
-                  )
-                }
-                disabled={disabled}
-                className="w-full px-3 py-2 rounded"
-                style={inputStyle}
-              />
-              <div className="text-[10px] mt-1" style={{ color: '#848E9C' }}>
-                {ts(preEntryGate.momentumFadingDesc, language)}
-              </div>
-            </div>
-            <div>
-              <label
-                className="block text-xs mb-1"
-                style={{ color: '#848E9C' }}
-              >
-                {ts(preEntryGate.maxSlDistancePct, language)}
-              </label>
-              <input
-                type="number"
-                value={config.max_sl_distance_pct ?? 2.0}
-                min={0.5}
-                step={0.5}
-                onChange={(e) =>
-                  update('max_sl_distance_pct', parseFloat(e.target.value) || 0)
-                }
-                disabled={disabled}
-                className="w-full px-3 py-2 rounded"
-                style={inputStyle}
-              />
-              <div className="text-[10px] mt-1" style={{ color: '#848E9C' }}>
-                {ts(preEntryGate.maxSlDistanceDesc, language)}
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Section 2: Entry Structure */}
-      <div className="p-3 rounded-lg space-y-2" style={sectionStyle}>
-        <div className="flex items-center gap-2">
-          <Layers className="w-4 h-4" style={{ color: '#60A5FA' }} />
-          <h4 className="text-sm font-medium" style={{ color: '#EAECEF' }}>
-            ② {ts(preEntryGate.entryStructure, language)}
-          </h4>
-        </div>
-
+      {/* Stage ② Entry Quality */}
+      <Stage
+        icon={<Layers className="w-4 h-4" />}
+        title={ts(preEntryGate.stageEntryQuality, language)}
+        accent="#60A5FA"
+      >
         {/* Master toggle */}
         <div
           className="p-3 rounded-lg"
@@ -757,7 +849,7 @@ export function PreEntryGateEditor({
           />
         </EntryGateGroup>
 
-        {/* Group C: Stop Loss Quality */}
+        {/* Group C: Stop / Reward / Setup quality (single backend toggle) */}
         <EntryGateGroup
           enabled={
             config.entry_structure?.entry_gate?.stop_quality_enabled !== false
@@ -771,6 +863,17 @@ export function PreEntryGateEditor({
           example={ts(preEntryGate.stopQualityExample, language)}
           color="#0ECB81"
         >
+          {/* — sub-group: stop placement — */}
+          <div
+            className="col-span-2 text-[11px] font-semibold pt-1"
+            style={{ color: '#0ECB81' }}
+          >
+            {ts(preEntryGate.grpStopPlacement, language)}
+            <span className="font-normal" style={{ color: '#848E9C' }}>
+              {' · '}
+              {ts(preEntryGate.grpStopPlacementDesc, language)}
+            </span>
+          </div>
           <EntryGateInput
             label={ts(preEntryGate.minRiskDistancePct, language)}
             value={
@@ -858,6 +961,18 @@ export function PreEntryGateEditor({
               {ts(preEntryGate.volatilityBufferDesc, language)}
             </div>
           </div>
+
+          {/* — sub-group: reward & target — */}
+          <div
+            className="col-span-2 text-[11px] font-semibold pt-2"
+            style={{ color: '#0ECB81' }}
+          >
+            {ts(preEntryGate.grpRewardTarget, language)}
+            <span className="font-normal" style={{ color: '#848E9C' }}>
+              {' · '}
+              {ts(preEntryGate.grpRewardTargetDesc, language)}
+            </span>
+          </div>
           <EntryGateInput
             label={ts(preEntryGate.minRewardAtr, language)}
             value={
@@ -871,212 +986,185 @@ export function PreEntryGateEditor({
             }
             onChange={(v) => updateEntryGate('min_reward_atr_mul', v)}
           />
-          <EntryGateInput
-            label={ts(preEntryGate.maxTargetAtr, language)}
-            value={
-              config.entry_structure?.entry_gate?.max_target_atr_mul ?? 5.0
-            }
-            step={0.5}
-            disabled={
-              disabled ||
-              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
-              config.entry_structure?.entry_gate?.stop_quality_enabled === false
-            }
-            onChange={(v) => updateEntryGate('max_target_atr_mul', v)}
-          />
-          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
-            {ts(preEntryGate.maxTargetAtrDesc, language)}
-          </div>
-          <label
-            className="flex items-center gap-2 text-sm mt-2"
-            style={{ color: '#EAECEF' }}
-          >
-            <input
-              type="checkbox"
-              checked={
-                (config.entry_structure?.entry_gate?.target_reachability_mode ||
-                  'cap') === 'reject'
+          <div>
+            <EntryGateInput
+              label={ts(preEntryGate.maxTargetAtr, language)}
+              value={
+                config.entry_structure?.entry_gate?.max_target_atr_mul ?? 5.0
               }
-              onChange={(e) =>
-                updateEntryGate(
-                  'target_reachability_mode',
-                  e.target.checked ? 'reject' : 'cap'
-                )
-              }
+              step={0.5}
               disabled={
                 disabled ||
                 !(config.entry_structure?.entry_gate?.enabled ?? false) ||
                 config.entry_structure?.entry_gate?.stop_quality_enabled ===
                   false
               }
-              className="h-4 w-4 accent-amber-500"
+              onChange={(v) => updateEntryGate('max_target_atr_mul', v)}
             />
-            {ts(preEntryGate.targetReachabilityMode, language)}
-            {' — '}
-            {(config.entry_structure?.entry_gate?.target_reachability_mode ||
-              'cap') === 'reject'
-              ? isZh
-                ? '拒绝(旧)'
-                : 'reject (legacy)'
-              : isZh
-                ? '压缩(默认)'
-                : 'cap (default)'}
-          </label>
-          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
-            {ts(preEntryGate.targetReachabilityModeDesc, language)}
+            <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+              {ts(preEntryGate.maxTargetAtrDesc, language)}
+            </div>
           </div>
-          <EntryGateInput
-            label={ts(preEntryGate.realisticTargetRiskMul, language)}
-            value={
-              config.entry_structure?.entry_gate?.realistic_target_risk_mul ??
-              0.8
-            }
-            step={0.1}
-            disabled={
-              disabled ||
-              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
-              config.entry_structure?.entry_gate?.stop_quality_enabled === false
-            }
-            onChange={(v) => updateEntryGate('realistic_target_risk_mul', v)}
-          />
-          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
-            {ts(preEntryGate.realisticTargetRiskMulDesc, language)}
+          <div className="col-span-2">
+            <label
+              className="flex items-center gap-2 text-sm"
+              style={{ color: '#EAECEF' }}
+            >
+              <input
+                type="checkbox"
+                checked={
+                  (config.entry_structure?.entry_gate
+                    ?.target_reachability_mode || 'cap') === 'reject'
+                }
+                onChange={(e) =>
+                  updateEntryGate(
+                    'target_reachability_mode',
+                    e.target.checked ? 'reject' : 'cap'
+                  )
+                }
+                disabled={
+                  disabled ||
+                  !(config.entry_structure?.entry_gate?.enabled ?? false) ||
+                  config.entry_structure?.entry_gate?.stop_quality_enabled ===
+                    false
+                }
+                className="h-4 w-4 accent-amber-500"
+              />
+              {ts(preEntryGate.targetReachabilityMode, language)}
+              {' — '}
+              {(config.entry_structure?.entry_gate?.target_reachability_mode ||
+                'cap') === 'reject'
+                ? isZh
+                  ? '拒绝(旧)'
+                  : 'reject (legacy)'
+                : isZh
+                  ? '压缩(默认)'
+                  : 'cap (default)'}
+            </label>
+            <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+              {ts(preEntryGate.targetReachabilityModeDesc, language)}
+            </div>
           </div>
-          <EntryGateInput
-            label={ts(preEntryGate.maxNetRr, language)}
-            value={config.entry_structure?.entry_gate?.max_net_rr ?? 2.8}
-            step={0.1}
-            disabled={
-              disabled ||
-              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
-              config.entry_structure?.entry_gate?.stop_quality_enabled === false
-            }
-            onChange={(v) => updateEntryGate('max_net_rr', v)}
-          />
-          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
-            {ts(preEntryGate.maxNetRrDesc, language)}
-          </div>
-          <label
-            className="flex items-center gap-2 text-sm mt-2"
-            style={{ color: '#EAECEF' }}
-          >
-            <input
-              type="checkbox"
-              checked={
-                config.entry_structure?.entry_gate?.block_breakout_retest ??
-                true
+          <div>
+            <EntryGateInput
+              label={ts(preEntryGate.realisticTargetRiskMul, language)}
+              value={
+                config.entry_structure?.entry_gate?.realistic_target_risk_mul ??
+                0.8
               }
-              onChange={(e) =>
-                updateEntryGate('block_breakout_retest', e.target.checked)
-              }
+              step={0.1}
               disabled={
                 disabled ||
                 !(config.entry_structure?.entry_gate?.enabled ?? false) ||
                 config.entry_structure?.entry_gate?.stop_quality_enabled ===
                   false
               }
-              className="h-4 w-4 accent-amber-500"
+              onChange={(v) => updateEntryGate('realistic_target_risk_mul', v)}
             />
-            {ts(preEntryGate.blockBreakoutRetest, language)}
-          </label>
-          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
-            {ts(preEntryGate.blockBreakoutRetestDesc, language)}
+            <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+              {ts(preEntryGate.realisticTargetRiskMulDesc, language)}
+            </div>
           </div>
-          <label
-            className="flex items-center gap-2 text-sm mt-3"
-            style={{ color: '#EAECEF' }}
-          >
-            <input
-              type="checkbox"
-              checked={
-                config.entry_structure?.entry_gate?.soft_regime_structure_fit ??
-                true
-              }
-              onChange={(e) =>
-                updateEntryGate('soft_regime_structure_fit', e.target.checked)
-              }
+          <div>
+            <EntryGateInput
+              label={ts(preEntryGate.maxNetRr, language)}
+              value={config.entry_structure?.entry_gate?.max_net_rr ?? 2.8}
+              step={0.1}
               disabled={
                 disabled ||
-                !(config.entry_structure?.entry_gate?.enabled ?? false)
+                !(config.entry_structure?.entry_gate?.enabled ?? false) ||
+                config.entry_structure?.entry_gate?.stop_quality_enabled ===
+                  false
               }
-              className="h-4 w-4 accent-amber-500"
+              onChange={(v) => updateEntryGate('max_net_rr', v)}
             />
-            {isZh
-              ? '结构错配软化（市场结构图）：把「趋势↔结构错配」从硬门改为软扣分（降低仓位而非拒单）。高确信逆结构单缩量入场而非直接拒绝——结构作为信心加权证据而非一票否决。真失效/陷阱门（假回测陷阱、保护策略拒绝）仍保持硬门。'
-              : 'Soft regime-structure fit (Market Structure Map): treat trend↔structure mismatch as a soft confidence penalty (smaller size) instead of a hard block. A high-conviction counter-structure trade is sized down, not rejected — structure as confidence-weighting evidence, not an all-or-nothing gate. Genuine invalidation/trap gates stay hard.'}
-          </label>
-          <label
-            className="flex items-center gap-2 text-sm mt-3"
-            style={{ color: '#EAECEF' }}
+            <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+              {ts(preEntryGate.maxNetRrDesc, language)}
+            </div>
+          </div>
+
+          {/* — sub-group: setup filter (penalties, not hard reject) — */}
+          <div
+            className="col-span-2 text-[11px] font-semibold pt-2"
+            style={{ color: '#F0B90B' }}
           >
-            <input
-              type="checkbox"
-              checked={
-                config.entry_structure?.entry_gate
-                  ?.correlated_adverse_throttle ?? false
-              }
-              onChange={(e) =>
-                updateEntryGate('correlated_adverse_throttle', e.target.checked)
-              }
-              disabled={
-                disabled ||
-                !(config.entry_structure?.entry_gate?.enabled ?? false)
-              }
-              className="h-4 w-4 accent-amber-500"
-            />
-            {ts(preEntryGate.correlatedAdverseThrottle, language)}
-          </label>
-          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
-            {ts(preEntryGate.correlatedAdverseThrottleDesc, language)}
+            {ts(preEntryGate.grpSetupFilter, language)}
+            <span className="font-normal" style={{ color: '#848E9C' }}>
+              {' · '}
+              {ts(preEntryGate.grpSetupFilterDesc, language)}
+            </span>
           </div>
-          <EntryGateInput
-            label={ts(preEntryGate.throttleWindowHours, language)}
-            value={
-              config.entry_structure?.entry_gate?.throttle_window_hours ?? 12
-            }
-            step={1}
-            disabled={
-              disabled ||
-              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
-              config.entry_structure?.entry_gate
-                ?.correlated_adverse_throttle === false
-            }
-            onChange={(v) => updateEntryGate('throttle_window_hours', v)}
-          />
-          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
-            {ts(preEntryGate.throttleWindowHoursDesc, language)}
+          <div className="col-span-2 space-y-1">
+            <label
+              className="flex items-center gap-2 text-sm"
+              style={{ color: '#EAECEF' }}
+            >
+              <input
+                type="checkbox"
+                checked={
+                  config.entry_structure?.entry_gate?.block_breakout_retest ??
+                  true
+                }
+                onChange={(e) =>
+                  updateEntryGate('block_breakout_retest', e.target.checked)
+                }
+                disabled={
+                  disabled ||
+                  !(config.entry_structure?.entry_gate?.enabled ?? false) ||
+                  config.entry_structure?.entry_gate?.stop_quality_enabled ===
+                    false
+                }
+                className="h-4 w-4 accent-amber-500"
+              />
+              {ts(preEntryGate.blockBreakoutRetest, language)}
+              <span
+                className="px-1.5 py-0.5 rounded text-[10px] font-medium"
+                style={{
+                  background: `${tagPenalty.color}22`,
+                  color: tagPenalty.color,
+                }}
+              >
+                {tagPenalty.text}
+              </span>
+            </label>
+            <div className="text-[11px]" style={{ color: '#848E9C' }}>
+              {ts(preEntryGate.blockBreakoutRetestDesc, language)}
+            </div>
           </div>
-          <EntryGateInput
-            label={ts(preEntryGate.throttleMinCloses, language)}
-            value={config.entry_structure?.entry_gate?.throttle_min_closes ?? 3}
-            step={1}
-            disabled={
-              disabled ||
-              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
-              config.entry_structure?.entry_gate
-                ?.correlated_adverse_throttle === false
-            }
-            onChange={(v) => updateEntryGate('throttle_min_closes', v)}
-          />
-          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
-            {ts(preEntryGate.throttleMinClosesDesc, language)}
-          </div>
-          <EntryGateInput
-            label={ts(preEntryGate.throttleLossRate, language)}
-            value={
-              config.entry_structure?.entry_gate?.throttle_loss_rate ?? 0.6
-            }
-            step={0.05}
-            disabled={
-              disabled ||
-              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
-              config.entry_structure?.entry_gate
-                ?.correlated_adverse_throttle === false
-            }
-            onChange={(v) => updateEntryGate('throttle_loss_rate', v)}
-          />
-          <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
-            {ts(preEntryGate.throttleLossRateDesc, language)}
+          <div className="col-span-2 space-y-1">
+            <label
+              className="flex items-center gap-2 text-sm"
+              style={{ color: '#EAECEF' }}
+            >
+              <input
+                type="checkbox"
+                checked={
+                  config.entry_structure?.entry_gate
+                    ?.soft_regime_structure_fit ?? true
+                }
+                onChange={(e) =>
+                  updateEntryGate('soft_regime_structure_fit', e.target.checked)
+                }
+                disabled={
+                  disabled ||
+                  !(config.entry_structure?.entry_gate?.enabled ?? false)
+                }
+                className="h-4 w-4 accent-amber-500"
+              />
+              {ts(preEntryGate.softRegimeFit, language)}
+              <span
+                className="px-1.5 py-0.5 rounded text-[10px] font-medium"
+                style={{
+                  background: `${tagPenalty.color}22`,
+                  color: tagPenalty.color,
+                }}
+              >
+                {tagPenalty.text}
+              </span>
+            </label>
+            <div className="text-[11px]" style={{ color: '#848E9C' }}>
+              {ts(preEntryGate.softRegimeFitDesc, language)}
+            </div>
           </div>
         </EntryGateGroup>
 
@@ -1107,66 +1195,6 @@ export function PreEntryGateEditor({
           />
         </EntryGateGroup>
 
-        {/* Group E: Confidence & Direction */}
-        <EntryGateGroup
-          enabled={
-            config.entry_structure?.entry_gate?.confidence_direction_enabled !==
-            false
-          }
-          onToggle={(v) => updateEntryGate('confidence_direction_enabled', v)}
-          masterDisabled={
-            disabled || !(config.entry_structure?.entry_gate?.enabled ?? false)
-          }
-          title={ts(preEntryGate.confidenceDirection, language)}
-          description={ts(preEntryGate.confidenceDirectionDesc, language)}
-          example={ts(preEntryGate.confidenceDirectionExample, language)}
-          color="#F6465D"
-        >
-          <EntryGateInput
-            label={ts(preEntryGate.shortNonDowntrendConf, language)}
-            value={
-              config.entry_structure?.entry_gate
-                ?.short_non_downtrend_min_confidence ?? 85
-            }
-            step={1}
-            disabled={
-              disabled ||
-              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
-              config.entry_structure?.entry_gate
-                ?.confidence_direction_enabled === false
-            }
-            onChange={(v) =>
-              updateEntryGate('short_non_downtrend_min_confidence', v)
-            }
-          />
-          <EntryGateInput
-            label={ts(preEntryGate.squeezeMinConf, language)}
-            value={
-              config.entry_structure?.entry_gate?.squeeze_min_confidence ?? 80
-            }
-            step={1}
-            disabled={
-              disabled ||
-              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
-              config.entry_structure?.entry_gate
-                ?.confidence_direction_enabled === false
-            }
-            onChange={(v) => updateEntryGate('squeeze_min_confidence', v)}
-          />
-          <EntryGateInput
-            label={ts(preEntryGate.squeezeMinRR, language)}
-            value={config.entry_structure?.entry_gate?.squeeze_min_rr ?? 2.5}
-            step={0.5}
-            disabled={
-              disabled ||
-              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
-              config.entry_structure?.entry_gate
-                ?.confidence_direction_enabled === false
-            }
-            onChange={(v) => updateEntryGate('squeeze_min_rr', v)}
-          />
-        </EntryGateGroup>
-
         <EntryStructureEditor
           config={config.entry_structure}
           onChange={(entryStructure: EntryStructureConfig) =>
@@ -1175,17 +1203,88 @@ export function PreEntryGateEditor({
           disabled={disabled}
           language={language}
         />
-      </div>
+      </Stage>
 
-      {/* Section 3: Confidence Gate */}
-      <div className="p-3 rounded-lg space-y-2" style={sectionStyle}>
-        <div className="flex items-center gap-2">
-          <Shield className="w-4 h-4" style={{ color: '#0ECB81' }} />
-          <h4 className="text-sm font-medium" style={{ color: '#EAECEF' }}>
-            ③ {ts(preEntryGate.confidenceGate, language)}
-          </h4>
-        </div>
+      {/* Stage ③ Trade Pacing */}
+      <Stage
+        icon={<Activity className="w-4 h-4" />}
+        title={ts(preEntryGate.stageTradePacing, language)}
+        accent="#F59E0B"
+      >
+        <EntryGateGroup
+          enabled={
+            config.entry_structure?.entry_gate?.correlated_adverse_throttle ??
+            false
+          }
+          onToggle={(v) => updateEntryGate('correlated_adverse_throttle', v)}
+          masterDisabled={
+            disabled || !(config.entry_structure?.entry_gate?.enabled ?? false)
+          }
+          title={ts(preEntryGate.grpCorrelatedThrottle, language)}
+          description={ts(preEntryGate.correlatedAdverseThrottleDesc, language)}
+          example=""
+          color="#F59E0B"
+        >
+          <div>
+            <EntryGateInput
+              label={ts(preEntryGate.throttleWindowHours, language)}
+              value={
+                config.entry_structure?.entry_gate?.throttle_window_hours ?? 12
+              }
+              step={1}
+              disabled={
+                disabled ||
+                !(config.entry_structure?.entry_gate?.enabled ?? false)
+              }
+              onChange={(v) => updateEntryGate('throttle_window_hours', v)}
+            />
+            <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+              {ts(preEntryGate.throttleWindowHoursDesc, language)}
+            </div>
+          </div>
+          <div>
+            <EntryGateInput
+              label={ts(preEntryGate.throttleMinCloses, language)}
+              value={
+                config.entry_structure?.entry_gate?.throttle_min_closes ?? 3
+              }
+              step={1}
+              disabled={
+                disabled ||
+                !(config.entry_structure?.entry_gate?.enabled ?? false)
+              }
+              onChange={(v) => updateEntryGate('throttle_min_closes', v)}
+            />
+            <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+              {ts(preEntryGate.throttleMinClosesDesc, language)}
+            </div>
+          </div>
+          <div>
+            <EntryGateInput
+              label={ts(preEntryGate.throttleLossRate, language)}
+              value={
+                config.entry_structure?.entry_gate?.throttle_loss_rate ?? 0.6
+              }
+              step={0.05}
+              disabled={
+                disabled ||
+                !(config.entry_structure?.entry_gate?.enabled ?? false)
+              }
+              onChange={(v) => updateEntryGate('throttle_loss_rate', v)}
+            />
+            <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+              {ts(preEntryGate.throttleLossRateDesc, language)}
+            </div>
+          </div>
+        </EntryGateGroup>
+      </Stage>
 
+      {/* Stage ④ Confidence & Direction */}
+      <Stage
+        icon={<Target className="w-4 h-4" />}
+        title={ts(preEntryGate.stageConfidence, language)}
+        accent="#0ECB81"
+      >
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {/* Min Confidence */}
           <div
@@ -1251,17 +1350,74 @@ export function PreEntryGateEditor({
             </div>
           </div>
         </div>
-      </div>
 
-      {/* Section 4: Policy Mode */}
-      <div className="p-3 rounded-lg space-y-2" style={sectionStyle}>
-        <div className="flex items-center gap-2">
-          <Radio className="w-4 h-4" style={{ color: '#A855F7' }} />
-          <h4 className="text-sm font-medium" style={{ color: '#EAECEF' }}>
-            {ts(preEntryGate.policyMode, language)}
-          </h4>
-        </div>
+        {/* Group E: Confidence & Direction (per-setup thresholds) */}
+        <EntryGateGroup
+          enabled={
+            config.entry_structure?.entry_gate?.confidence_direction_enabled !==
+            false
+          }
+          onToggle={(v) => updateEntryGate('confidence_direction_enabled', v)}
+          masterDisabled={
+            disabled || !(config.entry_structure?.entry_gate?.enabled ?? false)
+          }
+          title={ts(preEntryGate.confidenceDirection, language)}
+          description={ts(preEntryGate.confidenceDirectionDesc, language)}
+          example={ts(preEntryGate.confidenceDirectionExample, language)}
+          color="#F6465D"
+        >
+          <EntryGateInput
+            label={ts(preEntryGate.shortNonDowntrendConf, language)}
+            value={
+              config.entry_structure?.entry_gate
+                ?.short_non_downtrend_min_confidence ?? 85
+            }
+            step={1}
+            disabled={
+              disabled ||
+              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
+              config.entry_structure?.entry_gate
+                ?.confidence_direction_enabled === false
+            }
+            onChange={(v) =>
+              updateEntryGate('short_non_downtrend_min_confidence', v)
+            }
+          />
+          <EntryGateInput
+            label={ts(preEntryGate.squeezeMinConf, language)}
+            value={
+              config.entry_structure?.entry_gate?.squeeze_min_confidence ?? 80
+            }
+            step={1}
+            disabled={
+              disabled ||
+              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
+              config.entry_structure?.entry_gate
+                ?.confidence_direction_enabled === false
+            }
+            onChange={(v) => updateEntryGate('squeeze_min_confidence', v)}
+          />
+          <EntryGateInput
+            label={ts(preEntryGate.squeezeMinRR, language)}
+            value={config.entry_structure?.entry_gate?.squeeze_min_rr ?? 2.5}
+            step={0.5}
+            disabled={
+              disabled ||
+              !(config.entry_structure?.entry_gate?.enabled ?? false) ||
+              config.entry_structure?.entry_gate
+                ?.confidence_direction_enabled === false
+            }
+            onChange={(v) => updateEntryGate('squeeze_min_rr', v)}
+          />
+        </EntryGateGroup>
+      </Stage>
 
+      {/* Stage ⑤ Execution Policy */}
+      <Stage
+        icon={<SlidersHorizontal className="w-4 h-4" />}
+        title={ts(preEntryGate.stageExecPolicy, language)}
+        accent="#A855F7"
+      >
         <div className="space-y-2">
           {policyModes.map((pm) => {
             const selected = (config.policy_mode || 'strict') === pm.value
@@ -1298,7 +1454,7 @@ export function PreEntryGateEditor({
             )
           })}
         </div>
-      </div>
+      </Stage>
     </div>
   )
 }

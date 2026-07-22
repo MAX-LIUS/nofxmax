@@ -1242,12 +1242,12 @@ export const preEntryGate = {
     en: 'First take-profit / break-even tier distance fed to the AI, as a multiple of stop-risk (default 0.8, easier to bank — 105/174 blocked winners reach 0.8× risk vs 94 at 1.0×). Floored by min-reward (1.8× ATR) so the lock tier clears the noise band and is not scanned out.',
   },
   blockBreakoutRetest: {
-    zh: '拦截 breakout_retest 形态',
-    en: 'Block breakout_retest setup',
+    zh: '突破回踩形态降权',
+    en: 'Down-weight breakout_retest',
   },
   blockBreakoutRetestDesc: {
-    zh: '硬拦截 setup_type=breakout_retest 的入场。入场质量研究(1190笔平仓单，滚动5折前进验证，bootstrap改善概率98.8%)显示该形态在每个时间段都是净负(早-11.5/中-28.6/晚-4.0)，剔除后净值+44、最大回撤下降。默认启用。',
-    en: 'Hard-block entries tagged setup_type=breakout_retest. Entry-quality study (1190 closed positions, rolling 5-fold walk-forward, bootstrap P(improve)=98.8%) shows this setup is net-negative in every time third (early -11.5 / mid -28.6 / late -4.0); removing it adds +44 to net and lowers max drawdown. Default enabled.',
+    zh: '给 setup_type=breakout_retest（突破后回踩再进场）的开仓打一个重扣分（-40 分），大幅缩小仓位而不是直接拒单——高确信的这类单仍可小仓开出。为什么降权：入场质量研究（1190 笔平仓、滚动5折前进验证、改善概率 98.8%）显示这个形态在每个时段都净负（早 -11.5 / 中 -28.6 / 晚 -4.0）。默认开启。关闭则不扣分。',
+    en: 'Apply a heavy score penalty (-40) to entries tagged setup_type=breakout_retest (enter on the pullback after a breakout), sharply shrinking size instead of rejecting — a high-conviction one can still open small. Why: an entry-quality study (1190 closes, rolling 5-fold walk-forward, P(improve)=98.8%) shows this setup is net-negative in every time third (early -11.5 / mid -28.6 / late -4.0). Default on; off = no penalty.',
   },
   maxNetRr: { zh: '最大净RR', en: 'Max net RR' },
   maxNetRrDesc: {
@@ -1292,6 +1292,67 @@ export const preEntryGate = {
   blockShortInHtfUptrendDesc: {
     zh: '当1h和4h均确认上涨趋势时禁止做空。真实2026数据：4h确认的上涨做空9单净-4.9%(真上涨)，1h单独上涨7单净+6.6%(熊市反弹)。牛市模拟：快牛上涨做空-970%，慢牛-328%。多时间框架门控拦截真上涨做空，保留盈利熊市反弹空单。默认启用。',
     en: 'Block open_short when both 1h and 4h confirm uptrend. Real 2026: 4h-confirmed up×SHORT 9 trades -4.9% (true uptrend), 1h-only 7 trades +6.6% (bear bounces). Bull sim: up×SHORT -970% in fast bulls, -328% in slow bulls. Multi-TF gate blocks toxic real-uptrend shorts while preserving profitable bear-bounce fades. Default enabled.',
+  },
+
+  // ── Refactored structure: stage headers + beginner-friendly copy ──
+  howGateWorks: {
+    zh: '开仓门禁怎么工作：一笔候选开仓要依次通过下面几关。"硬门"不满足直接拒单；"降分项"不拒单，而是累计扣分——分数越低仓位越小（≥75 满仓，60-75 线性降到 5 成，<60 降到 3 成）。下面每项都标了它是硬门还是降分。',
+    en: 'How the gate works: a candidate entry passes through the stages below in order. A "hard gate" rejects the trade outright when unmet; a "score penalty" does not reject — it deducts points and shrinks size (≥75 full, 60-75 tapers to 50%, <60 → 30%). Each item below is labelled hard-gate or penalty.',
+  },
+  stageMarketAccess: {
+    zh: '① 市场准入 · 这个币现在能不能碰',
+    en: '① Market Access · can we touch this coin now',
+  },
+  stageEntryQuality: {
+    zh: '② 入场质量 · 这个入场点好不好',
+    en: '② Entry Quality · is this a good entry',
+  },
+  stageTradePacing: {
+    zh: '③ 交易节奏 · 最近手风顺不顺',
+    en: '③ Trade Pacing · are recent trades going well',
+  },
+  stageConfidence: {
+    zh: '④ 信心与方向 · AI 有多确信',
+    en: '④ Confidence & Direction · how sure is the AI',
+  },
+  stageExecPolicy: {
+    zh: '⑤ 执行策略 · 门禁不满足时怎么办',
+    en: '⑤ Execution Policy · what to do when a gate fails',
+  },
+
+  grpMarketState: { zh: '市场状态', en: 'Market Regime' },
+  grpMarketStateDesc: {
+    zh: '只在你勾选的市场状态、且资金费率/波动率不极端时才允许开仓。这是第一道硬门。',
+    en: 'Only allow entries in the regimes you tick, and when funding/volatility are not extreme. First hard gate.',
+  },
+  grpTrendAlign: { zh: '趋势同向', en: 'Trend Alignment' },
+  grpTrendAlignDesc: {
+    zh: '要求开仓方向顺应更高周期趋势——下跌趋势里不做多、上涨趋势里不做空。硬门。',
+    en: 'Require the entry direction to follow the higher-timeframe trend — no longs in a downtrend, no shorts in an uptrend. Hard gate.',
+  },
+  grpStopPlacement: { zh: '止损位置', en: 'Stop Placement' },
+  grpStopPlacementDesc: {
+    zh: '确保止损离入场有足够空间、锚在结构位上，别太窄被扫也别太松散。',
+    en: 'Make sure the stop has room, anchors to structure, and is neither too tight (scanned out) nor too loose.',
+  },
+  grpRewardTarget: { zh: '盈亏比与目标', en: 'Reward & Target' },
+  grpRewardTargetDesc: {
+    zh: '控制止盈目标的远近与盈亏比：目标太远够不着、承诺 RR 过高都会被处理。',
+    en: 'Control how far the target sits and the risk-reward: unreachable far targets and over-promised RR are handled here.',
+  },
+  grpSetupFilter: { zh: '形态筛选', en: 'Setup Filter' },
+  grpSetupFilterDesc: {
+    zh: '按开仓形态(setup_type)与市场结构的契合度调整仓位。基于回测把弱形态降权，但不一票否决。',
+    en: 'Adjust size by how well the setup_type fits market structure. Backtest-driven down-weighting of weak setups, without an outright veto.',
+  },
+  softRegimeFit: { zh: '结构错配降权', en: 'Down-weight structure mismatch' },
+  softRegimeFitDesc: {
+    zh: '当开仓形态与当前市场结构/趋势不匹配时，不直接拒单，而是扣分降仓(-20 分)。高确信的逆结构单可小仓开出——把"结构契合"当作信心加权证据，而非一票否决。真失效/陷阱信号(假回踩、保护策略拒绝)仍是硬门。默认开启。',
+    en: 'When the setup does not match the current structure/trend, do not reject — deduct score and shrink size (-20). A high-conviction counter-structure trade can still open small, treating structure fit as confidence-weighted evidence rather than a veto. Genuine invalidation/trap signals (fake retest, protection rejection) stay hard gates. Default on.',
+  },
+  grpCorrelatedThrottle: {
+    zh: '相关性逆境节流',
+    en: 'Correlated-adverse throttle',
   },
 }
 

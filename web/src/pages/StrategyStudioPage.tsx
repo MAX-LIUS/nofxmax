@@ -1063,8 +1063,8 @@ export function StrategyStudioPage() {
           <div className="flex-1 min-w-0 overflow-y-auto xl:border-r border-nofx-gold/20">
             {selectedStrategy && editingConfig ? (
               <div className="p-3">
-                {/* Strategy Name & Actions */}
-                <div className="flex items-center justify-between mb-4">
+                {/* Strategy Name & Actions — sticky so Save/Activate stay visible while scrolling */}
+                <div className="sticky top-0 z-20 -mx-3 px-3 py-2 mb-4 flex items-center justify-between border-b border-nofx-gold/20 bg-nofx-bg/85 backdrop-blur-md">
                   <div className="flex-1 min-w-0">
                     <input
                       type="text"
