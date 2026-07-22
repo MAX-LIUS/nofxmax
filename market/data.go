@@ -258,6 +258,7 @@ func GetWithTimeframesExchange(symbol string, timeframes []string, primaryTimefr
 		seriesData.AnchoredVWAPs = CalculateAnchoredVWAPs(klines, tf)
 		seriesData.FairValueGaps = DetectFairValueGaps(klines, seriesData.ATR14, tfCurrentPrice)
 		seriesData.LiquidityPools = DetectLiquidityPools(klines, seriesData.ATR14, tfCurrentPrice, tf)
+		seriesData.StructureBreaks, seriesData.OrderBlocks = DetectStructureBreaks(klines, seriesData.ATR14, tfCurrentPrice, tf)
 
 		// Merge levels into zones using ATR-scaled tolerance
 		tfATR14 := seriesData.ATR14
@@ -453,6 +454,7 @@ func GetWithTimeframesExchange(symbol string, timeframes []string, primaryTimefr
 	if primaryATR14 > 0 {
 		data.FairValueGaps = DetectFairValueGaps(primaryKlines, primaryATR14, currentPrice)
 		data.LiquidityPools = DetectLiquidityPools(primaryKlines, primaryATR14, currentPrice, primaryTimeframe)
+		data.StructureBreaks, data.OrderBlocks = DetectStructureBreaks(primaryKlines, primaryATR14, currentPrice, primaryTimeframe)
 	}
 
 	// Build consolidated zones from all timeframes

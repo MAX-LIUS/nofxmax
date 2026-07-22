@@ -36,6 +36,14 @@ func buildFullStructureData() *market.Data {
 		LiquidityPools: []market.LiquidityPool{
 			{Price: 102500, Type: "equal_highs", Touches: 3, BarsAgo: 12, StrengthATR: 0.15},
 		},
+		StructureBreaks: []market.StructureBreak{
+			{Type: "CHOCH", Direction: "bearish", BreakLevel: 99500, BarsAgo: 4, RetestLow: 99275, RetestHigh: 99725, Retested: true, SizeATR: 1.2},
+			{Type: "BOS", Direction: "bullish", BreakLevel: 100200, BarsAgo: 20, RetestLow: 99975, RetestHigh: 100425, Retested: false, SizeATR: 2.1},
+		},
+		OrderBlocks: []market.OrderBlock{
+			{Low: 98600, High: 99100, Mid: 98850, Direction: "demand", BarsAgo: 22, Mitigated: false, SizeATR: 2.5},
+			{Low: 101200, High: 101700, Mid: 101450, Direction: "supply", BarsAgo: 6, Mitigated: true, SizeATR: 1.8},
+		},
 		TimeframeData: map[string]*market.TimeframeSeriesData{
 			"1h": {Timeframe: "1h", ATR14: 900},
 		},
@@ -51,6 +59,8 @@ func TestStructureRender_AllSectionsPresent(t *testing.T) {
 		"周期关键位", "前日高", "前周高",
 		"未回补缺口", "看涨缺口",
 		"流动性池", "等高",
+		"结构突破", "CHOCH", "BOS", "回踩区",
+		"供需区", "需求", "供给",
 	}
 	for _, s := range must {
 		if !strings.Contains(out, s) {

@@ -403,8 +403,124 @@ func formatStructuralZones(mdata *market.Data, zh bool) string {
 	// pools (stop-run targets). Evidence for target/entry timing, not gates.
 	sb.WriteString(formatFVGAndLiquidity(mdata, currentPrice, zh))
 
+	// BOS/CHoCH structure breaks + supply/demand order blocks. A recent CHoCH
+	// warns of a trend flip; a BOS confirms continuation; the broken level and
+	// order block are retest zones. Evidence for bias/timing, not hard gates.
+	sb.WriteString(formatStructureBreaks(mdata, currentPrice, zh))
+
 	sb.WriteString("\n")
 	return sb.String()
+}
+
+// formatStructureBreaks renders recent Break-of-Structure / Change-of-Character
+// events and the supply/demand order blocks that spawned them. Kept short: the
+// few most recent, framed as continuation vs reversal evidence.
+func formatStructureBreaks(mdata *market.Data, currentPrice float64, zh bool) string {
+	var sb strings.Builder
+
+	if len(mdata.StructureBreaks) > 0 {
+		if zh {
+			sb.WriteString("\n**结构突破(BOS/CHoCH)** (趋势延续 vs 转变的证据, 非硬性规则):\n")
+		} else {
+			sb.WriteString("\n**Structure Breaks (BOS/CHoCH)** (continuation vs reversal evidence — not a hard rule):\n")
+		}
+		shown := 0
+		for _, b := range mdata.StructureBreaks {
+			if shown >= 3 {
+				break
+			}
+			shown++
+			dir := translateBreakDir(b.Direction, zh)
+			retest := ""
+			if b.Retested {
+				if zh {
+					retest = ", 已回踩"
+				} else {
+					retest = ", retested"
+				}
+			}
+			if zh {
+				fmt.Fprintf(&sb, "- %s %s @ %s (回踩区 %s-%s, %d根前, %.1fxATR%s)\n",
+					b.Type, dir, formatAIFloat(b.BreakLevel), formatAIFloat(b.RetestLow), formatAIFloat(b.RetestHigh), b.BarsAgo, b.SizeATR, retest)
+			} else {
+				fmt.Fprintf(&sb, "- %s %s @ %s (retest zone %s-%s, %d bars ago, %.1fxATR%s)\n",
+					b.Type, dir, formatAIFloat(b.BreakLevel), formatAIFloat(b.RetestLow), formatAIFloat(b.RetestHigh), b.BarsAgo, b.SizeATR, retest)
+			}
+		}
+	}
+
+	if len(mdata.OrderBlocks) > 0 {
+		if zh {
+			sb.WriteString("**供需区(Order Block)** (回踩常见反应位, 非硬性规则):\n")
+		} else {
+			sb.WriteString("**Supply/Demand Order Blocks** (common reaction zones on retest — not a hard rule):\n")
+		}
+		shown := 0
+		for _, ob := range mdata.OrderBlocks {
+			if shown >= 3 {
+				break
+			}
+			shown++
+			role := translateOrderBlock(ob.Direction, zh)
+			var state string
+			if ob.Mitigated {
+				if zh {
+					state = ", 已触及"
+				} else {
+					state = ", mitigated"
+				}
+			} else {
+				if zh {
+					state = ", 未触及"
+				} else {
+					state = ", fresh"
+				}
+			}
+			if zh {
+				fmt.Fprintf(&sb, "- %s区 %s-%s (%d根前, 源自 %.1fxATR 冲量%s)\n",
+					role, formatAIFloat(ob.Low), formatAIFloat(ob.High), ob.BarsAgo, ob.SizeATR, state)
+			} else {
+				fmt.Fprintf(&sb, "- %s zone %s-%s (%d bars ago, from %.1fxATR impulse%s)\n",
+					role, formatAIFloat(ob.Low), formatAIFloat(ob.High), ob.BarsAgo, ob.SizeATR, state)
+			}
+		}
+	}
+
+	return sb.String()
+}
+
+// translateBreakDir renders bullish/bearish direction.
+func translateBreakDir(dir string, zh bool) string {
+	if zh {
+		switch dir {
+		case "bullish":
+			return "向上"
+		case "bearish":
+			return "向下"
+		}
+		return dir
+	}
+	return dir
+}
+
+// translateOrderBlock renders demand/supply role.
+func translateOrderBlock(dir string, zh bool) string {
+	if zh {
+		switch dir {
+		case "demand":
+			return "需求"
+		case "supply":
+			return "供给"
+		}
+		return dir
+	}
+	switch dir {
+	case "demand":
+		return "Demand"
+	case "supply":
+		return "Supply"
+	}
+	return dir
 }
 
 // formatFVGAndLiquidity renders the nearest unfilled fair-value gaps and the
