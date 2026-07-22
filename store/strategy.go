@@ -648,6 +648,17 @@ type StructuralSLConfig struct {
 	// commodities keep the native TF (fine TFs whipsaw worst on open-gap/session
 	// microstructure). Zero value = off = native TF everywhere (current behaviour).
 	AssetAdaptiveConfirmTF bool `json:"asset_adaptive_confirm_tf,omitempty"`
+
+	// PreferProvenLevels (Market Structure Map integration): when true the structural
+	// boundary anchors to a PROVEN structure level — an unmitigated order block edge on
+	// the protective side of entry — in preference to a raw fractal swing pivot. An
+	// order block is the origin candle of an impulsive break, i.e. a level the market
+	// actually defended, so it is a more meaningful invalidation point than an arbitrary
+	// swing extreme. The proven level is only adopted when it sits on the correct side
+	// of entry AND is no farther than the nearest fractal pivot (never widens the stop);
+	// otherwise the existing fractal/bar-extreme logic is used unchanged. Opt-in —
+	// zero value = off = current fractal-only behaviour.
+	PreferProvenLevels bool `json:"prefer_proven_levels,omitempty"`
 }
 
 // WithDefaults fills unset structural-SL fields with safe, backtested defaults.

@@ -311,8 +311,31 @@ func (at *AutoTrader) computeStructuralBoundary(symbol string, entryPrice float6
 		return best, found
 	}
 
-	if b, ok := nearestSwing(); ok {
-		return b, true
+	fractal, haveFractal := nearestSwing()
+
+	// PreferProvenLevels: anchor to an unmitigated order block edge on the protective
+	// side of entry when one exists and it does NOT widen the stop past the nearest
+	// fractal pivot. An order block is the origin of an impulsive break — a level the
+	// market actually defended — so it is a stronger invalidation point than a raw
+	// swing. Opt-in; when off this whole block is skipped and behaviour is unchanged.
+	if ss.PreferProvenLevels {
+		if proven, ok := at.nearestProvenBoundary(bars, entryPrice, isLong, c.Timeframe); ok {
+			if !haveFractal {
+				return proven, true
+			}
+			// Adopt only when it does not sit FARTHER from entry than the fractal
+			// (never widen the stop). "Farther" is side-aware.
+			if isLong && proven >= fractal { // higher low = closer/tighter for a long
+				return proven, true
+			}
+			if !isLong && proven <= fractal { // lower high = closer/tighter for a short
+				return proven, true
+			}
+		}
+	}
+
+	if haveFractal {
+		return fractal, true
 	}
 
 	// No qualifying fractal pivot (e.g. very short window or monotonic run). Fall back
@@ -337,6 +360,63 @@ func (at *AutoTrader) computeStructuralBoundary(symbol string, entryPrice float6
 		return 0, false
 	}
 	return best, true
+}
+
+// nearestProvenBoundary locates the closest unmitigated order block edge on the
+// protective side of entry. For a LONG the protective side is below entry (demand
+// order block); for a SHORT above entry (supply). The "edge" is the block's High
+// for a long (the tested level) or Low for a short. Returns 0,false when no
+// unmitigated block exists on the correct side.
+func (at *AutoTrader) nearestProvenBoundary(bars []market.Kline, entryPrice float64, isLong bool, timeframe string) (float64, bool) {
+	if len(bars) < 20 {
+		return 0, false
+	}
+	// Compute ATR14 over the closed bars (drop the forming bar). wilderATRLast needs
+	// at least period+1 bars for the first true-range diff, so feed it the whole
+	// closed history and let it warm up.
+	end := len(bars) - 1
+	if end < 15 {
+		return 0, false
+	}
+	atrWindow := bars[:end]
+	var highs, lows, closes []float64
+	for _, b := range atrWindow {
+		highs = append(highs, b.High)
+		lows = append(lows, b.Low)
+		closes = append(closes, b.Close)
+	}
+	atr14 := wilderATRLast(highs, lows, closes, 14)
+	if atr14 <= 0 {
+		return 0, false
+	}
+
+	// Run structure detection on the full bar window (currentPrice argument is entry
+	// for this use case — we want structures relative to the pending entry).
+	_, orderBlocks := market.DetectStructureBreaks(bars, atr14, entryPrice, timeframe)
+
+	// Mitigation (a wick back into the block) is NOT disqualifying here — a block
+	// that price tested and held is a MORE proven support/resistance level, not a
+	// weaker one. What matters for stop placement is that the block sits on the
+	// protective side of entry; the caller's "never widen past the fractal" guard
+	// rejects any block that would loosen the stop, and the side check below rejects
+	// blocks that price has moved through.
+	best := 0.0
+	found := false
+	for _, ob := range orderBlocks {
+		if isLong && ob.Direction == "demand" && ob.High < entryPrice {
+			// Demand block below entry → protective boundary at its High (the tested edge).
+			if !found || ob.High > best {
+				best, found = ob.High, true
+			}
+		}
+		if !isLong && ob.Direction == "supply" && ob.Low > entryPrice {
+			// Supply block above entry → protective boundary at its Low (the tested edge).
+			if !found || ob.Low < best {
+				best, found = ob.Low, true
+			}
+		}
+	}
+	return best, found
 }
 
 // ladderMaxTPTargetPct returns the largest take-profit target move (as a percent of
