@@ -1,12 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"nofx/httpx"
 	"nofx/market"
+	"nofx/provider/hyperliquid"
 	"strconv"
 	"strings"
 	"time"
@@ -27,13 +29,21 @@ func (s *Server) handleTicker(c *gin.Context) {
 	var price float64
 	var err error
 
-	switch strings.ToLower(exchange) {
-	case "okx":
-		price, err = getOKXTickerPrice(symbol)
-	case "binance":
-		price, err = getBinanceTickerPrice(symbol)
-	default:
-		price, err = getOKXTickerPrice(symbol)
+	// Stock/forex/commodity perps (PLTR, MU, TSLA, GOLD, ...) have no ticker on the
+	// CEX price APIs — their price lives on Hyperliquid. Route by BASE-ASSET identity
+	// (not just the "xyz:" prefix) because the frontend passes the exchange-native
+	// symbol ("PLTRUSDT"). Without this the CEX ticker call 500s and the panel errors.
+	if strings.HasPrefix(strings.ToLower(symbol), "xyz:") || market.IsXyzDexAsset(symbol) {
+		price, err = getHyperliquidTickerPrice(symbol)
+	} else {
+		switch strings.ToLower(exchange) {
+		case "okx":
+			price, err = getOKXTickerPrice(symbol)
+		case "binance":
+			price, err = getBinanceTickerPrice(symbol)
+		default:
+			price, err = getOKXTickerPrice(symbol)
+		}
 	}
 
 	if err != nil {
@@ -46,6 +56,24 @@ func (s *Server) handleTicker(c *gin.Context) {
 		"price":  price,
 		"ts":     time.Now().UnixMilli(),
 	})
+}
+
+// getHyperliquidTickerPrice returns the current mid price for an xyz DEX asset
+// (stock/forex/commodity perp) from Hyperliquid. Accepts either the internal
+// "xyz:PLTR" form or the exchange-native "PLTRUSDT" form — FormatCoinForAPI maps
+// both to the Hyperliquid key ("xyz:PLTR"), which is how the allMids/xyz map is keyed.
+func getHyperliquidTickerPrice(symbol string) (float64, error) {
+	key := hyperliquid.FormatCoinForAPI(symbol)
+	client := hyperliquid.NewClient()
+	mids, err := client.GetAllMidsXYZ(context.Background())
+	if err != nil {
+		return 0, err
+	}
+	priceStr, ok := mids[key]
+	if !ok {
+		return 0, fmt.Errorf("no ticker data for %s", key)
+	}
+	return strconv.ParseFloat(priceStr, 64)
 }
 
 func getOKXTickerPrice(symbol string) (float64, error) {

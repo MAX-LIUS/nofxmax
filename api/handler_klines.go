@@ -44,11 +44,15 @@ func (s *Server) handleKlines(c *gin.Context) {
 	var klines []market.Kline
 	exchangeLower := strings.ToLower(exchange)
 
-	// xyz: prefix = DEX asset (stocks/forex/commodities perps) — these only exist on
-	// Hyperliquid, regardless of the trader's configured exchange. Without this, a
-	// position like "xyz:MU" on an OKX trader routes to CoinAnk/OKX and 500s (the
-	// symbol doesn't exist there), breaking the K-line chart in the frontend.
-	if strings.HasPrefix(strings.ToLower(symbol), "xyz:") {
+	// Stock/forex/commodity perps (PLTR, MU, TSLA, GOLD, ...) only have K-line data
+	// on Hyperliquid — neither CoinAnk nor the CEX kline APIs serve them (verified
+	// 2026-07-23: CoinAnk Binance returns no data for PLTRUSDT even though Binance
+	// lists the perp for TRADING). We must route these to Hyperliquid by BASE-ASSET
+	// identity, NOT just by the "xyz:" prefix: the positions API hands the frontend
+	// the exchange-native symbol ("PLTRUSDT"), so the chart request arrives WITHOUT
+	// the prefix. market.IsXyzDexAsset accepts both "xyz:PLTR" and "PLTRUSDT".
+	// getKlinesFromHyperliquid normalizes the symbol via FormatCoinForAPI internally.
+	if strings.HasPrefix(strings.ToLower(symbol), "xyz:") || market.IsXyzDexAsset(symbol) {
 		klines, err = s.getKlinesFromHyperliquid(symbol, interval, limit)
 		if err != nil {
 			SafeInternalError(c, "Get klines from Hyperliquid (xyz asset)", err)

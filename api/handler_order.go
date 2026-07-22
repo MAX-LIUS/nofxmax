@@ -255,6 +255,49 @@ func normalizeAPIPositionSideForStore(side string) string {
 	}
 }
 
+// isDexExchange reports whether an exchange trades in the Hyperliquid "xyz:" DEX
+// symbol space. For those, the xyz: form IS the native symbol; for CEXes it is not.
+func isDexExchange(exchange string) bool {
+	switch strings.ToLower(strings.TrimSpace(exchange)) {
+	case "hyperliquid", "hyperliquid-xyz", "xyz":
+		return true
+	default:
+		return false
+	}
+}
+
+// exchangeNativeSymbol maps any incoming symbol to the CEX-native pair. Stock/forex/
+// commodity perps arrive from the frontend either as "xyz:PLTR" (internal) or
+// "PLTRUSDT" (positions API, exchange-native). A CEX lists them as "<BASE>USDT", so
+// we strip any "xyz:" prefix and ensure the USDT suffix. Plain crypto is unchanged.
+func exchangeNativeSymbol(symbol string) string {
+	s := strings.ToUpper(strings.TrimSpace(symbol))
+	s = strings.TrimPrefix(s, "XYZ:")
+	if s == "" {
+		return s
+	}
+	// Already a quoted pair — leave USDC/USDT/USD pairs as-is.
+	for _, suffix := range []string{"USDT", "USDC", "USD"} {
+		if strings.HasSuffix(s, suffix) {
+			return s
+		}
+	}
+	return s + "USDT"
+}
+
+// isInvalidSymbolErr recognises the exchange responses that mean "this symbol does
+// not exist / is not queryable here" so the open-orders endpoint can degrade to an
+// empty list instead of a 500. Covers Binance -1121 and generic "invalid symbol".
+func isInvalidSymbolErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "-1121") ||
+		strings.Contains(msg, "invalid symbol") ||
+		strings.Contains(msg, "does not exist")
+}
+
 // handlePositionHistory Historical closed positions with statistics
 func (s *Server) handlePositionHistory(c *gin.Context) {
 	_, traderID, err := s.getTraderFromQuery(c)
@@ -785,12 +828,30 @@ func (s *Server) handleOpenOrders(c *gin.Context) {
 		return
 	}
 
-	// Normalize symbol
-	symbol = market.Normalize(symbol)
+	// Symbol identity is exchange-dependent. market.Normalize() maps stock/forex/
+	// commodity perp bases (PLTR, MU, TSLA, ...) to the "xyz:" DEX form, which is
+	// only valid on Hyperliquid. A CEX (Binance/OKX) that actually LISTS the perp
+	// (e.g. Binance PLTRUSDT) rejects "xyz:PLTR" with -1121 Invalid symbol, which
+	// used to bubble up as an HTTP 500 and blanked the whole panel with a repeating
+	// "Server Error" toast. So: query the exchange with its NATIVE symbol, and keep
+	// the normalized (possibly xyz:) form only for the local DB reconcile key.
+	reconcileSymbol := market.Normalize(symbol)
+	querySymbol := reconcileSymbol
+	if !isDexExchange(trader.GetExchange()) {
+		querySymbol = exchangeNativeSymbol(symbol)
+	}
 
 	// Get open orders from exchange
-	openOrders, err := trader.GetOpenOrders(symbol)
+	openOrders, err := trader.GetOpenOrders(querySymbol)
 	if err != nil {
+		// Graceful degradation: an unknown/invalid symbol on this exchange (or any
+		// single-symbol query failure) must NOT crash the panel. Return an empty
+		// list so the chart simply shows "no orders" instead of a full-page error.
+		if isInvalidSymbolErr(err) {
+			logger.Warnf("⚠️ Open orders: %s not queryable on %s (%v) — returning empty", querySymbol, trader.GetExchange(), err)
+			c.JSON(http.StatusOK, []any{})
+			return
+		}
 		SafeInternalError(c, "Get open orders", err)
 		return
 	}
@@ -801,11 +862,11 @@ func (s *Server) handleOpenOrders(c *gin.Context) {
 		}
 		fullCfg, cfgErr := s.store.Trader().GetFullConfig(c.GetString("user_id"), traderID)
 		if cfgErr == nil && fullCfg != nil && fullCfg.Trader != nil {
-			updated, markErr := s.store.Order().MarkMissingOpenOrdersCanceled(fullCfg.Trader.ExchangeID, symbol, liveIDs)
+			updated, markErr := s.store.Order().MarkMissingOpenOrdersCanceled(fullCfg.Trader.ExchangeID, reconcileSymbol, liveIDs)
 			if markErr != nil {
-				logger.Warnf("⚠️ Open orders: failed to reconcile local order status for %s: %v", symbol, markErr)
+				logger.Warnf("⚠️ Open orders: failed to reconcile local order status for %s: %v", reconcileSymbol, markErr)
 			} else if updated > 0 {
-				logger.Infof("🧹 Open orders: marked %d local stale order records canceled for %s", updated, symbol)
+				logger.Infof("🧹 Open orders: marked %d local stale order records canceled for %s", updated, reconcileSymbol)
 			}
 		}
 	}
