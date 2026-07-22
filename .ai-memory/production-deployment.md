@@ -191,8 +191,37 @@ Commit `c7482b9` (2 live-path files: `trader/entry_gate.go` +
 - Deployed clean: PID 1508058, 4 traders, 0 errors. Positions re-synced identically
   (GPT 3, claude 2, BN 0, Claude-R 0). Gate change affects new entries only.
 
+## 2026-07-22 Deploy: Binance native trailing true root-cause fix (pid 1805235)
+Commit `c41409f` (+ earlier trailing work 3e2d2bb/b307073/a7d841a). Fixes BN
+native trailing triggering AT ENTRY (immediate stop-out → unresolved_exchange_close
++ profit erosion).
+- TRUE ROOT CAUSE (not a Binance bug): go-binance v2.8.9 sent the trailing
+  activation param under the WRONG key `activationPrice`; Binance silently ignored
+  it and defaulted the trail to the order-time market price → armed at entry,
+  triggered on first adverse tick.
+- Fix: go.mod bump v2.8.9 → **v2.8.10** (renames activationPrice → activatePrice).
+  `setTrailingStopLossCore` rewritten onto the ALGO endpoint (/fapi/v1/algoOrder):
+  classic /fapi/v1/order now rejects TRAILING_STOP_MARKET with -4120. Bind
+  `.ActivatePrice()` explicitly; read-back verification retained as a regression
+  guard (cancel + local-monitor fallback on divergence/missing).
+- Also fixed CloseLong/CloseShort quantity==0 to resolve size via cache-free
+  `execPositionAmt` (symbol-scoped GetPositionRisk) instead of the 15s
+  GetPositions() cache — a stale read had reported "no position" ~10s after a live
+  fill (naked-position risk). Mock now honors the symbol query filter.
+- LIVE PROOF: BN PLTRUSDT long entry 127.535, native trailing armed via Algo Order
+  with exchange-confirmed **activation=130.5566 (+2.37% above entry)**, callback
+  1.4%, state native_trailing_full. Old bug would have armed ≈entry.
+- Left as-is per product decision: issue 1 (algo min-notional ~18-20 USDT → graceful
+  local-monitor degradation, -4136); issue 2 (ListOpenAlgoOrders lacks activatePrice
+  → GetOpenOrders approximates from triggerPrice, display only). Recorded in
+  `.ai-memory/binance-native-trailing.md`.
+- Rollback: old binary `/tmp/deploy_backup/nofx.20260722_154058.bak`; code
+  `git revert c41409f` (+ `go mod tidy` back to v2.8.9 if needed).
+- Deployed via start.sh; new PID 1805235, 4 traders loaded, health ok, no panics.
+  BN trader restarted (was stopped for testing). Backend-only — no frontend rebuild.
+
 ## Last Updated
-2026-07-20 - entry-gate closed-candle fake_retest confirmation deployment
+2026-07-22 - Binance native trailing true root-cause fix (go-binance v2.8.10)
 
 ## 2026-07-20 Deploy: unified SL band 1.5/2.5 + max-hold disabled + reward-ATR≥1.0 (pid 1556740)
 Backtest-driven risk tuning, ALL 4 traders identical:
@@ -209,3 +238,14 @@ Backtest basis: floor MUST stay 1.5 (dropping to 1.2 cost claude -15, GPT worse)
   max-hold profit-exemption was net-harmful everywhere; disabling entirely best for
   claude(+7.9)/BN(+10.8), neutral GPT(+3.8), no-op Claude-R.
 Deployed via start.sh; 4 traders loaded, 0 errors, health ok.
+
+## 2026-07-20 Deploy: min-SL-distance gate 0.2→0.8 (pid 1563139)
+Config-only (no rebuild). ALL 4 traders: entry_gate.min_sl_distance_atr_mul 0.2→0.8.
+Blocks entries whose AI-declared invalidation is <0.8×ATR from entry (too-tight stops
+that normal noise sweeps). Backtest (realized PnL, structural-target subset):
+  claude -31.06 → +21.57 kept (blocked tight-stop losers -52.63)
+  Claude-R -11.62 → -1.09 kept ; GPT neutral +2.01 ; BN inverted but tiny/noisy (44).
+Frequency: keeps ~45-50% of structural entries (halved). User accepted "少而精".
+Config backup: /tmp/cfg_backup_20260720_191738/. Restart via start.sh, 4 traders, ok.
+NOTE (future, more surgical): recompute RR against ENFORCED stop (1.5×ATR floor) instead
+of AI nominal invalidation — roots out the "tight declared SL inflates RR" (SPCX class).
