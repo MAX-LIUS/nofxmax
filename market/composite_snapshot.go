@@ -56,7 +56,14 @@ type CompositeMarketSnapshot struct {
 	Timeframes    map[string]CompositeMarketTimeframe `json:"timeframes,omitempty"`
 	Lines         []CompositeMarketLine               `json:"lines,omitempty"`
 	Zones         []StructuralZone                    `json:"zones,omitempty"`
-	AICompact     string                              `json:"ai_compact,omitempty"`
+	// Structure-map overlays from the PRIMARY timeframe, surfaced for the chart
+	// layer (VP shelves, anchored-VWAP bands, BOS/CHoCH breaks, order blocks).
+	// Populated on full/chart views; stripped on ai/summary to keep prompts small.
+	StructureBreaks []StructureBreak `json:"structure_breaks,omitempty"`
+	OrderBlocks     []OrderBlock     `json:"order_blocks,omitempty"`
+	VolumeProfile   *VolumeProfile   `json:"volume_profile,omitempty"`
+	AnchoredVWAPs   []AnchoredVWAP   `json:"anchored_vwaps,omitempty"`
+	AICompact       string           `json:"ai_compact,omitempty"`
 }
 
 type compositeMarketCacheEntry struct {
@@ -174,6 +181,11 @@ func buildCompositeMarketSnapshotFromData(exchange string, timeframes []string, 
 	if len(data.StructuralZones) > 0 {
 		s.Zones = data.StructuralZones
 	}
+	// Surface the primary-TF structure-map overlays for the chart layer.
+	s.StructureBreaks = data.StructureBreaks
+	s.OrderBlocks = data.OrderBlocks
+	s.VolumeProfile = data.VolumeProfile
+	s.AnchoredVWAPs = data.AnchoredVWAPs
 	s.AICompact = FormatCompositeMarketForAI(s)
 	return s
 }
@@ -189,21 +201,37 @@ func ProjectCompositeMarketSnapshot(s *CompositeMarketSnapshot, view string) *Co
 		cp.Timeframes = nil
 		cp.Lines = compactNearestLines(cp.Lines, 12)
 		cp.Zones = FilterTopZonesForAI(cp.Zones, cp.Price, 3)
+		// Structure-map overlays are a chart-only concern; the AI prompt already
+		// gets structure via AICompact, so drop the raw arrays to save tokens.
+		cp.StructureBreaks = nil
+		cp.OrderBlocks = nil
+		cp.VolumeProfile = nil
+		cp.AnchoredVWAPs = nil
 	case "summary":
 		cp.Timeframes = nil
 		cp.Lines = compactNearestLines(cp.Lines, 16)
 		cp.Zones = filterZonesForChart(cp.Zones, cp.Price, 5)
+		cp.StructureBreaks = nil
+		cp.OrderBlocks = nil
+		cp.VolumeProfile = nil
+		cp.AnchoredVWAPs = nil
 	case "chart":
 		cp.Context = nil
 		cp.Timeframes = compactChartTimeframes(cp.Timeframes, 120)
 		cp.Lines = compactNearestLines(cp.Lines, 24)
 		cp.Zones = filterZonesForChart(cp.Zones, cp.Price, 5)
+		// Keep StructureBreaks/OrderBlocks/VolumeProfile/AnchoredVWAPs as-is:
+		// these are the new structure-map chart overlays.
 	case "full", "":
 		return &cp
 	default:
 		cp.Timeframes = nil
 		cp.Lines = compactNearestLines(cp.Lines, 16)
 		cp.Zones = filterZonesForChart(cp.Zones, cp.Price, 5)
+		cp.StructureBreaks = nil
+		cp.OrderBlocks = nil
+		cp.VolumeProfile = nil
+		cp.AnchoredVWAPs = nil
 	}
 	return &cp
 }

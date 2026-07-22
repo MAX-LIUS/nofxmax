@@ -25,6 +25,7 @@ import {
   useStructuralLevels,
   type CompositeMarketLine,
   type StructuralZone,
+  type OrderBlock,
 } from '../../hooks/useStructuralLevels'
 
 // Order marker interface
@@ -63,9 +64,20 @@ interface AdvancedChartProps {
   showStructuralLevels?: boolean
   showFibonacci?: boolean
   showVWAP?: boolean
+  showStructureBreaks?: boolean
+  showOrderBlocks?: boolean
+  showVolumeProfile?: boolean
+  showAnchoredVWAP?: boolean
   levelTimeframes?: Record<string, boolean>
   onStructuralToggle?: (
-    key: 'showStructuralLevels' | 'showFibonacci' | 'showVWAP',
+    key:
+      | 'showStructuralLevels'
+      | 'showFibonacci'
+      | 'showVWAP'
+      | 'showStructureBreaks'
+      | 'showOrderBlocks'
+      | 'showVolumeProfile'
+      | 'showAnchoredVWAP',
     value: boolean
   ) => void
   onLevelTimeframeToggle?: (key: string, value: boolean) => void
@@ -82,6 +94,15 @@ interface IndicatorConfig {
   enabled: boolean
   color: string
   params?: any
+}
+
+// Convert a #RRGGBB hex color to an "r,g,b" string for rgba() usage.
+const hexToRgb = (hex: string): string => {
+  const h = hex.replace('#', '')
+  const r = parseInt(h.substring(0, 2), 16)
+  const g = parseInt(h.substring(2, 4), 16)
+  const b = parseInt(h.substring(4, 6), 16)
+  return `${r}, ${g}, ${b}`
 }
 
 // Get quote currency unit
@@ -132,6 +153,10 @@ export function AdvancedChart({
   showStructuralLevels = true,
   showFibonacci = true,
   showVWAP = true,
+  showStructureBreaks = true,
+  showOrderBlocks = true,
+  showVolumeProfile = false,
+  showAnchoredVWAP = false,
   levelTimeframes = {},
   onStructuralToggle,
   onLevelTimeframeToggle,
@@ -176,9 +201,21 @@ export function AdvancedChart({
 
   // Structural levels from composite API
   const structuralLevelsEnabled =
-    showStructuralLevels || showFibonacci || showVWAP
-  const { lines: structuralLines, zones: structuralZones } =
-    useStructuralLevels(symbol, exchange, structuralLevelsEnabled)
+    showStructuralLevels ||
+    showFibonacci ||
+    showVWAP ||
+    showStructureBreaks ||
+    showOrderBlocks ||
+    showVolumeProfile ||
+    showAnchoredVWAP
+  const {
+    lines: structuralLines,
+    zones: structuralZones,
+    structureBreaks,
+    orderBlocks,
+    volumeProfile,
+    anchoredVWAPs,
+  } = useStructuralLevels(symbol, exchange, structuralLevelsEnabled)
 
   // Real-time ticker price polling (1s) — updates current candle + header price
   useEffect(() => {
@@ -1459,6 +1496,36 @@ export function AdvancedChart({
       ctx.scale(dpr, dpr)
       ctx.clearRect(0, 0, rect.width, rect.height)
 
+      const priceScaleWidthOB = 65
+
+      // Order blocks: demand (green) below / supply (red) above, drawn as bands
+      // from the block low→high. Unmitigated = solid fill; mitigated = faint.
+      // Independent of the zones toggle so it can render on its own.
+      if (showOrderBlocks && orderBlocks.length > 0) {
+        orderBlocks.slice(0, 4).forEach((ob: OrderBlock) => {
+          if (ob.high <= 0 || ob.low <= 0) return
+          const yHi = series.priceToCoordinate(ob.high)
+          const yLo = series.priceToCoordinate(ob.low)
+          if (yHi === null || yLo === null) return
+          const top = Math.min(yHi, yLo)
+          const bandH = Math.max(Math.abs(yLo - yHi), 2)
+          const isDemand = ob.direction === 'demand'
+          const rgb = isDemand ? '52, 211, 153' : '248, 113, 113'
+          const alpha = ob.mitigated ? 0.06 : 0.14
+          ctx.fillStyle = `rgba(${rgb}, ${alpha})`
+          ctx.fillRect(0, top, rect.width - priceScaleWidthOB, bandH)
+          ctx.strokeStyle = `rgba(${rgb}, ${ob.mitigated ? 0.35 : 0.7})`
+          ctx.lineWidth = 1
+          ctx.setLineDash(ob.mitigated ? [3, 3] : [])
+          ctx.strokeRect(0, top, rect.width - priceScaleWidthOB, bandH)
+          ctx.setLineDash([])
+          const obLabel = `OB ${isDemand ? 'D' : 'S'}${ob.mitigated ? '·m' : ''}`
+          ctx.font = '10px monospace'
+          ctx.fillStyle = `rgba(${rgb}, 0.95)`
+          ctx.fillText(obLabel, 6, top + bandH / 2 + 3)
+        })
+      }
+
       if (!showStructuralLevels || structuralZones.length === 0) return
 
       const currentPrice =
@@ -1600,6 +1667,112 @@ export function AdvancedChart({
       if (priceLine) structuralLinesRef.current.set(line.id, priceLine)
     })
 
+    // Volume Profile: POC (solid), VAH/VAL (dashed band edges), HVN shelves.
+    if (showVolumeProfile && volumeProfile && volumeProfile.poc > 0) {
+      const vpLevels: Array<{
+        id: string
+        price: number
+        color: string
+        title: string
+        style: number
+        width: 1 | 2
+      }> = [
+        {
+          id: 'vp-poc',
+          price: volumeProfile.poc,
+          color: '#F59E0B',
+          title: 'POC',
+          style: 0,
+          width: 2,
+        },
+      ]
+      if (volumeProfile.vah > 0)
+        vpLevels.push({
+          id: 'vp-vah',
+          price: volumeProfile.vah,
+          color: '#F59E0B',
+          title: 'VAH',
+          style: 2,
+          width: 1,
+        })
+      if (volumeProfile.val > 0)
+        vpLevels.push({
+          id: 'vp-val',
+          price: volumeProfile.val,
+          color: '#F59E0B',
+          title: 'VAL',
+          style: 2,
+          width: 1,
+        })
+      ;(volumeProfile.hvns ?? []).slice(0, 3).forEach((hvn, i) => {
+        if (hvn > 0)
+          vpLevels.push({
+            id: `vp-hvn-${i}`,
+            price: hvn,
+            color: 'rgba(245, 158, 11, 0.5)',
+            title: 'HVN',
+            style: 1,
+            width: 1,
+          })
+      })
+      vpLevels.forEach((lvl) => {
+        const pl = candlestickSeriesRef.current?.createPriceLine({
+          price: lvl.price,
+          color: lvl.color,
+          lineWidth: lvl.width,
+          lineStyle: lvl.style,
+          axisLabelVisible: true,
+          axisLabelColor: '#F59E0B',
+          title: lvl.title,
+        })
+        if (pl) structuralLinesRef.current.set(lvl.id, pl)
+      })
+    }
+
+    // Anchored VWAP: value line + ±1σ bands, one set per anchor (swing hi/lo).
+    if (showAnchoredVWAP) {
+      anchoredVWAPs.forEach((av, i) => {
+        if (av.vwap <= 0) return
+        const anchorLabel =
+          av.anchor === 'swing_high'
+            ? 'AVWAP↑'
+            : av.anchor === 'swing_low'
+              ? 'AVWAP↓'
+              : 'AVWAP'
+        const pl = candlestickSeriesRef.current?.createPriceLine({
+          price: av.vwap,
+          color: '#22D3EE',
+          lineWidth: 2,
+          lineStyle: 0,
+          axisLabelVisible: true,
+          axisLabelColor: '#22D3EE',
+          title: anchorLabel,
+        })
+        if (pl) structuralLinesRef.current.set(`avwap-${i}`, pl)
+      })
+    }
+
+    // BOS/CHoCH break levels: the swing price that was broken. Solid for a
+    // fresh break, dashed once retested. Bullish green / bearish red.
+    if (showStructureBreaks) {
+      structureBreaks.slice(0, 6).forEach((sb, i) => {
+        if (sb.breakLevel <= 0) return
+        const bullish = sb.direction === 'bullish'
+        const color = bullish ? '#10B981' : '#EF4444'
+        const tag = `${sb.type}${bullish ? '↑' : '↓'}${sb.retested ? '·rt' : ''}`
+        const pl = candlestickSeriesRef.current?.createPriceLine({
+          price: sb.breakLevel,
+          color,
+          lineWidth: 1,
+          lineStyle: sb.retested ? 2 : 0,
+          axisLabelVisible: true,
+          axisLabelColor: color,
+          title: tag,
+        })
+        if (pl) structuralLinesRef.current.set(`bos-${i}`, pl)
+      })
+    }
+
     return () => {
       cancelAnimationFrame(rafId)
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(drawZones)
@@ -1608,9 +1781,17 @@ export function AdvancedChart({
   }, [
     structuralLines,
     structuralZones,
+    structureBreaks,
+    orderBlocks,
+    volumeProfile,
+    anchoredVWAPs,
     showStructuralLevels,
     showFibonacci,
     showVWAP,
+    showStructureBreaks,
+    showOrderBlocks,
+    showVolumeProfile,
+    showAnchoredVWAP,
     levelTimeframes,
   ])
 
@@ -1867,6 +2048,30 @@ export function AdvancedChart({
                   color: '#3B82F6',
                   enabled: showVWAP,
                 },
+                {
+                  key: 'showStructureBreaks' as const,
+                  label: 'BOS / CHoCH',
+                  color: '#10B981',
+                  enabled: showStructureBreaks,
+                },
+                {
+                  key: 'showOrderBlocks' as const,
+                  label: 'Order Blocks',
+                  color: '#34D399',
+                  enabled: showOrderBlocks,
+                },
+                {
+                  key: 'showVolumeProfile' as const,
+                  label: 'Volume Profile',
+                  color: '#F59E0B',
+                  enabled: showVolumeProfile,
+                },
+                {
+                  key: 'showAnchoredVWAP' as const,
+                  label: 'Anchored VWAP',
+                  color: '#22D3EE',
+                  enabled: showAnchoredVWAP,
+                },
               ].map((item) => (
                 <div
                   key={item.key}
@@ -1897,7 +2102,7 @@ export function AdvancedChart({
                     className="w-8 h-[18px] rounded-full relative transition-all shrink-0"
                     style={{
                       background: item.enabled
-                        ? `rgba(${item.color === '#10B981' ? '16,185,129' : item.color === '#A855F7' ? '168,85,247' : '59,130,246'}, 0.4)`
+                        ? `rgba(${hexToRgb(item.color)}, 0.4)`
                         : 'rgba(75, 85, 99, 0.3)',
                     }}
                   >

@@ -46,6 +46,8 @@ services:
       - "${NOFX_FRONTEND_PORT:-3000}:80"
     networks:
       - nofx-network
+    extra_hosts:
+      - "nofx:host-gateway"
     depends_on:
       - nofx
     healthcheck:

@@ -621,6 +621,10 @@ export function ChartTabs({
                 showStructuralLevels={prefs.showStructuralLevels}
                 showFibonacci={prefs.showFibonacci}
                 showVWAP={prefs.showVWAP}
+                showStructureBreaks={prefs.showStructureBreaks}
+                showOrderBlocks={prefs.showOrderBlocks}
+                showVolumeProfile={prefs.showVolumeProfile}
+                showAnchoredVWAP={prefs.showAnchoredVWAP}
                 levelTimeframes={prefs.levelTimeframes}
                 onStructuralToggle={(key, value) =>
                   updatePrefs({ [key]: value })

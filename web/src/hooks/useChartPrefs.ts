@@ -12,6 +12,11 @@ export interface ChartPrefs {
   showFibonacci: boolean
   showVWAP: boolean
   showOrderMarkers: boolean
+  // Structure-map overlays (BOS/CHoCH, order blocks, volume profile, anchored VWAP)
+  showStructureBreaks: boolean
+  showOrderBlocks: boolean
+  showVolumeProfile: boolean
+  showAnchoredVWAP: boolean
   // Per-timeframe toggles: e.g. { "support-5m": true, "fib-1h": false }
   levelTimeframes: Record<string, boolean>
 }
@@ -24,6 +29,10 @@ const DEFAULT_PREFS: ChartPrefs = {
   showFibonacci: true,
   showVWAP: true,
   showOrderMarkers: true,
+  showStructureBreaks: true,
+  showOrderBlocks: true,
+  showVolumeProfile: false,
+  showAnchoredVWAP: false,
   levelTimeframes: {},
 }
 
@@ -41,11 +50,13 @@ export function useChartPrefs() {
   const [prefs, setPrefs] = useState<ChartPrefs>(loadPrefs)
 
   const updatePrefs = useCallback((patch: Partial<ChartPrefs>) => {
-    setPrefs(prev => {
+    setPrefs((prev) => {
       const next = { ...prev, ...patch }
       try {
         localStorage.setItem(PREFS_KEY, JSON.stringify(next))
-      } catch { /* quota exceeded — ignore */ }
+      } catch {
+        /* quota exceeded — ignore */
+      }
       return next
     })
   }, [])
