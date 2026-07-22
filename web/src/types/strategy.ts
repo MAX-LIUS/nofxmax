@@ -117,6 +117,13 @@ export interface EntryGateConfig {
   throttle_window_hours?: number
   throttle_min_closes?: number
   throttle_loss_rate?: number
+  // soft_regime_structure_fit (Market Structure Map): treat the regime↔structure
+  // mismatch check as a SOFT confidence penalty (deducts from the gate score →
+  // smaller position) instead of a HARD block. A high-conviction counter-structure
+  // trade is sized down rather than rejected, so structure acts as confidence-
+  // weighting evidence, not an all-or-nothing gate. Genuine invalidation/trap gates
+  // (fake_retest_trap, protection_policy_rejected) stay hard regardless. Default off.
+  soft_regime_structure_fit?: boolean
   // Legacy compat
   entry_proximity_min_pct?: number
   invalidation_structure_min_pct?: number
@@ -277,6 +284,14 @@ export interface StructuralSLConfig {
   // +10.81 PnL, drawdown 88→77) when a clean 2× step exists; stocks/commodities keep
   // native (fine TFs whipsaw worst on session microstructure). Off = native everywhere.
   asset_adaptive_confirm_tf?: boolean
+  // prefer_proven_levels (Market Structure Map): anchor the structural stop to a
+  // proven order-block edge (demand-block high for a long / supply-block low for a
+  // short) in preference to the raw fractal swing, but only when it does NOT widen
+  // the stop past the nearest pivot. An order block is the origin of an impulsive
+  // break — a level the market defended — so it is a stronger invalidation point.
+  // Backtest (never-widen guarantees non-negative): claude 1h +1.68 PnL / DD flat,
+  // Claude-R 15m +0.62 PnL / DD -0.62. Off = fractal-only.
+  prefer_proven_levels?: boolean
 }
 
 export interface LadderTPSLConfig {

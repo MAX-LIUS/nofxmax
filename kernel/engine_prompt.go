@@ -46,6 +46,16 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 		decisionMode = strings.ReplaceAll(decisionMode, "|no_open", "")
 	}
 
+	// Entry-gate soft-flag awareness (align the prompt with the actual backend
+	// gate config so guidance matches enforcement instead of contradicting it).
+	//   - penalizeBreakoutRetest: breakout_retest carries a HEAVY size penalty
+	//     (not a hard block) → tell the AI it may still use it but only at high
+	//     conviction and reduced size, and it is de-preferred.
+	// (The regime/setup soft-fit rule is rendered in formatMarketContextV2, which
+	// computes SoftRegimeStructureFit locally.)
+	entryGateFlags := e.config.EntryStructure.EntryGate.WithDefaults()
+	penalizeBreakoutRetest := entryGateFlags.BlockBreakoutRetest != nil && *entryGateFlags.BlockBreakoutRetest
+
 	// 0. Data Dictionary & Schema (ensure AI understands all fields)
 	lang := e.GetLanguage()
 	schemaPrompt := GetSchemaPrompt(lang)
@@ -441,7 +451,11 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString(fmt.Sprintf("- **open_long / open_short** REQUIRE: `symbol`, `action`, `leverage`, `position_size_usd`, `stop_loss`, `take_profit`, `confidence` (0-100, open ≥ %d), `risk_usd`, `trigger_type`, `entry_protection_rationale`, %s`selected_levels`. Direction sanity: long → invalidation < entry < first_target; short → invalidation > entry > first_target. RR must meet min ≥ %.1f.\n", riskControl.MinConfidence, protectionPlanReq, riskControl.MinRiskRewardRatio))
 	sb.WriteString("- **hold / wait / close_long / close_short**: Do NOT output protection_plan for hold/wait/close actions, nor entry/structural fields.\n")
 	sb.WriteString("- `trigger_type`: one of the 6 in the Entry Trigger Gate section. No valid trigger → do not open.\n")
-	sb.WriteString("- Optional audit fields (include on strong opens): `regime` (trend_up|trend_down|range|squeeze|chop|news_risk|no_trade), `setup_type` (trend_pullback|range_edge|breakout_retest|none), `quality_score`.\n\n")
+	sb.WriteString("- Optional audit fields (include on strong opens): `regime` (trend_up|trend_down|range|squeeze|chop|news_risk|no_trade), `setup_type` (trend_pullback|range_edge|breakout_retest|none), `quality_score`.\n")
+	if penalizeBreakoutRetest {
+		sb.WriteString("- ⚠️ `setup_type=breakout_retest` is DE-PREFERRED: it is net-negative across all backtest periods and carries a heavy gate-score penalty that sharply reduces position size (it is NOT hard-rejected). Only tag a trade breakout_retest when conviction is very high and you accept the reduced size; otherwise prefer trend_pullback or range_edge.\n")
+	}
+	sb.WriteString("\n")
 
 	sb.WriteString("## entry_protection_rationale (open only)\n")
 	sb.WriteString("- Must contain `timeframe_context`, `risk_reward` (entry/invalidation/first_target/gross_estimated_rr, prefer net_estimated_rr), `key_levels.support` + `key_levels.resistance` (only decision-relevant levels, ≤3 each), and structural `anchors`.\n")
@@ -1219,9 +1233,23 @@ func (e *StrategyEngine) formatMarketContextV2(symbol string, data *market.Data)
 	if ctx == nil || ctx.RegimeRules == nil {
 		return ""
 	}
+	// Flag-aware regime rule: when SoftRegimeStructureFit is on (default), a
+	// setup/regime mismatch is a soft size penalty — a high-conviction
+	// counter-structure trade opens at reduced size rather than waiting. When
+	// off, the mismatch stays a hard gate ("otherwise wait").
+	softRegimeFit := true
+	if e.config != nil {
+		if f := e.config.EntryStructure.EntryGate.WithDefaults().SoftRegimeStructureFit; f != nil {
+			softRegimeFit = *f
+		}
+	}
+	regimeRule := "  rule: open only when setup_type is compatible with allowed_setups and structural anchors satisfy structure_mode; otherwise wait.\n"
+	if softRegimeFit {
+		regimeRule = "  rule: prefer setups compatible with allowed_setups that satisfy structure_mode. A setup/regime MISMATCH is not an automatic wait — if conviction is high you may still open a counter-structure trade, but the backend reduces its position size (soft penalty). Reserve a full wait for genuine invalidation (fake-retest trap, protection policy rejection) or when there is no real edge.\n"
+	}
 	snapshot := market.BuildCompositeMarketSnapshotFromExistingData("okx", []string{"15m", "1h", "4h", "1d"}, "1h", 180*time.Second, data)
 	if snapshot != nil && snapshot.AICompact != "" {
-		return "Composite Market Context (shared human/AI source):\n" + snapshot.AICompact + "  rule: open only when setup_type is compatible with allowed_setups and structural anchors satisfy structure_mode; otherwise wait. For any open with ladder protection, stop_loss_price must be an explicit structural invalidation price beyond support/resistance/fibonacci plus ATR/wick buffer; stop_loss_pct is only a derived display value, never the planning input.\n"
+		return "Composite Market Context (shared human/AI source):\n" + snapshot.AICompact + regimeRule + "  For any open with ladder protection, stop_loss_price must be an explicit structural invalidation price beyond support/resistance/fibonacci plus ATR/wick buffer; stop_loss_pct is only a derived display value, never the planning input.\n"
 	}
 	var sb strings.Builder
 	sb.WriteString("Execution Regime Guidance:\n")
@@ -1254,7 +1282,7 @@ func (e *StrategyEngine) formatMarketContextV2(symbol string, data *market.Data)
 	if ctx.ExchangeFlow != nil && ctx.ExchangeFlow.DataQuality != "" && ctx.ExchangeFlow.DataQuality != "missing" {
 		sb.WriteString(fmt.Sprintf("  exchange_flow: funding=%s long_short=%s taker=%s depth=%s crowding=%s depth_total=%s\n", ctx.ExchangeFlow.FundingBias, ctx.ExchangeFlow.LongShortSkew, ctx.ExchangeFlow.TakerFlowBias, ctx.ExchangeFlow.DepthBias, ctx.ExchangeFlow.CrowdingRisk, formatFlowValue(ctx.ExchangeFlow.DepthTotalUSDT)))
 	}
-	sb.WriteString("  rule: open only when setup_type is compatible with allowed_setups and structural anchors satisfy structure_mode; otherwise wait.\n")
+	sb.WriteString(regimeRule)
 	return sb.String()
 }
 

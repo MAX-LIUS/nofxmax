@@ -6,15 +6,27 @@ import (
 	"nofx/store"
 )
 
-// TestSoftRegimeStructureFit_Default verifies the flag defaults to OFF so the
-// regime_structure_mismatch check stays a hard gate unless explicitly enabled.
+// TestSoftRegimeStructureFit_Default verifies the flag now defaults to ON
+// (Market Structure Map: regime/setup mismatch is a soft size penalty, not a
+// hard block). Grayscale validated and promoted to the default; an explicit
+// false still restores the hard gate per trader.
 func TestSoftRegimeStructureFit_Default(t *testing.T) {
 	gate := store.EntryGateConfig{}.WithDefaults()
 	if gate.SoftRegimeStructureFit == nil {
 		t.Fatal("SoftRegimeStructureFit should be defaulted, got nil")
 	}
-	if *gate.SoftRegimeStructureFit {
-		t.Error("SoftRegimeStructureFit must default to false (opt-in)")
+	if !*gate.SoftRegimeStructureFit {
+		t.Error("SoftRegimeStructureFit must default to true (promoted from grayscale)")
+	}
+}
+
+// TestSoftRegimeStructureFit_ExplicitFalse verifies an explicit false survives
+// WithDefaults so a trader can restore the hard gate.
+func TestSoftRegimeStructureFit_ExplicitFalse(t *testing.T) {
+	off := false
+	gate := store.EntryGateConfig{SoftRegimeStructureFit: &off}.WithDefaults()
+	if gate.SoftRegimeStructureFit == nil || *gate.SoftRegimeStructureFit {
+		t.Error("explicit false SoftRegimeStructureFit must be preserved (opt-out)")
 	}
 }
 

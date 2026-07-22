@@ -1290,15 +1290,21 @@ func evaluateConfidenceRiskGate(input entryGateInput) []EntryGateCheck {
 	if input.StrategyConfig != nil {
 		gate := input.StrategyConfig.EntryStructure.EntryGate.WithDefaults()
 
-		// breakout_retest is net-negative in every time third — hard block.
+		// breakout_retest is net-negative in every backtest third (early -11.5,
+		// mid -28.6, late -4.0; 1190-sample entry-quality study, p=98.8%). Treated
+		// as a HEAVY soft penalty (Market Structure Map: confidence-weighted
+		// evidence, not a one-shot veto) so a high-conviction breakout_retest can
+		// still open at a sharply reduced size rather than being rejected outright.
+		// The BlockBreakoutRetest flag gates whether the penalty applies at all
+		// (explicit false = no penalty). Penalty weight lives in gateCheckPenalties.
 		if gate.BlockBreakoutRetest != nil && *gate.BlockBreakoutRetest &&
 			strings.EqualFold(strings.TrimSpace(d.SetupType), "breakout_retest") {
 			checks = append(checks, EntryGateCheck{
 				Code:     "breakout_retest_blocked",
 				Stage:    string(EntryGateStageConfidenceRisk),
 				Passed:   false,
-				Enforced: true,
-				Detail:   "setup_type=breakout_retest is net-negative across all backtest periods (early/mid/late) — hard-blocked",
+				Enforced: false,
+				Detail:   "setup_type=breakout_retest is net-negative across all backtest periods (early/mid/late) — heavy size penalty (soft), not a hard block",
 				Values:   fmt.Sprintf("setup=%s", d.SetupType),
 			})
 		}
@@ -1378,6 +1384,7 @@ func enforcedFailedCodes(checks []EntryGateCheck) []string {
 var gateCheckPenalties = map[string]int{
 	"range_middle_without_edge_setup":       15,
 	"regime_structure_mismatch":             20, // soft mode only (SoftRegimeStructureFit); hard block otherwise
+	"breakout_retest_blocked":               40, // heavy: net-negative in every backtest third (p=98.8%); soft-sizes down instead of hard-blocking
 	"net_rr_below_min":                      20,
 	"unsupported_setup_type":                10,
 	"sl_distance_below_vol_buffer":          10,

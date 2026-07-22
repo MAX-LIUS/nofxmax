@@ -989,6 +989,29 @@ export function PreEntryGateEditor({
             <input
               type="checkbox"
               checked={
+                config.entry_structure?.entry_gate?.soft_regime_structure_fit ??
+                true
+              }
+              onChange={(e) =>
+                updateEntryGate('soft_regime_structure_fit', e.target.checked)
+              }
+              disabled={
+                disabled ||
+                !(config.entry_structure?.entry_gate?.enabled ?? false)
+              }
+              className="h-4 w-4 accent-amber-500"
+            />
+            {isZh
+              ? '结构错配软化（市场结构图）：把「趋势↔结构错配」从硬门改为软扣分（降低仓位而非拒单）。高确信逆结构单缩量入场而非直接拒绝——结构作为信心加权证据而非一票否决。真失效/陷阱门（假回测陷阱、保护策略拒绝）仍保持硬门。'
+              : 'Soft regime-structure fit (Market Structure Map): treat trend↔structure mismatch as a soft confidence penalty (smaller size) instead of a hard block. A high-conviction counter-structure trade is sized down, not rejected — structure as confidence-weighting evidence, not an all-or-nothing gate. Genuine invalidation/trap gates stay hard.'}
+          </label>
+          <label
+            className="flex items-center gap-2 text-sm mt-3"
+            style={{ color: '#EAECEF' }}
+          >
+            <input
+              type="checkbox"
+              checked={
                 config.entry_structure?.entry_gate
                   ?.correlated_adverse_throttle ?? false
               }

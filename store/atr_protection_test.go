@@ -65,6 +65,20 @@ func TestStructuralSLConfig_WithDefaults(t *testing.T) {
 	if custom.FloorATRMul != 2.0 || custom.BackstopATRMul != 5.0 || custom.LookbackBars != 12 {
 		t.Fatalf("explicit values not preserved: %+v", custom)
 	}
+	// PreferProvenLevels defaults ON (promoted from grayscale: order-block anchor
+	// is a strict tighten-or-noop, net-positive with no downside in A/B backtest).
+	if got.PreferProvenLevels == nil {
+		t.Fatal("PreferProvenLevels should be defaulted, got nil")
+	}
+	if !*got.PreferProvenLevels {
+		t.Error("PreferProvenLevels must default to true (promoted from grayscale)")
+	}
+	// Explicit false opts out and survives WithDefaults.
+	off := false
+	optOut := StructuralSLConfig{PreferProvenLevels: &off}.WithDefaults()
+	if optOut.PreferProvenLevels == nil || *optOut.PreferProvenLevels {
+		t.Error("explicit false PreferProvenLevels must be preserved (opt-out)")
+	}
 }
 
 // Structural SL config must round-trip and default to disabled (no-op) for legacy JSON.

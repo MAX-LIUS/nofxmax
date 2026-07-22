@@ -1764,6 +1764,29 @@ export function ProtectionEditor({
                   </span>
                 </label>
 
+                {/* Market Structure Map: prefer proven order-block levels over raw fractals */}
+                <label
+                  className="flex items-start gap-2 text-xs"
+                  style={{ color: '#EAECEF' }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={structuralSL.prefer_proven_levels ?? true}
+                    onChange={(e) =>
+                      updateStructuralSL({
+                        prefer_proven_levels: e.target.checked,
+                      })
+                    }
+                    disabled={disabled}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    {isZh
+                      ? '优先采用验证过的结构位（市场结构图）：止损优先锚定入场保护侧的订单块边缘（多单用需求块高点/空单用供应块低点），而非裸摆动枢轴——订单块是脉冲突破的起点，是市场真正守住的位置。仅当不比最近枢轴更宽时才采用（“不放宽”保证净结果非负）。回测：claude 1h +1.68 PnL/回撤持平，Claude-R 15m +0.62 PnL/回撤-0.62。'
+                      : 'Prefer proven structural levels (Market Structure Map): anchor the stop to a protective-side order-block edge (demand-block high for a long / supply-block low for a short) over the raw fractal swing — an order block is the origin of an impulsive break, a level the market defended. Adopted only when it does not widen the stop past the nearest pivot (never-widen → non-negative). Backtest: claude 1h +1.68 PnL / DD flat, Claude-R 15m +0.62 PnL / DD -0.62.'}
+                  </span>
+                </label>
+
                 {/* Ratcheting (trailing) structural stop — requires close-confirm */}
                 <label
                   className="flex items-start gap-2 text-xs"

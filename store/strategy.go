@@ -215,8 +215,11 @@ type EntryGateConfig struct {
 	// shrinks position size, letting a high-conviction counter-structure trade
 	// still open at reduced risk. The genuine invalidation/trap gates
 	// (fake_retest_trap, protection_policy_rejected) remain HARD regardless.
-	// Pointer distinguishes explicit true/false from unset. DEFAULT OFF — enabling
-	// it materially changes which entries open, so it is opt-in per trader.
+	// Pointer distinguishes explicit true/false from unset. DEFAULT ON (WithDefaults):
+	// promoted from grayscale — treating structure alignment as confidence-weighted
+	// evidence rather than a binary gate lets high-conviction counter-structure
+	// trades open at reduced size instead of being rejected. Explicit false restores
+	// the hard gate per trader (surfaced as a strategy-UI toggle).
 	SoftRegimeStructureFit *bool `json:"soft_regime_structure_fit,omitempty"`
 
 	// Fallback minimum RR when strategy MinRiskRewardRatio is not set (G3b)
@@ -232,11 +235,15 @@ type EntryGateConfig struct {
 	// RR still holds after widening, backend auto-widens SL to meet the threshold.
 	VolatilityBufferATRMul float64 `json:"volatility_buffer_atr_mul,omitempty"`
 
-	// BlockBreakoutRetest hard-blocks entries tagged setup_type=breakout_retest.
+	// BlockBreakoutRetest applies a HEAVY soft size penalty to entries tagged
+	// setup_type=breakout_retest (was a hard block; softened to Market Structure
+	// Map semantics — confidence-weighted evidence, not a one-shot veto). A
+	// high-conviction breakout_retest still opens at a sharply reduced size.
 	// Entry-quality study (1190 closed positions, rolling 5-fold walk-forward +
 	// bootstrap p=98.8%): breakout_retest is net-negative in every time third
-	// (early -11.5, mid -28.6, late -4.0) and removing it improves net and lowers
-	// max drawdown. Pointer to distinguish an explicit false (allow) from unset.
+	// (early -11.5, mid -28.6, late -4.0), which is why the penalty is heavy (40).
+	// Pointer distinguishes explicit false (no penalty) from unset (default on).
+	// The field name is retained for config/UI/telemetry compatibility.
 	BlockBreakoutRetest *bool `json:"block_breakout_retest,omitempty"`
 
 	// MaxNetRR hard-blocks entries whose AI-promised net risk/reward exceeds this
@@ -299,7 +306,10 @@ func (c EntryGateConfig) WithDefaults() EntryGateConfig {
 		c.BlockBreakoutRetest = &defaultBlock
 	}
 	if c.SoftRegimeStructureFit == nil {
-		defaultSoft := false // opt-in: keep regime_structure_mismatch a hard gate by default
+		// DEFAULT ON: Market Structure Map philosophy — a regime/setup mismatch is
+		// confidence-reducing evidence (size penalty) rather than a hard reject.
+		// Grayscale validated; explicit false restores the hard gate per trader.
+		defaultSoft := true
 		c.SoftRegimeStructureFit = &defaultSoft
 	}
 	if c.MaxNetRR == 0 {
@@ -656,9 +666,14 @@ type StructuralSLConfig struct {
 	// actually defended, so it is a more meaningful invalidation point than an arbitrary
 	// swing extreme. The proven level is only adopted when it sits on the correct side
 	// of entry AND is no farther than the nearest fractal pivot (never widens the stop);
-	// otherwise the existing fractal/bar-extreme logic is used unchanged. Opt-in —
-	// zero value = off = current fractal-only behaviour.
-	PreferProvenLevels bool `json:"prefer_proven_levels,omitempty"`
+	// otherwise the existing fractal/bar-extreme logic is used unchanged.
+	//
+	// Pointer distinguishes explicit true/false from unset. DEFAULT ON (WithDefaults):
+	// the proven-level anchor is net-positive with no downside in the A/B backtest
+	// (claude 1h, n=387: PnL +1.68, SL-hit% unchanged at 22.5%, DD flat) because the
+	// never-widen guard makes it strictly a tighten-or-noop. A trader may still opt
+	// out by setting this false explicitly (surfaced as a strategy-UI toggle).
+	PreferProvenLevels *bool `json:"prefer_proven_levels,omitempty"`
 }
 
 // WithDefaults fills unset structural-SL fields with safe, backtested defaults.
@@ -712,6 +727,13 @@ func (c StructuralSLConfig) WithDefaults() StructuralSLConfig {
 	if c.TrailOnLoss == nil {
 		v := true
 		c.TrailOnLoss = &v
+	}
+	// PreferProvenLevels defaults ON: the order-block anchor is a strict
+	// tighten-or-noop (never-widen guard), net-positive with no downside in the
+	// A/B backtest. Explicit false opts out. See field doc for the numbers.
+	if c.PreferProvenLevels == nil {
+		v := true
+		c.PreferProvenLevels = &v
 	}
 	return c
 }

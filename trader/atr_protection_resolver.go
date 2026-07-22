@@ -318,7 +318,7 @@ func (at *AutoTrader) computeStructuralBoundary(symbol string, entryPrice float6
 	// fractal pivot. An order block is the origin of an impulsive break — a level the
 	// market actually defended — so it is a stronger invalidation point than a raw
 	// swing. Opt-in; when off this whole block is skipped and behaviour is unchanged.
-	if ss.PreferProvenLevels {
+	if ss.PreferProvenLevels != nil && *ss.PreferProvenLevels {
 		if proven, ok := at.nearestProvenBoundary(bars, entryPrice, isLong, c.Timeframe); ok {
 			if !haveFractal {
 				return proven, true

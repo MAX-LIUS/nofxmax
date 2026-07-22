@@ -34,7 +34,9 @@ func mkConfRiskInput(setupType string, netRR float64) entryGateInput {
 	}
 }
 
-func TestBreakoutRetestIsHardBlocked(t *testing.T) {
+func TestBreakoutRetestIsSoftPenalized(t *testing.T) {
+	// breakout_retest is now a HEAVY soft penalty (not a hard block): the check
+	// fails but is NOT enforced, so it deducts size rather than rejecting.
 	checks := evaluateConfidenceRiskGate(mkConfRiskInput("breakout_retest", 2.0))
 	c := findCheck(checks, "breakout_retest_blocked")
 	if c == nil {
@@ -43,8 +45,17 @@ func TestBreakoutRetestIsHardBlocked(t *testing.T) {
 	if c.Passed {
 		t.Error("breakout_retest must not pass (net-negative in every backtest third)")
 	}
-	if !c.Enforced {
-		t.Error("breakout_retest block must be hard-enforced")
+	if c.Enforced {
+		t.Error("breakout_retest must be a SOFT penalty now (Enforced=false), not a hard block")
+	}
+	// It must not hard-block: firstEnforcedFailure should ignore it.
+	if blocked, code, _ := firstEnforcedFailure(checks); blocked && code == "breakout_retest_blocked" {
+		t.Error("breakout_retest must not appear as an enforced (hard) failure")
+	}
+	// And it must carry the heavy penalty so size drops materially.
+	score := computeGateScore(checks)
+	if score > 60 {
+		t.Errorf("breakout_retest heavy penalty should drop gate score to <=60 (got %d)", score)
 	}
 }
 
@@ -63,8 +74,8 @@ func TestBreakoutRetestBlockRespectsCaseAndSpace(t *testing.T) {
 	if c == nil {
 		t.Fatal("expected breakout_retest_blocked for case/space variant")
 	}
-	if c.Passed || !c.Enforced {
-		t.Error("case/space variant must be hard-blocked")
+	if c.Passed || c.Enforced {
+		t.Error("case/space variant must be soft-penalized (fails, not enforced)")
 	}
 }
 

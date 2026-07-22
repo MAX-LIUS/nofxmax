@@ -8,6 +8,28 @@
 
 ## ✅ 已采纳（Accepted）
 
+### DEC-0122  提示词↔后端门控语义对齐（消除硬门自我否决）
+- **Question**：提示词与 entry-gate 存在语义不一致——AI 侧还是硬门措辞，会在决策前自我否决，使后端已软化的门控永不触发。是否统一为软扣分并让提示词感知 flag？
+- **Evidence**（三处不一致排查）：
+  - **矛盾1 regime_structure_mismatch**：后端已是软门（`Enforced:!softFit`，SoftRegimeStructureFit 默认 on），但提示词两处 `formatMarketContextV2` 仍写 "otherwise wait"（硬门）→ AI 看到错配直接 wait，软扣分降仓逻辑永不触发。
+  - **矛盾2 breakout_retest**：后端 `BlockBreakoutRetest` 默认**硬拒**（回测 1190 样本、p=98.8%、三时段全净负），但提示词把 breakout_retest 列为合法 setup 而不告知 → AI 输出后被硬拒，纯决策浪费。
+  - **矛盾3 net_rr 上限**：后端 `MaxNetRR=2.8` 硬门，提示词只讲 TARGET_CEILING 未讲 RR 比值上限（本次按决定不动）。
+- **Conclusion**：矛盾1、2 统一为**软扣分不硬拒**（Market Structure Map：证据加权而非一票否决）。
+  - breakout_retest：`Enforced:true→false` + `gateCheckPenalties` 重罚 40（分数 100→60→0.5×仓位，叠加落 0.3×）。保留 `BlockBreakoutRetest` flag 名兼容 DB/UI/遥测。
+  - 提示词做成 **flag 感知**：`formatMarketContextV2` 按 SoftRegimeStructureFit 渲染软/硬 rule；setup 清单按 BlockBreakoutRetest 追加降级警告。opt-out 时自动回退硬语义，与后端一致。
+- **Reason**：消除"提示词硬门 vs 后端软门"的自我否决与决策浪费，让两层语义一致；高确信逆结构/breakout_retest 单缩量入场而非拒单。
+- **Reopen Condition**：若 breakout_retest 缩量后仍显著拖累净值，将 `BlockBreakoutRetest` 恢复硬门（提示词随 flag 自动回退）；矛盾3 若 net_rr 硬拒频繁误伤，再补提示词告知上限。
+
+### DEC-0121  Market Structure Map 两特性由灰度提升为默认开启
+- **Question**：SoftRegimeStructureFit（regime/setup 错配软化）与 PreferProvenLevels（止损锚定订单块边缘）经灰度后，能否作为全策略默认？
+- **Evidence**：
+  - PreferProvenLevels A/B（claude 1h，n=387，24 笔=6.2% 边界变化）：PnL +1.68，**SL-hit% 22.5%→22.5% 不变**，Win% 持平，MaxDD 持平。never-widen 约束使其为「只紧不宽」的 tighten-or-noop，无负面。
+  - close-confirm + 宽 backstop 两层结构吸收了「近锚点=易被针扫」的主要风险；近锚点只作用于收盘确认线，挂单仍在宽 backstop。
+  - 订单块=市场真实防守过的失效点，比裸分形枢轴更可靠。
+- **Conclusion**：采纳。两者 `WithDefaults` 默认翻为 ON；字段改 `*bool` 以区分「未设置/显式 false」，UI 可显式 opt-out。
+- **Reason**：净正或中性、无下行、可逐 trader 退回硬门。
+- **Reopen Condition**：若某 trader 实盘 SL-hit% 显著上升或 counter-structure 单拖累净值，逐个 opt-out 并复验。
+
 ### DEC-0002  Time-stop（须亏损条件）
 - **Question**：持仓过久且仍亏损，是否该强平？
 - **Evidence**：部分大亏是"逆势慢失血20-37h"。带亏损条件的时间止损可确定性切除，且不碰赢家。
