@@ -60,6 +60,18 @@ Anchored VWAP、K线FVG、Equal H/L流动性池、反应强度+OI变化。
 - 上线验证(PID 1704323, 决策21709): 分布健康 reacted/reversal 27, flipped/continuation 10, retested/acceptance 3, invalid/continuation 3.
 - 仍缺(Phase2): 每根OI序列对齐zone(OI-at-level) — 需OI历史fetch+cache, API成本, 暂缓.
 - [ ] Phase2剩余: OI-at-level(需per-bar OI序列)
+
+## Phase 3 起步 (门禁哲学重构, 最高风险, 默认关闭)
+提交: b682749. 门禁架构: 3 stage, 每 stage 任一 Enforced:true check 失败即硬阻断;
+Enforced:false 软失败只扣分->computeGateScore(100基)->scoreToSizeMultiplier(仓位).
+Stage2 结构硬门: regime_structure_mismatch / squeeze_regime_low_conf,rr /
+regime_cross_validation_failed / protection_policy_rejected / fake_retest_trap.
+- 首个增量: store.EntryGateConfig.SoftRegimeStructureFit *bool (默认false, opt-in).
+  开启后 regime_structure_mismatch 从硬门->软扣分(20), 高确信逆结构单缩量而非拒单.
+  fake_retest_trap/protection_policy_rejected 永远保持硬门(真失效/陷阱).
+  trader/entry_gate.go: Enforced=!softFit; 惩罚20已注册; 3测试(默认关/显式真/硬vs软语义).
+- 已上线(PID 1707471), 默认关闭=零行为变化, 仅落地机制.
+- [ ] Phase3下一步: 灰度对单个trader开启 SoftRegimeStructureFit 观察; 评估其余软化候选(range_middle等).
 - [ ] Phase3: 门禁哲学重构(硬门→信心加分,仅失效位保留硬门) — 风险最高单独做
 - [ ] 后期: 图表显示、止损、选币过滤强化
 
