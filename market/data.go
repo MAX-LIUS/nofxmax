@@ -264,6 +264,7 @@ func GetWithTimeframesExchange(symbol string, timeframes []string, primaryTimefr
 		tfATR14 := seriesData.ATR14
 		zones := MergeIntoZones(seriesData.StructuralLevels, tfATR14, tfCurrentPrice)
 		zones = ApplyFlipLogic(zones, klines, tfCurrentPrice)
+		zones = AnnotateZoneLifecycle(zones, klines, tfATR14, tfCurrentPrice)
 		zones = ApplyTimeframeBoost(zones)
 		zones = AssignZoneQualityGrade(zones)
 		seriesData.StructuralZones = zones

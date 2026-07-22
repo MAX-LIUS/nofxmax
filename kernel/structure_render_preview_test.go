@@ -14,8 +14,8 @@ func buildFullStructureData() *market.Data {
 		Symbol:       "BTC-USDT-SWAP",
 		CurrentPrice: 100000,
 		StructuralZones: []market.StructuralZone{
-			{Low: 98000, High: 98500, MidPrice: 98250, Type: "support", Timeframes: []string{"1h", "4h"}, Sources: []string{"swing_point", "volume_cluster"}, TouchCount: 3, Confidence: 78, QualityGrade: "A"},
-			{Low: 102000, High: 102600, MidPrice: 102300, Type: "resistance", Timeframes: []string{"1h"}, Sources: []string{"swing_point"}, TouchCount: 2, Confidence: 60, QualityGrade: "B", Flipped: true},
+			{Low: 98000, High: 98500, MidPrice: 98250, Type: "support", Timeframes: []string{"1h", "4h"}, Sources: []string{"swing_point", "volume_cluster"}, TouchCount: 3, Confidence: 78, QualityGrade: "A", State: "reacted", Role: "reversal", MaxReactionATR: 2.3, TestCount: 2},
+			{Low: 102000, High: 102600, MidPrice: 102300, Type: "resistance", Timeframes: []string{"1h"}, Sources: []string{"swing_point"}, TouchCount: 2, Confidence: 60, QualityGrade: "B", Flipped: true, State: "flipped", Role: "continuation"},
 		},
 		VolumeProfile: &market.VolumeProfile{
 			POC: 99200, VAH: 101000, VAL: 97500,
@@ -61,6 +61,7 @@ func TestStructureRender_AllSectionsPresent(t *testing.T) {
 		"流动性池", "等高",
 		"结构突破", "CHOCH", "BOS", "回踩区",
 		"供需区", "需求", "供给",
+		"强反应", "反转位", "已翻转", "延续位",
 	}
 	for _, s := range must {
 		if !strings.Contains(out, s) {

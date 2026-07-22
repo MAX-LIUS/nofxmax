@@ -330,7 +330,7 @@ func formatStructuralZones(mdata *market.Data, zh bool) string {
 			sb.WriteString("RESISTANCE ZONES (above price):\n")
 		}
 		for i, z := range resistance {
-			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, formatZoneRow(z, atr14, currentPrice)))
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, formatZoneRow(z, atr14, currentPrice, zh)))
 		}
 	}
 
@@ -342,7 +342,7 @@ func formatStructuralZones(mdata *market.Data, zh bool) string {
 			sb.WriteString("SUPPORT ZONES (below price):\n")
 		}
 		for i, z := range support {
-			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, formatZoneRow(z, atr14, currentPrice)))
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, formatZoneRow(z, atr14, currentPrice, zh)))
 		}
 	}
 
@@ -755,7 +755,7 @@ func formatFloatList(vals []float64) string {
 	return strings.Join(parts, ", ")
 }
 
-func formatZoneRow(z market.StructuralZone, atr14, currentPrice float64) string {
+func formatZoneRow(z market.StructuralZone, atr14, currentPrice float64, zh bool) string {
 	tfs := strings.Join(z.Timeframes, "+")
 	sources := strings.Join(z.Sources, "+")
 
@@ -767,15 +767,84 @@ func formatZoneRow(z market.StructuralZone, atr14, currentPrice float64) string 
 
 	extra := ""
 	if z.TouchCount > 1 {
-		extra += fmt.Sprintf(", %d touches", z.TouchCount)
+		if zh {
+			extra += fmt.Sprintf(", %d次触及", z.TouchCount)
+		} else {
+			extra += fmt.Sprintf(", %d touches", z.TouchCount)
+		}
 	}
-	if z.Flipped {
-		extra += ", flipped"
+	// Phase 2: lifecycle state + behavioural role (evidence for the AI).
+	if z.State != "" {
+		extra += ", " + translateZoneState(z.State, zh)
+	}
+	if z.Role != "" {
+		extra += "/" + translateZoneRole(z.Role, zh)
+	}
+	if z.MaxReactionATR > 0 {
+		if zh {
+			extra += fmt.Sprintf(", 反应%.1fxATR", z.MaxReactionATR)
+		} else {
+			extra += fmt.Sprintf(", reaction %.1fxATR", z.MaxReactionATR)
+		}
+	}
+	// Only show flipped when the state machine didn't already surface it.
+	if z.Flipped && z.State != "flipped" {
+		if zh {
+			extra += ", 已翻转"
+		} else {
+			extra += ", flipped"
+		}
 	}
 
 	return fmt.Sprintf("[%s] %s – %s (%s, %s, conf=%.0f%s%s)",
 		z.QualityGrade, formatAIFloat(z.Low), formatAIFloat(z.High),
 		tfs, sources, z.Confidence, atrDist, extra)
+}
+
+// translateZoneState maps a lifecycle state to a bilingual label.
+func translateZoneState(state string, zh bool) string {
+	if !zh {
+		return state
+	}
+	switch state {
+	case "fresh":
+		return "未测试"
+	case "first_test":
+		return "首次测试"
+	case "reacted":
+		return "强反应"
+	case "retested":
+		return "多次守住"
+	case "weakened":
+		return "走弱"
+	case "broken":
+		return "已突破"
+	case "flipped":
+		return "已翻转"
+	case "invalid":
+		return "已失效"
+	}
+	return state
+}
+
+// translateZoneRole maps a behavioural role to a bilingual label.
+func translateZoneRole(role string, zh bool) string {
+	if !zh {
+		return role
+	}
+	switch role {
+	case "reversal":
+		return "反转位"
+	case "continuation":
+		return "延续位"
+	case "acceptance":
+		return "接受区"
+	case "acceleration_boundary":
+		return "加速边界"
+	case "liquidity_target":
+		return "流动性目标"
+	}
+	return role
 }
 
 func findNearestZone(zones []market.StructuralZone, currentPrice float64) *market.StructuralZone {

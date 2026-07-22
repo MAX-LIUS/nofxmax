@@ -22,6 +22,13 @@ type StructuralZone struct {
 	Flipped       bool     `json:"flipped"`
 	FlipCount     int      `json:"flip_count"`
 	MultiTFCount  int      `json:"multi_tf_count"`
+
+	// Phase 2 lifecycle & behaviour annotations (evidence, not gates)
+	State          string  `json:"state,omitempty"`            // fresh|first_test|reacted|retested|weakened|broken|flipped|invalid
+	Role           string  `json:"role,omitempty"`             // reversal|continuation|acceptance|acceleration_boundary|liquidity_target
+	TestCount      int     `json:"test_count,omitempty"`       // distinct test events (contiguous touch runs)
+	MaxReactionATR float64 `json:"max_reaction_atr,omitempty"` // strongest reaction away from zone, in ATR
+	AvgReactionATR float64 `json:"avg_reaction_atr,omitempty"` // average reaction across tests, in ATR
 }
 
 // MergeIntoZones merges individual structural levels into zones using ATR-scaled tolerance.
