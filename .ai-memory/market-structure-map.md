@@ -84,12 +84,19 @@ regime_cross_validation_failed / protection_policy_rejected / fake_retest_trap.
   - CalculateStructuralQuality: zone.30/reaction.25/clarity.20/profile.15/confluence.10, 邻近加权.
   - 评级边界重校准(预筛候选群): A>=80/B>=65/C>=50 (原 75/55/35 全A无区分度).
   - 已上线 PID 1717236, 实盘分布健康: 16 A / 11 B, 分值 73-92 分散.
-- [~] 结构位优化止损: opt-in PreferProvenLevels 已提交 90fbe53 (默认关, 休眠待回测).
-  - computeStructuralBoundary 原锚定裸 fractal 摆动枢轴. 新增: 开启后优先锚定
+- [x] 结构位优化止损: opt-in PreferProvenLevels 已提交 90fbe53, 回测验证 dcfa5d6, 已灰度 Claude-R.
+  - computeStructuralBoundary 原锚定裸 fractal 摆动枢轴. 开启后优先锚定
     entry保护侧的订单块边缘(多单demand OB High/空单supply OB Low), 仅当不比最近枢轴更宽时采用.
-  - nearestProvenBoundary helper + 3测试(Long/NoBlockOnSide/TooFewBars). store/trader全测试通过.
-  - Mitigation 不作否决: 被测试且守住的块是更强支撑, 非更弱. 侧向检查+不放宽保证安全.
-  - [ ] 下一步: 回测验证(trader/backtest 有 trail_sweep/confirm_timing 工具), 通过后择一 trader 灰度开启.
+  - nearestProvenBoundary helper + 3测试. Mitigation 不作否决(被测试守住的块=更强支撑).
+  - "不放宽"约束从结构上保证净结果非负(只能改到更紧或相等).
+  - 回测(cmd/backtest -provensl A/B): claude(1h,n=386) PnL +1.68 回撤持平 6.2%变化;
+    Claude-R(15m,n=332) PnL +0.62 回撤-0.62改善 7.8%变化. 两者非负.
+  - 灰度: Claude-R strategy_id=85b160fb, config protection.ladder_tp_sl.structural_sl.prefer_proven_levels=true.
+    备份 .backups/claude-r_strategy_config_20260722_084618.json. 重建二进制+重启 PID 1735545.
+    !! 注意: 之前 PID 1717236 是 proven-levels 提交前的二进制, 本次重建才真正带上该代码.
+  - 隔离设计: PreferProvenLevels 开在 Claude-R, SoftRegimeStructureFit 开在 claude, 两结构特性各自可归因.
+  - 回滚: 恢复备份 config 或删 prefer_proven_levels key, 重启.
+  - [ ] 下一步: 观察 Claude-R 实盘止损锚定效果; 稳定后可评估推广到其余 trader.
 - [ ] 图表层展示新结构数据(VP/AVWAP/BOS/供需区/zone状态) — 前端 web/src/components/charts (React/TS 编译), 单独较大工程.
 - [ ] Phase3: 门禁哲学重构(硬门→信心加分,仅失效位保留硬门) — 风险最高单独做
 
