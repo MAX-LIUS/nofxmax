@@ -97,6 +97,9 @@ func scoreZoneQuality(zones []StructuralZone, price, atr14 float64, reasons *[]s
 			s += 0.15
 		}
 		s = clamp01(s)
+		// Proximity weight: structure sitting AT price is worth full value; a zone
+		// 4+ ATR away is heavily discounted (it can't anchor a near-term entry).
+		s *= proximityWeight(dist)
 		if s > best {
 			best = s
 		}
@@ -104,10 +107,23 @@ func scoreZoneQuality(zones []StructuralZone, price, atr14 float64, reasons *[]s
 	if nearCount == 0 {
 		return 0, 0
 	}
-	if best >= 0.8 {
+	if best >= 0.7 {
 		*reasons = append(*reasons, "clean nearby S/R zone (high grade/confidence)")
 	}
 	return best, nearCount
+}
+
+// proximityWeight decays from 1.0 at 0 ATR to ~0.2 at 6 ATR, so structure near
+// price dominates the quality score and distant structure contributes little.
+func proximityWeight(distATR float64) float64 {
+	if distATR <= 0.5 {
+		return 1.0
+	}
+	w := 1.0 - (distATR-0.5)/6.0
+	if w < 0.15 {
+		w = 0.15
+	}
+	return w
 }
 
 // scoreReactionQuality rewards nearby zones that produced strong ATR reactions.
@@ -121,14 +137,14 @@ func scoreReactionQuality(zones []StructuralZone, price, atr14 float64, reasons 
 		if dist > 6 {
 			continue
 		}
-		// normalize reaction: 3xATR reaction -> full marks
-		r := z.MaxReactionATR / 3.0
+		// normalize reaction: 3xATR reaction -> full marks, proximity-weighted.
+		r := clamp01(z.MaxReactionATR/3.0) * proximityWeight(dist)
 		if r > best {
 			best = r
 		}
 	}
 	best = clamp01(best)
-	if best >= 0.66 {
+	if best >= 0.6 {
 		*reasons = append(*reasons, "levels strongly respected (large ATR reactions)")
 	}
 	return best

@@ -98,3 +98,20 @@ func TestQualityGrade(t *testing.T) {
 		}
 	}
 }
+
+func TestProximityWeight(t *testing.T) {
+	if w := proximityWeight(0); w != 1.0 {
+		t.Errorf("at price should be 1.0, got %.2f", w)
+	}
+	if w := proximityWeight(0.3); w != 1.0 {
+		t.Errorf("within 0.5 ATR should be 1.0, got %.2f", w)
+	}
+	near := proximityWeight(1.0)
+	far := proximityWeight(5.0)
+	if near <= far {
+		t.Errorf("nearer structure must weigh more: near(1ATR)=%.2f far(5ATR)=%.2f", near, far)
+	}
+	if w := proximityWeight(100); w != 0.15 {
+		t.Errorf("very far should floor at 0.15, got %.2f", w)
+	}
+}
