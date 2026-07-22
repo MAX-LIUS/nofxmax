@@ -387,8 +387,256 @@ func formatStructuralZones(mdata *market.Data, zh bool) string {
 			fib.Timeframe, formatAIFloat(fib.SwingLow), formatAIFloat(fib.SwingHigh), dir))
 	}
 
+	// Volume profile — where price was ACCEPTED (POC/value area/HVN) vs REJECTED (LVN).
+	// This is evidence to refine confidence and target/invalidation choice, not a hard rule.
+	sb.WriteString(formatVolumeProfile(mdata, currentPrice, zh))
+
+	// Anchored VWAP — fair value since the last significant swing; tells whether
+	// participants since that pivot are net long/short in profit. Evidence only.
+	sb.WriteString(formatAnchoredVWAPs(mdata, currentPrice, zh))
+
+	// Prev day/week high-low — heavily-watched liquidity references. Breaks and
+	// rejections here are meaningful, but they are evidence, not a hard rule.
+	sb.WriteString(formatPeriodLevels(mdata, currentPrice, zh))
+
+	// FVG imbalances (unfilled gaps act as magnets) + equal-high/low liquidity
+	// pools (stop-run targets). Evidence for target/entry timing, not gates.
+	sb.WriteString(formatFVGAndLiquidity(mdata, currentPrice, zh))
+
 	sb.WriteString("\n")
 	return sb.String()
+}
+
+// formatFVGAndLiquidity renders the nearest unfilled fair-value gaps and the
+// nearest equal-high/low liquidity pools. Kept short: only the closest few, and
+// FVGs are labelled with fill state so the AI can weigh how fresh they are.
+func formatFVGAndLiquidity(mdata *market.Data, currentPrice float64, zh bool) string {
+	var sb strings.Builder
+
+	// Fair value gaps — prefer unfilled, show at most 3 nearest.
+	if len(mdata.FairValueGaps) > 0 {
+		shown := 0
+		var buf strings.Builder
+		for _, g := range mdata.FairValueGaps {
+			if g.Filled {
+				continue // only surface still-actionable gaps
+			}
+			dir := g.Direction
+			if zh {
+				dir = "看涨缺口(下方易成支撑)"
+				if g.Direction == "bearish" {
+					dir = "看跌缺口(上方易成阻力)"
+				}
+			}
+			if zh {
+				buf.WriteString(fmt.Sprintf("- %s [%s ~ %s], %.0f%%回补, %.1fxATR, %d根前\n",
+					dir, formatAIFloat(g.Low), formatAIFloat(g.High), g.FillRatio*100, g.SizeATR, g.BarsAgo))
+			} else {
+				buf.WriteString(fmt.Sprintf("- %s FVG [%s ~ %s], %.0f%% filled, %.1fxATR, %d bars ago\n",
+					g.Direction, formatAIFloat(g.Low), formatAIFloat(g.High), g.FillRatio*100, g.SizeATR, g.BarsAgo))
+			}
+			shown++
+			if shown >= 3 {
+				break
+			}
+		}
+		if shown > 0 {
+			if zh {
+				sb.WriteString("\n**未回补缺口(FVG)** (价格常回补, 参考证据):\n")
+			} else {
+				sb.WriteString("\n**Unfilled FVGs** (price tends to fill — evidence):\n")
+			}
+			sb.WriteString(buf.String())
+		}
+	}
+
+	// Liquidity pools — nearest 3.
+	if len(mdata.LiquidityPools) > 0 {
+		if zh {
+			sb.WriteString("\n**流动性池(等高/等低)** (止损聚集, 常成扫单目标):\n")
+		} else {
+			sb.WriteString("\n**Liquidity Pools (equal H/L)** (stop clusters, sweep targets):\n")
+		}
+		for i, p := range mdata.LiquidityPools {
+			if i >= 3 {
+				break
+			}
+			typ := p.Type
+			if zh {
+				typ = "等高(上方买方止损)"
+				if p.Type == "equal_lows" {
+					typ = "等低(下方卖方止损)"
+				}
+			}
+			if zh {
+				sb.WriteString(fmt.Sprintf("- %s @ %s, %d次触及, %d根前\n",
+					typ, formatAIFloat(p.Price), p.Touches, p.BarsAgo))
+			} else {
+				sb.WriteString(fmt.Sprintf("- %s @ %s, %d touches, %d bars ago\n",
+					typ, formatAIFloat(p.Price), p.Touches, p.BarsAgo))
+			}
+		}
+	}
+
+	return sb.String()
+}
+
+// formatPeriodLevels renders previous-day / previous-week high-low plus the
+// developing current-day extremes. These are the most-watched liquidity refs
+// across markets and often act as magnets or breakout triggers.
+func formatPeriodLevels(mdata *market.Data, currentPrice float64, zh bool) string {
+	pl := mdata.PeriodLevels
+	if pl == nil {
+		return ""
+	}
+	var sb strings.Builder
+	if zh {
+		sb.WriteString("\n**周期关键位** (前日/前周高低点, 流动性参考证据):\n")
+	} else {
+		sb.WriteString("\n**Period Levels** (prev day/week high-low — liquidity reference):\n")
+	}
+	// Filter out period levels too far from price to be actionable — they add
+	// noise, not signal. ~8x ATR is well beyond any reasonable trade horizon.
+	atr14 := extractPrimaryATR14(mdata)
+	maxDist := currentPrice * 0.10 // fallback: 10% when ATR unavailable
+	if atr14 > 0 {
+		maxDist = atr14 * 8
+	}
+	row := func(labelZH, labelEN string, v float64) {
+		if v <= 0 {
+			return
+		}
+		if math.Abs(v-currentPrice) > maxDist {
+			return
+		}
+		side := "above"
+		if currentPrice >= v {
+			side = "below"
+		}
+		if zh {
+			sb.WriteString(fmt.Sprintf("- %s=%s (%s当前)\n", labelZH, formatAIFloat(v), translatePocSide(side, true)))
+		} else {
+			sb.WriteString(fmt.Sprintf("- %s=%s (%s current)\n", labelEN, formatAIFloat(v), side))
+		}
+	}
+	row("前日高", "prev_day_high", pl.PrevDayHigh)
+	row("前日低", "prev_day_low", pl.PrevDayLow)
+	row("前周高", "prev_week_high", pl.PrevWeekHigh)
+	row("前周低", "prev_week_low", pl.PrevWeekLow)
+	row("今日高", "curr_day_high", pl.CurrDayHigh)
+	row("今日低", "curr_day_low", pl.CurrDayLow)
+	return sb.String()
+}
+
+// formatAnchoredVWAPs renders anchored VWAPs (from recent swing high/low) as a
+// fair-value reference. Price above an anchored VWAP means buyers since that
+// pivot are in profit (bullish acceptance); below means sellers dominate.
+func formatAnchoredVWAPs(mdata *market.Data, currentPrice float64, zh bool) string {
+	if len(mdata.AnchoredVWAPs) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	if zh {
+		sb.WriteString("\n**锚定 VWAP** (自最近摆动点的公允价, 参考证据):\n")
+	} else {
+		sb.WriteString("\n**Anchored VWAP** (fair value since last swing — evidence):\n")
+	}
+	for _, v := range mdata.AnchoredVWAPs {
+		side := "above"
+		if currentPrice < v.VWAP {
+			side = "below"
+		}
+		anchorLabel := translateAnchor(v.Anchor, zh)
+		if zh {
+			sb.WriteString(fmt.Sprintf("- 锚点=%s (%d根前): VWAP=%s [%s ~ %s], 当前价%s\n",
+				anchorLabel, v.AnchorBars, formatAIFloat(v.VWAP),
+				formatAIFloat(v.LowerBand), formatAIFloat(v.UpperBand), translatePocSide(side, true)))
+		} else {
+			sb.WriteString(fmt.Sprintf("- anchor=%s (%d bars ago): VWAP=%s [%s ~ %s], price %s\n",
+				anchorLabel, v.AnchorBars, formatAIFloat(v.VWAP),
+				formatAIFloat(v.LowerBand), formatAIFloat(v.UpperBand), side))
+		}
+	}
+	return sb.String()
+}
+
+func translateAnchor(anchor string, zh bool) string {
+	if !zh {
+		return anchor
+	}
+	switch anchor {
+	case "swing_high":
+		return "摆动高点"
+	case "swing_low":
+		return "摆动低点"
+	case "window_start":
+		return "窗口起点"
+	default:
+		return anchor
+	}
+}
+
+// formatVolumeProfile renders the primary-timeframe volume profile for the AI.
+// It is intentionally framed as acceptance/rejection evidence: POC and value
+// area mark fair-value / mean-reversion magnets; LVNs mark thin zones price
+// tends to travel through quickly (good for targets, poor for resting stops).
+func formatVolumeProfile(mdata *market.Data, currentPrice float64, zh bool) string {
+	vp := mdata.VolumeProfile
+	if vp == nil || vp.POC <= 0 {
+		return ""
+	}
+	pocSide := "at"
+	if vp.POC > currentPrice {
+		pocSide = "above"
+	} else if vp.POC < currentPrice {
+		pocSide = "below"
+	}
+	var sb strings.Builder
+	if zh {
+		sb.WriteString("\n**成交量分布** (价格被接受/拒绝的区域, 参考证据非硬性规则):\n")
+		sb.WriteString(fmt.Sprintf("- POC(最大成交价)=%s (%s当前价), 价值区 VAL=%s ~ VAH=%s\n",
+			formatAIFloat(vp.POC), translatePocSide(pocSide, true),
+			formatAIFloat(vp.VAL), formatAIFloat(vp.VAH)))
+		if len(vp.HVNs) > 0 {
+			sb.WriteString(fmt.Sprintf("- HVN(高成交/接受区, 易成支撑阻力): %s\n", formatFloatList(vp.HVNs)))
+		}
+		if len(vp.LVNs) > 0 {
+			sb.WriteString(fmt.Sprintf("- LVN(低成交/拒绝区, 价格易快速穿越, 适合作目标不适合放止损): %s\n", formatFloatList(vp.LVNs)))
+		}
+	} else {
+		sb.WriteString("\n**Volume Profile** (where price was accepted/rejected — evidence, not a hard rule):\n")
+		sb.WriteString(fmt.Sprintf("- POC=%s (%s current), value area VAL=%s ~ VAH=%s\n",
+			formatAIFloat(vp.POC), pocSide, formatAIFloat(vp.VAL), formatAIFloat(vp.VAH)))
+		if len(vp.HVNs) > 0 {
+			sb.WriteString(fmt.Sprintf("- HVN (acceptance shelves, tend to act as S/R): %s\n", formatFloatList(vp.HVNs)))
+		}
+		if len(vp.LVNs) > 0 {
+			sb.WriteString(fmt.Sprintf("- LVN (rejection gaps, price travels fast — good for targets, poor for resting stops): %s\n", formatFloatList(vp.LVNs)))
+		}
+	}
+	return sb.String()
+}
+
+func translatePocSide(side string, zh bool) string {
+	if !zh {
+		return side
+	}
+	switch side {
+	case "above":
+		return "高于"
+	case "below":
+		return "低于"
+	default:
+		return "接近"
+	}
+}
+
+func formatFloatList(vals []float64) string {
+	parts := make([]string, 0, len(vals))
+	for _, v := range vals {
+		parts = append(parts, formatAIFloat(v))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func formatZoneRow(z market.StructuralZone, atr14, currentPrice float64) string {
@@ -467,7 +715,6 @@ func extractPrimaryATR14(mdata *market.Data) float64 {
 	}
 	return 0
 }
-
 
 func formatAIFloat(v float64) string {
 	s := fmt.Sprintf("%.8f", v)

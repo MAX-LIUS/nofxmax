@@ -27,6 +27,11 @@ type Data struct {
 	FibonacciLevels    *FibonacciLevels  `json:"fibonacci_levels,omitempty"`
 	StructuralLevels   []StructuralLevel `json:"structural_levels,omitempty"`
 	StructuralZones    []StructuralZone  `json:"structural_zones,omitempty"`
+	VolumeProfile      *VolumeProfile    `json:"volume_profile,omitempty"`
+	AnchoredVWAPs      []AnchoredVWAP    `json:"anchored_vwaps,omitempty"`
+	PeriodLevels       *PeriodLevels     `json:"period_levels,omitempty"`
+	FairValueGaps      []FairValueGap    `json:"fair_value_gaps,omitempty"`
+	LiquidityPools     []LiquidityPool   `json:"liquidity_pools,omitempty"`
 	QuantContext       *QuantContext     `json:"quant_context,omitempty"`
 	FundingRateHistory []float64         // last 8 funding rates (newest first)
 	OIHistory1h        float64           // OI value from 1h ago
@@ -89,6 +94,10 @@ type TimeframeSeriesData struct {
 	FibonacciLevels  *FibonacciLevels  `json:"fibonacci_levels,omitempty"`
 	StructuralLevels []StructuralLevel `json:"structural_levels,omitempty"`
 	StructuralZones  []StructuralZone  `json:"structural_zones,omitempty"`
+	VolumeProfile    *VolumeProfile    `json:"volume_profile,omitempty"`
+	AnchoredVWAPs    []AnchoredVWAP    `json:"anchored_vwaps,omitempty"`
+	FairValueGaps    []FairValueGap    `json:"fair_value_gaps,omitempty"`
+	LiquidityPools   []LiquidityPool   `json:"liquidity_pools,omitempty"`
 }
 
 // OIData Open Interest data

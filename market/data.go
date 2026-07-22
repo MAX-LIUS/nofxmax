@@ -195,6 +195,10 @@ func GetWithTimeframesExchange(symbol string, timeframes []string, primaryTimefr
 	// Store data for all timeframes
 	timeframeData := make(map[string]*TimeframeSeriesData)
 	var primaryKlines []Kline
+	// widestKlines tracks the series covering the longest wall-clock span, used
+	// for period-level aggregation (prev day/week need the deepest history).
+	var widestKlines []Kline
+	var widestSpan int64
 
 	// Check if this is an xyz dex asset (use Hyperliquid API)
 	isXyzAsset := IsXyzDexAsset(symbol)
@@ -234,6 +238,15 @@ func GetWithTimeframesExchange(symbol string, timeframes []string, primaryTimefr
 			primaryKlines = klines
 		}
 
+		// Track the widest-span series for period-level aggregation.
+		if len(klines) >= 2 {
+			span := klines[len(klines)-1].OpenTime - klines[0].OpenTime
+			if span > widestSpan {
+				widestSpan = span
+				widestKlines = klines
+			}
+		}
+
 		// Calculate series data for this timeframe (use count from config)
 		seriesData := calculateTimeframeSeries(klines, tf, count)
 
@@ -241,6 +254,10 @@ func GetWithTimeframesExchange(symbol string, timeframes []string, primaryTimefr
 		tfCurrentPrice := klines[len(klines)-1].Close
 		seriesData.StructuralLevels = DetectStructuralLevels(klines, tfCurrentPrice, tf)
 		seriesData.FibonacciLevels = CalculateFibonacciLevels(klines, tf)
+		seriesData.VolumeProfile = CalculateVolumeProfile(klines, tf)
+		seriesData.AnchoredVWAPs = CalculateAnchoredVWAPs(klines, tf)
+		seriesData.FairValueGaps = DetectFairValueGaps(klines, seriesData.ATR14, tfCurrentPrice)
+		seriesData.LiquidityPools = DetectLiquidityPools(klines, seriesData.ATR14, tfCurrentPrice, tf)
 
 		// Merge levels into zones using ATR-scaled tolerance
 		tfATR14 := seriesData.ATR14
@@ -414,6 +431,29 @@ func GetWithTimeframesExchange(symbol string, timeframes []string, primaryTimefr
 
 	// Detect structural levels from primary timeframe
 	data.StructuralLevels = DetectStructuralLevels(primaryKlines, currentPrice, primaryTimeframe)
+
+	// Volume profile from primary timeframe (POC / value area / HVN / LVN)
+	data.VolumeProfile = CalculateVolumeProfile(primaryKlines, primaryTimeframe)
+
+	// Anchored VWAPs from primary timeframe (from recent swing high / swing low)
+	data.AnchoredVWAPs = CalculateAnchoredVWAPs(primaryKlines, primaryTimeframe)
+
+	// Prev day/week high-low from the widest-span series (fallback to primary).
+	periodSrc := widestKlines
+	if len(periodSrc) == 0 {
+		periodSrc = primaryKlines
+	}
+	data.PeriodLevels = CalculatePeriodLevels(periodSrc)
+
+	// FVG imbalances and equal-high/low liquidity pools from primary timeframe.
+	var primaryATR14 float64
+	if ps, ok := timeframeData[primaryTimeframe]; ok && ps != nil {
+		primaryATR14 = ps.ATR14
+	}
+	if primaryATR14 > 0 {
+		data.FairValueGaps = DetectFairValueGaps(primaryKlines, primaryATR14, currentPrice)
+		data.LiquidityPools = DetectLiquidityPools(primaryKlines, primaryATR14, currentPrice, primaryTimeframe)
+	}
 
 	// Build consolidated zones from all timeframes
 	allZones := collectAllZones(timeframeData, currentPrice)
