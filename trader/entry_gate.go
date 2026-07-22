@@ -567,15 +567,27 @@ func evaluateStructuralFitGate(input entryGateInput) []EntryGateCheck {
 					break
 				}
 			}
+			// Market Structure Map philosophy: when SoftRegimeStructureFit is on,
+			// a setup/regime mismatch is confidence-reducing EVIDENCE (score penalty
+			// -> smaller size), not a hard block. Default off keeps it a hard gate.
+			softFit := false
+			if input.StrategyConfig != nil {
+				gate := input.StrategyConfig.EntryStructure.EntryGate.WithDefaults()
+				if gate.SoftRegimeStructureFit != nil {
+					softFit = *gate.SoftRegimeStructureFit
+				}
+			}
 			check := EntryGateCheck{
 				Code:     "regime_structure_mismatch",
 				Stage:    string(EntryGateStageStructuralFit),
 				Passed:   allowed,
-				Enforced: true,
-				Values:   fmt.Sprintf("setup=%s regime=%s allowed=[%s]", setup, guidance.Regime, strings.Join(guidance.AllowedSetups, ",")),
+				Enforced: !softFit,
+				Values:   fmt.Sprintf("setup=%s regime=%s allowed=[%s] soft=%t", setup, guidance.Regime, strings.Join(guidance.AllowedSetups, ","), softFit),
 			}
 			if allowed {
 				check.Detail = fmt.Sprintf("setup %s compatible with regime %s (allowed: %s)", setup, guidance.Regime, strings.Join(guidance.AllowedSetups, ","))
+			} else if softFit {
+				check.Detail = fmt.Sprintf("setup %s not preferred for regime %s (allowed: %s) — soft penalty, reduces size instead of blocking", setup, guidance.Regime, strings.Join(guidance.AllowedSetups, ","))
 			} else {
 				check.Detail = fmt.Sprintf("setup %s incompatible with regime %s — only [%s] are allowed", setup, guidance.Regime, strings.Join(guidance.AllowedSetups, ","))
 			}
@@ -1365,6 +1377,7 @@ func enforcedFailedCodes(checks []EntryGateCheck) []string {
 // Checks not listed here use a default penalty of 10.
 var gateCheckPenalties = map[string]int{
 	"range_middle_without_edge_setup":       15,
+	"regime_structure_mismatch":             20, // soft mode only (SoftRegimeStructureFit); hard block otherwise
 	"net_rr_below_min":                      20,
 	"unsupported_setup_type":                10,
 	"sl_distance_below_vol_buffer":          10,

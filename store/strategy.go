@@ -207,6 +207,18 @@ type EntryGateConfig struct {
 	SqueezeMinConfidence int     `json:"squeeze_min_confidence,omitempty"`
 	SqueezeMinRR         float64 `json:"squeeze_min_rr,omitempty"`
 
+	// SoftRegimeStructureFit converts the regime_structure_mismatch check from a
+	// HARD block into a SOFT score penalty (Market Structure Map philosophy:
+	// structure alignment is confidence-boosting evidence, not an all-or-nothing
+	// gate). When a setup type is not in the regime's preferred-setup list the
+	// entry is not rejected outright; instead it takes a gate-score penalty that
+	// shrinks position size, letting a high-conviction counter-structure trade
+	// still open at reduced risk. The genuine invalidation/trap gates
+	// (fake_retest_trap, protection_policy_rejected) remain HARD regardless.
+	// Pointer distinguishes explicit true/false from unset. DEFAULT OFF — enabling
+	// it materially changes which entries open, so it is opt-in per trader.
+	SoftRegimeStructureFit *bool `json:"soft_regime_structure_fit,omitempty"`
+
 	// Fallback minimum RR when strategy MinRiskRewardRatio is not set (G3b)
 	FallbackMinRR float64 `json:"fallback_min_rr,omitempty"`
 
@@ -285,6 +297,10 @@ func (c EntryGateConfig) WithDefaults() EntryGateConfig {
 	if c.BlockBreakoutRetest == nil {
 		defaultBlock := true // entry-quality study: breakout_retest is net-negative
 		c.BlockBreakoutRetest = &defaultBlock
+	}
+	if c.SoftRegimeStructureFit == nil {
+		defaultSoft := false // opt-in: keep regime_structure_mismatch a hard gate by default
+		c.SoftRegimeStructureFit = &defaultSoft
 	}
 	if c.MaxNetRR == 0 {
 		c.MaxNetRR = 2.8
