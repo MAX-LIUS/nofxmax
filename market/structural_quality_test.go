@@ -91,7 +91,7 @@ func TestQualityGrade(t *testing.T) {
 	cases := []struct {
 		score float64
 		want  string
-	}{{80, "A"}, {75, "A"}, {60, "B"}, {55, "B"}, {40, "C"}, {35, "C"}, {20, "D"}, {0, "D"}}
+	}{{85, "A"}, {80, "A"}, {70, "B"}, {65, "B"}, {55, "C"}, {50, "C"}, {40, "D"}, {0, "D"}}
 	for _, c := range cases {
 		if got := qualityGrade(c.score); got != c.want {
 			t.Errorf("qualityGrade(%.0f)=%s want %s", c.score, got, c.want)

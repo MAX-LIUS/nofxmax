@@ -257,14 +257,18 @@ func scoreConfluence(data *Data, atr14 float64, reasons *[]string) float64 {
 	return score
 }
 
-// qualityGrade maps a 0-100 score to a letter grade.
+// qualityGrade maps a 0-100 score to a letter grade. Boundaries are calibrated
+// to the PRE-FILTERED candidate population (coins that already cleared the
+// liquidity/OI hard filters), so scores naturally sit high and the grade must
+// discriminate within an already-good set: A = exceptional structure among
+// tradeable coins, D = tradeable but structurally messy.
 func qualityGrade(score float64) string {
 	switch {
-	case score >= 75:
+	case score >= 80:
 		return "A"
-	case score >= 55:
+	case score >= 65:
 		return "B"
-	case score >= 35:
+	case score >= 50:
 		return "C"
 	default:
 		return "D"
