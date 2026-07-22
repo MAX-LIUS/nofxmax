@@ -1953,21 +1953,17 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 		if caps.SupportsNativePartialTrailing {
 			switch exchange {
 			case "binance":
-				binanceTrader, ok := at.trader.(interface {
-					SetTrailingStopLoss(symbol string, positionSide string, activationPrice float64, callbackRate float64, quantity float64) error
+				// Phase 1b: use the tagged variant so the trailing fill's client id
+				// encodes the mechanism (native_partial_trailing) and the eventual
+				// close attributes 1:1 instead of falling to sync_external/heuristics.
+				if tagged, ok := at.trader.(interface {
+					SetTrailingStopLossTaggedWithID(symbol string, positionSide string, activationPrice float64, callbackRate float64, quantity float64, reasonTag string) (string, error)
 					CancelTrailingStopOrders(symbol string) error
-				})
-				if ok {
-					binanceCallbackPercent := priceBasedCallbackRatio * 100.0
-					if binanceCallbackPercent < 0.1 {
-						binanceCallbackPercent = 0.1
-					}
-					if binanceCallbackPercent > 10 {
-						binanceCallbackPercent = 10
-					}
-					if err := binanceTrader.SetTrailingStopLoss(symbol, positionSide, activationPrice, binanceCallbackPercent, partialQty); err == nil {
+				}); ok {
+					// Phase 1a: pass decimal ratio directly (adapter converts internally)
+					if _, err := tagged.SetTrailingStopLossTaggedWithID(symbol, positionSide, activationPrice, priceBasedCallbackRatio, partialQty, "native_trailing"); err == nil {
 						at.setProtectionState(symbol, side, "native_partial_trailing_armed")
-						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.4f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, binanceCallbackPercent, cumulativeRatio, partialQty, rule.StageName)
+						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.4f(ratio) close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, priceBasedCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
 						at.cancelImmediateTrailing(symbol, side)
 						return true
 					} else {
@@ -2150,22 +2146,19 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 	placedOrderID := ""
 	switch exchange {
 	case "binance":
-		binanceTrader, ok := at.trader.(interface {
-			SetTrailingStopLoss(symbol string, positionSide string, activationPrice float64, callbackRate float64, quantity float64) error
+		// Phase 1b: use the tagged variant so the trailing fill's client id
+		// encodes the mechanism (native_trailing) for 1:1 attribution.
+		if tagged, ok := at.trader.(interface {
+			SetTrailingStopLossTaggedWithID(symbol string, positionSide string, activationPrice float64, callbackRate float64, quantity float64, reasonTag string) (string, error)
 			CancelTrailingStopOrders(symbol string) error
-		})
-		if !ok {
-			return false
-		}
-		binanceCallbackPercent := priceBasedCallbackRatio * 100.0
-		if binanceCallbackPercent < 0.1 {
-			binanceCallbackPercent = 0.1
-		}
-		if binanceCallbackPercent > 10 {
-			binanceCallbackPercent = 10
-		}
-		if err := binanceTrader.SetTrailingStopLoss(symbol, positionSide, activationPrice, binanceCallbackPercent, 0); err != nil {
-			logger.Infof("❌ Native trailing drawdown apply failed (%s %s): %v", symbol, side, err)
+		}); ok {
+			// Phase 1a: pass decimal ratio directly (adapter converts internally)
+			placedOrderID, err = tagged.SetTrailingStopLossTaggedWithID(symbol, positionSide, activationPrice, priceBasedCallbackRatio, 0, "native_trailing")
+			if err != nil {
+				logger.Infof("❌ Native trailing drawdown apply failed (%s %s): %v", symbol, side, err)
+				return false
+			}
+		} else {
 			return false
 		}
 	case "bitget":

@@ -43,22 +43,13 @@ func (t *FuturesTrader) setTrailingStopLossCore(symbol string, positionSide stri
 
 	// Encode the mechanism when a reason is given (falls back to a plain broker id
 	// when the reason has no registered code), so the trailing fill is attributable.
-	clientAlgoID := getBrOrderID()
+	clientOrderID := getBrOrderID()
 	if reasonTag != "" {
-		clientAlgoID = clientIDForReason(reasonTag)
+		clientOrderID = clientIDForReason(reasonTag)
 	}
 
-	service := t.client.NewCreateAlgoOrderService().
-		Symbol(symbol).
-		Side(side).
-		PositionSide(posSide).
-		Type(futures.AlgoOrderTypeTrailingStopMarket).
-		WorkingType(futures.WorkingTypeContractPrice).
-		ClientAlgoId(clientAlgoID)
-
-	// Binance rejects closePosition=true for TRAILING_STOP_MARKET with -4136
-	// (Target strategy invalid). Trailing stops require an explicit quantity +
-	// reduceOnly. When the caller wants a full-position trail (quantity<=0),
+	// Resolve quantity early: both endpoints need explicit quantity (no closePosition
+	// support for trailing). When the caller wants a full-position trail (quantity<=0),
 	// resolve the live position size and trail the whole amount.
 	if quantity <= 0 {
 		amt, err := t.execPositionAmt(symbol, positionSide)
@@ -74,71 +65,183 @@ func (t *FuturesTrader) setTrailingStopLossCore(symbol string, positionSide stri
 	if err != nil {
 		return "", fmt.Errorf("failed to format trailing stop quantity: %w", err)
 	}
-	// Hedge mode (DualSide): PositionSide already fixes the close direction, so
-	// Binance rejects reduceOnly with -1106 (Parameter 'reduceonly' sent when not
-	// required). Mirror CloseLong/CloseShort: PositionSide + Quantity, no reduceOnly.
-	service = service.Quantity(qtyStr)
 
+	// Format activation price and callback rate (shared by both endpoints).
+	var actStr string
 	if activationPrice > 0 {
-		// Tick-align activation price (see SetStopLossTagged) to avoid -1111.
-		actStr, err := t.FormatPrice(symbol, activationPrice)
+		actStr, err = t.FormatPrice(symbol, activationPrice)
 		if err != nil {
 			return "", fmt.Errorf("failed to format trailing activation price: %w", err)
 		}
-		service = service.ActivationPrice(actStr)
-	}
-	if callbackRate > 0 {
-		// Binance callbackRate is a percentage constrained to [0.1, 5] with a
-		// 0.1 step. Callers pass strategy-derived values like 1.0089 or 3.4147;
-		// sending those 4-decimal values is rejected with -2007 (Invalid callBack
-		// rate). Clamp to the valid range and round to the 0.1 step so the
-		// exchange trailing always registers. This is the single boundary every
-		// trailing callback passes through (Binance-only; OKX/others unaffected).
-		cb := callbackRate
-		if cb < 0.1 {
-			cb = 0.1
-		}
-		if cb > 5 {
-			cb = 5
-		}
-		cb = math.Round(cb*10) / 10
-		service = service.CallbackRate(fmt.Sprintf("%.1f", cb))
-		callbackRate = cb
 	}
 
-	resp, err := service.Do(context.Background())
-	if err != nil {
-		return "", fmt.Errorf("failed to set trailing stop-loss: %w", err)
+	// Phase 1a fix: unified contract — callers always pass decimal ratio
+	// (e.g. 0.012 = 1.2%), adapter converts to Binance percentage internally.
+	// Binance callbackRate is a percentage constrained to [0.1, 5] with a
+	// 0.1 step; sending 4-decimal percentages is rejected with -2007 (Invalid
+	// callBack rate). Convert ratio→percent, clamp to [0.1, 5], and round to
+	// 0.1 step so the exchange trailing always registers. This is the single
+	// boundary every trailing callback passes through (Binance-only; OKX uses
+	// decimal ratios throughout). Fixes: immediate_trailing was passing ratio
+	// which got clamped to 0.1% (should be 3.74%); native trailing was
+	// pre-multiplying at call site (inconsistent contract).
+	cbPercent := callbackRate * 100.0 // ratio → percent
+	if cbPercent < 0.1 {
+		cbPercent = 0.1
+	}
+	if cbPercent > 5 {
+		cbPercent = 5
+	}
+	cbPercent = math.Round(cbPercent*10) / 10
+	cbStr := fmt.Sprintf("%.1f", cbPercent)
+
+	// Phase 1c: Try classic endpoint first (properly honors activationPrice).
+	// Binance migrated STOP_MARKET/TAKE_PROFIT_MARKET to algo (error -4120), but
+	// TRAILING_STOP_MARKET remains on the classic endpoint. The algo endpoint
+	// silently drops activationPrice (registers ≈entry instead of peak), causing
+	// unintended immediate triggers. If -4120 is returned, fall back to algo as
+	// last resort (with read-back warning to diagnose the activation-drop bug).
+	classicService := t.client.NewCreateOrderService().
+		Symbol(symbol).
+		Side(side).
+		PositionSide(posSide).
+		Type(futures.OrderType("TRAILING_STOP_MARKET")).
+		WorkingType(futures.WorkingTypeContractPrice).
+		NewClientOrderID(clientOrderID).
+		Quantity(qtyStr)
+
+	if actStr != "" {
+		classicService = classicService.ActivationPrice(actStr)
+	}
+	classicService = classicService.CallbackRate(cbStr)
+
+	classicResp, classicErr := classicService.Do(context.Background())
+	if classicErr == nil {
+		// Classic endpoint succeeded — read back and verify.
+		orderID := ""
+		if classicResp != nil && classicResp.OrderID != 0 {
+			orderID = strconv.FormatInt(classicResp.OrderID, 10)
+		}
+
+		exchangeActivation, _ := strconv.ParseFloat(classicResp.ActivatePrice, 64)
+		exchangeCallback, _ := strconv.ParseFloat(classicResp.PriceRate, 64)
+		activationDivergence := 0.0
+		if activationPrice > 0 && exchangeActivation > 0 {
+			activationDivergence = math.Abs(exchangeActivation-activationPrice) / activationPrice * 100.0
+		}
+		callbackDivergence := math.Abs(exchangeCallback - cbPercent)
+
+		if activationDivergence > 0.1 || callbackDivergence > 0.05 {
+			logger.Warnf("⚠️  Trailing order registered with DIVERGENT params: sent activation=%.4f callback=%.1f%%, exchange registered activation=%.4f callback=%.1f%% (Δact=%.2f%% Δcb=%.2f%%) orderId=%s reason=%q",
+				activationPrice, cbPercent, exchangeActivation, exchangeCallback,
+				activationDivergence, callbackDivergence, orderID, reasonTag)
+		} else {
+			logger.Infof("  Trailing stop-loss set (Classic Order): activation=%.4f callback=%.1f%% (exchange confirmed) reason=%q orderId=%s",
+				activationPrice, cbPercent, reasonTag, orderID)
+		}
+
+		return orderID, nil
+	}
+
+	// Classic endpoint failed — check if it's the -4120 migration error.
+	if !strings.Contains(classicErr.Error(), "4120") && !strings.Contains(classicErr.Error(), "STOP_ORDER") {
+		// Not a migration error — real failure, don't fall back.
+		return "", fmt.Errorf("failed to set trailing stop-loss (classic): %w", classicErr)
+	}
+
+	// -4120 returned: trailing stops migrated to algo endpoint. Fall back.
+	logger.Infof("  Classic trailing endpoint returned -4120 (migrated), falling back to algo endpoint")
+
+	algoService := t.client.NewCreateAlgoOrderService().
+		Symbol(symbol).
+		Side(side).
+		PositionSide(posSide).
+		Type(futures.AlgoOrderTypeTrailingStopMarket).
+		WorkingType(futures.WorkingTypeContractPrice).
+		ClientAlgoId(clientOrderID).
+		Quantity(qtyStr)
+
+	if actStr != "" {
+		algoService = algoService.ActivationPrice(actStr)
+	}
+	algoService = algoService.CallbackRate(cbStr)
+
+	algoResp, algoErr := algoService.Do(context.Background())
+	if algoErr != nil {
+		return "", fmt.Errorf("failed to set trailing stop-loss (algo fallback): %w", algoErr)
 	}
 
 	algoID := ""
-	if resp != nil && resp.AlgoId != 0 {
-		algoID = strconv.FormatInt(resp.AlgoId, 10)
+	if algoResp != nil && algoResp.AlgoId != 0 {
+		algoID = strconv.FormatInt(algoResp.AlgoId, 10)
 	}
-	logger.Infof("  Trailing stop-loss set (Algo Order): activation=%.4f callback=%.1f%% reason=%q algoId=%s", activationPrice, callbackRate, reasonTag, algoID)
+
+	// Phase 2 read-back: verify the exchange's registered activation/callback
+	// match what we sent. The algo endpoint silently drops activationPrice for
+	// TRAILING_STOP_MARKET (registers ≈ entry instead of peak), causing unintended
+	// immediate triggers. Log divergence as a diagnostic.
+	exchangeActivation, _ := strconv.ParseFloat(algoResp.ActivatePrice, 64)
+	exchangeCallback, _ := strconv.ParseFloat(algoResp.CallbackRate, 64)
+	activationDivergence := 0.0
+	if activationPrice > 0 && exchangeActivation > 0 {
+		activationDivergence = math.Abs(exchangeActivation-activationPrice) / activationPrice * 100.0
+	}
+	callbackDivergence := math.Abs(exchangeCallback - cbPercent)
+
+	if activationDivergence > 0.1 || callbackDivergence > 0.05 {
+		logger.Warnf("⚠️  Trailing order registered with DIVERGENT params (algo fallback): sent activation=%.4f callback=%.1f%%, exchange registered activation=%.4f callback=%.1f%% (Δact=%.2f%% Δcb=%.2f%%) algoId=%s reason=%q",
+			activationPrice, cbPercent, exchangeActivation, exchangeCallback,
+			activationDivergence, callbackDivergence, algoID, reasonTag)
+	} else {
+		logger.Infof("  Trailing stop-loss set (Algo Order fallback): activation=%.4f callback=%.1f%% (exchange confirmed) reason=%q algoId=%s",
+			activationPrice, cbPercent, reasonTag, algoID)
+	}
+
 	return algoID, nil
 }
 
 // CancelTrailingStopOrdersByIDs cancels specific trailing/algo orders by their
-// exchange algoId, leaving other algo orders intact. Mirrors the OKX method the
-// trailing re-arm path expects (so a replaced full-trail can drop only the stale
-// order). Unknown/already-gone ids are treated as success.
+// exchange algoId or orderId, leaving other algo orders intact. Mirrors the OKX
+// method the trailing re-arm path expects (so a replaced full-trail can drop only
+// the stale order). Unknown/already-gone ids are treated as success. Phase 1c:
+// supports both classic OrderIDs and AlgoIds — tries algo cancellation first, then
+// regular order cancellation if algo fails with "unknown".
 func (t *FuturesTrader) CancelTrailingStopOrdersByIDs(symbol string, orderIDs []string) error {
 	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
 	for _, id := range orderIDs {
 		if strings.TrimSpace(id) == "" {
 			continue
 		}
-		algoID, err := strconv.ParseInt(strings.TrimSpace(id), 10, 64)
+		numericID, err := strconv.ParseInt(strings.TrimSpace(id), 10, 64)
 		if err != nil {
-			// Not a numeric algoId (e.g. a client id) — skip rather than fail the batch.
-			logger.Infof("  ⚠ Skipping non-numeric trailing algo id %q: %v", id, err)
+			// Not a numeric id (e.g. a client id) — skip rather than fail the batch.
+			logger.Infof("  ⚠ Skipping non-numeric trailing order id %q: %v", id, err)
 			continue
 		}
-		if _, err := t.client.NewCancelAlgoOrderService().AlgoID(algoID).Do(context.Background()); err != nil {
-			if !contains(err.Error(), "no algo") && !contains(err.Error(), "No algo") && !contains(err.Error(), "Unknown order") {
-				return fmt.Errorf("failed to cancel trailing algo order %s: %w", id, err)
+
+		// Try algo cancellation first (most trailing orders are algo).
+		_, algoErr := t.client.NewCancelAlgoOrderService().AlgoID(numericID).Do(context.Background())
+		if algoErr == nil {
+			continue // Successfully cancelled as algo order
+		}
+
+		// Algo cancellation failed — check if it's "unknown algo order" (means it's
+		// a classic order ID instead), or a real error.
+		if !contains(algoErr.Error(), "no algo") && !contains(algoErr.Error(), "No algo") && !contains(algoErr.Error(), "Unknown order") {
+			return fmt.Errorf("failed to cancel trailing algo order %s: %w", id, algoErr)
+		}
+
+		// Unknown algo — try classic order cancellation (Phase 1c: classic trailing
+		// orders return regular OrderIDs that need standard cancellation).
+		_, orderErr := t.client.NewCancelOrderService().
+			Symbol(symbol).
+			OrderID(numericID).
+			Do(context.Background())
+		if orderErr != nil {
+			if !contains(orderErr.Error(), "Unknown order") && !contains(orderErr.Error(), "UNKNOWN_ORDER") {
+				return fmt.Errorf("failed to cancel trailing order %s (tried both algo and classic): %w", id, orderErr)
 			}
+			// Unknown in both — already cancelled or never existed, treat as success
 		}
 	}
 	return nil
@@ -146,6 +249,8 @@ func (t *FuturesTrader) CancelTrailingStopOrdersByIDs(symbol string, orderIDs []
 
 func (t *FuturesTrader) CancelTrailingStopOrders(symbol string) error {
 	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
+
+	// 1. Cancel algo trailing orders (fallback-path orders live here).
 	err := t.client.NewCancelAllAlgoOpenOrdersService().
 		Symbol(symbol).
 		Do(context.Background())
@@ -154,6 +259,29 @@ func (t *FuturesTrader) CancelTrailingStopOrders(symbol string) error {
 			return fmt.Errorf("failed to cancel trailing/algo orders: %w", err)
 		}
 	}
+
+	// 2. Phase 1c: cancel classic TRAILING_STOP_MARKET orders (primary path). These
+	// live in the regular open-orders list, not the algo list, so the algo cancel
+	// above misses them. Enumerate and cancel individually by order id.
+	orders, listErr := t.client.NewListOpenOrdersService().
+		Symbol(symbol).
+		Do(context.Background())
+	if listErr == nil {
+		for _, order := range orders {
+			if string(order.Type) != "TRAILING_STOP_MARKET" {
+				continue
+			}
+			if _, cErr := t.client.NewCancelOrderService().
+				Symbol(symbol).
+				OrderID(order.OrderID).
+				Do(context.Background()); cErr != nil {
+				if !contains(cErr.Error(), "Unknown order") && !contains(cErr.Error(), "UNKNOWN_ORDER") {
+					return fmt.Errorf("failed to cancel classic trailing order %d: %w", order.OrderID, cErr)
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -764,10 +892,12 @@ func (t *FuturesTrader) CancelStopOrders(symbol string) error {
 
 			// Only cancel stop-loss and take-profit orders
 			// Use string comparison since OrderType constants were removed in v2.8.9
+			// Phase 1c: TRAILING_STOP_MARKET (classic endpoint) also surfaces here.
 			if orderType == "STOP_MARKET" ||
 				orderType == "TAKE_PROFIT_MARKET" ||
 				orderType == "STOP" ||
-				orderType == "TAKE_PROFIT" {
+				orderType == "TAKE_PROFIT" ||
+				orderType == "TRAILING_STOP_MARKET" {
 
 				_, err := t.client.NewCancelOrderService().
 					Symbol(symbol).
@@ -841,7 +971,7 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 			reportType = "TAKE_PROFIT"
 		}
 
-		result = append(result, types.OpenOrder{
+		oo := types.OpenOrder{
 			OrderID:       fmt.Sprintf("%d", order.OrderID),
 			Symbol:        toInternalSymbol(order.Symbol),
 			Side:          string(order.Side),
@@ -852,7 +982,24 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 			Quantity:      quantity,
 			Status:        string(order.Status),
 			ClientOrderID: order.ClientOrderID,
-		})
+		}
+
+		// Phase 1c: classic TRAILING_STOP_MARKET orders (from the /fapi/v1/order
+		// endpoint) surface here in the regular list, carrying the REAL activation
+		// price (ActivatePrice) and callback rate (PriceRate) the exchange registered
+		// — unlike the algo-list endpoint which omits them. Read the real values so
+		// the panel/reconciler see truth, and mark activated so the phantom-activation
+		// guard (checkAndFixStaleTrailingActivation) doesn't force-close a live trail.
+		if strings.Contains(strings.ToUpper(string(order.Type)), "TRAILING") {
+			if activatePrice, e := strconv.ParseFloat(order.ActivatePrice, 64); e == nil && activatePrice > 0 {
+				oo.ActivationPrice = activatePrice
+			} else {
+				oo.ActivationPrice = stopPrice
+			}
+			oo.ActivationStatus = "activated"
+		}
+
+		result = append(result, oo)
 	}
 
 	// 2. Get Algo orders (new API for stop-loss/take-profit)

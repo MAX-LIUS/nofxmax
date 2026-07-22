@@ -73,7 +73,9 @@ Binance 是重灾区;OKX 基本健康(已读真实值),但部分共性缺陷两�
 - `placeImmediateTrailing`(`trader/protection_execution.go:353-404`)传 `callbackRatio` = 小数比率(如 0.0374)。
 - BN `setTrailingStopLossCore` clamp 按百分数 `[0.1, 5]` 处理 → 0.0374 < 0.1 被夹成 0.1%。
 - 实证: `activation=1346.0946 callback=0.1% reason="immediate_trailing"`(该 3.74% 变 0.1%)。
-- OKX: `normalizeOKXCallbackRatio`(`trader/okx/trader_orders.go:476`)语义需核实是否同样受影响。
+- OKX: 已核实**不受影响**。OKX 一贯用小数比率(place 时 `body["callbackRatio"]` 直送 0.012;read 时 `normalizeOKXCallbackRatio` 归一)。immediate_trailing 传小数对 OKX 正好正确。
+- 更深根因: Binance 适配器**回调单位契约不一致** —— native trailing 调用点(`auto_trader_risk.go:1961/2160`)先 `×100` 送百分数,immediate_trailing 送小数。同一个 `setTrailingStopLossCore` 收到两种单位。
+- 修法: 统一契约为「小数比率」,`setTrailingStopLossCore` 内部 `×100`+clamp,native 两调用点去掉预乘。与 OKX 契约一致,消除歧义。
 
 ### H — immediate_trailing 未注册 mechanism(两家)
 - `mechanismToCode`(`store/reason_codec.go:31-50`)无 `immediate_trailing`。
@@ -90,7 +92,7 @@ Binance 是重灾区;OKX 基本健康(已读真实值),但部分共性缺陷两�
 
 ### Phase 1 (P0) — BN trailing 止血(独立 PR)
 - C+F: trailing 改经典 `CreateOrderService` + `TRAILING_STOP_MARKET` + coded client-id
-- G: immediate_trailing 回调单位对齐(ratio→percent),同时验 OKX 路径
+- G: 统一 Binance 适配器回调单位契约为「小数比率」(内部 ×100+clamp),修正 native trailing 两调用点(去掉预乘)+ immediate_trailing 自动正确;OKX 一贯用小数比率,不受影响
 - 配套: `GetOpenOrders` 从经典 openOrders 读回 trailing,保面板可见
 - 验证: 单元测试(activation 生效 + 单位换算);testnet/小仓实盘验证激活价按峰值
 
