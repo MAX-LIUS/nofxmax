@@ -156,3 +156,21 @@ func TestDetectStructureBreaks_CHOCH(t *testing.T) {
 		t.Errorf("expected a CHOCH after trend reversal")
 	}
 }
+
+func TestRoundSig(t *testing.T) {
+	cases := []struct {
+		in, want float64
+		n        int
+	}{
+		{1277.14046987, 1277.14, 6},
+		{65696.5851736, 65696.6, 6},
+		{0.34158391780, 0.341584, 6},
+		{0, 0, 6},
+		{123.456, 123.456, 0}, // n<=0 -> unchanged
+	}
+	for _, c := range cases {
+		if got := roundSig(c.in, c.n); got != c.want {
+			t.Errorf("roundSig(%v,%d)=%v want %v", c.in, c.n, got, c.want)
+		}
+	}
+}

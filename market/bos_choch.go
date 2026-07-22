@@ -50,6 +50,18 @@ type structPivot struct {
 	isHigh bool
 }
 
+// roundSig rounds v to n significant figures, removing float arithmetic noise
+// from derived band bounds while preserving precision across price magnitudes.
+func roundSig(v float64, n int) float64 {
+	if v == 0 || n <= 0 {
+		return v
+	}
+	d := math.Ceil(math.Log10(math.Abs(v)))
+	power := float64(n) - d
+	mag := math.Pow(10, power)
+	return math.Round(v*mag) / mag
+}
+
 // DetectStructureBreaks scans the kline series for BOS / CHoCH events and the
 // order blocks that originated them. Returns nil slices when data is
 // insufficient. atr14 is used for noise/size normalization; a non-positive atr14
@@ -149,8 +161,8 @@ func buildBreak(klines []Kline, breakIdx int, level float64, dir, typ string, ba
 		Direction:  dir,
 		BreakLevel: level,
 		BarsAgo:    n - 1 - breakIdx,
-		RetestLow:  level - band,
-		RetestHigh: level + band,
+		RetestLow:  roundSig(level-band, 6),
+		RetestHigh: roundSig(level+band, 6),
 		SizeATR:    math.Abs(klines[breakIdx].Close-level) / atr14,
 	}
 	// Retested if any bar after the break traded back into the retest band.
