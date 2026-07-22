@@ -95,50 +95,55 @@ func (t *FuturesTrader) setTrailingStopLossCore(symbol string, positionSide stri
 	cbPercent = math.Round(cbPercent*10) / 10
 	cbStr := fmt.Sprintf("%.1f", cbPercent)
 
-	// Phase 1c: place on the CLASSIC endpoint (/fapi/v1/order) ONLY. It is the sole
-	// Binance endpoint that honors activationPrice for TRAILING_STOP_MARKET (the
-	// order becomes active only once price reaches the peak trigger, then trails).
+	// Place on the ALGO endpoint (/fapi/v1/algoOrder). Binance migrated
+	// TRAILING_STOP_MARKET off the classic /fapi/v1/order endpoint — the classic
+	// endpoint now rejects it with -4120 ("Order type not supported for this
+	// endpoint. Please use the Algo Order API endpoints instead."), confirmed on a
+	// live account 2026-07-22.
 	//
-	// We deliberately DO NOT fall back to the algo endpoint (/fapi/v1/algoOrder):
-	// that endpoint silently DROPS activationPrice and registers the trail ≈entry,
-	// so it triggers immediately on any adverse tick after open — the exact bug that
-	// caused unresolved_exchange_close and profit erosion. Contract (per product
-	// decision): if the exchange trailing cannot be placed correctly (rejected, or
-	// registered WITHOUT the requested peak activation), we place NO exchange order
-	// and return an error so the caller drops to the local managed-drawdown monitor
-	// and flags the panel. An immediate-triggering exchange order is worse than none.
+	// CRITICAL (root cause of the immediate-trigger / unresolved_exchange_close bug):
+	// go-binance <= v2.8.9 sent the activation param under the WRONG key
+	// ("activationPrice"), which Binance silently ignored, defaulting the trail to
+	// the order-time market price → it armed at entry and triggered on the first
+	// adverse tick. v2.8.10+ renamed it to the correct "activatePrice", so the
+	// exchange now honors the requested peak. Verified live: sending activatePrice
+	// = entry*1.02 registered exactly at +2.000% (0.000% divergence). We call
+	// .ActivatePrice() explicitly to bind to the corrected key.
 	activationRequired := activationPrice > 0
 
-	classicService := t.client.NewCreateOrderService().
+	algoService := t.client.NewCreateAlgoOrderService().
 		Symbol(symbol).
 		Side(side).
 		PositionSide(posSide).
-		Type(futures.OrderType("TRAILING_STOP_MARKET")).
+		Type(futures.AlgoOrderTypeTrailingStopMarket).
 		WorkingType(futures.WorkingTypeContractPrice).
-		NewClientOrderID(clientOrderID).
+		ClientAlgoId(clientOrderID).
 		Quantity(qtyStr)
 
 	if actStr != "" {
-		classicService = classicService.ActivationPrice(actStr)
+		algoService = algoService.ActivatePrice(actStr)
 	}
-	classicService = classicService.CallbackRate(cbStr)
+	algoService = algoService.CallbackRate(cbStr)
 
-	resp, err := classicService.Do(context.Background())
+	resp, err := algoService.Do(context.Background())
 	if err != nil {
-		return "", fmt.Errorf("failed to set trailing stop-loss (classic endpoint, no algo fallback by design): %w", err)
+		return "", fmt.Errorf("failed to set trailing stop-loss (algo endpoint): %w", err)
 	}
 
 	orderID := ""
-	if resp != nil && resp.OrderID != 0 {
-		orderID = strconv.FormatInt(resp.OrderID, 10)
+	if resp != nil && resp.AlgoId != 0 {
+		orderID = strconv.FormatInt(resp.AlgoId, 10)
 	}
 
 	// Read-back verification: confirm the exchange registered the activation/callback
 	// we sent. This is the safety gate — if the exchange came back WITHOUT the peak
 	// activation (or with a materially different one), the order would trigger too
 	// early, so we CANCEL it and return an error rather than leave a wrong order live.
+	// With the v2.8.10 param-name fix this passes cleanly; it stays as a genuine
+	// guard against future regressions (wrong param, API change) so a mis-registered
+	// order never rests silently.
 	exchangeActivation, _ := strconv.ParseFloat(resp.ActivatePrice, 64)
-	exchangeCallback, _ := strconv.ParseFloat(resp.PriceRate, 64)
+	exchangeCallback, _ := strconv.ParseFloat(resp.CallbackRate, 64)
 
 	activationDivergence := 0.0
 	if activationRequired && exchangeActivation > 0 {
@@ -156,9 +161,9 @@ func (t *FuturesTrader) setTrailingStopLossCore(symbol string, positionSide stri
 		if activationWrong {
 			reason = fmt.Sprintf("exchange activation %.4f diverges %.2f%% from requested %.4f", exchangeActivation, activationDivergence, activationPrice)
 		}
-		logger.Warnf("⚠️  Trailing order rejected on read-back: %s — cancelling orderId=%s and falling back to local monitor (reason=%q)", reason, orderID, reasonTag)
-		if orderID != "" {
-			if _, cErr := t.client.NewCancelOrderService().Symbol(symbol).OrderID(resp.OrderID).Do(context.Background()); cErr != nil {
+		logger.Warnf("⚠️  Trailing order rejected on read-back: %s — cancelling algoId=%s and falling back to local monitor (reason=%q)", reason, orderID, reasonTag)
+		if resp.AlgoId != 0 {
+			if _, cErr := t.client.NewCancelAlgoOrderService().AlgoID(resp.AlgoId).Do(context.Background()); cErr != nil {
 				if !contains(cErr.Error(), "Unknown order") && !contains(cErr.Error(), "UNKNOWN_ORDER") {
 					logger.Warnf("⚠️  Failed to cancel mis-registered trailing order %s: %v", orderID, cErr)
 				}
@@ -169,11 +174,11 @@ func (t *FuturesTrader) setTrailingStopLossCore(symbol string, positionSide stri
 
 	if callbackDivergence > 0.05 {
 		// Callback rounding to the 0.1 step is expected and harmless; only warn.
-		logger.Warnf("⚠️  Trailing callback registered with divergence: sent %.1f%%, exchange %.1f%% (Δ=%.2f%%) orderId=%s reason=%q",
+		logger.Warnf("⚠️  Trailing callback registered with divergence: sent %.1f%%, exchange %.1f%% (Δ=%.2f%%) algoId=%s reason=%q",
 			cbPercent, exchangeCallback, callbackDivergence, orderID, reasonTag)
 	}
 
-	logger.Infof("  Trailing stop-loss set (Classic Order): activation=%.4f callback=%.1f%% (exchange confirmed) reason=%q orderId=%s",
+	logger.Infof("  Trailing stop-loss set (Algo Order): activation=%.4f callback=%.1f%% (exchange confirmed) reason=%q algoId=%s",
 		activationPrice, cbPercent, reasonTag, orderID)
 	return orderID, nil
 }
@@ -378,20 +383,18 @@ func (t *FuturesTrader) OpenShort(symbol string, quantity float64, leverage int)
 // CloseLong closes a long position
 func (t *FuturesTrader) CloseLong(symbol string, quantity float64) (map[string]interface{}, error) {
 	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
-	// If quantity is 0, get current position quantity
+	// If quantity is 0, resolve the LIVE position size. This MUST read fresh from
+	// the exchange (execPositionAmt calls GetPositionRisk directly, symbol-scoped),
+	// NOT the 15s GetPositions() cache: a close issued right after an open/resize
+	// would otherwise read a stale (possibly zero) amount and silently skip the
+	// close, leaving a NAKED position. Observed live 2026-07-22: a cached read
+	// reported "no long position" ~10s after a fill while the position was live.
 	if quantity == 0 {
-		positions, err := t.GetPositions()
+		amt, err := t.execPositionAmt(symbol, "LONG")
 		if err != nil {
 			return nil, err
 		}
-
-		for _, pos := range positions {
-			if pos["symbol"] == symbol && pos["side"] == "long" {
-				quantity = pos["positionAmt"].(float64)
-				break
-			}
-		}
-
+		quantity = amt
 		if quantity == 0 {
 			return nil, fmt.Errorf("no long position found for %s", symbol)
 		}
@@ -434,20 +437,16 @@ func (t *FuturesTrader) CloseLong(symbol string, quantity float64) (map[string]i
 // CloseShort closes a short position
 func (t *FuturesTrader) CloseShort(symbol string, quantity float64) (map[string]interface{}, error) {
 	symbol = t.toExecSymbol(symbol) // internal USDT -> exec (USDC when applicable)
-	// If quantity is 0, get current position quantity
+	// If quantity is 0, resolve the LIVE position size fresh from the exchange
+	// (execPositionAmt returns the absolute amount). Must NOT use the 15s
+	// GetPositions() cache — a close right after an open/resize could read a stale
+	// amount and skip the close, leaving a naked position (see CloseLong note).
 	if quantity == 0 {
-		positions, err := t.GetPositions()
+		amt, err := t.execPositionAmt(symbol, "SHORT")
 		if err != nil {
 			return nil, err
 		}
-
-		for _, pos := range positions {
-			if pos["symbol"] == symbol && pos["side"] == "short" {
-				quantity = -pos["positionAmt"].(float64) // Short position quantity is negative, take absolute value
-				break
-			}
-		}
-
+		quantity = amt // already absolute value
 		if quantity == 0 {
 			return nil, fmt.Errorf("no short position found for %s", symbol)
 		}

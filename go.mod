@@ -3,7 +3,7 @@ module nofx
 go 1.25.3
 
 require (
-	github.com/adshao/go-binance/v2 v2.8.9
+	github.com/adshao/go-binance/v2 v2.8.10
 	github.com/agiledragon/gomonkey/v2 v2.13.0
 	github.com/antihax/optional v1.0.0
 	github.com/bybit-exchange/bybit.go.api v0.0.0-20250727214011-c9347d6804d6

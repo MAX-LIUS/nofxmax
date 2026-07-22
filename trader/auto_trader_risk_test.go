@@ -340,8 +340,7 @@ func TestApplyNativeTrailingDrawdownForBinance(t *testing.T) {
 	if fake.trailingActivation <= 100 {
 		t.Fatalf("expected activation above entry for long, got %.4f", fake.trailingActivation)
 	}
-	// Phase 1a: callers now pass decimal ratio (0.019048) directly; adapter converts
-	// internally. Test expects the decimal ratio, not the old pre-multiplied percent.
+	// Phase 1a: callers pass decimal ratio (0.019048) directly; adapter converts.
 	expectedRatio := 1.9048 / 100.0
 	if math.Abs(fake.trailingCallback-expectedRatio) > 0.00001 {
 		t.Fatalf("expected callback ratio about %.6f, got %.6f", expectedRatio, fake.trailingCallback)

@@ -28,6 +28,7 @@
 | `communication-preferences.md` | 语言（中文）、风格、高风险操作需确认 | 活跃 |
 | `claude-code-env.md` | 本机 CLI 配置：上下文窗口 ~570k、autoCompactWindow=500k、网关 failover | 活跃 |
 | `unified-protection-system.md` | 统一保护系统全量记忆（churn/回吐护栏/GPT custom_prompt bug 等） | 活跃 v1.12 |
+| `binance-native-trailing.md` | BN 原生 trailing 修复（go-binance v2.8.9→2.8.10 参数键名 bug、algo 端点、close 缓存裸仓修复、遗留 issue 1/2） | 活跃 |
 
 ---
 

@@ -77,17 +77,36 @@ func NewBinanceFuturesTestSuite(t *testing.T) *BinanceFuturesTestSuite {
 
 		// Mock GetPositions - /fapi/v2/positionRisk
 		case path == "/fapi/v2/positionRisk":
-			respBody = []map[string]interface{}{
-				{
-					"symbol":           "BTCUSDT",
-					"positionAmt":      "0.5",
-					"entryPrice":       "50000.00",
-					"markPrice":        "50500.00",
-					"unRealizedProfit": "250.00",
-					"liquidationPrice": "45000.00",
-					"leverage":         "10",
-					"positionSide":     "LONG",
-				},
+			// Honor the symbol query filter like the real Binance API does.
+			// Only BTCUSDT has an open position in this mock; any other symbol
+			// (e.g. ETHUSDT) returns an empty/zero-amount position set.
+			qSymbol := r.URL.Query().Get("symbol")
+			if qSymbol == "" || qSymbol == "BTCUSDT" {
+				respBody = []map[string]interface{}{
+					{
+						"symbol":           "BTCUSDT",
+						"positionAmt":      "0.5",
+						"entryPrice":       "50000.00",
+						"markPrice":        "50500.00",
+						"unRealizedProfit": "250.00",
+						"liquidationPrice": "45000.00",
+						"leverage":         "10",
+						"positionSide":     "LONG",
+					},
+				}
+			} else {
+				respBody = []map[string]interface{}{
+					{
+						"symbol":           qSymbol,
+						"positionAmt":      "0",
+						"entryPrice":       "0.00",
+						"markPrice":        "0.00",
+						"unRealizedProfit": "0.00",
+						"liquidationPrice": "0.00",
+						"leverage":         "10",
+						"positionSide":     "BOTH",
+					},
+				}
 			}
 
 		// Mock GetMarketPrice - /fapi/v1/ticker/price and /fapi/v2/ticker/price
