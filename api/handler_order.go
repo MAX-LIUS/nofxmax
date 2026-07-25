@@ -9,6 +9,7 @@ import (
 
 	"nofx/logger"
 	"nofx/market"
+	"nofx/store"
 
 	"github.com/gin-gonic/gin"
 )
@@ -212,7 +213,11 @@ func (s *Server) handlePositions(c *gin.Context) {
 		SafeInternalError(c, "Get positions", err)
 		return
 	}
-	if s.store != nil {
+	// Reconcile stale local OPEN rows against the exchange truth — but ONLY when the
+	// served snapshot is genuinely fresh. GetPositions may serve a stale-but-usable
+	// cache to keep the dashboard fast (stale-while-revalidate); acting on a stale
+	// snapshot here could wrongly close a freshly-opened position, so skip it.
+	if s.store != nil && trader.PositionsSnapshotFresh() {
 		livePositions := make(map[string]float64, len(positions))
 		for _, pos := range positions {
 			symbol, _ := pos["symbol"].(string)
@@ -351,6 +356,35 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 	// Determine enrichment level
 	doFullEnrich := enrich == "full" || (enrich == "auto" && len(positions) <= 100)
 
+	// Per-request memoization. Full enrichment loads the SAME decision record many
+	// times per position (entry cycle 3x, exit cycle 2x, once per close event, plus
+	// the aiSL/aiTP pass) and re-parses its JSON blobs each time. With limit=50 that
+	// exploded to 300+ GetRecordByCycle DB loads + JSON unmarshals and took 12-26s —
+	// over the frontend's 30s axios timeout, which surfaced as a "Network error"
+	// toast on the panel. These caches collapse the repeats to one load/parse per
+	// distinct (cycle) / (cycle,symbol,action) within a single request.
+	recordByCycleMemo := make(map[int]*store.DecisionRecord)
+	recordByCycleMiss := make(map[int]bool)
+	getRecordByCycleMemo := func(cycle int) *store.DecisionRecord {
+		if cycle <= 0 || traderStore.Decision() == nil {
+			return nil
+		}
+		if rec, ok := recordByCycleMemo[cycle]; ok {
+			return rec
+		}
+		if recordByCycleMiss[cycle] {
+			return nil
+		}
+		rec, err := traderStore.Decision().GetRecordByCycle(trader.GetID(), cycle)
+		if err != nil || rec == nil {
+			recordByCycleMiss[cycle] = true
+			return nil
+		}
+		recordByCycleMemo[cycle] = rec
+		return rec
+	}
+	reviewRefMemo := make(map[string]map[string]interface{})
+
 	type decisionReviewRef struct {
 		DecisionRecordID   int64                  `json:"decision_record_id"`
 		CycleNumber        int                    `json:"cycle_number"`
@@ -379,8 +413,13 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 		if cycle <= 0 || traderStore.Decision() == nil {
 			return nil
 		}
-		record, err := traderStore.Decision().GetRecordByCycle(trader.GetID(), cycle)
-		if err != nil || record == nil {
+		memoKey := strconv.Itoa(cycle) + "|" + strings.ToUpper(symbol) + "|" + strings.ToUpper(action)
+		if cached, ok := reviewRefMemo[memoKey]; ok {
+			return cached
+		}
+		record := getRecordByCycleMemo(cycle)
+		if record == nil {
+			reviewRefMemo[memoKey] = nil
 			return nil
 		}
 		var matched map[string]interface{}
@@ -412,7 +451,7 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 		); real != nil {
 			protectionSnapshot = real
 		}
-		return map[string]interface{}{
+		result := map[string]interface{}{
 			"decision_record_id":  record.ID,
 			"cycle_number":        record.CycleNumber,
 			"timestamp":           record.Timestamp.UTC().Format(time.RFC3339),
@@ -421,6 +460,8 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 			"decisions":           record.Decisions,
 			"matched_decision":    matched,
 		}
+		reviewRefMemo[memoKey] = result
+		return result
 	}
 
 	buildEntryReviewSummary := func(cycle int, symbol string, action string) map[string]interface{} {
@@ -614,7 +655,7 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 				enrichedPos["placed_protection"] = placed
 				// AI structural SL/TP opinion (present even in manual mode).
 				aiSL, aiTP := 0.0, 0.0
-				if rec, err := traderStore.Decision().GetRecordByCycle(trader.GetID(), pos.EntryDecisionCycle); err == nil && rec != nil {
+				if rec := getRecordByCycleMemo(pos.EntryDecisionCycle); rec != nil {
 					aiSL, aiTP = aiSLTPFromDecisionJSON([]string{rec.DecisionJSON, rec.RawResponse}, pos.Symbol, sideToOpenAction(pos.Side))
 				}
 				if dev := buildProtectionDeviation(placed, aiSL, aiTP, pos.EntryPrice, isLong); dev != nil {

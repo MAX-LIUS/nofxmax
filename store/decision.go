@@ -17,8 +17,8 @@ type DecisionStore struct {
 // DecisionRecordDB internal GORM model for decision_records table
 type DecisionRecordDB struct {
 	ID                  int64     `gorm:"primaryKey;autoIncrement"`
-	TraderID            string    `gorm:"column:trader_id;not null;index:idx_decision_records_trader_time"`
-	CycleNumber         int       `gorm:"column:cycle_number;not null"`
+	TraderID            string    `gorm:"column:trader_id;not null;index:idx_decision_records_trader_time;index:idx_decision_records_trader_cycle,priority:1"`
+	CycleNumber         int       `gorm:"column:cycle_number;not null;index:idx_decision_records_trader_cycle,priority:2"`
 	Timestamp           time.Time `gorm:"not null;index:idx_decision_records_trader_time,sort:desc;index:idx_decision_records_timestamp,sort:desc"`
 	SystemPrompt        string    `gorm:"column:system_prompt;default:''"`
 	InputPrompt         string    `gorm:"column:input_prompt;default:''"`
