@@ -1,5 +1,28 @@
 # Production Deployment - Critical Information
 
+## 2026-07-23 Fix: positions/history perf — "Network error" toast root cause (pid 2035360)
+BN (and every) trader panel kept popping a "网络错误/Network error" toast because
+`GET /api/positions/history?limit=50` took 12-26s, past the frontend's 30s axios
+timeout (httpClient.ts: `!error.response` → Network error toast).
+Two compounding causes:
+  1. N+1 JSON re-parse: full enrichment loaded the SAME decision record many times
+     per position (entry 3x, exit 2x, per close-event, + aiSL/aiTP pass) and
+     re-unmarshalled its JSON blobs each time → 300+ GetRecordByCycle loads at limit=50.
+  2. Missing composite index: each GetRecordByCycle linear-scanned thousands of rows
+     (only had idx_decision_records_trader_time on (trader_id, timestamp)).
+Fixes (commit 2ad4216, pushed origin/dev):
+  - api/handler_order.go: per-request memo for GetRecordByCycle + built review refs
+    (recordByCycleMemo / reviewRefMemo). Also skip stale-snapshot reconcile in
+    handlePositions (PositionsSnapshotFresh guard) to avoid closing a freshly-opened
+    position off a stale-while-revalidate read.
+  - store/decision.go: added GORM composite index idx_decision_records_trader_cycle
+    on (trader_id priority:1, cycle_number priority:2).
+Rollout: memoized binary deployed as pid 2035360 (14s→9-15s, not enough alone), THEN
+the composite index was created manually in the prod DB → endpoint dropped to ~1.5s
+(BN 1.79s, claude 1.51s, Claude-R 1.22s, GPT 0.96s). The GORM tag now persists the
+index across future AutoMigrate; the prod DB already has it. No further deploy needed
+solely for the tag.
+
 ## 2026-07-20 Deploy: structural backup wick-immunity fix (pid 1449553)
 Fixed a bug where ratchet #1 could park a PHYSICAL backup stop right on the
 close-confirm structural level, destroying its wick-immunity. Root cause:
@@ -221,7 +244,7 @@ native trailing triggering AT ENTRY (immediate stop-out → unresolved_exchange_
   BN trader restarted (was stopped for testing). Backend-only — no frontend rebuild.
 
 ## Last Updated
-2026-07-22 - Binance native trailing true root-cause fix (go-binance v2.8.10)
+2026-07-23 - positions/history perf fix (memoize + composite index) — killed "Network error" toast
 
 ## 2026-07-20 Deploy: unified SL band 1.5/2.5 + max-hold disabled + reward-ATR≥1.0 (pid 1556740)
 Backtest-driven risk tuning, ALL 4 traders identical:
