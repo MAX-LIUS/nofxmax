@@ -784,8 +784,25 @@ export interface HistoricalPosition {
   trough_pnl_pct?: number
   peak_atr_mult?: number
   trough_atr_mult?: number
+  // Structural-stop ratchet walk-in log frozen at close: one entry per genuine
+  // tighten (distance %, ATR multiple, price at event). Empty when the position
+  // never trailed. Rendered in the entry-protection plan panel.
+  ratchet_history?: RatchetEvent[]
   created_at: string
   updated_at: string
+}
+
+// One structural-stop tighten event, mirrored from the Go store.RatchetEvent.
+export interface RatchetEvent {
+  seq: number
+  boundary: number
+  prev_boundary: number
+  price_at_event: number
+  dist_pct: number
+  atr_mult: number
+  timestamp: number
+  side?: string
+  entry_price?: number
 }
 
 // Real protections the bot placed on the exchange, mirrored from close_intents.
@@ -810,7 +827,9 @@ export interface ProtectionDeviation {
   tp_diff_pct?: number
   manual_rr?: number
   ai_rr?: number
-  entry_price?: number
+  entry_price?: number // actual fill (manual/live entry)
+  ai_entry?: number // AI's planned entry
+  entry_diff_pct?: number // (actual-planned)/planned*100 — slippage/chase
 }
 
 // Matches Go TraderStats struct exactly

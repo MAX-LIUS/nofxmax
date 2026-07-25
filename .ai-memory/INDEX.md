@@ -29,6 +29,7 @@
 | `claude-code-env.md` | 本机 CLI 配置：上下文窗口 ~570k、autoCompactWindow=500k、网关 failover | 活跃 |
 | `unified-protection-system.md` | 统一保护系统全量记忆（churn/回吐护栏/GPT custom_prompt bug 等） | 活跃 v1.12 |
 | `binance-native-trailing.md` | BN 原生 trailing 修复（go-binance v2.8.9→2.8.10 参数键名 bug、algo 端点、close 缓存裸仓修复、遗留 issue 1/2） | 活跃 |
+| `exit-timing-stop-research.md` | 退出侧研究(已逐K定论,未部署)：弱势/动量判据无增益(证伪)；快照仿真的2×ATR收紧止损被逐K回测证伪(claude上-45U最差)；**四trader逐K验证:无固定N×ATR能全正,系统现有swing结构close-confirm止损已是稳健最优,勿替换**；顺带发现Claude-R 15m止损偏紧可单独跟进 | 已定论 |
 
 ---
 

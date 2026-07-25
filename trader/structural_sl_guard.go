@@ -266,6 +266,39 @@ func (at *AutoTrader) applyStructuralTrail(symbol, side string, entry float64, i
 				logger.Infof("🔧 [StructuralSL] %s %s trail ratchet #%d → tight %.6f (close-confirm only, no physical backup; prev %.6f, entry-floor %.6f)",
 					symbol, sideUpper, newRatchets, newBoundary, prevBoundary, entryBoundary)
 			}
+			// Side-record this genuine tighten to the ratchet event log so the
+			// position-history panel can replay every step (distance %, ATR multiple,
+			// price at event). PURE side-effect: it reads no state back into the
+			// boundary/close logic, and a write failure is logged-and-ignored so the
+			// stop update is never blocked on the audit trail. Keyed identically to the
+			// frozen-ATR record; frozen onto the closed row + deleted at position close.
+			dist := newBoundary - closedBar.Close
+			if dist < 0 {
+				dist = -dist
+			}
+			distPct := 0.0
+			if closedBar.Close > 0 {
+				distPct = dist / closedBar.Close * 100
+			}
+			atrMult := 0.0
+			if atr > 0 {
+				atrMult = dist / atr
+			}
+			if err := at.store.AppendRatchetEvent(key, store.RatchetEvent{
+				TraderID:     at.id,
+				Symbol:       symbol,
+				Side:         sideUpper,
+				EntryPrice:   entry,
+				Seq:          newRatchets,
+				Boundary:     newBoundary,
+				PrevBoundary: prevBoundary,
+				PriceAtEvent: closedBar.Close,
+				DistPct:      distPct,
+				AtrMult:      atrMult,
+				Timestamp:    time.Now().Unix(),
+			}); err != nil {
+				logger.Warnf("⚠️ [StructuralSL] ratchet event log append failed %s: %v", key, err)
+			}
 		}
 	}
 	return effective

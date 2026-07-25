@@ -1007,6 +1007,21 @@ export const translations = {
     oiChange: 'OI Change',
     fundingRate: 'Funding',
     compositeScore: 'Score',
+    currentPrice: 'Price',
+    qualityTip:
+      'Percentile rank within the current candidate cohort (0-100, higher is better).',
+    qualityTipT:
+      'Tradability: composite of liquidity, OI, activity & reliability minus risk. The main driver of the Score.',
+    qualityTipL:
+      'Liquidity: 24h quote volume rank. Higher = easier to enter/exit.',
+    qualityTipOI:
+      'Open Interest: outstanding contract value rank. Higher = deeper market.',
+    qualityTipA:
+      'Activity: volume/OI turnover rank. Higher = more active flow.',
+    qualityTipR:
+      'Reliability: stability of liquidity+OI, penalised by extreme 24h moves.',
+    scoreTip:
+      'Composite hot score (0-1): 45% tradability, 20% liquidity, 13% activity, 10% OI-growth, 7% momentum, 5% funding-edge. Coins are ranked by this.',
     exchangeLabel: 'Exchange',
     autoRefresh: 'Auto Refresh',
     coinDetail: 'Coin Detail',
@@ -1159,6 +1174,7 @@ export const translations = {
       updating: 'Updating...',
       indicators: 'Indicators',
       orderMarkers: 'Order Markers',
+      orderLines: 'Order Lines (SL/TP/Limit)',
       technicalIndicators: 'Technical Indicators',
       clickToToggle: 'Click to toggle indicators',
       shares: 'shares',
@@ -2353,6 +2369,16 @@ export const translations = {
     oiChange: 'OI变化',
     fundingRate: '资金费率',
     compositeScore: '综合评分',
+    currentPrice: '现价',
+    qualityTip: '在当前候选池内的百分位排名(0-100，越高越好)。',
+    qualityTipT:
+      '可交易性：流动性/持仓/活跃度/可靠性的综合减去风险，是评分的主要驱动。',
+    qualityTipL: '流动性：24h 成交额排名，越高越易进出。',
+    qualityTipOI: '持仓量：未平仓合约价值排名，越高市场越深。',
+    qualityTipA: '活跃度：成交额/持仓 换手率排名，越高资金流越活跃。',
+    qualityTipR: '可靠性：流动性+持仓的稳定性，受极端 24h 波动惩罚。',
+    scoreTip:
+      '综合热度评分(0-1)：可交易性45% + 流动性20% + 活跃度13% + OI增长10% + 动量7% + 资金费边际5%。币种按此排序。',
     exchangeLabel: '交易所',
     autoRefresh: '自动刷新',
     coinDetail: '币种详情',
@@ -2502,6 +2528,7 @@ export const translations = {
       updating: '更新中...',
       indicators: '指标',
       orderMarkers: '订单标记',
+      orderLines: '委托线 (止损/止盈/限价)',
       technicalIndicators: '技术指标',
       clickToToggle: '点击选择需要显示的指标',
       shares: '股',
@@ -3639,6 +3666,21 @@ export const translations = {
     oiChange: 'OI Change',
     fundingRate: 'Funding',
     compositeScore: 'Score',
+    currentPrice: 'Price',
+    qualityTip:
+      'Percentile rank within the current candidate cohort (0-100, higher is better).',
+    qualityTipT:
+      'Tradability: composite of liquidity, OI, activity & reliability minus risk. The main driver of the Score.',
+    qualityTipL:
+      'Liquidity: 24h quote volume rank. Higher = easier to enter/exit.',
+    qualityTipOI:
+      'Open Interest: outstanding contract value rank. Higher = deeper market.',
+    qualityTipA:
+      'Activity: volume/OI turnover rank. Higher = more active flow.',
+    qualityTipR:
+      'Reliability: stability of liquidity+OI, penalised by extreme 24h moves.',
+    scoreTip:
+      'Composite hot score (0-1): 45% tradability, 20% liquidity, 13% activity, 10% OI-growth, 7% momentum, 5% funding-edge. Coins are ranked by this.',
     exchangeLabel: 'Exchange',
     autoRefresh: 'Auto Refresh',
     coinDetail: 'Coin Detail',
@@ -3792,6 +3834,7 @@ export const translations = {
       updating: 'Memperbarui...',
       indicators: 'Indikator',
       orderMarkers: 'Penanda Order',
+      orderLines: 'Garis Order (SL/TP/Limit)',
       technicalIndicators: 'Indikator Teknikal',
       clickToToggle: 'Klik untuk beralih indikator',
       shares: 'lembar',

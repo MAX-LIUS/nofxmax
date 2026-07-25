@@ -12,6 +12,8 @@ export interface ChartPrefs {
   showFibonacci: boolean
   showVWAP: boolean
   showOrderMarkers: boolean
+  // Pending-order price lines (SL/TP/limit) drawn on the candlestick series
+  showOrderLines: boolean
   // Structure-map overlays (BOS/CHoCH, order blocks, volume profile, anchored VWAP)
   showStructureBreaks: boolean
   showOrderBlocks: boolean
@@ -29,6 +31,7 @@ const DEFAULT_PREFS: ChartPrefs = {
   showFibonacci: true,
   showVWAP: true,
   showOrderMarkers: true,
+  showOrderLines: true,
   showStructureBreaks: true,
   showOrderBlocks: true,
   showVolumeProfile: false,

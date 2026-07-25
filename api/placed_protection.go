@@ -216,7 +216,9 @@ type protectionDeviation struct {
 	TPDiffPct  *float64 `json:"tp_diff_pct,omitempty"`
 	ManualRR   *float64 `json:"manual_rr,omitempty"` // |TP-entry| / |SL-entry|
 	AIRR       *float64 `json:"ai_rr,omitempty"`
-	EntryPrice float64  `json:"entry_price,omitempty"`
+	EntryPrice float64  `json:"entry_price,omitempty"`         // actual fill (manual/live entry)
+	AIEntry    *float64 `json:"ai_entry,omitempty"`            // AI's PLANNED entry (nil when unknown)
+	EntryDiffPct *float64 `json:"entry_diff_pct,omitempty"`    // (actual-planned)/planned *100 — slippage/chase
 }
 
 // buildProtectionDeviation derives the manual first-TP/first-SL from the placed
@@ -225,7 +227,7 @@ type protectionDeviation struct {
 // nearest-to-entry (the tier that fires first), not array order — so the manual
 // R multiple compares the first profit-lock against the first stop, matching how
 // the AI's own first_target R is defined.
-func buildProtectionDeviation(placed []placedProtectionItem, aiSL, aiTP, entryPrice float64, isLong bool) *protectionDeviation {
+func buildProtectionDeviation(placed []placedProtectionItem, aiSL, aiTP, aiEntry, entryPrice float64, isLong bool) *protectionDeviation {
 	var mSL, mTP *float64
 	for i := range placed {
 		it := placed[i]
@@ -248,11 +250,19 @@ func buildProtectionDeviation(placed []placedProtectionItem, aiSL, aiTP, entryPr
 			}
 		}
 	}
-	hasAI := aiSL > 0 || aiTP > 0
+	hasAI := aiSL > 0 || aiTP > 0 || aiEntry > 0
 	if mSL == nil && mTP == nil && !hasAI {
 		return nil
 	}
 	d := &protectionDeviation{EntryPrice: entryPrice, ManualSL: mSL, ManualTP: mTP}
+	if aiEntry > 0 {
+		v := aiEntry
+		d.AIEntry = &v
+		if entryPrice > 0 {
+			diff := round2((entryPrice - aiEntry) / aiEntry * 100)
+			d.EntryDiffPct = &diff
+		}
+	}
 	if aiSL > 0 {
 		v := aiSL
 		d.AISL = &v
@@ -305,26 +315,26 @@ func rrMultiple(entry, tp, sl float64) float64 {
 // These exist even in manual protection mode (the AI still reasons R multiples),
 // so the panel can always show the structural reference. Returns (0,0) when not
 // found.
-func aiSLTPFromDecisionJSON(payloads []string, symbol, action string) (float64, float64) {
+func aiSLTPFromDecisionJSON(payloads []string, symbol, action string) (sl, tp, entry float64) {
 	for _, payload := range payloads {
 		if strings.TrimSpace(payload) == "" {
 			continue
 		}
-		sl, tp, ok := decodeAISLTP(payload, symbol, action)
+		sl, tp, entry, ok := decodeAISLTP(payload, symbol, action)
 		if ok {
-			return sl, tp
+			return sl, tp, entry
 		}
 	}
-	return 0, 0
+	return 0, 0, 0
 }
 
 // decodeAISLTP unmarshals decision payloads and returns the AI's structural
-// stop_loss / take_profit for the matching (symbol, action). ok=false when no
-// matching decision carries usable values.
-func decodeAISLTP(payload, symbol, action string) (sl, tp float64, ok bool) {
+// stop_loss / take_profit and PLANNED entry for the matching (symbol, action).
+// ok=false when no matching decision carries usable SL/TP values.
+func decodeAISLTP(payload, symbol, action string) (sl, tp, entry float64, ok bool) {
 	var decisions []kernelDecisionSLTP
 	if err := json.Unmarshal([]byte(payload), &decisions); err != nil {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	for _, d := range decisions {
 		if symbol != "" && !strings.EqualFold(d.Symbol, symbol) {
@@ -334,10 +344,10 @@ func decodeAISLTP(payload, symbol, action string) (sl, tp float64, ok bool) {
 			continue
 		}
 		if d.StopLoss > 0 || d.TakeProfit > 0 {
-			return d.StopLoss, d.TakeProfit, true
+			return d.StopLoss, d.TakeProfit, d.plannedEntry(), true
 		}
 	}
-	return 0, 0, false
+	return 0, 0, 0, false
 }
 
 // kernelDecisionSLTP is a minimal projection of kernel.Decision for extracting
@@ -347,4 +357,23 @@ type kernelDecisionSLTP struct {
 	Action     string  `json:"action"`
 	StopLoss   float64 `json:"stop_loss"`
 	TakeProfit float64 `json:"take_profit"`
+	// Price is the AI's PLANNED entry (the price it intended to open at). Compared
+	// against the position's actual fill (entry_price) in the deviation panel to
+	// expose slippage / chase. review_context.risk_reward.entry is the same value
+	// re-stated as the R basis; prefer it when present, else fall back to Price.
+	Price         float64 `json:"price"`
+	ReviewContext *struct {
+		RiskReward *struct {
+			Entry float64 `json:"entry"`
+		} `json:"risk_reward"`
+	} `json:"review_context"`
+}
+
+// plannedEntry returns the AI's intended entry price for this decision, preferring
+// the risk_reward.entry (the AI's own R basis) over the raw order price.
+func (d kernelDecisionSLTP) plannedEntry() float64 {
+	if d.ReviewContext != nil && d.ReviewContext.RiskReward != nil && d.ReviewContext.RiskReward.Entry > 0 {
+		return d.ReviewContext.RiskReward.Entry
+	}
+	return d.Price
 }

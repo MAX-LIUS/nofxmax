@@ -355,9 +355,9 @@ export function ChartTabs({
           )}
         </div>
 
-        {/* Right: Symbol + Interval + Refresh */}
+        {/* Right: Symbol + Interval + Refresh - single horizontal scroll region, thin visible scrollbar as affordance */}
         {activeTab === 'kline' && (
-          <div className="flex items-center gap-2 md:gap-3 w-full md:w-auto min-w-0 overflow-x-auto no-scrollbar">
+          <div className="flex items-center gap-2 md:gap-3 w-full md:w-auto min-w-0 overflow-x-auto thin-scrollbar overscroll-x-contain [-webkit-overflow-scrolling:touch]">
             {/* Symbol Dropdown */}
             <div className="shrink-0 relative" ref={dropdownRef}>
               {marketConfig.hasDropdown ? (
@@ -436,8 +436,8 @@ export function ChartTabs({
               )}
             </div>
 
-            {/* Interval Selector - Allow scrolling if needed */}
-            <div className="flex items-center bg-black/40 rounded border border-white/10 overflow-x-auto no-scrollbar max-w-[200px] md:max-w-none">
+            {/* Interval Selector - never clip; outer row handles horizontal scroll */}
+            <div className="flex items-center bg-black/40 rounded border border-white/10 shrink-0">
               {INTERVALS.map((int) => (
                 <button
                   key={int.value}
@@ -636,9 +636,13 @@ export function ChartTabs({
                 }
                 initialIndicators={prefs.indicators}
                 initialShowOrderMarkers={prefs.showOrderMarkers}
+                initialShowOrderLines={prefs.showOrderLines}
                 onIndicatorsChange={(indicators) => updatePrefs({ indicators })}
                 onOrderMarkersChange={(show) =>
                   updatePrefs({ showOrderMarkers: show })
+                }
+                onOrderLinesChange={(show) =>
+                  updatePrefs({ showOrderLines: show })
                 }
               />
             </motion.div>

@@ -111,18 +111,18 @@ func (at *AutoTrader) tryMakerEntry(symbol, side string, quantity float64, lever
 	}
 	ex, ok := at.trader.(makerEntryCapable)
 	if !ok {
-		logger.Infof("  ℹ️ Maker entry enabled but exchange lacks limit/orderbook support; using market for %s", symbol)
+		logger.Infof("  ℹ️ [%s] Maker entry enabled but exchange lacks limit/orderbook support; using market for %s", at.name, symbol)
 		return nil, false, false
 	}
 
 	bids, asks, err := ex.GetOrderBook(symbol, 5)
 	if err != nil || len(bids) == 0 || len(asks) == 0 {
-		logger.Warnf("  ⚠️ Maker entry: order book unavailable for %s (%v); using market", symbol, err)
+		logger.Warnf("  ⚠️ [%s] Maker entry: order book unavailable for %s (%v); using market", at.name, symbol, err)
 		return nil, false, false
 	}
 	px := makerEntryPrice(side, bids, asks, mc.offsetTicks)
 	if px <= 0 {
-		logger.Warnf("  ⚠️ Maker entry: bad maker price for %s; using market", symbol)
+		logger.Warnf("  ⚠️ [%s] Maker entry: bad maker price for %s; using market", at.name, symbol)
 		return nil, false, false
 	}
 
@@ -144,11 +144,11 @@ func (at *AutoTrader) tryMakerEntry(symbol, side string, quantity float64, lever
 	})
 	if err != nil {
 		// post_only rejection (would cross) or other placement error: treat as unfilled-attempted.
-		logger.Warnf("  ⚠️ Maker entry: post-only placement failed for %s @ %.8f: %v", symbol, px, err)
+		logger.Warnf("  ⚠️ [%s] Maker entry: post-only placement failed for %s @ %.8f: %v", at.name, symbol, px, err)
 		return nil, false, true
 	}
-	logger.Infof("  📬 Maker entry: post-only %s %s %.6f @ %.8f (orderID=%s), polling up to %s",
-		reqSide, symbol, quantity, px, placed.OrderID, mc.timeout)
+	logger.Infof("  📬 [%s] Maker entry: post-only %s %s %.6f @ %.8f (orderID=%s), polling up to %s",
+		at.name, reqSide, symbol, quantity, px, placed.OrderID, mc.timeout)
 
 	deadline := time.Now().Add(mc.timeout)
 	pollEvery := 1 * time.Second
@@ -162,7 +162,7 @@ func (at *AutoTrader) tryMakerEntry(symbol, side string, quantity float64, lever
 		status, _ := st["status"].(string)
 		switch strings.ToUpper(status) {
 		case "FILLED":
-			logger.Infof("  ✅ Maker entry filled: %s %s orderID=%s", reqSide, symbol, placed.OrderID)
+			logger.Infof("  ✅ [%s] Maker entry filled: %s %s orderID=%s", at.name, reqSide, symbol, placed.OrderID)
 			result := map[string]interface{}{
 				"orderId": placed.OrderID,
 				"symbol":  symbol,
@@ -178,10 +178,10 @@ func (at *AutoTrader) tryMakerEntry(symbol, side string, quantity float64, lever
 			// under-filling is safe, over-filling is not. Exchange position sync
 			// reconciles the actual recorded quantity afterward.
 			if res, filled := makerPartialResult(placed.OrderID, symbol, st); filled {
-				logger.Warnf("  ⚠️ Maker entry order %s ended (%s) with partial fill %.8f; accepting partial, skipping market top-up", placed.OrderID, status, res["executedQty"])
+				logger.Warnf("  ⚠️ [%s] Maker entry order %s ended (%s) with partial fill %.8f; accepting partial, skipping market top-up", at.name, placed.OrderID, status, res["executedQty"])
 				return res, true, true
 			}
-			logger.Warnf("  ⚠️ Maker entry order %s ended early with status=%s (no fill)", placed.OrderID, status)
+			logger.Warnf("  ⚠️ [%s] Maker entry order %s ended early with status=%s (no fill)", at.name, placed.OrderID, status)
 			return nil, false, true
 		}
 	}
@@ -189,7 +189,7 @@ func (at *AutoTrader) tryMakerEntry(symbol, side string, quantity float64, lever
 	// Timeout: cancel the resting order so it cannot fill later unexpectedly.
 	cancelErr := ex.CancelOrder(symbol, placed.OrderID)
 	if cancelErr != nil {
-		logger.Warnf("  ⚠️ Maker entry: failed to cancel unfilled order %s: %v", placed.OrderID, cancelErr)
+		logger.Warnf("  ⚠️ [%s] Maker entry: failed to cancel unfilled order %s: %v", at.name, placed.OrderID, cancelErr)
 	}
 	// Re-check final state after the cancel attempt. This covers two cases:
 	//   1) it fully filled in the race between timeout and cancel, or
@@ -199,7 +199,7 @@ func (at *AutoTrader) tryMakerEntry(symbol, side string, quantity float64, lever
 	if st, sErr := ex.GetOrderStatus(symbol, placed.OrderID); sErr == nil {
 		status, _ := st["status"].(string)
 		if strings.ToUpper(status) == "FILLED" {
-			logger.Infof("  ✅ Maker entry filled during cancel race: %s", placed.OrderID)
+			logger.Infof("  ✅ [%s] Maker entry filled during cancel race: %s", at.name, placed.OrderID)
 			result := map[string]interface{}{"orderId": placed.OrderID, "symbol": symbol, "status": "FILLED"}
 			if avg, ok := st["avgPrice"].(float64); ok && avg > 0 {
 				result["avgPrice"] = avg
@@ -207,11 +207,11 @@ func (at *AutoTrader) tryMakerEntry(symbol, side string, quantity float64, lever
 			return result, true, true
 		}
 		if res, filled := makerPartialResult(placed.OrderID, symbol, st); filled {
-			logger.Warnf("  ⚠️ Maker entry %s timed out with partial fill %.8f; accepting partial, skipping market top-up", placed.OrderID, res["executedQty"])
+			logger.Warnf("  ⚠️ [%s] Maker entry %s timed out with partial fill %.8f; accepting partial, skipping market top-up", at.name, placed.OrderID, res["executedQty"])
 			return res, true, true
 		}
 	}
-	logger.Infof("  ⏱ Maker entry unfilled within %s for %s; cancelled.", mc.timeout, symbol)
+	logger.Infof("  ⏱ [%s] Maker entry unfilled within %s for %s; cancelled.", at.name, mc.timeout, symbol)
 	return nil, false, true
 }
 

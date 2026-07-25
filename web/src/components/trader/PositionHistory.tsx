@@ -24,6 +24,7 @@ import type {
   HistoricalPosition,
   PositionCloseEvent,
   ProtectionDeviation,
+  RatchetEvent,
   TraderStats,
   SymbolStats,
   DirectionStats,
@@ -1419,6 +1420,11 @@ function ProtectionDeviationBlock({
     typeof v === 'number' ? `${v >= 0 ? '+' : ''}${v}%` : '—'
   const rr = (v?: number) => (typeof v === 'number' ? `${v}R` : '—')
   const hasAI = typeof dev.ai_sl === 'number' || typeof dev.ai_tp === 'number'
+  // Planned-vs-actual entry: manual column = actual fill (entry_price), AI column
+  // = the AI's planned entry (ai_entry). The R multiples above are computed off
+  // these anchors, so showing entry makes the SL/TP distances and R legible.
+  const hasEntry =
+    typeof dev.entry_price === 'number' || typeof dev.ai_entry === 'number'
   return (
     <div className="mt-3">
       <div className="text-xs mb-2" style={{ color: '#848E9C' }}>
@@ -1435,18 +1441,52 @@ function ProtectionDeviationBlock({
           style={{ gridTemplateColumns: '1fr 1fr 1fr 1fr', color: '#848E9C' }}
         >
           <span></span>
+          <span>{zh ? '入场价' : 'Entry'}</span>
           <span>SL</span>
           <span>TP</span>
-          <span>R</span>
         </div>
+        {hasEntry && (
+          <div
+            className="grid px-3 py-1.5"
+            style={{ gridTemplateColumns: '1fr 1fr 1fr 1fr', color: '#EAECEF' }}
+          >
+            <span style={{ color: '#848E9C' }}>
+              {zh ? '计划入场' : 'Planned'}
+            </span>
+            <span className="font-mono">{fmt(dev.ai_entry)}</span>
+            <span className="font-mono" style={{ color: '#5E6673' }}>
+              {zh ? 'AI 结构' : 'AI struct'}
+            </span>
+            <span></span>
+          </div>
+        )}
         <div
           className="grid px-3 py-1.5"
           style={{ gridTemplateColumns: '1fr 1fr 1fr 1fr', color: '#EAECEF' }}
         >
           <span style={{ color: '#848E9C' }}>{zh ? '手动实盘' : 'Manual'}</span>
+          <span className="font-mono">
+            {fmt(dev.entry_price)}
+            {typeof dev.entry_diff_pct === 'number' && (
+              <span style={{ color: '#F0B90B' }}>
+                {' '}
+                ({pct(dev.entry_diff_pct)})
+              </span>
+            )}
+          </span>
           <span className="font-mono">{fmt(dev.manual_sl)}</span>
           <span className="font-mono">{fmt(dev.manual_tp)}</span>
-          <span className="font-mono">{rr(dev.manual_rr)}</span>
+        </div>
+        <div
+          className="grid px-3 py-1.5"
+          style={{ gridTemplateColumns: '1fr 1fr 1fr 1fr', color: '#848E9C' }}
+        >
+          <span>{zh ? '手动 R' : 'Manual R'}</span>
+          <span className="font-mono" style={{ color: '#EAECEF' }}>
+            {rr(dev.manual_rr)}
+          </span>
+          <span></span>
+          <span></span>
         </div>
         {hasAI && (
           <div
@@ -1456,9 +1496,20 @@ function ProtectionDeviationBlock({
             <span style={{ color: '#848E9C' }}>
               {zh ? 'AI 结构' : 'AI struct'}
             </span>
+            <span className="font-mono">{fmt(dev.ai_entry)}</span>
             <span className="font-mono">{fmt(dev.ai_sl)}</span>
             <span className="font-mono">{fmt(dev.ai_tp)}</span>
+          </div>
+        )}
+        {hasAI && (
+          <div
+            className="grid px-3 py-1.5"
+            style={{ gridTemplateColumns: '1fr 1fr 1fr 1fr', color: '#EAECEF' }}
+          >
+            <span style={{ color: '#848E9C' }}>{zh ? 'AI R' : 'AI R'}</span>
             <span className="font-mono">{rr(dev.ai_rr)}</span>
+            <span></span>
+            <span></span>
           </div>
         )}
         {hasAI && (
@@ -1471,13 +1522,82 @@ function ProtectionDeviationBlock({
             }}
           >
             <span style={{ color: '#848E9C' }}>{zh ? '偏差' : 'Δ'}</span>
+            <span className="font-mono">
+              {typeof dev.entry_diff_pct === 'number'
+                ? pct(dev.entry_diff_pct)
+                : '—'}
+            </span>
             <span className="font-mono">{pct(dev.sl_diff_pct)}</span>
             <span className="font-mono">{pct(dev.tp_diff_pct)}</span>
-            <span></span>
           </div>
         )}
       </div>
     </div>
+  )
+}
+
+// RatchetHistoryBlock replays the structural-stop tighten log frozen at close:
+// one row per genuine ratchet, showing the sequence number, the price at the
+// event, the new close-confirm boundary, and how far that boundary sat from price
+// (both as % and in frozen-open-time ATR multiples). Collapsed by default — this
+// is deep protection forensics, not everyday reading.
+function RatchetHistoryBlock({
+  events,
+  language,
+}: {
+  events: RatchetEvent[]
+  language: string
+}) {
+  const zh = language === 'zh'
+  const sorted = [...events].sort((a, b) => a.seq - b.seq)
+  return (
+    <details
+      className="mt-3 rounded text-[11px]"
+      style={{ border: '1px solid #2B3139' }}
+    >
+      <summary
+        className="cursor-pointer px-3 py-1.5 select-none hover:bg-white/5 transition-colors rounded"
+        style={{ color: '#848E9C' }}
+      >
+        {zh
+          ? `结构位棘轮锁紧 (${sorted.length} 次)`
+          : `Structural ratchet tightens (${sorted.length})`}
+      </summary>
+      <div style={{ background: '#1E2329' }}>
+        <div
+          className="grid px-3 py-1.5"
+          style={{
+            gridTemplateColumns: '0.5fr 1.2fr 1.2fr 1fr 1fr',
+            color: '#848E9C',
+          }}
+        >
+          <span>#</span>
+          <span>{zh ? '触发价' : 'Price'}</span>
+          <span>{zh ? '结构位' : 'Stop'}</span>
+          <span>{zh ? '距离%' : 'Dist%'}</span>
+          <span>ATR×</span>
+        </div>
+        {sorted.map((ev, i) => (
+          <div
+            key={`${ev.seq}-${i}`}
+            className="grid px-3 py-1.5"
+            style={{
+              gridTemplateColumns: '0.5fr 1.2fr 1.2fr 1fr 1fr',
+              color: '#EAECEF',
+              borderTop: '1px solid #2B3139',
+            }}
+          >
+            <span style={{ color: '#F0B90B' }}>{ev.seq}</span>
+            <span className="font-mono">{formatPrice(ev.price_at_event)}</span>
+            <span className="font-mono">{formatPrice(ev.boundary)}</span>
+            <span className="font-mono">{ev.dist_pct.toFixed(2)}%</span>
+            <span className="font-mono" style={{ color: '#848E9C' }}>
+              {ev.atr_mult.toFixed(2)}×
+            </span>
+          </div>
+        ))}
+      </div>
+    </details>
   )
 }
 
@@ -1525,8 +1645,6 @@ function PositionRow({
   // Use entry_quantity for display (original position size)
   const displayQty = position.entry_quantity || position.quantity || 0
 
-  const closeRatioPct = position.close_ratio_pct || 0
-  const closeValueUsdt = position.close_value_usdt || exitPrice * displayQty
   // Excursion (MFE/MAE) frozen onto the row at close: favorable peak + adverse trough
   // profit% and each extreme in open-time ATR multiples. Reverse-lookup / backtest trail.
   const excPeakPct = Number(position.peak_pnl_pct ?? 0)
@@ -1687,11 +1805,38 @@ function PositionRow({
         </td>
 
         {/* Quantity */}
-        <td
-          className="py-3 px-4 text-right font-mono"
-          style={{ color: '#848E9C' }}
-        >
-          {formatQuantity(displayQty)}
+        {/* Peak/Trough (MFE/MAE): favorable peak profit% ↑ and adverse trough% ↓,
+            each with its open-time ATR multiple. Replaces the raw quantity column
+            (qty still shown in the expanded detail). Sourced from the excursion
+            fields frozen onto the row at close (peak_pnl_pct / trough_pnl_pct /
+            peak_atr_mult / trough_atr_mult). "—" when never captured. */}
+        <td className="py-3 px-4 text-right font-mono text-xs whitespace-nowrap">
+          {hasExcursion ? (
+            <div className="flex flex-col gap-0.5">
+              <span style={{ color: '#0ECB81' }}>
+                ↑{excPeakPct >= 0 ? '+' : ''}
+                {excPeakPct.toFixed(2)}%
+                {excPeakAtr > 0 && (
+                  <span style={{ color: '#5E6673' }}>
+                    {' '}
+                    ({excPeakAtr.toFixed(1)}×)
+                  </span>
+                )}
+              </span>
+              <span style={{ color: '#F6465D' }}>
+                ↓{excTroughPct >= 0 ? '+' : ''}
+                {excTroughPct.toFixed(2)}%
+                {excTroughAtr > 0 && (
+                  <span style={{ color: '#5E6673' }}>
+                    {' '}
+                    ({excTroughAtr.toFixed(1)}×)
+                  </span>
+                )}
+              </span>
+            </div>
+          ) : (
+            <span style={{ color: '#5E6673' }}>—</span>
+          )}
         </td>
 
         {/* Position Value (Entry Price * Quantity) */}
@@ -1798,25 +1943,30 @@ function PositionRow({
                     {executionOrderType}
                   </div>
                   {closeFlowSummary && (
-                    <div
-                      className="mt-2 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-[11px] space-y-1"
-                      style={{ color: '#EAECEF' }}
-                    >
-                      <div style={{ color: '#848E9C' }}>
+                    <details className="mt-2 rounded-lg border border-white/10 bg-black/20 text-[11px]">
+                      <summary
+                        className="cursor-pointer px-3 py-2 select-none hover:bg-white/5 transition-colors rounded-lg"
+                        style={{ color: '#848E9C' }}
+                      >
                         {'平仓流摘要 / Close Flow Summary'}
-                      </div>
-                      <div>{`events=${closeFlowSummary.eventCount} | linked=${closeFlowSummary.linkedDecisionCount} | ratio=${closeFlowSummary.totalRatio.toFixed(2)}%`}</div>
-                      <div>
-                        {closeFlowSummary.sourceBreakdown.join(' · ') || '—'}
-                      </div>
-                      {closeFlowSummary.isFragmentedSyncLike && (
-                        <div style={{ color: '#F0B90B' }}>
-                          {
-                            'This looks like fragmented exchange sync, not multiple independent AI decisions.'
-                          }
+                      </summary>
+                      <div
+                        className="px-3 pb-2 space-y-1"
+                        style={{ color: '#EAECEF' }}
+                      >
+                        <div>{`events=${closeFlowSummary.eventCount} | linked=${closeFlowSummary.linkedDecisionCount} | ratio=${closeFlowSummary.totalRatio.toFixed(2)}%`}</div>
+                        <div>
+                          {closeFlowSummary.sourceBreakdown.join(' · ') || '—'}
                         </div>
-                      )}
-                    </div>
+                        {closeFlowSummary.isFragmentedSyncLike && (
+                          <div style={{ color: '#F0B90B' }}>
+                            {
+                              'This looks like fragmented exchange sync, not multiple independent AI decisions.'
+                            }
+                          </div>
+                        )}
+                      </div>
+                    </details>
                   )}
                 </div>
                 <div>
@@ -1925,22 +2075,8 @@ function PositionRow({
                     />
                   </div>
                 </details>
-                <div>
-                  <div style={{ color: '#848E9C' }}>
-                    {'成交比例 / Close Ratio'}
-                  </div>
-                  <div className="font-mono" style={{ color: '#EAECEF' }}>
-                    {closeRatioPct > 0 ? `${closeRatioPct.toFixed(2)}%` : '—'}
-                  </div>
-                </div>
-                <div>
-                  <div style={{ color: '#848E9C' }}>
-                    {'成交价值 / Value USDT'}
-                  </div>
-                  <div className="font-mono" style={{ color: '#EAECEF' }}>
-                    {formatNumber(closeValueUsdt)}
-                  </div>
-                </div>
+                {/* 成交比例 / 成交价值 removed here — duplicated by the Close Flow
+                    Summary + close-events breakdown above. */}
               </div>
 
               {/* Entry Market Snapshot — from scene tags */}
@@ -2055,6 +2191,14 @@ function PositionRow({
                   language={language}
                 />
               )}
+
+              {position.ratchet_history &&
+                position.ratchet_history.length > 0 && (
+                  <RatchetHistoryBlock
+                    events={position.ratchet_history}
+                    language={language}
+                  />
+                )}
 
               {position.close_events &&
                 position.close_events.length > 0 &&
@@ -2808,7 +2952,7 @@ export function PositionHistory({
                   className="py-3 px-4 text-right text-xs font-semibold uppercase tracking-wider"
                   style={{ color: '#848E9C' }}
                 >
-                  {t('positionHistory.qty', language)}
+                  {language === 'zh' ? '峰值/谷值' : 'Peak/Trough'}
                 </th>
                 <th
                   className="py-3 px-4 text-right text-xs font-semibold uppercase tracking-wider"

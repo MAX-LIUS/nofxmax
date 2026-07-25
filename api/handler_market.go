@@ -21,6 +21,7 @@ type HotCoinResponse struct {
 // HotCoinItem is a single coin in the ranking response.
 type HotCoinItem struct {
 	Symbol                string                  `json:"symbol"`
+	CurrentPrice          float64                 `json:"current_price"`
 	Score                 float64                 `json:"score"`
 	TradabilityScore      float64                 `json:"tradability_score,omitempty"`
 	Volume24h             float64                 `json:"volume_24h"`
@@ -38,6 +39,7 @@ func toHotCoinItems(coins []market.HotCoin) []HotCoinItem {
 	for i, c := range coins {
 		items[i] = HotCoinItem{
 			Symbol:                c.Symbol,
+			CurrentPrice:          c.CurrentPrice,
 			Score:                 c.HotScore,
 			TradabilityScore:      c.Quality.Tradability,
 			Volume24h:             c.QuoteVolume24h,
@@ -161,6 +163,62 @@ func (s *Server) handleCoinData(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, resp)
+}
+
+// oiKlinePoint is one time-aligned open-interest sample for the chart overlay.
+type oiKlinePoint struct {
+	Time  int64   `json:"time"`  // unix seconds
+	Value float64 `json:"value"` // open interest (contracts / base units)
+}
+
+// handleOIKline GET /api/market/oi-kline?symbol=BTCUSDT&interval=1h&exchange=okx&limit=120
+// Returns open-interest history aligned to kline times for the volume-pane overlay.
+func (s *Server) handleOIKline(c *gin.Context) {
+	symbol := c.Query("symbol")
+	if symbol == "" {
+		SafeBadRequest(c, "symbol parameter is required")
+		return
+	}
+	interval := c.DefaultQuery("interval", "1h")
+	exchange := strings.ToLower(c.DefaultQuery("exchange", "okx"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "120"))
+	if limit <= 0 || limit > 500 {
+		limit = 120
+	}
+
+	points := make([]oiKlinePoint, 0, limit)
+
+	if exchange == "binance" {
+		client := market.NewAPIClient()
+		items, err := client.GetOpenInterestHist(symbol, interval, limit)
+		if err != nil {
+			SafeInternalError(c, "Get OI kline", err)
+			return
+		}
+		for _, it := range items {
+			v, _ := strconv.ParseFloat(it.SumOpenInterest, 64)
+			if v <= 0 {
+				continue
+			}
+			points = append(points, oiKlinePoint{Time: it.Timestamp / 1000, Value: v})
+		}
+	} else {
+		// OKX (also the default for stocks/other via composite default).
+		client := market.NewOKXAPIClient()
+		items, err := client.GetOpenInterestHistory(symbol, market.OKXOIPeriod(interval))
+		if err != nil {
+			SafeInternalError(c, "Get OI kline", err)
+			return
+		}
+		for _, it := range items {
+			if it.OI <= 0 {
+				continue
+			}
+			points = append(points, oiKlinePoint{Time: it.Ts / 1000, Value: it.OI})
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"symbol": symbol, "interval": interval, "points": points})
 }
 
 // handleCompositeMarket GET /api/market/composite?symbol=BTCUSDT&exchange=okx&timeframes=3m,5m,15m,1h,4h,1d&primary=15m&count=120&ttl=15

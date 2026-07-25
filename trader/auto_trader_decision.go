@@ -110,7 +110,41 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 }
 
 // GetAccountInfo gets account information (for API)
+// GetAccountInfo (API) returns account equity/margin for the dashboard using the
+// same stale-while-revalidate + singleflight pattern as GetPositions, so opening a
+// dashboard never blocks on the exchange balance+positions round-trips. The trading
+// loop does not use this path.
 func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
+	at.apiReadMu.RLock()
+	snap, at0 := at.apiAccountSnap, at.apiAccountAt
+	at.apiReadMu.RUnlock()
+
+	age := time.Since(at0)
+	if snap != nil && age < apiReadStaleWindow {
+		if age >= apiReadFreshWindow {
+			go func() {
+				_, _, _ = at.apiReadGroup.Do("account", func() (interface{}, error) {
+					return at.fetchAccountInfo()
+				})
+			}()
+		}
+		return snap, nil
+	}
+	v, err, _ := at.apiReadGroup.Do("account", func() (interface{}, error) {
+		return at.fetchAccountInfo()
+	})
+	if err != nil {
+		if snap != nil {
+			return snap, nil
+		}
+		return nil, err
+	}
+	return v.(map[string]interface{}), nil
+}
+
+// fetchAccountInfo computes account info from a fresh exchange balance+positions read
+// and updates the API read cache. Shared by the blocking and async paths.
+func (at *AutoTrader) fetchAccountInfo() (map[string]interface{}, error) {
 	balance, err := at.trader.GetBalance()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get balance: %w", err)
@@ -202,7 +236,7 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 		marginUsedPct = (totalMarginUsed / totalEquity) * 100
 	}
 
-	return map[string]interface{}{
+	acct := map[string]interface{}{
 		// Core fields
 		"total_equity":      totalEquity,           // Account equity = wallet + unrealized
 		"wallet_balance":    totalWalletBalance,    // Wallet balance (excluding unrealized P&L)
@@ -219,11 +253,75 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 		"position_count":  len(positions),  // Position count
 		"margin_used":     totalMarginUsed, // Margin used
 		"margin_used_pct": marginUsedPct,   // Margin usage rate
-	}, nil
+	}
+
+	at.apiReadMu.Lock()
+	at.apiAccountSnap = acct
+	at.apiAccountAt = time.Now()
+	at.apiReadMu.Unlock()
+
+	return acct, nil
 }
 
-// GetPositions gets position list (for API)
+// API-facing read-cache tuning. The dashboard tolerates a slightly stale view; the
+// trading loop does NOT use this path (it calls at.trader.GetPositions directly).
+const (
+	apiReadFreshWindow = 8 * time.Second // within this age, serve cache with no refresh
+	apiReadStaleWindow = 5 * time.Minute // older than this, block for a fresh fetch
+)
+
+// PositionsSnapshotFresh reports whether the last API positions snapshot is recent
+// enough (< apiReadFreshWindow) to be safe for the write-side reconcile in the
+// positions handler. Acting on a stale snapshot could wrongly close a freshly-opened
+// row, so the handler skips reconciliation when this returns false.
+func (at *AutoTrader) PositionsSnapshotFresh() bool {
+	at.apiReadMu.RLock()
+	defer at.apiReadMu.RUnlock()
+	return !at.apiPositionsAt.IsZero() && time.Since(at.apiPositionsAt) < apiReadFreshWindow
+}
+
+// GetPositions (API) returns the projected position list for the dashboard using
+// stale-while-revalidate + singleflight: a present snapshot is returned immediately
+// (async-refreshed when older than the fresh window), so opening a dashboard never
+// blocks on the exchange. Only a cold/too-stale cache blocks for one fetch.
 func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
+	at.apiReadMu.RLock()
+	snap, at0 := at.apiPositionsSnap, at.apiPositionsAt
+	at.apiReadMu.RUnlock()
+
+	age := time.Since(at0)
+	if snap != nil && age < apiReadStaleWindow {
+		if age >= apiReadFreshWindow {
+			at.refreshPositionsAsync() // stale-but-usable: refresh in background
+		}
+		return snap, nil
+	}
+	// Cold or too stale: block on a single deduped fetch.
+	v, err, _ := at.apiReadGroup.Do("positions", func() (interface{}, error) {
+		return at.fetchAndProjectPositions()
+	})
+	if err != nil {
+		if snap != nil {
+			return snap, nil // fall back to whatever we last had rather than erroring the UI
+		}
+		return nil, err
+	}
+	return v.([]map[string]interface{}), nil
+}
+
+// refreshPositionsAsync triggers a background refresh of the API position cache,
+// deduped by singleflight so concurrent dashboards cause exactly one exchange call.
+func (at *AutoTrader) refreshPositionsAsync() {
+	go func() {
+		_, _, _ = at.apiReadGroup.Do("positions", func() (interface{}, error) {
+			return at.fetchAndProjectPositions()
+		})
+	}()
+}
+
+// fetchAndProjectPositions pulls fresh positions from the exchange, projects them to
+// the API shape, and updates the API read cache. Shared by the blocking and async paths.
+func (at *AutoTrader) fetchAndProjectPositions() ([]map[string]interface{}, error) {
 	positions, err := at.trader.GetPositions()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get positions: %w", err)
@@ -355,6 +453,12 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 		posMap["peak_atr_mult"] = ex.PeakAtrMult
 		posMap["trough_atr_mult"] = ex.TroughAtrMult
 	}
+
+	// Update the API read cache for stale-while-revalidate serving.
+	at.apiReadMu.Lock()
+	at.apiPositionsSnap = result
+	at.apiPositionsAt = time.Now()
+	at.apiReadMu.Unlock()
 
 	return result, nil
 }

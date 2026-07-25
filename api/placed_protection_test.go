@@ -65,7 +65,7 @@ func TestBuildProtectionDeviation(t *testing.T) {
 		{Mechanism: store.MechLadderSL, Kind: "sl", TriggerPrice: f(478.41)},
 	}
 	aiSL, aiTP := 509.8, 520.98
-	dev := buildProtectionDeviation(placed, aiSL, aiTP, entry, true)
+	dev := buildProtectionDeviation(placed, aiSL, aiTP, 0, entry, true)
 	if dev == nil {
 		t.Fatal("deviation should not be nil when both sides present")
 	}
@@ -81,6 +81,35 @@ func TestBuildProtectionDeviation(t *testing.T) {
 	// AI RR ~ (520.98-513.2)/(513.2-509.8) = 7.78/3.4 = 2.29
 	if *dev.AIRR < 2.0 || *dev.AIRR > 2.6 {
 		t.Fatalf("ai RR out of expected range: %v", *dev.AIRR)
+	}
+}
+
+// TestBuildProtectionDeviationEntry verifies the planned-vs-actual entry row: the
+// AI entry surfaces and the slippage/chase percent is (actual-planned)/planned*100.
+func TestBuildProtectionDeviationEntry(t *testing.T) {
+	entry := 513.2 // actual fill
+	placed := []placedProtectionItem{
+		{Mechanism: store.MechLadderTP, Kind: "tp", TriggerPrice: f(521.69)},
+		{Mechanism: store.MechLadderSL, Kind: "sl", TriggerPrice: f(478.41)},
+	}
+	aiEntry := 510.0 // planned
+	dev := buildProtectionDeviation(placed, 509.8, 520.98, aiEntry, entry, true)
+	if dev == nil || dev.AIEntry == nil {
+		t.Fatal("ai entry should be present")
+	}
+	if *dev.AIEntry != 510.0 {
+		t.Fatalf("ai entry wrong: %v", *dev.AIEntry)
+	}
+	if dev.EntryDiffPct == nil {
+		t.Fatal("entry diff pct should be computed when both entries present")
+	}
+	// (513.2-510.0)/510.0*100 = 0.627 → round2 0.63
+	if *dev.EntryDiffPct < 0.6 || *dev.EntryDiffPct > 0.66 {
+		t.Fatalf("entry diff pct out of range: %v", *dev.EntryDiffPct)
+	}
+	// aiEntry alone (no SL/TP either side) still yields a non-nil deviation.
+	if d2 := buildProtectionDeviation(nil, 0, 0, 500.0, 505.0, true); d2 == nil || d2.AIEntry == nil {
+		t.Fatal("deviation should be non-nil when only aiEntry present")
 	}
 }
 
@@ -124,7 +153,7 @@ func TestPlacedProtectionDedupAndEntryWindow(t *testing.T) {
 	}
 
 	// Deviation must pick the NEAREST-to-entry TP (531.38), not a farther one.
-	dev := buildProtectionDeviation(plan, 517.5, 534.97, entry, true)
+	dev := buildProtectionDeviation(plan, 517.5, 534.97, 0, entry, true)
 	if dev == nil || dev.ManualTP == nil {
 		t.Fatal("deviation/manual TP missing")
 	}

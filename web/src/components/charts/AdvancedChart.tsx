@@ -17,6 +17,7 @@ import {
   calculateSMA,
   calculateEMA,
   calculateBollingerBands,
+  calculateRSI,
   type Kline,
 } from '../../utils/indicators'
 import { Settings, BarChart2 } from 'lucide-react'
@@ -85,6 +86,8 @@ interface AdvancedChartProps {
   onIndicatorsChange?: (indicators: Record<string, boolean>) => void
   onOrderMarkersChange?: (show: boolean) => void
   initialShowOrderMarkers?: boolean
+  onOrderLinesChange?: (show: boolean) => void
+  initialShowOrderLines?: boolean
 }
 
 // Indicator configuration
@@ -164,18 +167,20 @@ export function AdvancedChart({
   onIndicatorsChange,
   onOrderMarkersChange,
   initialShowOrderMarkers = true,
+  onOrderLinesChange,
+  initialShowOrderLines = true,
 }: AdvancedChartProps) {
   void _onSymbolChange
   const { language } = useLanguage()
   const quoteUnit = getQuoteUnit(exchange)
   const baseUnit = getBaseUnit(exchange, symbol, language)
   const chartContainerRef = useRef<HTMLDivElement>(null)
-  const volumeChartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
-  const volumeChartRef = useRef<IChartApi | null>(null)
   const candlestickSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const volumeMASeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
+  const oiSeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
+  const rsiSeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
   const indicatorSeriesRef = useRef<Map<string, ISeriesApi<any>>>(new Map())
   const seriesMarkersRef = useRef<any>(null)
   const currentMarkersDataRef = useRef<any[]>([])
@@ -196,6 +201,11 @@ export function AdvancedChart({
   const [showOrderMarkers, setShowOrderMarkers] = useState(
     initialShowOrderMarkers
   )
+  const [showOrderLines, setShowOrderLines] = useState(initialShowOrderLines)
+  // Which parent structure rows are expanded to reveal their per-timeframe children
+  const [expandedStructure, setExpandedStructure] = useState<
+    Record<string, boolean>
+  >({})
   const [tooltipData, setTooltipData] = useState<any>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)
 
@@ -341,8 +351,50 @@ export function AdvancedChart({
         enabled: saved.bb ?? false,
         color: '#9B59B6',
       },
+      {
+        id: 'rsi',
+        name: 'RSI (14) · vol pane',
+        enabled: saved.rsi ?? false,
+        color: '#E879F9',
+      },
+      {
+        id: 'oi',
+        name: 'Open Interest · vol pane',
+        enabled: saved.oi ?? false,
+        color: '#22D3EE',
+      },
     ]
   })
+
+  // Load Open Interest history and map it onto the volume pane, aligned to the
+  // provided kline times. Fails silently if the backend endpoint is unavailable
+  // so the rest of the chart is unaffected.
+  const loadOIOverlay = async (klineData: Kline[]) => {
+    if (!oiSeriesRef.current || klineData.length === 0) return
+    try {
+      const url = `/api/market/oi-kline?symbol=${encodeURIComponent(
+        symbol
+      )}&interval=${encodeURIComponent(interval)}&exchange=${encodeURIComponent(
+        exchange
+      )}&limit=${klineData.length}`
+      const result = await httpClient.get<{
+        points?: Array<{ time: number; value: number }>
+      }>(url)
+      if (!result.success || !result.data?.points) {
+        oiSeriesRef.current.setData([])
+        return
+      }
+      // Keep only points within the kline time range, ascending by time.
+      const minT = klineData[0].time
+      const maxT = klineData[klineData.length - 1].time
+      const points = result.data.points
+        .filter((p) => p.time >= minT && p.time <= maxT && p.value > 0)
+        .sort((a, b) => a.time - b.time)
+      oiSeriesRef.current.setData(points as any)
+    } catch {
+      oiSeriesRef.current?.setData([])
+    }
+  }
 
   // Fetch kline data from service
   const fetchKlineData = async (
@@ -666,7 +718,7 @@ export function AdvancedChart({
         timeVisible: true,
         secondsVisible: false,
         borderVisible: true,
-        rightOffset: 5,
+        rightOffset: 14, // 右移留白:让水平线价签(SL/TP/结构位)浮在最新K线右侧空白处,不遮挡K线
         barSpacing: 8,
       },
       handleScroll: {
@@ -710,57 +762,90 @@ export function AdvancedChart({
     })
     candlestickSeriesRef.current = candlestickSeries as any
 
-    // Create volume sub-chart
-    if (volumeChartContainerRef.current) {
-      const volumeChart = createChart(volumeChartContainerRef.current, {
-        width: volumeChartContainerRef.current.clientWidth || 800,
-        height: 80,
-        layout: {
-          background: { color: '#0B0E11' },
-          textColor: '#6B7280',
-          fontSize: 10,
-        },
-        grid: {
-          vertLines: { visible: false },
-          horzLines: { color: 'rgba(43, 49, 57, 0.15)', visible: true },
-        },
-        rightPriceScale: {
-          borderColor: '#2B3139',
-          scaleMargins: { top: 0.1, bottom: 0 },
-          borderVisible: true,
-        },
-        timeScale: { visible: false },
-        handleScroll: false,
-        handleScale: false,
-        crosshair: {
-          vertLine: { visible: false, labelVisible: false },
-          horzLine: { visible: false, labelVisible: false },
-        },
-      })
-      volumeChartRef.current = volumeChart
-
-      const volumeSeries = volumeChart.addSeries(HistogramSeries, {
+    // Volume + overlays live in a NATIVE pane (index 1) of the main chart, not a
+    // separate chart instance. This makes the volume pane share the main chart's
+    // time scale (perfect alignment on zoom) and its crosshair (vertical line
+    // extends into the volume pane automatically). Overlaid OI/RSI lines sit on
+    // their own invisible overlay price scales so they never squash the bars.
+    const VOLUME_PANE = 1
+    const volumeSeries = chart.addSeries(
+      HistogramSeries,
+      {
         priceFormat: { type: 'volume' },
         lastValueVisible: false,
         priceLineVisible: false,
-      })
-      volumeSeriesRef.current = volumeSeries as any
+        priceScaleId: 'vol',
+      },
+      VOLUME_PANE
+    )
+    volumeSeriesRef.current = volumeSeries as any
+    volumeSeries.priceScale().applyOptions({
+      scaleMargins: { top: 0.25, bottom: 0 },
+    })
 
-      // Volume MA line
-      const volumeMA = volumeChart.addSeries(LineSeries, {
+    // Volume MA line (same scale as the histogram)
+    const volumeMA = chart.addSeries(
+      LineSeries,
+      {
         color: '#F0B90B',
         lineWidth: 1,
         lastValueVisible: false,
         priceLineVisible: false,
-      })
-      volumeMASeriesRef.current = volumeMA as any
+        priceScaleId: 'vol',
+      },
+      VOLUME_PANE
+    )
+    volumeMASeriesRef.current = volumeMA as any
 
-      // Sync time scales
-      chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-        if (range && volumeChartRef.current) {
-          volumeChartRef.current.timeScale().setVisibleLogicalRange(range)
-        }
-      })
+    // OI overlay line (own left-side overlay scale)
+    const oiSeries = chart.addSeries(
+      LineSeries,
+      {
+        color: '#22D3EE',
+        lineWidth: 1,
+        lastValueVisible: false,
+        priceLineVisible: false,
+        priceScaleId: 'oi',
+      },
+      VOLUME_PANE
+    )
+    oiSeriesRef.current = oiSeries as any
+    oiSeries.priceScale().applyOptions({
+      scaleMargins: { top: 0.05, bottom: 0.55 },
+    })
+
+    // RSI overlay line (0-100 own overlay scale)
+    const rsiSeries = chart.addSeries(
+      LineSeries,
+      {
+        color: '#E879F9',
+        lineWidth: 1,
+        lastValueVisible: false,
+        priceLineVisible: false,
+        priceScaleId: 'rsi',
+      },
+      VOLUME_PANE
+    )
+    rsiSeriesRef.current = rsiSeries as any
+    rsiSeries.priceScale().applyOptions({
+      scaleMargins: { top: 0.05, bottom: 0.55 },
+    })
+
+    // Size the volume pane (~22% of chart height) once it exists.
+    try {
+      const panes = chart.panes()
+      if (panes.length > VOLUME_PANE) {
+        panes[VOLUME_PANE].setHeight(
+          Math.max(
+            90,
+            Math.round(
+              (chartContainerRef.current.clientHeight || height) * 0.22
+            )
+          )
+        )
+      }
+    } catch {
+      /* older API — pane auto-sizes */
     }
 
     // Responsive resize (ResizeObserver)
@@ -768,9 +853,6 @@ export function AdvancedChart({
       if (entries.length === 0 || !entries[0].contentRect) return
       const { width, height: h } = entries[0].contentRect
       chart.applyOptions({ width, height: h })
-      if (volumeChartRef.current && volumeChartContainerRef.current) {
-        volumeChartRef.current.applyOptions({ width })
-      }
     })
 
     if (chartContainerRef.current) {
@@ -812,10 +894,10 @@ export function AdvancedChart({
     return () => {
       resizeObserver.disconnect()
       chart.remove()
-      if (volumeChartRef.current) {
-        volumeChartRef.current.remove()
-        volumeChartRef.current = null
-      }
+      volumeSeriesRef.current = null
+      volumeMASeriesRef.current = null
+      oiSeriesRef.current = null
+      rsiSeriesRef.current = null
     }
   }, []) // Chart is created once, ResizeObserver handles dimension changes
 
@@ -853,9 +935,23 @@ export function AdvancedChart({
             const existing = klineDataCacheRef.current
             const lastExistingTime = existing[existing.length - 1]?.time || 0
 
+            // 影线保护:CoinAnk 对未收盘K线的 high/low 会滞后于 ticker(实测 kline.high
+            // 63990.8 但 ticker 已到 63997)。若直接用 recentData 覆盖,会把 ticker 期间
+            // 观察到的盘中极值(影线)抹掉→只剩开盘到最新价的实体。故按 time 匹配已有
+            // bar 时取 max(high)/min(low),既纠正数据源滞后又保住影线。
+            const mergeBar = (incoming: any) => {
+              const prior = existing.find((b: any) => b.time === incoming.time)
+              if (!prior) return incoming
+              return {
+                ...incoming,
+                high: Math.max(incoming.high, prior.high),
+                low: Math.min(incoming.low, prior.low),
+              }
+            }
+
             for (const bar of recentData) {
               if (bar.time >= lastExistingTime) {
-                candlestickSeriesRef.current.update(bar)
+                candlestickSeriesRef.current.update(mergeBar(bar))
               }
             }
 
@@ -864,7 +960,7 @@ export function AdvancedChart({
             for (const bar of recentData) {
               const idx = merged.findIndex((b: any) => b.time === bar.time)
               if (idx >= 0) {
-                merged[idx] = bar
+                merged[idx] = mergeBar(bar)
               } else if (bar.time > lastExistingTime) {
                 merged.push(bar)
               }
@@ -1032,6 +1128,26 @@ export function AdvancedChart({
           } else {
             volumeSeriesRef.current.setData([])
             volumeMASeriesRef.current?.setData([])
+          }
+        }
+
+        // 2b. RSI overlay in the volume pane (computed from the same klines)
+        if (rsiSeriesRef.current) {
+          const rsiEnabled = indicators.find((i) => i.id === 'rsi')?.enabled
+          if (rsiEnabled && klineData.length > 15) {
+            rsiSeriesRef.current.setData(calculateRSI(klineData, 14) as any)
+          } else {
+            rsiSeriesRef.current.setData([])
+          }
+        }
+
+        // 2c. OI overlay in the volume pane (fetched from OI kline endpoint)
+        if (oiSeriesRef.current) {
+          const oiEnabled = indicators.find((i) => i.id === 'oi')?.enabled
+          if (oiEnabled) {
+            void loadOIOverlay(klineData)
+          } else {
+            oiSeriesRef.current.setData([])
           }
         }
 
@@ -1260,6 +1376,23 @@ export function AdvancedChart({
   useEffect(() => {
     if (!traderID || !candlestickSeriesRef.current) return
 
+    const clearOrderLines = () => {
+      priceLinesRef.current.forEach((line) => {
+        try {
+          candlestickSeriesRef.current?.removePriceLine(line)
+        } catch (e) {
+          // Ignore clear error
+        }
+      })
+      priceLinesRef.current = []
+    }
+
+    // When the toggle is off, clear any existing lines and skip fetching entirely.
+    if (!showOrderLines) {
+      clearOrderLines()
+      return
+    }
+
     // Load open orders and display price lines
     const loadOpenOrders = async () => {
       try {
@@ -1342,7 +1475,7 @@ export function AdvancedChart({
       clearTimeout(initialTimeout)
       clearInterval(openOrdersInterval)
     }
-  }, [symbol, traderID])
+  }, [symbol, traderID, showOrderLines])
 
   // Handle order marker show/hide separately to avoid reloading data
   useEffect(() => {
@@ -1795,6 +1928,29 @@ export function AdvancedChart({
     levelTimeframes,
   ])
 
+  // Group the currently-loaded structural lines by "kind-timeframe" so a parent
+  // structure row (e.g. Support/Resistance) can expand to reveal per-timeframe
+  // children. `kind` maps to a parent toggle via structureKindToParent.
+  const timeframeChildren = (() => {
+    const groups: Record<string, { kind: string; tf: string; count: number }> =
+      {}
+    structuralLines.forEach((l) => {
+      const key = `${l.kind}-${l.timeframe || 'all'}`
+      if (!groups[key])
+        groups[key] = { kind: l.kind, tf: l.timeframe || 'all', count: 0 }
+      groups[key].count++
+    })
+    return groups
+  })()
+
+  // Which structure `kind` values belong under which parent toggle key.
+  const structureKindToParent: Record<string, string> = {
+    support: 'showStructuralLevels',
+    resistance: 'showStructuralLevels',
+    fibonacci: 'showFibonacci',
+    vwap: 'showVWAP',
+  }
+
   return (
     <div
       className="relative shadow-xl"
@@ -1933,18 +2089,38 @@ export function AdvancedChart({
           >
             <span>B/S</span>
           </button>
+
+          <button
+            onClick={() => {
+              const next = !showOrderLines
+              setShowOrderLines(next)
+              onOrderLinesChange?.(next)
+            }}
+            className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium transition-all"
+            style={{
+              background: showOrderLines
+                ? 'rgba(240, 185, 11, 0.15)'
+                : 'transparent',
+              color: showOrderLines ? '#F0B90B' : '#6B7280',
+            }}
+            title={t('advancedChart.orderLines', language)}
+          >
+            <span>SL/TP</span>
+          </button>
         </div>
       </div>
 
-      {/* Indicator panel - modern floating panel */}
+      {/* Indicator panel - anchored inside the chart card so it never spills into
+          the page below; scrolls internally when tall. */}
       {showIndicatorPanel && (
         <div
-          className="fixed top-24 right-4 z-50 rounded-xl shadow-2xl backdrop-blur-md"
+          className="absolute top-12 right-2 z-50 rounded-xl shadow-2xl backdrop-blur-md"
           style={{
-            background: 'rgba(15, 18, 21, 0.95)',
+            background: 'rgba(15, 18, 21, 0.97)',
             border: '1px solid rgba(255, 255, 255, 0.08)',
-            maxHeight: 'calc(100vh - 120px)',
-            width: '300px',
+            maxHeight: 'calc(100% - 60px)',
+            width: '280px',
+            maxWidth: 'calc(100% - 16px)',
             overflowY: 'auto',
           }}
         >
@@ -2072,118 +2248,129 @@ export function AdvancedChart({
                   color: '#22D3EE',
                   enabled: showAnchoredVWAP,
                 },
-              ].map((item) => (
-                <div
-                  key={item.key}
-                  onClick={() => onStructuralToggle?.(item.key, !item.enabled)}
-                  className="flex items-center gap-2.5 px-2.5 py-2 rounded-lg cursor-pointer transition-all hover:bg-white/[0.04]"
-                  style={{
-                    background: item.enabled
-                      ? 'rgba(255, 255, 255, 0.03)'
-                      : 'transparent',
-                  }}
-                >
-                  <div
-                    className="w-2.5 h-2.5 rounded-full shrink-0"
-                    style={{
-                      backgroundColor: item.color,
-                      opacity: item.enabled ? 1 : 0.3,
-                    }}
-                  />
-                  <span
-                    className="text-[12px] flex-1"
-                    style={{
-                      color: item.enabled ? '#E5E7EB' : '#6B7280',
-                    }}
-                  >
-                    {item.label}
-                  </span>
-                  <div
-                    className="w-8 h-[18px] rounded-full relative transition-all shrink-0"
-                    style={{
-                      background: item.enabled
-                        ? `rgba(${hexToRgb(item.color)}, 0.4)`
-                        : 'rgba(75, 85, 99, 0.3)',
-                    }}
-                  >
-                    <div
-                      className="absolute top-[2px] w-[14px] h-[14px] rounded-full transition-all"
-                      style={{
-                        left: item.enabled ? '18px' : '2px',
-                        background: item.enabled ? item.color : '#4B5563',
-                      }}
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* Per-timeframe toggles */}
-            {(structuralLines.length > 0 || structuralZones.length > 0) && (
-              <div
-                className="mt-2 pt-2"
-                style={{ borderTop: '1px solid rgba(255, 255, 255, 0.04)' }}
-              >
-                <div className="text-[9px] text-gray-600 uppercase tracking-widest px-2.5 mb-1">
-                  Timeframes
-                </div>
-                {(() => {
-                  const groups: Record<
-                    string,
-                    { kind: string; tf: string; count: number }
-                  > = {}
-                  structuralLines.forEach((l) => {
-                    const key = `${l.kind}-${l.timeframe || 'all'}`
-                    if (!groups[key])
-                      groups[key] = {
-                        kind: l.kind,
-                        tf: l.timeframe || 'all',
-                        count: 0,
-                      }
-                    groups[key].count++
-                  })
-                  return Object.entries(groups).map(([key, g]) => {
-                    const enabled = levelTimeframes[key] !== false
-                    const color =
-                      g.kind === 'support' || g.kind === 'resistance'
-                        ? '#10B981'
-                        : g.kind === 'fibonacci'
-                          ? '#A855F7'
-                          : '#3B82F6'
-                    return (
+              ].map((item) => {
+                // Children (per-timeframe rows) that belong under this parent.
+                const childEntries = Object.entries(timeframeChildren).filter(
+                  ([, g]) => structureKindToParent[g.kind] === item.key
+                )
+                const hasChildren = childEntries.length > 0
+                const isExpanded = expandedStructure[item.key]
+                return (
+                  <div key={item.key}>
+                    <div className="flex items-center gap-1.5 rounded-lg transition-all hover:bg-white/[0.04]">
+                      {/* Expand caret (only when this parent has per-tf children) */}
+                      <button
+                        onClick={() =>
+                          hasChildren &&
+                          setExpandedStructure((prev) => ({
+                            ...prev,
+                            [item.key]: !prev[item.key],
+                          }))
+                        }
+                        className="w-5 h-8 flex items-center justify-center shrink-0"
+                        style={{
+                          color: hasChildren ? '#6B7280' : 'transparent',
+                          cursor: hasChildren ? 'pointer' : 'default',
+                        }}
+                      >
+                        <span
+                          className="text-[9px] transition-transform"
+                          style={{
+                            transform: isExpanded
+                              ? 'rotate(90deg)'
+                              : 'rotate(0deg)',
+                          }}
+                        >
+                          ▶
+                        </span>
+                      </button>
                       <div
-                        key={key}
-                        onClick={() => onLevelTimeframeToggle?.(key, !enabled)}
-                        className="flex items-center gap-2 px-2.5 py-1.5 rounded-md cursor-pointer hover:bg-white/[0.04] transition-all"
+                        onClick={() =>
+                          onStructuralToggle?.(item.key, !item.enabled)
+                        }
+                        className="flex items-center gap-2.5 py-2 flex-1 cursor-pointer min-w-0"
                       >
                         <div
-                          className="w-1.5 h-1.5 rounded-full"
+                          className="w-2.5 h-2.5 rounded-full shrink-0"
                           style={{
-                            backgroundColor: color,
-                            opacity: enabled ? 1 : 0.3,
+                            backgroundColor: item.color,
+                            opacity: item.enabled ? 1 : 0.3,
                           }}
                         />
                         <span
-                          className="text-[11px] flex-1"
-                          style={{ color: enabled ? '#9CA3AF' : '#4B5563' }}
+                          className="text-[12px] flex-1 truncate"
+                          style={{
+                            color: item.enabled ? '#E5E7EB' : '#6B7280',
+                          }}
                         >
-                          {g.kind}
+                          {item.label}
                         </span>
-                        <span
-                          className="text-[10px] font-mono"
-                          style={{ color: enabled ? '#6B7280' : '#374151' }}
+                        <div
+                          className="w-8 h-[18px] rounded-full relative transition-all shrink-0 mr-2"
+                          style={{
+                            background: item.enabled
+                              ? `rgba(${hexToRgb(item.color)}, 0.4)`
+                              : 'rgba(75, 85, 99, 0.3)',
+                          }}
                         >
-                          {g.tf}
-                        </span>
-                        <span className="text-[10px] text-gray-600 tabular-nums w-4 text-right">
-                          {g.count}
-                        </span>
+                          <div
+                            className="absolute top-[2px] w-[14px] h-[14px] rounded-full transition-all"
+                            style={{
+                              left: item.enabled ? '18px' : '2px',
+                              background: item.enabled ? item.color : '#4B5563',
+                            }}
+                          />
+                        </div>
                       </div>
-                    )
-                  })
-                })()}
-              </div>
-            )}
+                    </div>
+                    {/* Per-timeframe children, revealed on expand */}
+                    {hasChildren && isExpanded && (
+                      <div className="ml-6 mb-1 space-y-0.5">
+                        {childEntries.map(([key, g]) => {
+                          const tfEnabled = levelTimeframes[key] !== false
+                          return (
+                            <div
+                              key={key}
+                              onClick={() =>
+                                onLevelTimeframeToggle?.(key, !tfEnabled)
+                              }
+                              className="flex items-center gap-2 px-2.5 py-1 rounded-md cursor-pointer hover:bg-white/[0.04] transition-all"
+                            >
+                              <div
+                                className="w-1.5 h-1.5 rounded-full shrink-0"
+                                style={{
+                                  backgroundColor: item.color,
+                                  opacity: tfEnabled ? 1 : 0.3,
+                                }}
+                              />
+                              <span
+                                className="text-[11px] flex-1"
+                                style={{
+                                  color: tfEnabled ? '#9CA3AF' : '#4B5563',
+                                }}
+                              >
+                                {g.kind}
+                              </span>
+                              <span
+                                className="text-[10px] font-mono"
+                                style={{
+                                  color: tfEnabled ? '#6B7280' : '#374151',
+                                }}
+                              >
+                                {g.tf}
+                              </span>
+                              <span className="text-[10px] text-gray-600 tabular-nums w-4 text-right">
+                                {g.count}
+                              </span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
           </div>
         </div>
       )}
@@ -2217,113 +2404,101 @@ export function AdvancedChart({
           />
         </div>
 
-        {/* Volume sub-chart */}
-        <div
-          ref={volumeChartContainerRef}
-          style={{
-            height: indicators.find((i) => i.id === 'volume')?.enabled ? 80 : 0,
-            flexShrink: 0,
-            borderTop: '1px solid rgba(43, 49, 57, 0.3)',
-            transition: 'height 0.2s ease',
-            overflow: 'hidden',
-          }}
-        />
+        {/* Volume now lives in a native pane inside the main chart above. */}
 
-        {/* OHLC Tooltip */}
-        {tooltipData && (
-          <div
-            ref={tooltipRef}
-            style={{
-              position: 'absolute',
-              left: '10px',
-              top: '10px',
-              padding: '8px 12px',
-              background: 'rgba(15, 18, 21, 0.95)',
-              border: '1px solid rgba(240, 185, 11, 0.3)',
-              borderRadius: '6px',
-              color: '#EAECEF',
-              fontSize: '12px',
-              fontFamily: 'monospace',
-              pointerEvents: 'none',
-              zIndex: 10,
-              backdropFilter: 'blur(10px)',
-              boxShadow: '0 4px 12px rgba(0, 0, 0, 0.5)',
-            }}
-          >
-            <div
-              style={{
-                marginBottom: '6px',
-                color: '#F0B90B',
-                fontWeight: 'bold',
-                fontSize: '11px',
-              }}
-            >
-              {new Date((tooltipData.time as number) * 1000).toLocaleString(
-                language === 'zh' ? 'zh-CN' : 'en-US',
-                {
-                  month: 'short',
-                  day: 'numeric',
-                  hour: '2-digit',
-                  minute: '2-digit',
+        {/* OHLCV top row - pinned to the top edge of the chart so it never
+            covers price action (critical on mobile portrait). Shows the hovered
+            bar, or the latest bar when the cursor is off-chart. */}
+        {(() => {
+          const latest =
+            klineDataCacheRef.current[klineDataCacheRef.current.length - 1]
+          const d =
+            tooltipData ||
+            (latest
+              ? {
+                  time: latest.time,
+                  open: latest.open,
+                  high: latest.high,
+                  low: latest.low,
+                  close: latest.close,
+                  volume: latest.volume,
+                  quoteVolume: (latest as any).quoteVolume ?? 0,
                 }
-              )}
-            </div>
+              : null)
+          if (!d) return null
+          const up = d.close >= d.open
+          return (
             <div
+              ref={tooltipRef}
+              className="absolute top-0 left-0 right-0 z-20 flex flex-wrap items-center gap-x-3 gap-y-0.5 px-2 py-1 pointer-events-none"
               style={{
-                display: 'grid',
-                gridTemplateColumns: 'auto 1fr',
-                gap: '4px 12px',
+                background:
+                  'linear-gradient(180deg, rgba(11,14,17,0.92) 0%, rgba(11,14,17,0.0) 100%)',
+                fontFamily: 'monospace',
                 fontSize: '11px',
+                lineHeight: 1.4,
               }}
             >
-              <span style={{ color: '#848E9C' }}>O:</span>
-              <span style={{ color: '#EAECEF', fontWeight: '500' }}>
-                {tooltipData.open?.toFixed(2)}
+              <span style={{ color: '#F0B90B', fontWeight: 700 }}>
+                {new Date((d.time as number) * 1000).toLocaleString(
+                  language === 'zh' ? 'zh-CN' : 'en-US',
+                  {
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  }
+                )}
               </span>
-
-              <span style={{ color: '#848E9C' }}>H:</span>
-              <span style={{ color: '#0ECB81', fontWeight: '500' }}>
-                {tooltipData.high?.toFixed(2)}
+              <span style={{ color: '#848E9C' }}>
+                O
+                <span style={{ color: '#EAECEF', marginLeft: 3 }}>
+                  {d.open?.toFixed(2)}
+                </span>
               </span>
-
-              <span style={{ color: '#848E9C' }}>L:</span>
-              <span style={{ color: '#F6465D', fontWeight: '500' }}>
-                {tooltipData.low?.toFixed(2)}
+              <span style={{ color: '#848E9C' }}>
+                H
+                <span style={{ color: '#0ECB81', marginLeft: 3 }}>
+                  {d.high?.toFixed(2)}
+                </span>
               </span>
-
-              <span style={{ color: '#848E9C' }}>C:</span>
-              <span
-                style={{
-                  color:
-                    tooltipData.close >= tooltipData.open
-                      ? '#0ECB81'
-                      : '#F6465D',
-                  fontWeight: 'bold',
-                }}
-              >
-                {tooltipData.close?.toFixed(2)}
+              <span style={{ color: '#848E9C' }}>
+                L
+                <span style={{ color: '#F6465D', marginLeft: 3 }}>
+                  {d.low?.toFixed(2)}
+                </span>
               </span>
-
-              {tooltipData.volume > 0 && baseUnit && (
-                <>
-                  <span style={{ color: '#848E9C' }}>V({baseUnit}):</span>
-                  <span style={{ color: '#3B82F6', fontWeight: '500' }}>
-                    {formatVolume(tooltipData.volume)}
+              <span style={{ color: '#848E9C' }}>
+                C
+                <span
+                  style={{
+                    color: up ? '#0ECB81' : '#F6465D',
+                    marginLeft: 3,
+                    fontWeight: 700,
+                  }}
+                >
+                  {d.close?.toFixed(2)}
+                </span>
+              </span>
+              {d.volume > 0 && baseUnit && (
+                <span style={{ color: '#848E9C' }}>
+                  V({baseUnit})
+                  <span style={{ color: '#3B82F6', marginLeft: 3 }}>
+                    {formatVolume(d.volume)}
                   </span>
-                </>
+                </span>
               )}
-
-              {tooltipData.quoteVolume > 0 && quoteUnit && (
-                <>
-                  <span style={{ color: '#848E9C' }}>V({quoteUnit}):</span>
-                  <span style={{ color: '#3B82F6', fontWeight: '500' }}>
-                    {formatVolume(tooltipData.quoteVolume)}
+              {d.quoteVolume > 0 && quoteUnit && (
+                <span style={{ color: '#848E9C' }}>
+                  V({quoteUnit})
+                  <span style={{ color: '#3B82F6', marginLeft: 3 }}>
+                    {formatVolume(d.quoteVolume)}
                   </span>
-                </>
+                </span>
               )}
             </div>
-          </div>
-        )}
+          )
+        })()}
 
         {/* NOFX watermark */}
         <div

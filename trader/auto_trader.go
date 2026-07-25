@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // AutoTraderConfig auto trading configuration (simplified version - AI makes all decisions)
@@ -193,6 +195,17 @@ type AutoTrader struct {
 	safeModeReason         string                                    // Why safe mode was activated
 	lastMarketDataMap      map[string]*market.Data                   // Market data from current cycle (for scene tag recording)
 	lastTriggerTypes       map[string]string                         // Trigger types from current cycle decisions (symbol → trigger_type)
+
+	// API-facing read cache (dashboard only) — serves the last snapshot to the UI
+	// with stale-while-revalidate + singleflight so a dashboard open never blocks on
+	// the exchange. The TRADING loop never reads these; it calls at.trader.* directly
+	// for strictly-fresh positions/balance. See GetPositions/GetAccountInfo (API).
+	apiReadMu        sync.RWMutex             // guards the cached snapshots + timestamps below
+	apiPositionsSnap []map[string]interface{} // last projected positions returned to the API
+	apiPositionsAt   time.Time                // when apiPositionsSnap was last refreshed
+	apiAccountSnap   map[string]interface{}   // last account-info map returned to the API
+	apiAccountAt     time.Time                // when apiAccountSnap was last refreshed
+	apiReadGroup     singleflight.Group       // dedupes concurrent exchange fetches by key
 }
 
 // NewAutoTrader creates an automatic trader

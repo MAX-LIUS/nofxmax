@@ -400,6 +400,12 @@ func (o *OKXAPIClient) GetOpenInterestHistory(symbol, period string) ([]OIHistor
 	return items, nil
 }
 
+// OKXOIPeriod maps a standard interval (e.g. "1h") to the period string the OKX
+// rubik OI-history endpoint expects (e.g. "1H"). Exported for API handlers.
+func OKXOIPeriod(interval string) string {
+	return convertInterval(interval)
+}
+
 func convertInterval(interval string) string {
 	// Most intervals are the same, but OKX uses slightly different naming
 	mapping := map[string]string{

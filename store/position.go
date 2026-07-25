@@ -135,6 +135,13 @@ type TraderPosition struct {
 	PeakAtrMult   float64 `gorm:"column:peak_atr_mult;default:0" json:"peak_atr_mult"`
 	TroughAtrMult float64 `gorm:"column:trough_atr_mult;default:0" json:"trough_atr_mult"`
 
+	// RatchetHistory is the JSON-serialized []RatchetEvent (structural-stop tighten log)
+	// frozen onto the row at close. The live log lives transiently in system_config
+	// (ratchet_events.go) keyed by trader+symbol+tf+side and is deleted at close; this
+	// column preserves the full walk-in sequence on the closed position for the history
+	// panel. Empty ("") when the position used no structural trail or never tightened.
+	RatchetHistory string `gorm:"column:ratchet_history;type:text;default:''" json:"ratchet_history,omitempty"`
+
 	CreatedAt int64 `gorm:"column:created_at" json:"created_at"` // Unix milliseconds UTC
 	UpdatedAt int64 `gorm:"column:updated_at" json:"updated_at"` // Unix milliseconds UTC
 }
@@ -823,6 +830,66 @@ func (s *PositionStore) stampExcursionOntoUpdates(pos *TraderPosition, updates m
 	updates["trough_atr_mult"] = ex.TroughAtrMult
 }
 
+// stampRatchetHistoryOntoUpdates freezes the structural-stop tighten log onto the
+// close Updates map, then clears the transient log so a future position on the
+// same symbol/side starts clean. The live log (ratchet_events.go) is keyed by
+// trader+symbol+tf+side, but the store close path doesn't know the timeframe — so
+// this matches on the event CONTENT (TraderID+Symbol+Side+EntryPrice) which every
+// RatchetEvent carries, making it timeframe-agnostic and robust to the 1h/4h key
+// split. Best-effort: any failure leaves ratchet_history at its existing value and
+// never blocks the close. side matching is case-insensitive (live cache may use
+// exchange-reported casing; DB row stores uppercase).
+func (s *PositionStore) stampRatchetHistoryOntoUpdates(pos *TraderPosition, updates map[string]interface{}) {
+	if pos == nil || s.db == nil || pos.TraderID == "" {
+		return
+	}
+	// Reach the shared Store (system_config-backed) via the same *gorm.DB.
+	// PositionStore.db IS the *gorm.DB, which maps to Store.gdb (the field the
+	// system_config get/set helpers use).
+	rs := &Store{gdb: s.db}
+	state, err := rs.LoadRatchetEventsState()
+	if err != nil || state == nil || len(state.Events) == 0 {
+		return
+	}
+	sideUpper := strings.ToUpper(pos.Side)
+	var matched []RatchetEvent
+	var matchedKeys []string
+	for key, evs := range state.Events {
+		for _, ev := range evs {
+			if ev.TraderID != pos.TraderID {
+				break // whole key belongs to another trader
+			}
+			if !strings.EqualFold(ev.Symbol, pos.Symbol) || !strings.EqualFold(ev.Side, sideUpper) {
+				break
+			}
+			// Guard against a stale log from a prior position on the same symbol/side:
+			// require the entry price to match this position (same tolerance as the
+			// frozen-ATR reuse guard uses elsewhere — exact for our own writes).
+			if pos.EntryPrice > 0 && ev.EntryPrice > 0 &&
+				math.Abs(ev.EntryPrice-pos.EntryPrice)/pos.EntryPrice > 0.005 {
+				break
+			}
+			matched = append(matched, evs...)
+			matchedKeys = append(matchedKeys, key)
+			break // consumed this key's slice
+		}
+	}
+	if len(matched) == 0 {
+		return
+	}
+	raw, err := json.Marshal(matched)
+	if err != nil {
+		return
+	}
+	updates["ratchet_history"] = string(raw)
+	// Clear the transient log for the matched keys so the next position is clean.
+	for _, k := range matchedKeys {
+		if err := rs.DeleteRatchetEvents(k); err != nil {
+			logger.Warnf("⚠️ Failed to clear ratchet events for %s: %v", k, err)
+		}
+	}
+}
+
 // ClosePositionFully marks position as fully closed
 // exitTimeMs is Unix milliseconds UTC
 func (s *PositionStore) ClosePositionFully(id int64, exitPrice float64, exitOrderID string, exitTimeMs int64, totalRealizedPnL float64, totalFee float64, closeReason string, executionSource string, executionType string) error {
@@ -850,6 +917,7 @@ func (s *PositionStore) ClosePositionFully(id int64, exitPrice float64, exitOrde
 		"updated_at":          time.Now().UTC().UnixMilli(),
 	}
 	s.stampExcursionOntoUpdates(&pos, updates)
+	s.stampRatchetHistoryOntoUpdates(&pos, updates)
 	if err := s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 		return err
 	}
@@ -1304,6 +1372,7 @@ func (s *PositionStore) ClosePositionWithAccurateData(id int64, exitPrice float6
 	var pos TraderPosition
 	if err := s.db.First(&pos, id).Error; err == nil {
 		s.stampExcursionOntoUpdates(&pos, updates)
+		s.stampRatchetHistoryOntoUpdates(&pos, updates)
 	}
 	if err := s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 		return err

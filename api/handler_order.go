@@ -604,8 +604,24 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 			"close_ratio_pct":      closeRatioPct,
 			"close_value_usdt":     pos.ExitPrice * closedQty,
 			"close_events":         closeEvents,
-			"created_at":           time.UnixMilli(pos.CreatedAt).UTC().Format(time.RFC3339),
-			"updated_at":           time.UnixMilli(pos.UpdatedAt).UTC().Format(time.RFC3339),
+			// Excursion (MFE/MAE) frozen onto the row at close — the history panel's
+			// peak/trough column reads these. Included in the BASE map (not gated by
+			// doFullEnrich) so they survive light-enrich large pages too.
+			"peak_pnl_pct":    pos.PeakPnlPct,
+			"trough_pnl_pct":  pos.TroughPnlPct,
+			"peak_atr_mult":   pos.PeakAtrMult,
+			"trough_atr_mult": pos.TroughAtrMult,
+			"created_at":      time.UnixMilli(pos.CreatedAt).UTC().Format(time.RFC3339),
+			"updated_at":      time.UnixMilli(pos.UpdatedAt).UTC().Format(time.RFC3339),
+		}
+		// Structural-stop ratchet walk-in log (JSON []RatchetEvent) frozen at close.
+		// Parsed to an array so the protection-plan panel can render each tighten;
+		// omitted when the position never trailed. Malformed JSON is skipped silently.
+		if strings.TrimSpace(pos.RatchetHistory) != "" {
+			var ratchets []map[string]interface{}
+			if err := json.Unmarshal([]byte(pos.RatchetHistory), &ratchets); err == nil && len(ratchets) > 0 {
+				enrichedPos["ratchet_history"] = ratchets
+			}
 		}
 		if doFullEnrich {
 			enrichedPos["entry_decision_review"] = buildDecisionReviewRef(pos.EntryDecisionCycle, pos.Symbol, sideToOpenAction(pos.Side))
@@ -654,11 +670,11 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 			if len(placed) > 0 {
 				enrichedPos["placed_protection"] = placed
 				// AI structural SL/TP opinion (present even in manual mode).
-				aiSL, aiTP := 0.0, 0.0
+				aiSL, aiTP, aiEntry := 0.0, 0.0, 0.0
 				if rec := getRecordByCycleMemo(pos.EntryDecisionCycle); rec != nil {
-					aiSL, aiTP = aiSLTPFromDecisionJSON([]string{rec.DecisionJSON, rec.RawResponse}, pos.Symbol, sideToOpenAction(pos.Side))
+					aiSL, aiTP, aiEntry = aiSLTPFromDecisionJSON([]string{rec.DecisionJSON, rec.RawResponse}, pos.Symbol, sideToOpenAction(pos.Side))
 				}
-				if dev := buildProtectionDeviation(placed, aiSL, aiTP, pos.EntryPrice, isLong); dev != nil {
+				if dev := buildProtectionDeviation(placed, aiSL, aiTP, aiEntry, pos.EntryPrice, isLong); dev != nil {
 					enrichedPos["protection_deviation"] = dev
 				}
 			}

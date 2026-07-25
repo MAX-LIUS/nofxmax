@@ -1382,172 +1382,209 @@ export function TraderDashboardPage({
           </div>
         </div>
 
-        {/* Recent Decisions — Full Width */}
-        <div
-          className="nofx-glass p-4 mb-4 animate-slide-in"
-          style={{ animationDelay: '0.2s' }}
-        >
-          {/* Header */}
-          <div className="flex items-center gap-3 mb-5 pb-4 border-b border-white/5 shrink-0">
-            <div
-              className="w-10 h-10 rounded-xl flex items-center justify-center text-xl shadow-[0_4px_14px_rgba(99,102,241,0.4)]"
-              style={{
-                background: 'linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%)',
-              }}
-            >
-              🧠
-            </div>
-            <div className="flex-1">
-              <h2 className="text-xl font-bold text-nofx-text-main">
-                {t('recentDecisions', language)}
-              </h2>
-              {decisions && decisions.length > 0 && (
-                <div className="text-xs text-nofx-text-muted">
-                  {t('lastCycles', language, { count: decisions.length })}
-                </div>
-              )}
-            </div>
-            {/* Decision type filter */}
-            <select
-              value={decisionFilter}
-              onChange={(e) => {
-                setDecisionFilter(e.target.value as typeof decisionFilter)
-                setDecisionsPage(1)
-              }}
-              className="px-3 py-1.5 rounded-lg text-sm font-medium cursor-pointer transition-all bg-black/40 text-nofx-text-main border border-white/10 hover:border-nofx-accent focus:outline-none"
-            >
-              <option value="all">
-                {language === 'zh' ? '全部决策' : 'All decisions'}
-              </option>
-              <option value="opens">
-                {language === 'zh' ? '全部开仓决策' : 'All opens'}
-              </option>
-              <option value="opens_success">
-                {language === 'zh' ? '仅成功开仓' : 'Successful opens'}
-              </option>
-              <option value="opens_rejected">
-                {language === 'zh' ? '仅拒绝开仓' : 'Rejected opens'}
-              </option>
-            </select>
-            {/* Limit Selector */}
-            <select
-              value={decisionsLimit}
-              onChange={(e) => {
-                onDecisionsLimitChange(Number(e.target.value))
-                setDecisionsPage(1)
-              }}
-              className="px-3 py-1.5 rounded-lg text-sm font-medium cursor-pointer transition-all bg-black/40 text-nofx-text-main border border-white/10 hover:border-nofx-accent focus:outline-none"
-            >
-              <option value={5}>5</option>
-              <option value={10}>10</option>
-              <option value={20}>20</option>
-              <option value={50}>50</option>
-              <option value={100}>100</option>
-              <option value={300}>300</option>
-              <option value={500}>500</option>
-            </select>
-          </div>
-
-          {/* Decisions List */}
+        {/* Decisions + Position History — portrait: stacked (decisions first);
+            landscape: side-by-side. Wrapped together so the two can sit in one
+            row on wide/landscape screens while the intervening analytics + insight
+            panels fall below as full-width sections. */}
+        <div className="flex flex-col landscape:flex-row lg:flex-row gap-4 mb-4 items-stretch">
+          {/* Recent Decisions */}
           <div
-            className="space-y-4 overflow-y-auto pr-2 custom-scrollbar"
-            style={{ maxHeight: '600px' }}
+            className="nofx-glass p-4 animate-slide-in landscape:flex-1 lg:flex-1 min-w-0"
+            style={{ animationDelay: '0.2s' }}
           >
-            {(() => {
-              const isOpenRejected = (d: DecisionRecord) =>
-                d.decisions?.some(
-                  (a) =>
-                    a.action.includes('open') &&
-                    (a.review_context?.control?.decision === 'rejected' ||
-                      a.review_context?.control?.decision ===
-                        'downgraded_to_wait' ||
-                      a.review_context?.quality_gate?.decision === 'rejected' ||
-                      a.review_context?.quality_gate?.decision === 'blocked' ||
-                      (!a.success && !!a.error))
-                )
-              const isOpenSuccess = (d: DecisionRecord) =>
-                d.decisions?.some((a) => a.action.includes('open') && a.success)
-              const hasOpen = (d: DecisionRecord) =>
-                d.decisions?.some((a) => a.action.includes('open'))
-
-              const filteredDecisions = (decisions || []).filter((d) => {
-                switch (decisionFilter) {
-                  case 'opens':
-                    return hasOpen(d)
-                  case 'opens_success':
-                    return isOpenSuccess(d)
-                  case 'opens_rejected':
-                    return isOpenRejected(d) && !isOpenSuccess(d)
-                  default:
-                    return true
-                }
-              })
-
-              const totalPages = Math.max(
-                1,
-                Math.ceil(filteredDecisions.length / decisionsPageSize)
-              )
-              const page = Math.min(decisionsPage, totalPages)
-              const pageStart = (page - 1) * decisionsPageSize
-              const pageDecisions = filteredDecisions.slice(
-                pageStart,
-                pageStart + decisionsPageSize
-              )
-
-              if (filteredDecisions.length === 0) {
-                return (
-                  <div className="py-16 text-center text-nofx-text-muted opacity-60">
-                    <div className="text-6xl mb-4 opacity-30 grayscale">🧠</div>
-                    <div className="text-lg font-semibold mb-2 text-nofx-text-main">
-                      {t('noDecisionsYet', language)}
-                    </div>
-                    <div className="text-sm">
-                      {t('aiDecisionsWillAppear', language)}
-                    </div>
+            {/* Header */}
+            <div className="flex items-center gap-3 mb-5 pb-4 border-b border-white/5 shrink-0">
+              <div
+                className="w-10 h-10 rounded-xl flex items-center justify-center text-xl shadow-[0_4px_14px_rgba(99,102,241,0.4)]"
+                style={{
+                  background:
+                    'linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%)',
+                }}
+              >
+                🧠
+              </div>
+              <div className="flex-1">
+                <h2 className="text-xl font-bold text-nofx-text-main">
+                  {t('recentDecisions', language)}
+                </h2>
+                {decisions && decisions.length > 0 && (
+                  <div className="text-xs text-nofx-text-muted">
+                    {t('lastCycles', language, { count: decisions.length })}
                   </div>
-                )
-              }
+                )}
+              </div>
+              {/* Decision type filter */}
+              <select
+                value={decisionFilter}
+                onChange={(e) => {
+                  setDecisionFilter(e.target.value as typeof decisionFilter)
+                  setDecisionsPage(1)
+                }}
+                className="px-3 py-1.5 rounded-lg text-sm font-medium cursor-pointer transition-all bg-black/40 text-nofx-text-main border border-white/10 hover:border-nofx-accent focus:outline-none"
+              >
+                <option value="all">
+                  {language === 'zh' ? '全部决策' : 'All decisions'}
+                </option>
+                <option value="opens">
+                  {language === 'zh' ? '全部开仓决策' : 'All opens'}
+                </option>
+                <option value="opens_success">
+                  {language === 'zh' ? '仅成功开仓' : 'Successful opens'}
+                </option>
+                <option value="opens_rejected">
+                  {language === 'zh' ? '仅拒绝开仓' : 'Rejected opens'}
+                </option>
+              </select>
+              {/* Limit Selector */}
+              <select
+                value={decisionsLimit}
+                onChange={(e) => {
+                  onDecisionsLimitChange(Number(e.target.value))
+                  setDecisionsPage(1)
+                }}
+                className="px-3 py-1.5 rounded-lg text-sm font-medium cursor-pointer transition-all bg-black/40 text-nofx-text-main border border-white/10 hover:border-nofx-accent focus:outline-none"
+              >
+                <option value={5}>5</option>
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={300}>300</option>
+                <option value={500}>500</option>
+              </select>
+            </div>
 
-              return (
-                <>
-                  {pageDecisions.map((decision, i) => (
-                    <DecisionCard
-                      key={`${decision.cycle_number}-${i}`}
-                      decision={decision}
-                      language={language}
-                      traderId={selectedTraderId}
-                      onSymbolClick={handleSymbolClick}
-                    />
-                  ))}
-                  {totalPages > 1 && (
-                    <div className="flex items-center justify-center gap-2 pt-2 flex-wrap">
-                      <button
-                        onClick={() =>
-                          setDecisionsPage((p) => Math.max(1, p - 1))
-                        }
-                        disabled={page <= 1}
-                        className="px-3 py-1 rounded-lg text-xs font-medium bg-black/40 text-nofx-text-main border border-white/10 disabled:opacity-40 hover:border-nofx-accent"
-                      >
-                        {language === 'zh' ? '上一页' : 'Prev'}
-                      </button>
-                      <span className="text-xs text-nofx-text-muted">
-                        {page} / {totalPages}
-                      </span>
-                      <button
-                        onClick={() =>
-                          setDecisionsPage((p) => Math.min(totalPages, p + 1))
-                        }
-                        disabled={page >= totalPages}
-                        className="px-3 py-1 rounded-lg text-xs font-medium bg-black/40 text-nofx-text-main border border-white/10 disabled:opacity-40 hover:border-nofx-accent"
-                      >
-                        {language === 'zh' ? '下一页' : 'Next'}
-                      </button>
+            {/* Decisions List */}
+            <div
+              className="space-y-4 overflow-y-auto pr-2 custom-scrollbar"
+              style={{ maxHeight: '600px' }}
+            >
+              {(() => {
+                const isOpenRejected = (d: DecisionRecord) =>
+                  d.decisions?.some(
+                    (a) =>
+                      a.action.includes('open') &&
+                      (a.review_context?.control?.decision === 'rejected' ||
+                        a.review_context?.control?.decision ===
+                          'downgraded_to_wait' ||
+                        a.review_context?.quality_gate?.decision ===
+                          'rejected' ||
+                        a.review_context?.quality_gate?.decision ===
+                          'blocked' ||
+                        (!a.success && !!a.error))
+                  )
+                const isOpenSuccess = (d: DecisionRecord) =>
+                  d.decisions?.some(
+                    (a) => a.action.includes('open') && a.success
+                  )
+                const hasOpen = (d: DecisionRecord) =>
+                  d.decisions?.some((a) => a.action.includes('open'))
+
+                const filteredDecisions = (decisions || []).filter((d) => {
+                  switch (decisionFilter) {
+                    case 'opens':
+                      return hasOpen(d)
+                    case 'opens_success':
+                      return isOpenSuccess(d)
+                    case 'opens_rejected':
+                      return isOpenRejected(d) && !isOpenSuccess(d)
+                    default:
+                      return true
+                  }
+                })
+
+                const totalPages = Math.max(
+                  1,
+                  Math.ceil(filteredDecisions.length / decisionsPageSize)
+                )
+                const page = Math.min(decisionsPage, totalPages)
+                const pageStart = (page - 1) * decisionsPageSize
+                const pageDecisions = filteredDecisions.slice(
+                  pageStart,
+                  pageStart + decisionsPageSize
+                )
+
+                if (filteredDecisions.length === 0) {
+                  return (
+                    <div className="py-16 text-center text-nofx-text-muted opacity-60">
+                      <div className="text-6xl mb-4 opacity-30 grayscale">
+                        🧠
+                      </div>
+                      <div className="text-lg font-semibold mb-2 text-nofx-text-main">
+                        {t('noDecisionsYet', language)}
+                      </div>
+                      <div className="text-sm">
+                        {t('aiDecisionsWillAppear', language)}
+                      </div>
                     </div>
-                  )}
-                </>
-              )
-            })()}
+                  )
+                }
+
+                return (
+                  <>
+                    {pageDecisions.map((decision, i) => (
+                      <DecisionCard
+                        key={`${decision.cycle_number}-${i}`}
+                        decision={decision}
+                        language={language}
+                        traderId={selectedTraderId}
+                        onSymbolClick={handleSymbolClick}
+                      />
+                    ))}
+                    {totalPages > 1 && (
+                      <div className="flex items-center justify-center gap-2 pt-2 flex-wrap">
+                        <button
+                          onClick={() =>
+                            setDecisionsPage((p) => Math.max(1, p - 1))
+                          }
+                          disabled={page <= 1}
+                          className="px-3 py-1 rounded-lg text-xs font-medium bg-black/40 text-nofx-text-main border border-white/10 disabled:opacity-40 hover:border-nofx-accent"
+                        >
+                          {language === 'zh' ? '上一页' : 'Prev'}
+                        </button>
+                        <span className="text-xs text-nofx-text-muted">
+                          {page} / {totalPages}
+                        </span>
+                        <button
+                          onClick={() =>
+                            setDecisionsPage((p) => Math.min(totalPages, p + 1))
+                          }
+                          disabled={page >= totalPages}
+                          className="px-3 py-1 rounded-lg text-xs font-medium bg-black/40 text-nofx-text-main border border-white/10 disabled:opacity-40 hover:border-nofx-accent"
+                        >
+                          {language === 'zh' ? '下一页' : 'Next'}
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )
+              })()}
+            </div>
           </div>
+
+          {/* Position History — sibling column (landscape) / below decisions (portrait) */}
+          {selectedTraderId && (
+            <div
+              className="nofx-glass p-4 animate-slide-in landscape:flex-1 lg:flex-1 min-w-0"
+              style={{ animationDelay: '0.25s' }}
+            >
+              <div className="flex items-center justify-between mb-5">
+                <h2 className="text-xl font-bold flex items-center gap-2 text-nofx-text-main">
+                  <span className="text-2xl">📜</span>
+                  {t('positionHistory.title', language)}
+                </h2>
+              </div>
+              <Suspense
+                fallback={<SectionLoader heightClass="min-h-[420px]" />}
+              >
+                <PositionHistory
+                  traderId={selectedTraderId}
+                  onSymbolClick={handleSymbolClick}
+                />
+              </Suspense>
+              <EvolutionProfilePanel traderId={selectedTraderId} />
+            </div>
+          )}
         </div>
 
         {/* Advanced Analytics - Collapsible */}
@@ -1607,28 +1644,6 @@ export function TraderDashboardPage({
             decisions={decisions}
             language={language}
           />
-        )}
-
-        {/* Position History Section */}
-        {selectedTraderId && (
-          <div
-            className="nofx-glass p-4 animate-slide-in"
-            style={{ animationDelay: '0.25s' }}
-          >
-            <div className="flex items-center justify-between mb-5">
-              <h2 className="text-xl font-bold flex items-center gap-2 text-nofx-text-main">
-                <span className="text-2xl">📜</span>
-                {t('positionHistory.title', language)}
-              </h2>
-            </div>
-            <Suspense fallback={<SectionLoader heightClass="min-h-[420px]" />}>
-              <PositionHistory
-                traderId={selectedTraderId}
-                onSymbolClick={handleSymbolClick}
-              />
-            </Suspense>
-            <EvolutionProfilePanel traderId={selectedTraderId} />
-          </div>
         )}
       </div>
     </DeepVoidBackground>

@@ -14,6 +14,34 @@ import { AdvancedChart } from '../components/charts/AdvancedChart'
 import { useChartPrefs } from '../hooks/useChartPrefs'
 
 type Tab = 'hot' | 'oi-top' | 'oi-low'
+type SortKey =
+  | 'rank'
+  | 'change'
+  | 'volume'
+  | 'oi'
+  | 'quality'
+  | 'score'
+  | 'price'
+
+function sortValue(coin: HotCoinItem, key: SortKey, apiRank: number): number {
+  switch (key) {
+    case 'change':
+      return coin.price_change_24h
+    case 'volume':
+      return coin.volume_24h
+    case 'oi':
+      return coin.oi
+    case 'price':
+      return coin.current_price
+    case 'quality':
+      return coin.quality?.tradability_score ?? 0
+    case 'score':
+      return coin.oi_change_pct ?? coin.score
+    case 'rank':
+    default:
+      return -apiRank // preserve API order (best first) on desc
+  }
+}
 
 export function MarketDataPage() {
   const { language } = useLanguage()
@@ -22,6 +50,19 @@ export function MarketDataPage() {
   const [limit, setLimit] = useState(20)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [selectedCoin, setSelectedCoin] = useState<string | null>(null)
+  const [sortKey, setSortKey] = useState<SortKey>('rank')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+
+  const toggleSort = useCallback((key: SortKey) => {
+    setSortKey((prev) => {
+      if (prev === key) {
+        setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'))
+        return prev
+      }
+      setSortDir('desc')
+      return key
+    })
+  }, [])
 
   const fetcher = useCallback(() => {
     if (tab === 'hot') return api.getHotCoins(limit, exchange)
@@ -66,6 +107,20 @@ export function MarketDataPage() {
   }
 
   const pctColor = (v: number) => (v >= 0 ? 'text-emerald-400' : 'text-red-400')
+
+  const price = (n: number) => {
+    if (!n) return '-'
+    const digits = n >= 1000 ? 2 : n >= 1 ? 3 : 6
+    return '$' + n.toLocaleString(undefined, { maximumFractionDigits: digits })
+  }
+
+  // Attach original API rank, then sort by the active column.
+  const rows = (data?.coins ?? []).map((coin, apiRank) => ({ coin, apiRank }))
+  rows.sort((a, b) => {
+    const av = sortValue(a.coin, sortKey, a.apiRank)
+    const bv = sortValue(b.coin, sortKey, b.apiRank)
+    return sortDir === 'desc' ? bv - av : av - bv
+  })
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6">
@@ -158,33 +213,76 @@ export function MarketDataPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-zinc-800 text-zinc-500 text-xs uppercase tracking-wider">
-                  <th className="px-4 py-3 text-left w-12">#</th>
+                  <SortableTh
+                    label="#"
+                    sortK="rank"
+                    active={sortKey}
+                    dir={sortDir}
+                    onSort={toggleSort}
+                    align="left"
+                    className="w-12"
+                  />
                   <th className="px-4 py-3 text-left">
                     {t('symbol', language)}
                   </th>
-                  <th className="px-4 py-3 text-right">
-                    {t('change24h', language)}
-                  </th>
-                  <th className="px-4 py-3 text-right">
-                    {t('volume24h', language)}
-                  </th>
-                  <th className="px-4 py-3 text-right">
-                    {t('openInterest', language)}
-                  </th>
-                  <th className="px-4 py-3 text-right">Quality</th>
+                  <SortableTh
+                    label={t('currentPrice', language)}
+                    sortK="price"
+                    active={sortKey}
+                    dir={sortDir}
+                    onSort={toggleSort}
+                  />
+                  <SortableTh
+                    label={t('change24h', language)}
+                    sortK="change"
+                    active={sortKey}
+                    dir={sortDir}
+                    onSort={toggleSort}
+                  />
+                  <SortableTh
+                    label={t('volume24h', language)}
+                    sortK="volume"
+                    active={sortKey}
+                    dir={sortDir}
+                    onSort={toggleSort}
+                  />
+                  <SortableTh
+                    label={t('openInterest', language)}
+                    sortK="oi"
+                    active={sortKey}
+                    dir={sortDir}
+                    onSort={toggleSort}
+                  />
+                  <SortableTh
+                    label="Quality"
+                    sortK="quality"
+                    active={sortKey}
+                    dir={sortDir}
+                    onSort={toggleSort}
+                    title={t('qualityTip', language)}
+                  />
                   {tab === 'hot' ? (
-                    <th className="px-4 py-3 text-right">
-                      {t('compositeScore', language)}
-                    </th>
+                    <SortableTh
+                      label={t('compositeScore', language)}
+                      sortK="score"
+                      active={sortKey}
+                      dir={sortDir}
+                      onSort={toggleSort}
+                      title={t('scoreTip', language)}
+                    />
                   ) : (
-                    <th className="px-4 py-3 text-right">
-                      {t('oiChange', language)}
-                    </th>
+                    <SortableTh
+                      label={t('oiChange', language)}
+                      sortK="score"
+                      active={sortKey}
+                      dir={sortDir}
+                      onSort={toggleSort}
+                    />
                   )}
                 </tr>
               </thead>
               <tbody>
-                {data.coins.map((coin, i) => (
+                {rows.map(({ coin }, i) => (
                   <tr
                     key={coin.symbol}
                     onClick={() => setSelectedCoin(coin.symbol)}
@@ -196,6 +294,9 @@ export function MarketDataPage() {
                     <td className="px-4 py-3 font-medium text-white">
                       {coin.symbol.replace('USDT', '')}
                       <span className="text-zinc-600 text-xs ml-1">USDT</span>
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono text-zinc-200">
+                      {price(coin.current_price)}
                     </td>
                     <td
                       className={`px-4 py-3 text-right font-mono ${pctColor(coin.price_change_24h)}`}
@@ -210,7 +311,10 @@ export function MarketDataPage() {
                       ${fmt(coin.oi)}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <QualityPills quality={coin.quality} />
+                      <QualityPills
+                        quality={coin.quality}
+                        language={language}
+                      />
                     </td>
                     {tab === 'hot' ? (
                       <td className="px-4 py-3 text-right">
@@ -253,6 +357,46 @@ function formatOIChangeCell(coin: HotCoinItem): string {
     ? `/${Math.round(coin.oi_change_window_seconds / 60)}m`
     : ''
   return `${sign}${v.toFixed(3)}%${window}`
+}
+
+function SortableTh({
+  label,
+  sortK,
+  active,
+  dir,
+  onSort,
+  align = 'right',
+  title,
+  className = '',
+}: {
+  label: string
+  sortK: SortKey
+  active: SortKey
+  dir: 'asc' | 'desc'
+  onSort: (k: SortKey) => void
+  align?: 'left' | 'right'
+  title?: string
+  className?: string
+}) {
+  const isActive = active === sortK
+  const arrow = isActive ? (dir === 'desc' ? '↓' : '↑') : ''
+  return (
+    <th
+      className={`px-4 py-3 select-none ${align === 'left' ? 'text-left' : 'text-right'} ${className}`}
+      title={title}
+    >
+      <button
+        onClick={() => onSort(sortK)}
+        className={`inline-flex items-center gap-1 uppercase tracking-wider transition-colors hover:text-zinc-200 ${
+          isActive ? 'text-nofx-gold' : ''
+        } ${align === 'left' ? '' : 'flex-row-reverse'}`}
+      >
+        <span>{label}</span>
+        <span className="w-2 text-[10px]">{arrow}</span>
+        {title && <span className="text-zinc-600 text-[10px]">ⓘ</span>}
+      </button>
+    </th>
+  )
 }
 
 function ScoreBar({ score }: { score: number }) {
@@ -551,6 +695,7 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function QualityPills({
   quality,
+  language,
 }: {
   quality?: {
     liquidity_score?: number
@@ -560,21 +705,23 @@ function QualityPills({
     tradability_score?: number
     risk_penalty?: number
   }
+  language: Language
 }) {
   if (!quality) return <span className="text-xs text-zinc-600">—</span>
   const items = [
-    ['T', quality.tradability_score],
-    ['L', quality.liquidity_score],
-    ['OI', quality.open_interest_score],
-    ['A', quality.activity_score],
-    ['R', quality.reliability_score],
+    ['T', quality.tradability_score, t('qualityTipT', language)],
+    ['L', quality.liquidity_score, t('qualityTipL', language)],
+    ['OI', quality.open_interest_score, t('qualityTipOI', language)],
+    ['A', quality.activity_score, t('qualityTipA', language)],
+    ['R', quality.reliability_score, t('qualityTipR', language)],
   ] as const
   return (
     <div className="flex justify-end gap-1">
-      {items.map(([label, value]) => (
+      {items.map(([label, value, tip]) => (
         <span
           key={label}
-          className="rounded border border-zinc-700 bg-zinc-800/70 px-1.5 py-0.5 text-[10px] text-zinc-300"
+          title={tip}
+          className="cursor-help rounded border border-zinc-700 bg-zinc-800/70 px-1.5 py-0.5 text-[10px] text-zinc-300"
         >
           {label}:{Math.round((value || 0) * 100)}
         </span>

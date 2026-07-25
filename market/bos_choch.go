@@ -38,16 +38,25 @@ type OrderBlock struct {
 }
 
 const (
-	bosMinMoveATR  = 0.5  // impulsive break close must clear the level by this many ATR
-	bosRetestBandF = 0.25 // retest band = level +/- this * ATR
-	maxStructBreaks = 4   // cap surfaced breaks
-	maxOrderBlocks  = 4   // cap surfaced order blocks
+	bosMinMoveATR   = 0.5  // impulsive break close must clear the level by this many ATR
+	bosRetestBandF  = 0.25 // retest band = level +/- this * ATR
+	bosDedupBandATR = 0.15 // 同向破位间距 <= 此 * ATR 视为重复(与模块其它 ATR 尺度一致)
+	maxStructBreaks = 4    // cap surfaced breaks
+	maxOrderBlocks  = 4    // cap surfaced order blocks
 )
 
 type structPivot struct {
 	idx    int
 	price  float64
 	isHigh bool
+}
+
+// breakCand 是第一阶段收集的突破候选,尚未判定 BOS/CHOCH。
+type breakCand struct {
+	breakIdx int     // 突破收盘发生的 kline 索引(实际发生时间)
+	pivotIdx int     // 被突破 pivot 的形成索引(用于 order block)
+	level    float64 // 被突破的 swing 价位
+	dir      string  // "bullish" / "bearish"
 }
 
 // roundSig rounds v to n significant figures, removing float arithmetic noise
@@ -95,51 +104,65 @@ func DetectStructureBreaks(klines []Kline, atr14, currentPrice float64, timefram
 	var breaks []StructureBreak
 	var blocks []OrderBlock
 
-	// trend: +1 last break was bullish, -1 bearish, 0 unknown.
-	trend := 0
-
-	// For each swing pivot, look forward for the first close that decisively
-	// breaks it. A broken swing high = bullish break; broken swing low = bearish.
+	// 第一阶段:遍历所有 pivot,找到每个 pivot 的首个突破点,收集成候选列表。
+	// 此阶段不判定 BOS/CHOCH、不设 trend —— 分类必须按突破"实际发生时间"进行,
+	// 而非 pivot 的形成顺序(震荡市里高点先形成、低点先被跌破会导致判反)。
+	var cands []breakCand
 	for _, p := range pivots {
 		if p.isHigh {
 			// find first later close that clears the high by minMove
 			for k := p.idx + 1; k < n; k++ {
 				if klines[k].Close > p.price+minMove {
-					dir := "bullish"
-					typ := "BOS"
-					if trend == -1 {
-						typ = "CHOCH"
-					}
-					sb := buildBreak(klines, k, p.price, dir, typ, band, atr14, currentPrice, n)
-					breaks = append(breaks, sb)
-					if ob, ok := findOrderBlock(klines, p.idx, k, "demand", atr14, currentPrice, n); ok {
-						blocks = append(blocks, ob)
-					}
-					trend = 1
+					cands = append(cands, breakCand{
+						breakIdx: k, pivotIdx: p.idx, level: p.price, dir: "bullish",
+					})
 					break
 				}
 			}
 		} else {
 			for k := p.idx + 1; k < n; k++ {
 				if klines[k].Close < p.price-minMove {
-					dir := "bearish"
-					typ := "BOS"
-					if trend == 1 {
-						typ = "CHOCH"
-					}
-					sb := buildBreak(klines, k, p.price, dir, typ, band, atr14, currentPrice, n)
-					breaks = append(breaks, sb)
-					if ob, ok := findOrderBlock(klines, p.idx, k, "supply", atr14, currentPrice, n); ok {
-						blocks = append(blocks, ob)
-					}
-					trend = -1
+					cands = append(cands, breakCand{
+						breakIdx: k, pivotIdx: p.idx, level: p.price, dir: "bearish",
+					})
 					break
 				}
 			}
 		}
 	}
 
-	breaks = dedupBreaks(breaks)
+	// 第二阶段:按 breakIdx(突破实际发生时间)升序排序,再用 trend 状态机判定类型。
+	sort.Slice(cands, func(a, b int) bool { return cands[a].breakIdx < cands[b].breakIdx })
+
+	// trend: +1 last break was bullish, -1 bearish, 0 unknown.
+	trend := 0
+	for _, c := range cands {
+		if c.dir == "bullish" {
+			typ := "BOS"
+			if trend == -1 {
+				typ = "CHOCH"
+			}
+			sb := buildBreak(klines, c.breakIdx, c.level, "bullish", typ, band, atr14, currentPrice, n)
+			breaks = append(breaks, sb)
+			if ob, ok := findOrderBlock(klines, c.pivotIdx, c.breakIdx, "demand", atr14, currentPrice, n); ok {
+				blocks = append(blocks, ob)
+			}
+			trend = 1
+		} else {
+			typ := "BOS"
+			if trend == 1 {
+				typ = "CHOCH"
+			}
+			sb := buildBreak(klines, c.breakIdx, c.level, "bearish", typ, band, atr14, currentPrice, n)
+			breaks = append(breaks, sb)
+			if ob, ok := findOrderBlock(klines, c.pivotIdx, c.breakIdx, "supply", atr14, currentPrice, n); ok {
+				blocks = append(blocks, ob)
+			}
+			trend = -1
+		}
+	}
+
+	breaks = dedupBreaks(breaks, atr14)
 	blocks = dedupBlocks(blocks)
 
 	// Sort: most recent first (smallest BarsAgo), cap.
@@ -225,18 +248,20 @@ func findOrderBlock(klines []Kline, pivotIdx, breakIdx int, direction string, at
 }
 
 // dedupBreaks removes breaks whose levels are near-identical (same direction),
-// keeping the most recent.
-func dedupBreaks(in []StructureBreak) []StructureBreak {
+// keeping the most recent. 合并阈值用 ATR 尺度(bosDedupBandATR * atr14),与模块
+// 其它地方(bosMinMoveATR / bosRetestBandF)一致,避免近距离破位漏合并。
+func dedupBreaks(in []StructureBreak, atr14 float64) []StructureBreak {
 	if len(in) <= 1 {
 		return in
 	}
 	sort.Slice(in, func(a, b int) bool { return in[a].BarsAgo < in[b].BarsAgo })
+	tol := bosDedupBandATR * atr14
 	var out []StructureBreak
 	for _, b := range in {
 		dup := false
 		for _, kept := range out {
-			if kept.Direction == b.Direction && kept.BreakLevel != 0 &&
-				math.Abs(kept.BreakLevel-b.BreakLevel)/math.Abs(kept.BreakLevel) < 0.001 {
+			if kept.Direction == b.Direction &&
+				math.Abs(kept.BreakLevel-b.BreakLevel) <= tol {
 				dup = true
 				break
 			}

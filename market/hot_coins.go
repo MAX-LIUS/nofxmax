@@ -12,8 +12,9 @@ import (
 // HotCoin represents a hot coin with composite scoring
 type HotCoin struct {
 	Symbol                string           `json:"symbol"`
+	CurrentPrice          float64          `json:"current_price"`
 	QuoteVolume24h        float64          `json:"quote_volume_24h"`
-	PriceChangePct        float64          `json:"price_change_pct"`
+	PriceChangePct        float64          `json:"price_change_pct"` // signed 24h change % (for display)
 	OpenInterestUSD       float64          `json:"open_interest_usd"`
 	OpenInterestChangePct float64          `json:"open_interest_change_pct,omitempty"`
 	OpenInterestWindowSec int              `json:"open_interest_window_sec,omitempty"`
@@ -100,14 +101,24 @@ func getHotCoinsOKX(limit int, excludedCoins []string) ([]HotCoin, error) {
 	}
 
 	type raw struct {
-		symbol string
-		vol    float64
-		chg    float64
-		oi     float64
-		tier2  bool // true when only second-tier threshold is met
+		symbol    string
+		price     float64
+		vol       float64
+		signedChg float64 // signed 24h change % (for display)
+		chg       float64 // abs(change) (for scoring)
+		oi        float64
+		tier2     bool // true when only second-tier threshold is met
 	}
-	var raws []raw
 
+	// Pre-filter candidates (cheap, ticker-only) before the expensive per-symbol
+	// OI fetches, which we run concurrently below.
+	type preCand struct {
+		symbol    string
+		price     float64
+		vol       float64
+		signedChg float64
+	}
+	var pre []preCand
 	for _, t := range tickers {
 		if !strings.HasSuffix(t.InstID, "-USDT-SWAP") {
 			continue
@@ -132,24 +143,40 @@ func getHotCoinsOKX(limit int, excludedCoins []string) ([]HotCoin, error) {
 		if math.Abs(chg) > hotCoinMaxPriceChg {
 			continue
 		}
-
 		// Reject coins below tier-2 (lowest) volume floor early.
 		if volUSD < hotCoinTier2MinVolume {
 			continue
 		}
+		pre = append(pre, preCand{symbol: stdSymbol, price: last, vol: volUSD, signedChg: chg})
+	}
 
-		// Get OI
-		oiData, err := okx.GetOpenInterest(stdSymbol)
+	// Concurrent OI fetch (bounded) — serial per-symbol calls previously made this
+	// path slow; OKX has many candidates so parallelism matters.
+	ois := fetchOIConcurrent(pre, func(p preCand) (float64, bool) {
+		oiData, err := okx.GetOpenInterest(p.symbol)
 		if err != nil || oiData == nil {
-			continue
+			return 0, false
 		}
-		oiUSD := oiData.Latest * last
-		if oiUSD < hotCoinTier2MinOI {
-			continue
-		}
+		oiUSD := oiData.Latest * p.price
+		return oiUSD, oiUSD >= hotCoinTier2MinOI
+	})
 
-		isTier2 := volUSD < hotCoinMinVolume || oiUSD < hotCoinMinOI
-		raws = append(raws, raw{symbol: stdSymbol, vol: volUSD, chg: math.Abs(chg), oi: oiUSD, tier2: isTier2})
+	var raws []raw
+	for i, p := range pre {
+		oiUSD, ok := ois[i]
+		if !ok {
+			continue
+		}
+		isTier2 := p.vol < hotCoinMinVolume || oiUSD < hotCoinMinOI
+		raws = append(raws, raw{
+			symbol:    p.symbol,
+			price:     p.price,
+			vol:       p.vol,
+			signedChg: p.signedChg,
+			chg:       math.Abs(p.signedChg),
+			oi:        oiUSD,
+			tier2:     isTier2,
+		})
 	}
 
 	// Build candidateInput slice for batch percentile scoring.
@@ -189,8 +216,9 @@ func getHotCoinsOKX(limit int, excludedCoins []string) ([]HotCoin, error) {
 
 		candidates = append(candidates, HotCoin{
 			Symbol:          r.symbol,
+			CurrentPrice:    r.price,
 			QuoteVolume24h:  r.vol,
-			PriceChangePct:  r.chg,
+			PriceChangePct:  r.signedChg,
 			OpenInterestUSD: r.oi,
 			HotScore:        composite,
 			Source:          "okx_hot",
@@ -258,6 +286,7 @@ func getOIRankedCoinsOKX(limit int, excludedCoins []string, ascending bool) ([]H
 
 		rawCoins = append(rawCoins, HotCoin{
 			Symbol:          stdSymbol,
+			CurrentPrice:    last,
 			QuoteVolume24h:  volUSD,
 			PriceChangePct:  chg,
 			OpenInterestUSD: oiUSD,
@@ -314,7 +343,10 @@ func getOIRankedCoinsBinance(limit int, excludedCoins []string, ascending bool) 
 		}
 
 		chg, _ := strconv.ParseFloat(t.PriceChangePercent, 64)
-		price, _ := strconv.ParseFloat(t.WeightedAvgPrice, 64)
+		price, _ := strconv.ParseFloat(t.LastPrice, 64)
+		if price <= 0 {
+			price, _ = strconv.ParseFloat(t.WeightedAvgPrice, 64)
+		}
 
 		oiData, err := getOpenInterestData(t.Symbol)
 		if err != nil || oiData == nil || oiData.Latest == 0 {
@@ -329,6 +361,7 @@ func getOIRankedCoinsBinance(limit int, excludedCoins []string, ascending bool) 
 
 		rawCoins = append(rawCoins, HotCoin{
 			Symbol:          t.Symbol,
+			CurrentPrice:    price,
 			QuoteVolume24h:  vol,
 			PriceChangePct:  chg,
 			OpenInterestUSD: oiUSD,
@@ -368,14 +401,23 @@ func getHotCoinsBinance(limit int, excludedCoins []string) ([]HotCoin, error) {
 	}
 
 	type raw struct {
-		symbol string
-		vol    float64
-		chg    float64
-		oi     float64
-		tier2  bool
+		symbol    string
+		price     float64
+		vol       float64
+		signedChg float64 // signed 24h change % (for display)
+		chg       float64 // abs(change) (for scoring)
+		oi        float64
+		tier2     bool
 	}
-	var raws []raw
 
+	// Pre-filter (ticker-only) before the expensive per-symbol OI fetches.
+	type preCand struct {
+		symbol    string
+		price     float64
+		vol       float64
+		signedChg float64
+	}
+	var pre []preCand
 	for _, t := range tickers {
 		if !strings.HasSuffix(t.Symbol, "USDT") {
 			continue
@@ -392,19 +434,42 @@ func getHotCoinsBinance(limit int, excludedCoins []string) ([]HotCoin, error) {
 		if vol < hotCoinTier2MinVolume {
 			continue
 		}
+		// Prefer last price; fall back to weighted-avg when absent.
+		price, _ := strconv.ParseFloat(t.LastPrice, 64)
+		if price <= 0 {
+			price, _ = strconv.ParseFloat(t.WeightedAvgPrice, 64)
+		}
+		pre = append(pre, preCand{symbol: t.Symbol, price: price, vol: vol, signedChg: chg})
+	}
 
-		oiData, err := getOpenInterestData(t.Symbol)
+	// Concurrent OI fetch (bounded). Serial per-symbol OI calls through the Binance
+	// proxy previously blew past the HTTP timeout (~0.5s × 100+ candidates); the
+	// worker pool caps latency at roughly ceil(n/workers) × per-call time.
+	ois := fetchOIConcurrent(pre, func(p preCand) (float64, bool) {
+		oiData, err := getOpenInterestData(p.symbol)
 		if err != nil || oiData == nil {
-			continue
+			return 0, false
 		}
-		price, _ := strconv.ParseFloat(t.WeightedAvgPrice, 64)
-		oiUSD := oiData.Latest * price
-		if oiUSD < hotCoinTier2MinOI {
-			continue
-		}
+		oiUSD := oiData.Latest * p.price
+		return oiUSD, oiUSD >= hotCoinTier2MinOI
+	})
 
-		isTier2 := vol < hotCoinMinVolume || oiUSD < hotCoinMinOI
-		raws = append(raws, raw{symbol: t.Symbol, vol: vol, chg: math.Abs(chg), oi: oiUSD, tier2: isTier2})
+	var raws []raw
+	for i, p := range pre {
+		oiUSD, ok := ois[i]
+		if !ok {
+			continue
+		}
+		isTier2 := p.vol < hotCoinMinVolume || oiUSD < hotCoinMinOI
+		raws = append(raws, raw{
+			symbol:    p.symbol,
+			price:     p.price,
+			vol:       p.vol,
+			signedChg: p.signedChg,
+			chg:       math.Abs(p.signedChg),
+			oi:        oiUSD,
+			tier2:     isTier2,
+		})
 	}
 
 	// Batch percentile scoring.
@@ -442,8 +507,9 @@ func getHotCoinsBinance(limit int, excludedCoins []string) ([]HotCoin, error) {
 
 		candidates = append(candidates, HotCoin{
 			Symbol:          r.symbol,
+			CurrentPrice:    r.price,
 			QuoteVolume24h:  r.vol,
-			PriceChangePct:  r.chg,
+			PriceChangePct:  r.signedChg,
 			OpenInterestUSD: r.oi,
 			HotScore:        composite,
 			Source:          "binance_hot",
@@ -462,6 +528,48 @@ func getHotCoinsBinance(limit int, excludedCoins []string) ([]HotCoin, error) {
 }
 
 // ---- Helpers ----
+
+// oiFetchConcurrency bounds simultaneous per-symbol OI requests. Kept modest so
+// the proxied Binance endpoint isn't hammered while still cutting wall-clock time
+// from O(n) serial round-trips to ~O(n/workers).
+const oiFetchConcurrency = 12
+
+// fetchOIConcurrent runs fetch(item) for every item using a bounded worker pool
+// and returns a map keyed by the item's index. An entry is present only when
+// fetch reported ok==true (i.e. the coin cleared its OI floor). Results preserve
+// index alignment with the input slice so callers can zip them back together.
+func fetchOIConcurrent[T any](items []T, fetch func(T) (float64, bool)) map[int]float64 {
+	out := make(map[int]float64, len(items))
+	if len(items) == 0 {
+		return out
+	}
+
+	type result struct {
+		idx float64
+		val float64
+		ok  bool
+		i   int
+	}
+	sem := make(chan struct{}, oiFetchConcurrency)
+	resCh := make(chan result, len(items))
+
+	for i, item := range items {
+		sem <- struct{}{}
+		go func(i int, item T) {
+			defer func() { <-sem }()
+			val, ok := fetch(item)
+			resCh <- result{val: val, ok: ok, i: i}
+		}(i, item)
+	}
+
+	for range items {
+		r := <-resCh
+		if r.ok {
+			out[r.i] = r.val
+		}
+	}
+	return out
+}
 
 func safeNorm(val, max float64) float64 {
 	if max == 0 {
