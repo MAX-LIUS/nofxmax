@@ -29,6 +29,12 @@ import {
   type OrderBlock,
 } from '../../hooks/useStructuralLevels'
 
+// Blank bars kept to the right of the newest candle so horizontal price labels
+// (SL/TP/structure) float in empty space instead of covering candles. Used both
+// as timeScale.rightOffset and when computing the initial visible logical range
+// (they must agree or the view snaps back to the edge right after first paint).
+const CHART_RIGHT_OFFSET = 14
+
 // Order marker interface
 interface OrderMarker {
   time: number
@@ -718,7 +724,7 @@ export function AdvancedChart({
         timeVisible: true,
         secondsVisible: false,
         borderVisible: true,
-        rightOffset: 14, // 右移留白:让水平线价签(SL/TP/结构位)浮在最新K线右侧空白处,不遮挡K线
+        rightOffset: CHART_RIGHT_OFFSET, // 右移留白:让水平线价签(SL/TP/结构位)浮在最新K线右侧空白处,不遮挡K线
         barSpacing: 8,
       },
       handleScroll: {
@@ -1334,13 +1340,16 @@ export function AdvancedChart({
           })
         }
 
-        // Auto-fit view only on initial load — show last 200 bars
+        // Auto-fit view only on initial load — show last 200 bars.
+        // The right edge must extend to totalBars + CHART_RIGHT_OFFSET so the
+        // logical range agrees with timeScale.rightOffset; otherwise the blank
+        // right margin flashes once then snaps back to the newest candle.
         if (isInitialLoadRef.current) {
           const totalBars = klineData.length
           if (totalBars > 200) {
             chartRef.current?.timeScale().setVisibleLogicalRange({
               from: totalBars - 200,
-              to: totalBars + 5,
+              to: totalBars + CHART_RIGHT_OFFSET,
             })
           } else {
             chartRef.current?.timeScale().fitContent()
@@ -2124,10 +2133,15 @@ export function AdvancedChart({
             overflowY: 'auto',
           }}
         >
-          {/* Title bar */}
+          {/* Title bar — sticky so the close button stays visible at the top-right
+              even after the indicator list scrolls (panel itself is the scroll box) */}
           <div
-            className="flex items-center justify-between px-4 py-3"
-            style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.06)' }}
+            className="sticky top-0 z-10 flex items-center justify-between px-4 py-3"
+            style={{
+              borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
+              background: 'rgba(15, 18, 21, 0.98)',
+              backdropFilter: 'blur(8px)',
+            }}
           >
             <div className="flex items-center gap-2">
               <BarChart2 className="w-4 h-4 text-blue-400" />
@@ -2137,7 +2151,7 @@ export function AdvancedChart({
             </div>
             <button
               onClick={() => setShowIndicatorPanel(false)}
-              className="w-6 h-6 flex items-center justify-center rounded-md text-gray-500 hover:text-white hover:bg-white/10 transition-all"
+              className="w-6 h-6 flex items-center justify-center rounded-md text-gray-500 hover:text-white hover:bg-white/10 transition-all shrink-0"
             >
               <span className="text-sm">×</span>
             </button>

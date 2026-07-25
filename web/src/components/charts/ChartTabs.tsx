@@ -456,8 +456,9 @@ export function ChartTabs({
               ))}
             </div>
 
-            {/* Refresh Rate Selector */}
-            <div className="flex items-center bg-black/40 rounded border border-white/10 overflow-hidden">
+            {/* Refresh Rate Selector — shrink-0 so it isn't squeezed to nothing
+                when the interval tabs fill the row (RT/realtime was collapsing) */}
+            <div className="flex items-center bg-black/40 rounded border border-white/10 overflow-hidden shrink-0">
               {REFRESH_RATES.map((rate) => (
                 <button
                   key={rate.value}

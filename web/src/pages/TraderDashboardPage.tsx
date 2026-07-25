@@ -1562,7 +1562,8 @@ export function TraderDashboardPage({
             </div>
           </div>
 
-          {/* Position History — sibling column (landscape) / below decisions (portrait) */}
+          {/* Position History TABLE — sibling column (landscape) / below decisions (portrait).
+              The aggregate stats block is rendered full-width below this row. */}
           {selectedTraderId && (
             <div
               className="nofx-glass p-4 animate-slide-in landscape:flex-1 lg:flex-1 min-w-0"
@@ -1580,12 +1581,35 @@ export function TraderDashboardPage({
                 <PositionHistory
                   traderId={selectedTraderId}
                   onSymbolClick={handleSymbolClick}
+                  section="table"
                 />
               </Suspense>
-              <EvolutionProfilePanel traderId={selectedTraderId} />
             </div>
           )}
         </div>
+
+        {/* Position History STATS — full width below the decisions + table row */}
+        {selectedTraderId && (
+          <div
+            className="nofx-glass p-4 animate-slide-in mb-4"
+            style={{ animationDelay: '0.28s' }}
+          >
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="text-xl font-bold flex items-center gap-2 text-nofx-text-main">
+                <span className="text-2xl">📊</span>
+                {t('positionHistory.title', language)}
+              </h2>
+            </div>
+            <Suspense fallback={<SectionLoader heightClass="min-h-[240px]" />}>
+              <PositionHistory
+                traderId={selectedTraderId}
+                onSymbolClick={handleSymbolClick}
+                section="stats"
+              />
+            </Suspense>
+            <EvolutionProfilePanel traderId={selectedTraderId} />
+          </div>
+        )}
 
         {/* Advanced Analytics - Collapsible */}
         <details

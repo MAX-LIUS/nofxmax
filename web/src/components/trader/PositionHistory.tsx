@@ -38,6 +38,74 @@ import type {
 interface PositionHistoryProps {
   traderId: string
   onSymbolClick?: (symbol: string) => void
+  // Which part of the panel to render. 'all' = stats + table (default, backward
+  // compatible). 'table' = only the filter bar + trades table. 'stats' = only
+  // the aggregate stat cards + direction + symbol performance. Used by the
+  // dashboard to place the table next to Decisions and the stats block below.
+  section?: 'all' | 'table' | 'stats'
+}
+
+// Hideable data columns of the trades table (symbol is the anchor and always
+// shown). Order here matches the visual column order.
+type ColKey =
+  | 'entry'
+  | 'exit'
+  | 'peakTrough'
+  | 'value'
+  | 'pnl'
+  | 'fee'
+  | 'duration'
+  | 'closedAt'
+
+const COL_ORDER: ColKey[] = [
+  'entry',
+  'exit',
+  'peakTrough',
+  'value',
+  'pnl',
+  'fee',
+  'duration',
+  'closedAt',
+]
+
+// Columns hidden by default to keep the table compact when placed beside the
+// Decisions panel. Users can toggle any column from the "列/Columns" menu or by
+// clicking a header.
+const DEFAULT_HIDDEN_COLS: ColKey[] = ['peakTrough', 'fee']
+const HIDDEN_COLS_STORAGE_KEY = 'ph_hidden_cols_v1'
+
+function colLabel(key: ColKey, language: Language): string {
+  switch (key) {
+    case 'entry':
+      return t('positionHistory.entry', language)
+    case 'exit':
+      return t('positionHistory.exit', language)
+    case 'peakTrough':
+      return language === 'zh' ? '峰值/谷值' : 'Peak/Trough'
+    case 'value':
+      return t('positionHistory.value', language)
+    case 'pnl':
+      return t('positionHistory.pnl', language)
+    case 'fee':
+      return t('positionHistory.fee', language)
+    case 'duration':
+      return t('positionHistory.duration', language)
+    case 'closedAt':
+      return t('positionHistory.closedAt', language)
+  }
+}
+
+function loadHiddenCols(): Set<ColKey> {
+  try {
+    const raw = localStorage.getItem(HIDDEN_COLS_STORAGE_KEY)
+    if (raw) {
+      const arr = JSON.parse(raw) as ColKey[]
+      return new Set(arr.filter((k) => COL_ORDER.includes(k)))
+    }
+  } catch {
+    // ignore malformed storage
+  }
+  return new Set(DEFAULT_HIDDEN_COLS)
 }
 
 // Format number with proper decimals (for large numbers)
@@ -1605,9 +1673,13 @@ function RatchetHistoryBlock({
 function PositionRow({
   position,
   onSymbolClick,
+  hiddenCols,
+  visibleColCount,
 }: {
   position: HistoricalPosition
   onSymbolClick?: (symbol: string) => void
+  hiddenCols: Set<ColKey>
+  visibleColCount: number
 }) {
   const { language } = useLanguage()
   const [expanded, setExpanded] = useState(false)
@@ -1789,102 +1861,108 @@ function PositionRow({
         </td>
 
         {/* Entry Price */}
-        <td
-          className="py-3 px-4 text-right font-mono"
-          style={{ color: '#EAECEF' }}
-        >
-          {formatPrice(entryPrice)}
-        </td>
+        {!hiddenCols.has('entry') && (
+          <td
+            className="py-3 px-4 text-right font-mono"
+            style={{ color: '#EAECEF' }}
+          >
+            {formatPrice(entryPrice)}
+          </td>
+        )}
 
         {/* Exit Price */}
-        <td
-          className="py-3 px-4 text-right font-mono"
-          style={{ color: '#EAECEF' }}
-        >
-          {formatPrice(exitPrice)}
-        </td>
+        {!hiddenCols.has('exit') && (
+          <td
+            className="py-3 px-4 text-right font-mono"
+            style={{ color: '#EAECEF' }}
+          >
+            {formatPrice(exitPrice)}
+          </td>
+        )}
 
-        {/* Quantity */}
-        {/* Peak/Trough (MFE/MAE): favorable peak profit% ↑ and adverse trough% ↓,
-            each with its open-time ATR multiple. Replaces the raw quantity column
-            (qty still shown in the expanded detail). Sourced from the excursion
-            fields frozen onto the row at close (peak_pnl_pct / trough_pnl_pct /
-            peak_atr_mult / trough_atr_mult). "—" when never captured. */}
-        <td className="py-3 px-4 text-right font-mono text-xs whitespace-nowrap">
-          {hasExcursion ? (
-            <div className="flex flex-col gap-0.5">
-              <span style={{ color: '#0ECB81' }}>
-                ↑{excPeakPct >= 0 ? '+' : ''}
-                {excPeakPct.toFixed(2)}%
-                {excPeakAtr > 0 && (
-                  <span style={{ color: '#5E6673' }}>
-                    {' '}
-                    ({excPeakAtr.toFixed(1)}×)
-                  </span>
-                )}
-              </span>
-              <span style={{ color: '#F6465D' }}>
-                ↓{excTroughPct >= 0 ? '+' : ''}
-                {excTroughPct.toFixed(2)}%
-                {excTroughAtr > 0 && (
-                  <span style={{ color: '#5E6673' }}>
-                    {' '}
-                    ({excTroughAtr.toFixed(1)}×)
-                  </span>
-                )}
-              </span>
-            </div>
-          ) : (
-            <span style={{ color: '#5E6673' }}>—</span>
-          )}
-        </td>
+        {/* Peak/Trough (MFE/MAE): favorable peak profit% ↑ and adverse trough% ↓.
+            Replaces the raw quantity column (qty still shown in the expanded
+            detail). Sourced from the excursion fields frozen onto the row at close
+            (peak_pnl_pct / trough_pnl_pct). ATR multiples moved to the expanded
+            detail to keep the column narrow. "—" when never captured. */}
+        {!hiddenCols.has('peakTrough') && (
+          <td className="py-3 px-4 text-right font-mono text-xs whitespace-nowrap">
+            {hasExcursion ? (
+              <div className="flex flex-col gap-0.5">
+                <span style={{ color: '#0ECB81' }}>
+                  ↑{excPeakPct >= 0 ? '+' : ''}
+                  {excPeakPct.toFixed(2)}%
+                </span>
+                <span style={{ color: '#F6465D' }}>
+                  ↓{excTroughPct >= 0 ? '+' : ''}
+                  {excTroughPct.toFixed(2)}%
+                </span>
+              </div>
+            ) : (
+              <span style={{ color: '#5E6673' }}>—</span>
+            )}
+          </td>
+        )}
 
         {/* Position Value (Entry Price * Quantity) */}
-        <td
-          className="py-3 px-4 text-right font-mono"
-          style={{ color: '#EAECEF' }}
-        >
-          {formatNumber(entryPrice * displayQty)}
-        </td>
+        {!hiddenCols.has('value') && (
+          <td
+            className="py-3 px-4 text-right font-mono"
+            style={{ color: '#EAECEF' }}
+          >
+            {formatNumber(entryPrice * displayQty)}
+          </td>
+        )}
 
         {/* P&L */}
-        <td className="py-3 px-4 text-right">
-          <div className="font-mono font-semibold" style={{ color: pnlColor }}>
-            {isProfitable ? '+' : ''}
-            {formatNumber(realizedPnl)}
-          </div>
-          <div className="text-xs" style={{ color: pnlColor }}>
-            {pnlPct >= 0 ? '+' : ''}
-            {pnlPct.toFixed(2)}%
-          </div>
-        </td>
+        {!hiddenCols.has('pnl') && (
+          <td className="py-3 px-4 text-right">
+            <div
+              className="font-mono font-semibold"
+              style={{ color: pnlColor }}
+            >
+              {isProfitable ? '+' : ''}
+              {formatNumber(realizedPnl)}
+            </div>
+            <div className="text-xs" style={{ color: pnlColor }}>
+              {pnlPct >= 0 ? '+' : ''}
+              {pnlPct.toFixed(2)}%
+            </div>
+          </td>
+        )}
 
         {/* Fee - show more precision for small fees */}
-        <td
-          className="py-3 px-4 text-right font-mono text-xs"
-          style={{ color: '#848E9C' }}
-        >
-          -
-          {(position.fee || 0) < 0.01 && (position.fee || 0) > 0
-            ? (position.fee || 0).toFixed(4)
-            : (position.fee || 0).toFixed(2)}
-        </td>
+        {!hiddenCols.has('fee') && (
+          <td
+            className="py-3 px-4 text-right font-mono text-xs"
+            style={{ color: '#848E9C' }}
+          >
+            -
+            {(position.fee || 0) < 0.01 && (position.fee || 0) > 0
+              ? (position.fee || 0).toFixed(4)
+              : (position.fee || 0).toFixed(2)}
+          </td>
+        )}
 
         {/* Duration */}
-        <td
-          className="py-3 px-4 text-center text-sm"
-          style={{ color: '#848E9C' }}
-        >
-          {formatDuration(holdingMinutes)}
-        </td>
+        {!hiddenCols.has('duration') && (
+          <td
+            className="py-3 px-4 text-center text-sm"
+            style={{ color: '#848E9C' }}
+          >
+            {formatDuration(holdingMinutes)}
+          </td>
+        )}
 
         {/* Exit Time */}
-        <td
-          className="py-3 px-4 text-right text-xs"
-          style={{ color: '#848E9C' }}
-        >
-          {formatDate(position.exit_time)}
-        </td>
+        {!hiddenCols.has('closedAt') && (
+          <td
+            className="py-3 px-4 text-right text-xs"
+            style={{ color: '#848E9C' }}
+          >
+            {formatDate(position.exit_time)}
+          </td>
+        )}
       </tr>
       {expanded && (
         <tr
@@ -1893,7 +1971,7 @@ function PositionRow({
             background: 'rgba(255,255,255,0.02)',
           }}
         >
-          <td colSpan={9} className="px-4 pb-4 pt-0">
+          <td colSpan={visibleColCount} className="px-4 pb-4 pt-0">
             <div className="rounded-lg border border-white/10 bg-black/20 p-4 mt-2 space-y-3">
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-xs">
                 <div>
@@ -2443,8 +2521,33 @@ function PositionRow({
 export function PositionHistory({
   traderId,
   onSymbolClick,
+  section = 'all',
 }: PositionHistoryProps) {
   const { language } = useLanguage()
+  const showStats = section === 'all' || section === 'stats'
+  const showTable = section === 'all' || section === 'table'
+  // Column visibility (persisted). peakTrough + fee hidden by default.
+  const [hiddenCols, setHiddenCols] = useState<Set<ColKey>>(() =>
+    loadHiddenCols()
+  )
+  const [colMenuOpen, setColMenuOpen] = useState(false)
+  const toggleCol = (key: ColKey) => {
+    setHiddenCols((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      try {
+        localStorage.setItem(
+          HIDDEN_COLS_STORAGE_KEY,
+          JSON.stringify(Array.from(next))
+        )
+      } catch {
+        // ignore storage failures
+      }
+      return next
+    })
+  }
+  const visibleColCount = 1 + COL_ORDER.filter((c) => !hiddenCols.has(c)).length
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [positions, setPositions] = useState<HistoricalPosition[]>([])
@@ -2644,7 +2747,7 @@ export function PositionHistory({
   return (
     <div className="space-y-6">
       {/* Overall Stats - Row 1: Core Metrics */}
-      {stats && (
+      {showStats && stats && (
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
           <StatCard
             icon="📊"
@@ -2719,7 +2822,7 @@ export function PositionHistory({
       )}
 
       {/* Overall Stats - Row 2: Advanced Metrics */}
-      {stats && (
+      {showStats && stats && (
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
           <StatCard
             icon="📉"
@@ -2787,7 +2890,7 @@ export function PositionHistory({
       )}
 
       {/* Direction Stats */}
-      {directionStats.length > 0 && (
+      {showStats && directionStats.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {directionStats.map((stat) => (
             <DirectionStatsCard
@@ -2800,7 +2903,7 @@ export function PositionHistory({
       )}
 
       {/* Symbol Performance */}
-      {symbolStats.length > 0 && (
+      {showStats && symbolStats.length > 0 && (
         <div
           className="rounded-lg p-4"
           style={{
@@ -2827,317 +2930,349 @@ export function PositionHistory({
       )}
 
       {/* Position List */}
-      <div
-        className="rounded-lg overflow-hidden"
-        style={{
-          background: 'linear-gradient(135deg, #1E2329 0%, #181C21 100%)',
-          border: '1px solid #2B3139',
-        }}
-      >
-        {/* Filters */}
+      {showTable && (
         <div
-          className="flex flex-wrap items-center gap-4 p-4"
-          style={{ borderBottom: '1px solid #2B3139' }}
+          className="rounded-lg overflow-hidden"
+          style={{
+            background: 'linear-gradient(135deg, #1E2329 0%, #181C21 100%)',
+            border: '1px solid #2B3139',
+          }}
         >
-          <div className="flex items-center gap-2">
-            <span className="text-sm" style={{ color: '#848E9C' }}>
-              {t('positionHistory.symbol', language)}:
-            </span>
-            <select
-              value={filterSymbol}
-              onChange={(e) => setFilterSymbol(e.target.value)}
-              className="rounded px-3 py-1.5 text-sm"
-              style={{
-                background: '#0B0E11',
-                border: '1px solid #2B3139',
-                color: '#EAECEF',
-              }}
-            >
-              <option value="all">
-                {t('positionHistory.allSymbols', language)}
-              </option>
-              {uniqueSymbols.map((symbol) => (
-                <option key={symbol} value={symbol}>
-                  {(symbol || '').replace('USDT', '')}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="text-sm" style={{ color: '#848E9C' }}>
-              {t('positionHistory.side', language)}:
-            </span>
-            <div
-              className="flex rounded overflow-hidden"
-              style={{ border: '1px solid #2B3139' }}
-            >
-              {['all', 'LONG', 'SHORT'].map((side) => (
-                <button
-                  key={side}
-                  onClick={() => setFilterSide(side)}
-                  className="px-3 py-1.5 text-sm capitalize transition-colors"
-                  style={{
-                    background: filterSide === side ? '#2B3139' : 'transparent',
-                    color: filterSide === side ? '#EAECEF' : '#848E9C',
-                  }}
-                >
-                  {side === 'all' ? t('positionHistory.all', language) : side}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 ml-auto">
-            <span className="text-sm" style={{ color: '#848E9C' }}>
-              {t('positionHistory.sort', language)}:
-            </span>
-            <select
-              value={`${sortBy}-${sortOrder}`}
-              onChange={(e) => {
-                const [by, order] = e.target.value.split('-') as [
-                  'time' | 'pnl' | 'pnl_pct',
-                  'asc' | 'desc',
-                ]
-                setSortBy(by)
-                setSortOrder(order)
-              }}
-              className="rounded px-3 py-1.5 text-sm"
-              style={{
-                background: '#0B0E11',
-                border: '1px solid #2B3139',
-                color: '#EAECEF',
-              }}
-            >
-              <option value="time-desc">
-                {t('positionHistory.latestFirst', language)}
-              </option>
-              <option value="time-asc">
-                {t('positionHistory.oldestFirst', language)}
-              </option>
-              <option value="pnl-desc">
-                {t('positionHistory.highestPnL', language)}
-              </option>
-              <option value="pnl-asc">
-                {t('positionHistory.lowestPnL', language)}
-              </option>
-            </select>
-          </div>
-        </div>
-
-        {/* Table */}
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr style={{ background: '#0B0E11' }}>
-                <th
-                  className="py-3 px-4 text-left text-xs font-semibold uppercase tracking-wider"
-                  style={{ color: '#848E9C' }}
-                >
-                  {t('positionHistory.symbol', language)}
-                </th>
-                <th
-                  className="py-3 px-4 text-right text-xs font-semibold uppercase tracking-wider"
-                  style={{ color: '#848E9C' }}
-                >
-                  {t('positionHistory.entry', language)}
-                </th>
-                <th
-                  className="py-3 px-4 text-right text-xs font-semibold uppercase tracking-wider"
-                  style={{ color: '#848E9C' }}
-                >
-                  {t('positionHistory.exit', language)}
-                </th>
-                <th
-                  className="py-3 px-4 text-right text-xs font-semibold uppercase tracking-wider"
-                  style={{ color: '#848E9C' }}
-                >
-                  {language === 'zh' ? '峰值/谷值' : 'Peak/Trough'}
-                </th>
-                <th
-                  className="py-3 px-4 text-right text-xs font-semibold uppercase tracking-wider"
-                  style={{ color: '#848E9C' }}
-                >
-                  {t('positionHistory.value', language)}
-                </th>
-                <th
-                  className="py-3 px-4 text-right text-xs font-semibold uppercase tracking-wider"
-                  style={{ color: '#848E9C' }}
-                >
-                  {t('positionHistory.pnl', language)}
-                </th>
-                <th
-                  className="py-3 px-4 text-right text-xs font-semibold uppercase tracking-wider"
-                  style={{ color: '#848E9C' }}
-                >
-                  {t('positionHistory.fee', language)}
-                </th>
-                <th
-                  className="py-3 px-4 text-center text-xs font-semibold uppercase tracking-wider"
-                  style={{ color: '#848E9C' }}
-                >
-                  {t('positionHistory.duration', language)}
-                </th>
-                <th
-                  className="py-3 px-4 text-right text-xs font-semibold uppercase tracking-wider"
-                  style={{ color: '#848E9C' }}
-                >
-                  {t('positionHistory.closedAt', language)}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredPositions.map((position) => (
-                <PositionRow
-                  key={position.id}
-                  position={position}
-                  onSymbolClick={onSymbolClick}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Footer with Pagination */}
-        <div
-          className="flex flex-wrap items-center justify-between gap-4 p-4 text-sm"
-          style={{ borderTop: '1px solid #2B3139', color: '#848E9C' }}
-        >
-          {/* Left: Count info */}
-          <div className="flex items-center gap-4">
-            <span>
-              {t('positionHistory.showingPositions', language, {
-                count: totalFilteredCount,
-                total: positions.length,
-              })}
-            </span>
-            {totalFilteredCount > 0 && (
-              <span>
-                {t('positionHistory.totalPnL', language)}:{' '}
-                <span
-                  style={{
-                    color:
-                      filteredAndSortedPositions.reduce(
-                        (sum, p) => sum + (p.realized_pnl || 0),
-                        0
-                      ) >= 0
-                        ? '#0ECB81'
-                        : '#F6465D',
-                  }}
-                >
-                  {filteredAndSortedPositions.reduce(
-                    (sum, p) => sum + (p.realized_pnl || 0),
-                    0
-                  ) >= 0
-                    ? '+'
-                    : ''}
-                  {formatNumber(
-                    filteredAndSortedPositions.reduce(
-                      (sum, p) => sum + (p.realized_pnl || 0),
-                      0
-                    )
-                  )}
-                </span>
-              </span>
-            )}
-          </div>
-
-          {/* Right: Pagination controls */}
-          <div className="flex items-center gap-3">
-            {/* Page size selector */}
+          {/* Filters */}
+          <div
+            className="flex flex-wrap items-center gap-4 p-4"
+            style={{ borderBottom: '1px solid #2B3139' }}
+          >
             <div className="flex items-center gap-2">
-              <span className="text-xs" style={{ color: '#848E9C' }}>
-                {language === 'zh' ? '每页' : 'Per page'}:
+              <span className="text-sm" style={{ color: '#848E9C' }}>
+                {t('positionHistory.symbol', language)}:
               </span>
               <select
-                value={pageSize}
-                onChange={(e) => setPageSize(Number(e.target.value))}
-                className="rounded px-2 py-1 text-sm"
+                value={filterSymbol}
+                onChange={(e) => setFilterSymbol(e.target.value)}
+                className="rounded px-3 py-1.5 text-sm"
                 style={{
                   background: '#0B0E11',
                   border: '1px solid #2B3139',
                   color: '#EAECEF',
                 }}
               >
-                <option value={20}>20</option>
-                <option value={50}>50</option>
-                <option value={100}>100</option>
+                <option value="all">
+                  {t('positionHistory.allSymbols', language)}
+                </option>
+                {uniqueSymbols.map((symbol) => (
+                  <option key={symbol} value={symbol}>
+                    {(symbol || '').replace('USDT', '')}
+                  </option>
+                ))}
               </select>
             </div>
 
-            {/* Page navigation */}
-            {totalPages > 1 && (
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => setCurrentPage(1)}
-                  disabled={currentPage === 1}
-                  className="px-2 py-1 rounded text-xs transition-colors disabled:opacity-30"
-                  style={{
-                    background: currentPage === 1 ? 'transparent' : '#2B3139',
-                    color: '#EAECEF',
-                  }}
-                >
-                  «
-                </button>
-                <button
-                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                  disabled={currentPage === 1}
-                  className="px-2 py-1 rounded text-xs transition-colors disabled:opacity-30"
-                  style={{
-                    background: currentPage === 1 ? 'transparent' : '#2B3139',
-                    color: '#EAECEF',
-                  }}
-                >
-                  ‹
-                </button>
-                <span className="px-3 text-xs" style={{ color: '#EAECEF' }}>
-                  {currentPage} / {totalPages}
-                </span>
-                <button
-                  onClick={() =>
-                    setCurrentPage((p) => Math.min(totalPages, p + 1))
-                  }
-                  disabled={currentPage === totalPages}
-                  className="px-2 py-1 rounded text-xs transition-colors disabled:opacity-30"
-                  style={{
-                    background:
-                      currentPage === totalPages ? 'transparent' : '#2B3139',
-                    color: '#EAECEF',
-                  }}
-                >
-                  ›
-                </button>
-                <button
-                  onClick={() => setCurrentPage(totalPages)}
-                  disabled={currentPage === totalPages}
-                  className="px-2 py-1 rounded text-xs transition-colors disabled:opacity-30"
-                  style={{
-                    background:
-                      currentPage === totalPages ? 'transparent' : '#2B3139',
-                    color: '#EAECEF',
-                  }}
-                >
-                  »
-                </button>
+            <div className="flex items-center gap-2">
+              <span className="text-sm" style={{ color: '#848E9C' }}>
+                {t('positionHistory.side', language)}:
+              </span>
+              <div
+                className="flex rounded overflow-hidden"
+                style={{ border: '1px solid #2B3139' }}
+              >
+                {['all', 'LONG', 'SHORT'].map((side) => (
+                  <button
+                    key={side}
+                    onClick={() => setFilterSide(side)}
+                    className="px-3 py-1.5 text-sm capitalize transition-colors"
+                    style={{
+                      background:
+                        filterSide === side ? '#2B3139' : 'transparent',
+                      color: filterSide === side ? '#EAECEF' : '#848E9C',
+                    }}
+                  >
+                    {side === 'all' ? t('positionHistory.all', language) : side}
+                  </button>
+                ))}
               </div>
-            )}
-            {!loadedAll && positions.length >= 50 && (
-              <button
-                onClick={loadAllPositions}
-                disabled={loadingMore}
-                className="px-3 py-1 rounded text-xs transition-colors"
+            </div>
+
+            <div className="flex items-center gap-2 ml-auto">
+              <span className="text-sm" style={{ color: '#848E9C' }}>
+                {t('positionHistory.sort', language)}:
+              </span>
+              <select
+                value={`${sortBy}-${sortOrder}`}
+                onChange={(e) => {
+                  const [by, order] = e.target.value.split('-') as [
+                    'time' | 'pnl' | 'pnl_pct',
+                    'asc' | 'desc',
+                  ]
+                  setSortBy(by)
+                  setSortOrder(order)
+                }}
+                className="rounded px-3 py-1.5 text-sm"
                 style={{
-                  background: '#2B3139',
-                  color: '#818CF8',
-                  border: '1px solid rgba(129, 140, 248, 0.3)',
+                  background: '#0B0E11',
+                  border: '1px solid #2B3139',
+                  color: '#EAECEF',
                 }}
               >
-                {loadingMore ? '加载中...' : '加载全部'}
+                <option value="time-desc">
+                  {t('positionHistory.latestFirst', language)}
+                </option>
+                <option value="time-asc">
+                  {t('positionHistory.oldestFirst', language)}
+                </option>
+                <option value="pnl-desc">
+                  {t('positionHistory.highestPnL', language)}
+                </option>
+                <option value="pnl-asc">
+                  {t('positionHistory.lowestPnL', language)}
+                </option>
+              </select>
+            </div>
+
+            {/* Column visibility menu */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setColMenuOpen((v) => !v)}
+                className="rounded px-3 py-1.5 text-sm flex items-center gap-1.5"
+                style={{
+                  background: '#0B0E11',
+                  border: '1px solid #2B3139',
+                  color: '#EAECEF',
+                }}
+                title={
+                  language === 'zh'
+                    ? '显示/隐藏列（也可点表头隐藏）'
+                    : 'Show/hide columns (or click a header to hide)'
+                }
+              >
+                <span>⚙</span>
+                <span>{language === 'zh' ? '列' : 'Columns'}</span>
               </button>
-            )}
+              {colMenuOpen && (
+                <>
+                  {/* click-away backdrop */}
+                  <div
+                    className="fixed inset-0 z-40"
+                    onClick={() => setColMenuOpen(false)}
+                  />
+                  <div
+                    className="absolute right-0 mt-1 z-50 rounded-lg p-2 shadow-xl min-w-[160px]"
+                    style={{
+                      background: '#12161C',
+                      border: '1px solid #2B3139',
+                    }}
+                  >
+                    {COL_ORDER.map((key) => (
+                      <label
+                        key={key}
+                        className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-white/5 text-sm"
+                        style={{ color: '#EAECEF' }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={!hiddenCols.has(key)}
+                          onChange={() => toggleCol(key)}
+                        />
+                        {colLabel(key, language)}
+                      </label>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Table */}
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr style={{ background: '#0B0E11' }}>
+                  {/* Symbol — anchor column, always shown */}
+                  <th
+                    className="py-3 px-4 text-left text-xs font-semibold uppercase tracking-wider"
+                    style={{ color: '#848E9C' }}
+                  >
+                    {t('positionHistory.symbol', language)}
+                  </th>
+                  {COL_ORDER.filter((key) => !hiddenCols.has(key)).map(
+                    (key) => {
+                      const align =
+                        key === 'duration' ? 'text-center' : 'text-right'
+                      return (
+                        <th
+                          key={key}
+                          onClick={() => toggleCol(key)}
+                          title={
+                            language === 'zh'
+                              ? '点击隐藏此列（从"列"菜单恢复）'
+                              : 'Click to hide (restore from Columns menu)'
+                          }
+                          className={`py-3 px-4 ${align} text-xs font-semibold uppercase tracking-wider cursor-pointer select-none hover:text-nofx-text-main`}
+                          style={{ color: '#848E9C' }}
+                        >
+                          {colLabel(key, language)}
+                        </th>
+                      )
+                    }
+                  )}
+                </tr>
+              </thead>
+              <tbody>
+                {filteredPositions.map((position) => (
+                  <PositionRow
+                    key={position.id}
+                    position={position}
+                    onSymbolClick={onSymbolClick}
+                    hiddenCols={hiddenCols}
+                    visibleColCount={visibleColCount}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Footer with Pagination */}
+          <div
+            className="flex flex-wrap items-center justify-between gap-4 p-4 text-sm"
+            style={{ borderTop: '1px solid #2B3139', color: '#848E9C' }}
+          >
+            {/* Left: Count info */}
+            <div className="flex items-center gap-4">
+              <span>
+                {t('positionHistory.showingPositions', language, {
+                  count: totalFilteredCount,
+                  total: positions.length,
+                })}
+              </span>
+              {totalFilteredCount > 0 && (
+                <span>
+                  {t('positionHistory.totalPnL', language)}:{' '}
+                  <span
+                    style={{
+                      color:
+                        filteredAndSortedPositions.reduce(
+                          (sum, p) => sum + (p.realized_pnl || 0),
+                          0
+                        ) >= 0
+                          ? '#0ECB81'
+                          : '#F6465D',
+                    }}
+                  >
+                    {filteredAndSortedPositions.reduce(
+                      (sum, p) => sum + (p.realized_pnl || 0),
+                      0
+                    ) >= 0
+                      ? '+'
+                      : ''}
+                    {formatNumber(
+                      filteredAndSortedPositions.reduce(
+                        (sum, p) => sum + (p.realized_pnl || 0),
+                        0
+                      )
+                    )}
+                  </span>
+                </span>
+              )}
+            </div>
+
+            {/* Right: Pagination controls */}
+            <div className="flex items-center gap-3">
+              {/* Page size selector */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs" style={{ color: '#848E9C' }}>
+                  {language === 'zh' ? '每页' : 'Per page'}:
+                </span>
+                <select
+                  value={pageSize}
+                  onChange={(e) => setPageSize(Number(e.target.value))}
+                  className="rounded px-2 py-1 text-sm"
+                  style={{
+                    background: '#0B0E11',
+                    border: '1px solid #2B3139',
+                    color: '#EAECEF',
+                  }}
+                >
+                  <option value={20}>20</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+              </div>
+
+              {/* Page navigation */}
+              {totalPages > 1 && (
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setCurrentPage(1)}
+                    disabled={currentPage === 1}
+                    className="px-2 py-1 rounded text-xs transition-colors disabled:opacity-30"
+                    style={{
+                      background: currentPage === 1 ? 'transparent' : '#2B3139',
+                      color: '#EAECEF',
+                    }}
+                  >
+                    «
+                  </button>
+                  <button
+                    onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                    disabled={currentPage === 1}
+                    className="px-2 py-1 rounded text-xs transition-colors disabled:opacity-30"
+                    style={{
+                      background: currentPage === 1 ? 'transparent' : '#2B3139',
+                      color: '#EAECEF',
+                    }}
+                  >
+                    ‹
+                  </button>
+                  <span className="px-3 text-xs" style={{ color: '#EAECEF' }}>
+                    {currentPage} / {totalPages}
+                  </span>
+                  <button
+                    onClick={() =>
+                      setCurrentPage((p) => Math.min(totalPages, p + 1))
+                    }
+                    disabled={currentPage === totalPages}
+                    className="px-2 py-1 rounded text-xs transition-colors disabled:opacity-30"
+                    style={{
+                      background:
+                        currentPage === totalPages ? 'transparent' : '#2B3139',
+                      color: '#EAECEF',
+                    }}
+                  >
+                    ›
+                  </button>
+                  <button
+                    onClick={() => setCurrentPage(totalPages)}
+                    disabled={currentPage === totalPages}
+                    className="px-2 py-1 rounded text-xs transition-colors disabled:opacity-30"
+                    style={{
+                      background:
+                        currentPage === totalPages ? 'transparent' : '#2B3139',
+                      color: '#EAECEF',
+                    }}
+                  >
+                    »
+                  </button>
+                </div>
+              )}
+              {!loadedAll && positions.length >= 50 && (
+                <button
+                  onClick={loadAllPositions}
+                  disabled={loadingMore}
+                  className="px-3 py-1 rounded text-xs transition-colors"
+                  style={{
+                    background: '#2B3139',
+                    color: '#818CF8',
+                    border: '1px solid rgba(129, 140, 248, 0.3)',
+                  }}
+                >
+                  {loadingMore ? '加载中...' : '加载全部'}
+                </button>
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }
