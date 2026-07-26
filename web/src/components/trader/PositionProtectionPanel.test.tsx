@@ -161,4 +161,128 @@ describe('PositionProtectionPanel price ladder', () => {
     const liqEls = screen.getAllByText('Liq')
     expect(liqEls.length).toBeGreaterThanOrEqual(2) // legend item + row label
   })
+
+  it('renders 4-colour exchange_light status text (yellow=phantom/no-activation)', async () => {
+    const positions: Position[] = [
+      {
+        symbol: 'WLDUSDT',
+        side: 'short',
+        entry_price: 100,
+        mark_price: 92,
+        quantity: 10,
+        leverage: 5,
+        unrealized_pnl: 8,
+        unrealized_pnl_pct: 8,
+        liquidation_price: 130,
+        margin_used: 20,
+        protection_state: 'exchange_protection_verified',
+        break_even_state: 'idle',
+        drawdown_execution_mode: 'native_trailing_full',
+        protection_runtime: {
+          current_pnl_pct: 8,
+          drawdown_peak_pnl_pct: 8,
+          current_drawdown_pct: 0,
+          scheduled_tiers: [
+            {
+              index: 1,
+              min_profit_pct: 6,
+              max_drawdown_pct: 30,
+              close_ratio_pct: 100,
+              activation_price: 94,
+              callback_rate: 0.3,
+              planned_quantity: 10,
+              source: 'native',
+              execution_mode: 'native_trailing_full',
+              is_satisfied: true,
+              is_triggered: false,
+              // Real exchange state: dangerous no-activation order → yellow with the
+              // urgent "will mis-close · cancelling" reason text.
+              exchange_light: 'yellow',
+              exchange_light_reason: 'no_activation',
+            },
+          ],
+        },
+      } as unknown as Position,
+    ]
+
+    render(
+      <PositionProtectionPanel
+        traderId="t-2"
+        positions={positions}
+        language="en"
+        exchange="okx"
+      />
+    )
+
+    expect(await screen.findByText('DD-1')).toBeInTheDocument()
+    // exchange_light=yellow + reason=no_activation → the urgent mis-close warning.
+    // The tile/dot title carries the full buildTierReason tooltip ("...it would
+    // mis-close on any retrace..."), so match that wording.
+    const danger = await screen.findAllByTitle(
+      /would mis-close on any retrace/i
+    )
+    expect(danger.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('renders phantom yellow light distinctly from no-activation danger', async () => {
+    const positions: Position[] = [
+      {
+        symbol: 'BTCUSDT',
+        side: 'long',
+        entry_price: 100,
+        mark_price: 108,
+        quantity: 1,
+        leverage: 5,
+        unrealized_pnl: 8,
+        unrealized_pnl_pct: 8,
+        liquidation_price: 70,
+        margin_used: 20,
+        protection_state: 'exchange_protection_verified',
+        break_even_state: 'idle',
+        drawdown_execution_mode: 'native_trailing_full',
+        protection_runtime: {
+          current_pnl_pct: 8,
+          drawdown_peak_pnl_pct: 8,
+          current_drawdown_pct: 0,
+          scheduled_tiers: [
+            {
+              index: 1,
+              min_profit_pct: 6,
+              max_drawdown_pct: 30,
+              close_ratio_pct: 100,
+              activation_price: 106,
+              callback_rate: 0.3,
+              planned_quantity: 1,
+              source: 'native',
+              execution_mode: 'native_trailing_full',
+              is_satisfied: true,
+              is_triggered: false,
+              exchange_light: 'yellow',
+              exchange_light_reason: 'phantom',
+            },
+          ],
+        },
+      } as unknown as Position,
+    ]
+
+    render(
+      <PositionProtectionPanel
+        traderId="t-3"
+        positions={positions}
+        language="en"
+        exchange="okx"
+      />
+    )
+
+    expect(await screen.findByText('DD-1')).toBeInTheDocument()
+    // phantom reason → "...dead (no protection, but cannot mis-close)...", which
+    // is distinct from the no_activation "would mis-close on any retrace" danger.
+    const phantom = await screen.findAllByTitle(
+      /no protection, but cannot mis-close/i
+    )
+    expect(phantom.length).toBeGreaterThanOrEqual(1)
+    expect(
+      screen.queryAllByTitle(/would mis-close on any retrace/i)
+    ).toHaveLength(0)
+  })
 })

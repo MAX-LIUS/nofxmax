@@ -175,8 +175,12 @@ func (at *AutoTrader) applyStructuralTrail(symbol, side string, entry float64, i
 	}
 	key := frozenATRKey(at.id, symbol, tf, sideUpper)
 
-	// Frozen open-time ATR (price units) drives cushion/min-profit. No ATR → static.
-	atr, ok := at.frozenATRForPosition(symbol, side, entry, acfg)
+	// ATR (price units) drives cushion/min-profit. No ATR → static. By default this
+	// resolves to the open-time FROZEN ATR (unchanged behaviour); when StructuralSL.
+	// DynamicATR is opted in, it resolves to a per-main-cycle recomputed candidate so
+	// the trail cushion adapts to changing volatility. The monotonic never-loosen gate
+	// below guarantees a changing ATR can only tighten the boundary, never widen it.
+	atr, ok := at.candidateATRForRatchet(symbol, side, entry, acfg, ss)
 	if !ok || atr <= 0 {
 		return entryBoundary
 	}

@@ -89,6 +89,60 @@ func (at *AutoTrader) frozenATRForPosition(symbol, side string, entryPrice float
 	return atr, true
 }
 
+// candidateATRRecomputeIntervalMs throttles the dynamic-ATR recompute to at most
+// once per this window, approximating "once per main analysis cycle" without
+// coupling to the cycle loop. 5 minutes is comfortably longer than a drawdown poll
+// (5-60s) so the 10s monitor never triggers a recompute storm.
+const candidateATRRecomputeIntervalMs = 5 * 60 * 1000
+
+// candidateATRForRatchet returns the ATR the STRUCTURAL RATCHET should use this
+// cycle. Default behaviour (StructuralSL.DynamicATR == false) is completely inert:
+// it returns the open-time frozen ATR, identical to calling frozenATRForPosition —
+// so every existing protection path is byte-for-byte unchanged and this is pure
+// scaffolding.
+//
+// When DynamicATR is opted in, it returns a per-main-cycle RECOMPUTED "candidate"
+// ATR (throttled to once per candidateATRRecomputeIntervalMs, cached per position)
+// so a long hold's trail cushion can adapt to changing volatility. The downstream
+// ratchet already enforces a monotonic never-loosen gate, so feeding it a changing
+// ATR can only ever tighten the boundary (one-way), never widen it. Only the
+// structural ratchet calls this — DD/TP/BE/SL activation anchors keep the frozen
+// ATR because they are fixed at-open targets whose exchange orders are already
+// placed and must not be re-anchored.
+func (at *AutoTrader) candidateATRForRatchet(symbol, side string, entryPrice float64, cfg store.ATRProtectionConfig, ss store.StructuralSLConfig) (float64, bool) {
+	frozen, ok := at.frozenATRForPosition(symbol, side, entryPrice, cfg)
+	if !ss.DynamicATR {
+		// Inert scaffold path: behave exactly like frozenATRForPosition.
+		return frozen, ok
+	}
+	if !ok || frozen <= 0 {
+		return frozen, ok
+	}
+	key := frozenATRKey(at.id, symbol, cfg.WithDefaults().Timeframe, side)
+	nowMs := time.Now().UnixMilli()
+	at.candidateATRMutex.RLock()
+	cached, hasCached := at.candidateATRCache[key]
+	lastMs := at.candidateATRAtMs[key]
+	at.candidateATRMutex.RUnlock()
+	if hasCached && nowMs-lastMs < candidateATRRecomputeIntervalMs {
+		return cached, true
+	}
+	// Recompute a fresh ATR for this main cycle; on failure fall back to the last
+	// candidate (if any) or the frozen value — never return a worse/looser number.
+	fresh, freshOK := at.atrForProtection(symbol, cfg)
+	if !freshOK || fresh <= 0 {
+		if hasCached {
+			return cached, true
+		}
+		return frozen, true
+	}
+	at.candidateATRMutex.Lock()
+	at.candidateATRCache[key] = fresh
+	at.candidateATRAtMs[key] = nowMs
+	at.candidateATRMutex.Unlock()
+	return fresh, true
+}
+
 // frozenATRKey builds the cache/persistence key for a position's frozen ATR.
 // The 1h timeframe (the protection default) keeps the legacy "id|symbol" form so
 // existing persisted records and the ETH-drift fix are untouched. Other

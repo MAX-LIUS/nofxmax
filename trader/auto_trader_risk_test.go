@@ -22,6 +22,7 @@ type fakeProtectionTrader struct {
 	lastStopPrice       float64
 	cancelErr           error
 	setStopLossErr      error
+	getOpenOrdersErr    error
 	trailingCalls       int
 	cancelTrailingCalls int
 	trailingSymbol      string
@@ -116,6 +117,9 @@ func (f *fakeProtectionTrader) GetClosedPnL(startTime time.Time, limit int) ([]t
 func (f *fakeProtectionTrader) GetOpenOrders(symbol string) ([]tradertypes.OpenOrder, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.getOpenOrdersErr != nil {
+		return nil, f.getOpenOrdersErr
+	}
 	return append([]tradertypes.OpenOrder(nil), f.openOrders...), nil
 }
 func (f *fakeProtectionTrader) SetTrailingStopLoss(symbol string, positionSide string, activationPrice float64, callbackRate float64, quantity float64) error {
@@ -129,16 +133,42 @@ func (f *fakeProtectionTrader) SetTrailingStopLoss(symbol string, positionSide s
 	f.trailingSide = positionSide
 	f.trailingActivation = activationPrice
 	f.trailingCallback = callbackRate
+	// Faithful to the OKX adapter (trader/okx/trader_orders.go:1457): an order placed
+	// with activePx<=0 is reported back as "activated" (immediate activation from mark),
+	// StopPrice=0; a positive activePx rests as pending_activation carrying that activePx.
+	status := "pending_activation"
+	stopPrice := activationPrice
+	if activationPrice <= 0 {
+		status = "activated"
+		stopPrice = 0
+	}
 	f.openOrders = append(f.openOrders, tradertypes.OpenOrder{
-		OrderID:      fmt.Sprintf("new-tier-%d", f.trailingCalls),
-		Symbol:       symbol,
-		PositionSide: positionSide,
-		Type:         "TRAILING_STOP_MARKET",
-		StopPrice:    activationPrice,
-		CallbackRate: callbackRate,
-		Quantity:     quantity,
-		Status:       "NEW",
+		OrderID:          fmt.Sprintf("new-tier-%d", f.trailingCalls),
+		Symbol:           symbol,
+		PositionSide:     positionSide,
+		Type:             "TRAILING_STOP_MARKET",
+		StopPrice:        stopPrice,
+		ActivationPrice:  activationPrice,
+		ActivationStatus: status,
+		CallbackRate:     callbackRate,
+		Quantity:         quantity,
+		Status:           "NEW",
 	})
+	return nil
+}
+
+func (f *fakeProtectionTrader) CancelAlgoOrderByID(symbol string, algoID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	filtered := make([]tradertypes.OpenOrder, 0, len(f.openOrders))
+	for _, order := range f.openOrders {
+		if order.OrderID == algoID {
+			f.cancelTrailingCalls++
+			continue
+		}
+		filtered = append(filtered, order)
+	}
+	f.openOrders = filtered
 	return nil
 }
 func (f *fakeProtectionTrader) SetTrailingStopLossTagged(symbol string, positionSide string, activationPrice float64, callbackRate float64, quantity float64, reasonTag string) error {
@@ -1039,19 +1069,40 @@ func TestBuildEntryReviewSummaryFromDecisionReviewWhitelistsFields(t *testing.T)
 	}
 }
 
-func TestGetDrawdownArmRulesForNativeExposureSelectsOneStableTierBeforeProfitGate(t *testing.T) {
+// Place-at-open (2026-07-26): getDrawdownArmRulesForNativeExposure returns EVERY
+// valid tier that lacks a live exchange order, INDEPENDENT of current profit — all
+// tiers are armed at open (each at its own activePx), runtime only re-fills missing.
+// (Superseded the old single-tier profit-migration which caused the WLD churn loop.)
+func TestGetDrawdownArmRulesForNativeExposureArmsAllValidTiers(t *testing.T) {
 	at := &AutoTrader{trader: &fakeProtectionTrader{}}
 	rules := []store.DrawdownTakeProfitRule{
 		{MinProfitPct: 0.8, MaxDrawdownPct: 55, CloseRatioPct: 50},
 		{MinProfitPct: 1.5, MaxDrawdownPct: 45, CloseRatioPct: 80},
 	}
-	got := at.getDrawdownArmRulesForNativeExposure(0.2, 100, 1, "BTCUSDT", "long", rules)
-	if len(got) != 1 || got[0].MinProfitPct != 0.8 {
-		t.Fatalf("expected nearest native tier before profit gate, got %+v", got)
+	minProfits := func(got []store.DrawdownTakeProfitRule) map[float64]bool {
+		m := make(map[float64]bool, len(got))
+		for _, r := range got {
+			m[r.MinProfitPct] = true
+		}
+		return m
 	}
+	// Low profit (0.2%): still arm BOTH tiers (they rest at their own activePx).
+	got := at.getDrawdownArmRulesForNativeExposure(0.2, 100, 1, "BTCUSDT", "long", rules)
+	m := minProfits(got)
+	if !m[0.8] || !m[1.5] {
+		t.Fatalf("place-at-open must arm all valid tiers regardless of profit, got %+v", got)
+	}
+	// Higher profit (2.0%): same — all tiers, no single-tier migration.
 	got = at.getDrawdownArmRulesForNativeExposure(2.0, 100, 1, "BTCUSDT", "long", rules)
-	if len(got) != 1 || got[0].MinProfitPct != 1.5 {
-		t.Fatalf("expected highest satisfied native tier after profit advances, got %+v", got)
+	m = minProfits(got)
+	if !m[0.8] || !m[1.5] {
+		t.Fatalf("place-at-open must arm all valid tiers at higher profit too, got %+v", got)
+	}
+	// Invalid tier (min<=0) is skipped.
+	withBad := append([]store.DrawdownTakeProfitRule{{MinProfitPct: 0, MaxDrawdownPct: 10, CloseRatioPct: 50}}, rules...)
+	got = at.getDrawdownArmRulesForNativeExposure(0.2, 100, 1, "BTCUSDT", "long", withBad)
+	if minProfits(got)[0] {
+		t.Fatalf("invalid tier (min<=0) must be skipped, got %+v", got)
 	}
 }
 

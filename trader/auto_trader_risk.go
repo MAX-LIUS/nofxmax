@@ -263,32 +263,51 @@ func (at *AutoTrader) checkPositionDrawdown() {
 		}
 
 		// For exchange-native trailing protections, arm all tiers whose min-profit gate is already met.
+		//
+		// Anti-churn design (2026-07): we NO LONGER cancel+convert phantom trailing
+		// orders here (that place→phantom→cancel→managed→re-arm loop caused the WLD
+		// 208-set/106-cancel/212-phantom churn). Instead: arm any genuinely-missing
+		// tier once, then LEAVE existing orders alone. Whether the code-side managed
+		// close must supplement is decided by real EFFECTIVENESS (activated, or
+		// resting with activePx not yet passed) — a phantom/flawed order no longer
+		// suppresses the managed backup. So nativeTrailingHandled reflects effective
+		// coverage, not mere placement.
 		nativeTrailingHandled := false
 		if at.supportsNativeTrailingStop() {
 			executionMode := at.getDrawdownExecutionMode(symbol, side)
+			// Safety FIRST: cancel any DANGEROUS no-activation trailing order that would
+			// mis-close at a loss — i.e. activePx<=0 activated-immediately AND the position
+			// is below the tier profit floor (trailing from near-entry). At/above the floor
+			// a no-activePx order is a DELIBERATE profit-locked immediate-trail we place on
+			// purpose (unified reached/unreached protection) and must be kept. Runs before
+			// arming so the arm loop can re-place a genuinely-missing tier this pass.
+			// Phantom orders (activePx>0, mark passed) are NOT touched here.
+			safeProfitFloor := lowestTierMinProfit(rules)
+			at.reconcileDangerousTrailingOrders(symbol, side, currentPnLPct, safeProfitFloor)
 			armRules := at.getDrawdownArmRulesForNativeExposure(currentPnLPct, entryPrice, quantity, symbol, side, rules)
-			if len(armRules) == 0 && isNativeTrailingProtectionState(at.getProtectionState(symbol, side)) {
-				// Check if existing trailing orders need reactivation (placed with activePx
-				// that is now past current price but OKX didn't auto-activate)
-				if at.checkAndFixStaleTrailingActivation(symbol, side, entryPrice, markPrice, rules) {
-					// Stale trailing order was cancelled, re-fetch arm rules
-					armRules = at.getDrawdownArmRulesForNativeExposure(currentPnLPct, entryPrice, quantity, symbol, side, rules)
-				} else {
-					logger.Infof("🟣 Drawdown monitor: %s %s already has all satisfied native trailing tiers armed (%s), skipping duplicate arm pass", symbol, side, executionMode)
-					nativeTrailingHandled = true
+			for _, armRule := range armRules {
+				// If this tier's re-arm breaker has tripped (repeated place/verify
+				// failures), STOP re-placing on the exchange — the in-process managed
+				// monitor owns it now. This is what cuts the cancel→re-place churn once
+				// the exchange side is proven unreliable for the tier.
+				if at.reArmBreakerTripped(symbol, side, armRule, entryPrice) {
+					continue
 				}
+				// applyNativeTrailingDrawdown is idempotent: it re-places only when the
+				// tier is genuinely missing/drifted, and leaves a present (incl. phantom)
+				// order untouched. This "arm only when missing" is the whole point.
+				_ = at.applyNativeTrailingDrawdown(symbol, side, entryPrice, markPrice, armRule)
 			}
-			if !nativeTrailingHandled {
-				for _, armRule := range armRules {
-					if at.applyNativeTrailingDrawdown(symbol, side, entryPrice, markPrice, armRule) {
-						// Only mark as native-handled if the state is actually native trailing.
-						// If applyNativeTrailingDrawdown fell back to managed mode (callback too small),
-						// we must NOT skip the managed execution path below.
-						if isNativeTrailingProtectionState(at.getProtectionState(symbol, side)) {
-							nativeTrailingHandled = true
-						}
-					}
-				}
+			// Decide managed suppression by EFFECTIVENESS, not placement, while
+			// maintaining the per-tier re-arm breaker. If every currently-satisfied
+			// native tier is effectively covered (or its breaker has tripped and the
+			// managed monitor now owns it), the exchange/managed side owns the exit and
+			// we skip the tier-alloc managed market-close pass. Otherwise we fall through
+			// so the managed block (with its per-tier Layer-1 gate) can supplement.
+			if at.accountReArmBreaker(symbol, side, entryPrice, markPrice, currentPnLPct, rules) {
+				nativeTrailingHandled = true
+			} else {
+				logger.Warnf("🟡 Drawdown monitor: %s %s (%s) has satisfied tier(s) NOT effectively covered on exchange — allowing managed backup to supplement", symbol, side, executionMode)
 			}
 		}
 
@@ -328,7 +347,7 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			// activated" status shown to the user reflects the EXCHANGE order, not
 			// this monitor — so suppressing here keeps display and execution aligned.
 			if matchingRule := findRuleForTier(rules, triggered); matchingRule != nil {
-				if at.exchangeSideCoversDrawdownTier(symbol, side, normalizeDrawdownRule(*matchingRule), entryPrice) {
+				if at.exchangeSideCoversDrawdownTier(symbol, side, normalizeDrawdownRule(*matchingRule), entryPrice, markPrice) {
 					// Exchange owns this tier; keep tier state as-is (do not mark
 					// executed — the exchange fill detector handles that) and move on.
 					continue
@@ -1061,47 +1080,32 @@ func (at *AutoTrader) hasMatchingNativeTrailingOrderForRule(symbol, side string,
 }
 
 func (at *AutoTrader) getDrawdownArmRulesForNativeExposure(currentPnLPct, entryPrice, quantity float64, symbol, side string, rules []store.DrawdownTakeProfitRule) []store.DrawdownTakeProfitRule {
-	// Exchange-native trailing coverage is intentionally single-tier on OKX-style
-	// venues. Live OKX behaviour showed multiple simultaneous trailing tiers on the
-	// same symbol/side can churn (place/cancel/place). Keep one exchange tier stable
-	// and let local managed drawdown + reconciler migrate it as profit advances.
-	highestArmedMinProfit := at.getHighestArmedTierMinProfit(symbol, side, entryPrice, quantity)
-
-	// If current profit is below the floor tier's activation threshold, the floor
-	// tier's trailing order is unreachable (activation price not met). In this case,
-	// drop the floor so we can arm the highest currently-satisfied tier instead.
-	// This prevents "phantom protection" where an unreachable trailing order exists
-	// but provides no actual protection.
-	// HOWEVER: if the exchange already has a trailing order with activePx set,
-	// it will auto-activate when price reaches it — don't clear in that case.
-	if highestArmedMinProfit > 0 && currentPnLPct < highestArmedMinProfit {
-		if openOrders, err := at.trader.GetOpenOrders(symbol); err == nil {
-			positionSide := strings.ToUpper(side)
-			hasLiveTrailing := false
-			for _, o := range openOrders {
-				if !strings.EqualFold(o.PositionSide, positionSide) && o.PositionSide != "" && o.PositionSide != "BOTH" {
-					continue
-				}
-				if strings.Contains(strings.ToUpper(o.Type), "TRAILING") {
-					hasLiveTrailing = true
-					break
-				}
-			}
-			if hasLiveTrailing {
-				// Exchange has a trailing order waiting for activation — don't clear
-				return nil
-			}
+	// Unified place-at-open protection (2026-07-26): ALL configured tiers are armed at
+	// open, each with its own activation price (safest moment — price is furthest from
+	// every activePx). At runtime we only MONITOR and re-fill genuinely-missing tiers.
+	// We no longer migrate a single exchange tier as profit advances — that migration
+	// tried to arm a higher tier only once price approached/passed its activePx, which
+	// on OKX became an immediate-active or phantom order and looped (WLD churn). Instead:
+	// query every tier, return those without a matching live exchange order so each gets
+	// re-placed (a passed+profitable tier is re-placed with an immediate anchor by
+	// applyNativeTrailingDrawdown; an unreached tier is re-placed resting at its activePx).
+	//
+	// Churn-safety: per-rule getDrawdownArmRulesForSelectedRule keeps the fingerprint
+	// dedup (skip when a matching order already exists), the executed-tier guard, and
+	// the 300s re-arm cooldown — so "return all missing" cannot spam duplicate orders.
+	// The two historical multi-tier churns were both fixed independently: the activated-
+	// order drift false-positive (leave activated orders alone) and the ATR-resolution
+	// mismatch (resolveDrawdownRulesATR). Holding N resting tiers at distinct activePx is
+	// now stable.
+	var out []store.DrawdownTakeProfitRule
+	for _, raw := range rules {
+		rule := normalizeDrawdownRule(raw)
+		if rule.MinProfitPct <= 0 || rule.MaxDrawdownPct <= 0 || rule.CloseRatioPct <= 0 {
+			continue
 		}
-		logger.Infof("🔄 Drawdown floor downgrade: %s %s profit %.2f%% < floor %.2f%% — allowing lower tier", symbol, side, currentPnLPct, highestArmedMinProfit)
-		at.clearArmedDrawdownRecordsAboveMinProfit(symbol, side, currentPnLPct)
-		highestArmedMinProfit = 0
+		out = append(out, at.getDrawdownArmRulesForSelectedRule(entryPrice, quantity, symbol, side, rule)...)
 	}
-
-	rule, ok := selectNativeDrawdownExposureRuleWithFloor(currentPnLPct, rules, highestArmedMinProfit)
-	if !ok {
-		return nil
-	}
-	return at.getDrawdownArmRulesForSelectedRule(entryPrice, quantity, symbol, side, rule)
+	return out
 }
 
 // getHighestArmedTierMinProfit returns the MinProfitPct of the highest tier that has been
@@ -1519,6 +1523,11 @@ type nativeTrailingOrder struct {
 	Quantity         float64
 	OrderID          string
 	ActivationStatus string
+	// ActivationPrice is the fixed activePx the order was placed with. On OKX a
+	// resting order reports StopPrice==activePx, but once ACTIVATED StopPrice
+	// becomes the moving trail level — so we carry activePx separately to judge
+	// phantom activation (activePx passed but exchange never activated) reliably.
+	ActivationPrice float64
 }
 
 func (at *AutoTrader) findExistingFullTrailingOrder(side string, openOrders []OpenOrder) *nativeTrailingOrder {
@@ -1536,23 +1545,162 @@ func (at *AutoTrader) findExistingFullTrailingOrder(side string, openOrders []Op
 			Quantity:         order.Quantity,
 			OrderID:          order.OrderID,
 			ActivationStatus: order.ActivationStatus,
+			ActivationPrice:  order.ActivationPrice,
 		}
 	}
 	return nil
 }
 
-// exchangeSideCoversDrawdownTier reports whether the exchange already carries a
-// live trailing order that protects this drawdown tier — i.e. the exchange side
-// is the active protection and the code side must NOT also fire (avoid double
-// execution). It is the gate for "code side only supplements when the exchange
-// side did not actually execute".
+// trailingOrderIsDangerousNoActivation reports whether a native trailing order is
+// the DANGEROUS "no activation price" kind: OKX places a move_order_stop without
+// activePx as immediately-active, and the adapter reports it as ActivationStatus
+// "activated" with ActivationPrice<=0 (see trader/okx/trader_orders.go:1457). Such
+// an order trails from the CURRENT price the instant it is placed, so any small
+// retrace closes the position early — even before the tier's profit anchor. It is
+// never something WE place (applyNativeTrailingDrawdown requires activePx>0), so it
+// only arises from legacy/manual/exchange-anomaly orders. It must be cancelled and
+// re-placed with the correct anchor, NOT left resting. This is distinct from a
+// PHANTOM order (activePx>0 but mark already passed it) which will never fire and
+// so cannot mis-close — phantoms are left alone and covered by the managed backup.
+// exchange is required because the danger pattern is VENUE-SPECIFIC: only OKX
+// reports an immediately-active (no-activePx) order as ActivationStatus "activated"
+// with ActivationPrice<=0. On Binance an "activated" trailing order legitimately
+// carries ActivationPrice = triggerPrice (>0), and even a synthetic 0 there means a
+// genuinely armed order (Binance reliably activates), NOT a mis-closing one — so the
+// rule must never fire off-OKX or it would cancel healthy Binance protection.
 //
-// Returns true (exchange covers it, suppress code-side close) when a trailing
-// order matching this tier's planned activation + callback + quantity exists on
-// the exchange in any non-terminal state. Returns false only when no such order
-// is found (exchange side genuinely absent), in which case the code-side managed
-// close is allowed to supplement.
-func (at *AutoTrader) exchangeSideCoversDrawdownTier(symbol, side string, rule store.DrawdownTakeProfitRule, entryPrice float64) bool {
+// PROFIT-AWARE (2026-07-26): a no-activePx immediate-trail order is DANGEROUS only
+// when placed while the position is NOT yet profitable enough — it then trails from
+// a near-entry/loss level and mis-closes at a loss on any small retrace. Once the
+// position's profit has reached the lowest tier's activation floor (safeProfitFloor
+// = min MinProfitPct across rules), an immediate-trail order is a DELIBERATE,
+// SAFE profit-lock: its peak is anchored in profit, so the worst-case close is
+// (peak × (1 − callback)) ≥ around the tier's designed retained profit — never a
+// fresh-position loss. We place exactly such orders on purpose for tiers whose
+// activePx the mark has already passed (unifying reached/unreached protection), so
+// the reconciler must NOT cancel them or it recreates the place→cancel churn. Below
+// the floor the old always-dangerous rule still holds.
+// lowestTierMinProfit returns the smallest positive MinProfitPct across the given
+// drawdown rules — the profit level at/above which a no-activePx immediate-trail is
+// a deliberate, safe profit-lock rather than a mis-closing hazard. Returns 0 when no
+// valid rule exists (callers then fall back to the always-dangerous rule).
+func lowestTierMinProfit(rules []store.DrawdownTakeProfitRule) float64 {
+	floor := 0.0
+	for _, raw := range rules {
+		rule := normalizeDrawdownRule(raw)
+		if rule.MinProfitPct <= 0 || rule.MaxDrawdownPct <= 0 || rule.CloseRatioPct <= 0 {
+			continue
+		}
+		if floor == 0 || rule.MinProfitPct < floor {
+			floor = rule.MinProfitPct
+		}
+	}
+	return floor
+}
+
+func trailingOrderIsDangerousNoActivation(exchange string, order *nativeTrailingOrder, currentPnLPct, safeProfitFloor float64) bool {
+	if order == nil {
+		return false
+	}
+	if !strings.EqualFold(exchange, "okx") {
+		return false
+	}
+	if !(strings.EqualFold(order.ActivationStatus, "activated") && order.ActivationPrice <= 0) {
+		return false
+	}
+	// Profit gate: at/above the floor this is a deliberate, safe immediate-trail
+	// (profit locked in). Only below the floor is it the mis-closing kind.
+	if safeProfitFloor > 0 && currentPnLPct >= safeProfitFloor {
+		return false
+	}
+	return true
+}
+
+// nativeTrailingEffective reports whether a resting/native trailing order is
+// actually EFFECTIVE protection right now — i.e. it will (or already does) close
+// the position on giveback. This is the distinction that the old "order merely
+// exists" check missed and that let phantom orders silently disable the managed
+// backup:
+//
+//   - activated WITH activePx>0 → EFFECTIVE (genuinely trailing the peak).
+//   - activated WITHOUT activePx → NOT effective (dangerous immediate-activation
+//     order; it mis-closes rather than protects — the managed backup must cover
+//     the giveback while the danger reconciler cancels+re-places it).
+//   - activated (legacy)         → EFFECTIVE (already trailing the peak).
+//   - resting, activePx NOT yet
+//     passed by mark            → EFFECTIVE (OKX will auto-activate when reached).
+//   - phantom (resting, activePx
+//     already passed, never
+//     activated)                → NOT effective (dead order; OKX won't activate).
+//   - no activePx recorded      → NOT effective (cannot judge; treat as flawed so
+//     the managed backup covers it).
+//
+// markPrice<=0 means we cannot evaluate reachability; be conservative and treat
+// the order as NOT effective so the managed backup still fires (a duplicate
+// reduce-only close is bounded and safe; an unprotected giveback is not).
+//
+// PROFIT-AWARE (2026-07-26): an OKX activated order WITHOUT activePx is effective
+// protection when the position is at/above the tier's profit floor (safeProfitFloor)
+// — it is then a deliberate immediate-trail whose peak is anchored in profit and
+// WILL close on giveback. Below the floor it is the dangerous mis-closing kind and
+// NOT effective (managed backup covers while the reconciler cancels it).
+func nativeTrailingEffective(exchange string, order *nativeTrailingOrder, side string, markPrice, currentPnLPct, safeProfitFloor float64) bool {
+	if order == nil {
+		return false
+	}
+	if strings.EqualFold(order.ActivationStatus, "activated") {
+		// A genuinely activated order carries the activation price it was placed
+		// with (adapter sets ActivationPrice=activePx). On OKX, if activePx<=0 the
+		// order was placed with NO activation anchor and OKX activated it immediately.
+		// Whether that is protection or a mis-close hazard depends on PROFIT: at/above
+		// the tier floor it is a deliberate profit-locked immediate-trail (effective);
+		// below the floor it mis-closes (not effective → managed backup covers while
+		// the danger reconciler cancels+re-places). This gate is OKX-ONLY: on Binance
+		// an activated order always carries ActivationPrice=triggerPrice and activates
+		// reliably, so it stays effective regardless of the recorded value.
+		if strings.EqualFold(exchange, "okx") {
+			if order.ActivationPrice > 0 {
+				return true
+			}
+			return safeProfitFloor > 0 && currentPnLPct >= safeProfitFloor
+		}
+		return true
+	}
+	activePx := order.ActivationPrice
+	if activePx <= 0 {
+		// OKX resting orders report activePx via StopPrice; fall back to it.
+		activePx = order.StopPrice
+	}
+	if activePx <= 0 {
+		// No activation anchor at all — flawed order, cannot rely on it.
+		return false
+	}
+	if markPrice <= 0 {
+		return false
+	}
+	// Resting order is effective ONLY while the activation price has NOT yet been
+	// passed (it will auto-activate when reached). Once mark passed activePx and
+	// the venue still reports it non-activated, it is phantom → NOT effective.
+	if strings.EqualFold(side, "long") {
+		return markPrice < activePx
+	}
+	return markPrice > activePx
+}
+
+// exchangeSideCoversDrawdownTier reports whether the exchange already carries an
+// EFFECTIVE trailing order that protects this drawdown tier — i.e. the exchange
+// side is genuinely active protection and the code side must NOT also fire (avoid
+// double execution). It is the gate for "code side only supplements when the
+// exchange side is not actually protecting".
+//
+// Returns true (suppress code-side close) ONLY when a matching trailing order
+// exists AND is effective (activated, or resting with its activation price not
+// yet passed). Returns false — allowing the managed code-side close to fire —
+// when the order is absent, phantom (activePx already passed but never
+// activated), or flawed (no activation price). This is the decisive fix: a
+// phantom order no longer masquerades as coverage and silently disables the
+// managed backup.
+func (at *AutoTrader) exchangeSideCoversDrawdownTier(symbol, side string, rule store.DrawdownTakeProfitRule, entryPrice, markPrice float64) bool {
 	if !at.supportsNativeTrailingStop() {
 		// Exchange cannot carry native trailing at all → code side is the sole
 		// protection and must execute (no double-fire risk).
@@ -1567,19 +1715,184 @@ func (at *AutoTrader) exchangeSideCoversDrawdownTier(symbol, side string, rule s
 		logger.Warnf("⚠️ Drawdown fallback gate: cannot fetch open orders (%s %s): %v — allowing code-side close", symbol, side, err)
 		return false
 	}
+	return at.exchangeSideCoversDrawdownTierWithOrders(symbol, side, rule, entryPrice, markPrice, openOrders)
+}
+
+// exchangeSideCoversDrawdownTierWithOrders is the pure form of the coverage gate
+// operating on a pre-fetched open-orders snapshot, so a caller iterating many tiers
+// (breaker accounting) can fetch once instead of once per tier. exchangeSideCovers-
+// DrawdownTier is the fetch-then-delegate wrapper used everywhere else.
+func (at *AutoTrader) exchangeSideCoversDrawdownTierWithOrders(symbol, side string, rule store.DrawdownTakeProfitRule, entryPrice, markPrice float64, openOrders []OpenOrder) bool {
 	existing, _, _, _ := at.findEquivalentPartialTrailingOrder(symbol, side, rule, entryPrice, openOrders)
-	if existing != nil {
-		logger.Infof("🛡 Exchange side covers drawdown tier (%s %s close=%.1f%% status=%s) — suppressing code-side close to avoid double execution",
-			symbol, side, rule.CloseRatioPct, existing.ActivationStatus)
-		return true
+	if existing == nil {
+		return false
 	}
-	return false
+	// Profit-aware effectiveness: a no-activePx immediate-trail counts as effective
+	// coverage only when the position is at/above this tier's profit floor (its own
+	// MinProfitPct) — then it is a deliberate profit-lock. Below the floor it mis-
+	// closes and the managed backup must supplement.
+	currentPnLPct := calculatePositionPnLPct(side, entryPrice, markPrice)
+	if !nativeTrailingEffective(at.exchange, existing, side, markPrice, currentPnLPct, rule.MinProfitPct) {
+		logger.Warnf("🟡 Exchange trailing tier present but NOT effective (%s %s close=%.1f%% status=%s activePx=%.6f mark=%.6f) — allowing managed code-side close to supplement",
+			symbol, side, rule.CloseRatioPct, existing.ActivationStatus, existing.ActivationPrice, markPrice)
+		return false
+	}
+	logger.Infof("🛡 Exchange side covers drawdown tier (%s %s close=%.1f%% status=%s) — suppressing code-side close to avoid double execution",
+		symbol, side, rule.CloseRatioPct, existing.ActivationStatus)
+	return true
+}
+
+// allSatisfiedNativeTiersEffective reports whether EVERY drawdown tier whose
+// min-profit gate is currently met has an EFFECTIVE native trailing order on the
+// exchange. "Satisfied" = currentPnLPct >= rule.MinProfitPct (the tier's
+// activation price has been reached, so a resting-but-unactivated order for it is
+// phantom). Used to decide whether the managed code-side close pass can be
+// skipped: only when the exchange genuinely owns every reachable tier.
+//
+// Returns true when there are no satisfied tiers (nothing to protect yet — the
+// resting at-open orders wait for activation) OR all satisfied tiers are
+// effectively covered. Returns false the moment any satisfied tier is phantom,
+// flawed, or missing — forcing the managed backup to supplement.
+func (at *AutoTrader) allSatisfiedNativeTiersEffective(symbol, side string, entryPrice, markPrice, currentPnLPct float64, rules []store.DrawdownTakeProfitRule) bool {
+	for _, raw := range rules {
+		rule := normalizeDrawdownRule(raw)
+		if rule.MinProfitPct <= 0 || rule.MaxDrawdownPct <= 0 || rule.CloseRatioPct <= 0 {
+			continue
+		}
+		if currentPnLPct < rule.MinProfitPct {
+			// Not yet reached this tier's activation — its resting order is legitimately
+			// waiting, not a gap. Don't require effective coverage yet.
+			continue
+		}
+		if !at.exchangeSideCoversDrawdownTier(symbol, side, rule, entryPrice, markPrice) {
+			return false
+		}
+	}
+	return true
+}
+
+// reconcileDangerousTrailingOrders finds and cancels DANGEROUS no-activation-price
+// native trailing orders (ActivationStatus "activated" with activePx<=0). Such an
+// order was placed without an activation anchor, so OKX activated it immediately
+// and it trails from the current price — a small retrace mis-closes the position
+// before the tier's profit anchor. It is never something WE place (place path
+// requires activePx>0), so it only arises from legacy/manual/exchange-anomaly
+// orders. We cancel it here; the normal arm loop then re-places the tier with the
+// correct anchor (when mark hasn't passed the planned activation) and the managed
+// backup covers the giveback in the meantime. PHANTOM orders (activePx>0, mark
+// already passed) are deliberately NOT touched here — they can't mis-close, and
+// re-placing them would just recreate a phantom (churn). Returns the number of
+// dangerous orders cancelled. Runs before the arm loop each drawdown poll.
+func (at *AutoTrader) reconcileDangerousTrailingOrders(symbol, side string, currentPnLPct, safeProfitFloor float64) int {
+	if !at.supportsNativeTrailingStop() {
+		return 0
+	}
+	openOrders, err := at.GetOpenOrders(symbol)
+	if err != nil {
+		logger.Warnf("⚠️ Dangerous-trailing reconcile: cannot fetch open orders (%s %s): %v — skipping this pass", symbol, side, err)
+		return 0
+	}
+	var dangerousIDs []string
+	for _, order := range openOrders {
+		if order.PositionSide != "" && !strings.EqualFold(order.PositionSide, strings.ToUpper(side)) {
+			continue
+		}
+		if !strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
+			continue
+		}
+		candidate := &nativeTrailingOrder{
+			PositionSide:     order.PositionSide,
+			StopPrice:        order.StopPrice,
+			CallbackRate:     order.CallbackRate,
+			Quantity:         order.Quantity,
+			OrderID:          order.OrderID,
+			ActivationStatus: order.ActivationStatus,
+			ActivationPrice:  order.ActivationPrice,
+		}
+		if trailingOrderIsDangerousNoActivation(at.exchange, candidate, currentPnLPct, safeProfitFloor) && order.OrderID != "" {
+			dangerousIDs = append(dangerousIDs, order.OrderID)
+		}
+	}
+	if len(dangerousIDs) == 0 {
+		return 0
+	}
+	tagged, ok := at.trader.(interface {
+		CancelTrailingStopOrdersByIDs(symbol string, orderIDs []string) error
+	})
+	if !ok {
+		logger.Warnf("🔴 Dangerous no-activation trailing detected (%s %s) but venue lacks CancelTrailingStopOrdersByIDs — cannot cancel; managed backup covers giveback", symbol, side)
+		return 0
+	}
+	if err := tagged.CancelTrailingStopOrdersByIDs(symbol, dangerousIDs); err != nil {
+		logger.Warnf("🔴 Failed to cancel %d dangerous no-activation trailing order(s) (%s %s): %v", len(dangerousIDs), symbol, side, err)
+		return 0
+	}
+	logger.Warnf("🔴 Cancelled %d DANGEROUS no-activation trailing order(s) (%s %s) — would mis-close on any retrace; arm loop will re-place with correct anchor, managed backup covers meanwhile", len(dangerousIDs), symbol, side)
+	return len(dangerousIDs)
+}
+
+// accountReArmBreaker runs AFTER the arm loop each poll and returns whether every
+// currently-satisfied native tier is EFFECTIVELY covered on the exchange (the same
+// answer as allSatisfiedNativeTiersEffective) while maintaining the per-tier re-arm
+// breaker. For each satisfied tier: if effectively covered → reset its breaker; if
+// NOT covered → bump its breaker, and once it reaches reArmBreakerLimit, trip it —
+// stop re-placing on the exchange and arm the in-process managed monitor (panel
+// shows the exchange-failed reverse-colour warning). A tripped tier is reported as
+// "covered" for suppression purposes because the managed monitor now owns it (via
+// checkPositionDrawdown), so we don't ALSO fire the tier-alloc managed close in the
+// same pass — the two must never double-execute. Uses one open-orders fetch.
+func (at *AutoTrader) accountReArmBreaker(symbol, side string, entryPrice, markPrice, currentPnLPct float64, rules []store.DrawdownTakeProfitRule) bool {
+	openOrders, err := at.GetOpenOrders(symbol)
+	if err != nil {
+		// Cannot confirm exchange state — do NOT trip the breaker on a read failure
+		// and do NOT claim coverage; let the managed backup supplement this pass.
+		logger.Warnf("⚠️ Re-arm breaker accounting: cannot fetch open orders (%s %s): %v — allowing managed backup", symbol, side, err)
+		return false
+	}
+	allCovered := true
+	for _, raw := range rules {
+		rule := normalizeDrawdownRule(raw)
+		if rule.MinProfitPct <= 0 || rule.MaxDrawdownPct <= 0 || rule.CloseRatioPct <= 0 {
+			continue
+		}
+		if currentPnLPct < rule.MinProfitPct {
+			// Tier not yet reached — its resting order is legitimately waiting; do not
+			// require coverage and do not touch its breaker.
+			continue
+		}
+		key := reArmFailKey(symbol, side, rule, entryPrice)
+		if at.exchangeSideCoversDrawdownTierWithOrders(symbol, side, rule, entryPrice, markPrice, openOrders) {
+			at.resetReArmFail(key)
+			continue
+		}
+		// Satisfied tier not effectively covered despite the arm attempt this poll.
+		fails := at.bumpReArmFail(key)
+		if fails >= reArmBreakerLimit {
+			logger.Warnf("🔴 Re-arm breaker TRIPPED (%s %s close=%.1f%% fails=%d) — stop re-placing exchange trailing, arming in-process managed monitor", symbol, side, rule.CloseRatioPct, fails)
+			at.applyExchangeFailedLocalMonitor(symbol, side, entryPrice, rule, calculateProfitBasedTrailingTriggerPrice(entryPrice, side, rule.MinProfitPct), calculateDrawdownRuleCallbackRatio(entryPrice, side, rule))
+			// Managed now owns this tier; treat as covered so the tier-alloc managed
+			// close does not ALSO fire in the same pass (double-execution guard).
+			continue
+		}
+		logger.Warnf("🟡 Re-arm attempt %d/%d not yet effective (%s %s close=%.1f%%) — managed backup supplements this poll", fails, reArmBreakerLimit, symbol, side, rule.CloseRatioPct)
+		allCovered = false
+	}
+	return allCovered
+}
+
+// reArmBreakerTripped reports whether a tier's re-arm breaker has already tripped,
+// so the arm loop can SKIP calling applyNativeTrailingDrawdown for it (no more
+// place attempts — the managed monitor owns it). Prevents the cancel→re-place churn
+// once we've decided the exchange side is unreliable for this tier.
+func (at *AutoTrader) reArmBreakerTripped(symbol, side string, rule store.DrawdownTakeProfitRule, entryPrice float64) bool {
+	return at.getReArmFail(reArmFailKey(symbol, side, normalizeDrawdownRule(rule), entryPrice)) >= reArmBreakerLimit
 }
 
 func (at *AutoTrader) findEquivalentPartialTrailingOrder(symbol, side string, rule store.DrawdownTakeProfitRule, entryPrice float64, openOrders []OpenOrder) (*nativeTrailingOrder, float64, float64, float64) {
 	plannedActivationPrice := calculateProfitBasedTrailingTriggerPrice(entryPrice, side, rule.MinProfitPct)
 	plannedCallbackRate := calculateDrawdownRuleCallbackRatio(entryPrice, side, rule)
 	currentQty := 0.0
+	markPrice := 0.0
 	positions, err := at.trader.GetPositions()
 	if err == nil {
 		for _, pos := range positions {
@@ -1592,9 +1905,21 @@ func (at *AutoTrader) findEquivalentPartialTrailingOrder(symbol, side string, ru
 			if currentQty < 0 {
 				currentQty = -currentQty
 			}
+			markPrice, _ = pos["markPrice"].(float64)
 			break
 		}
 	}
+	// Once the mark has passed the planned activation, this tier's order is no longer
+	// a resting order sitting at the planned anchor — it is either the now-activated
+	// original OR an immediate-anchor we deliberately re-placed for the passed tier
+	// (activation ≈ mark, deep in profit). Its activation price therefore no longer
+	// equals the planned value, so activation-price matching would spuriously miss it
+	// and the tier would churn (re-place) / double-fire (managed supplements). In that
+	// zone we identify the tier by qty+callback alone (both are per-tier discriminators:
+	// cumulative ratio and MaxDrawdown-derived callback differ across tiers).
+	markPassedPlanned := markPrice > 0 && plannedActivationPrice > 0 &&
+		((strings.EqualFold(side, "long") && markPrice >= plannedActivationPrice) ||
+			(strings.EqualFold(side, "short") && markPrice <= plannedActivationPrice))
 	if currentQty > 0 {
 		// Use cumulative ratio (this tier + all lower tiers) to match the actual
 		// trailing order quantity on exchange. E.g. T2 armed = T1(65%)+T2(25%)=90%.
@@ -1623,7 +1948,13 @@ func (at *AutoTrader) findEquivalentPartialTrailingOrder(symbol, side string, ru
 			if !strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
 				continue
 			}
-			if math.Abs(order.Quantity-qtyTarget) <= qtyTolerance && math.Abs(order.CallbackRate-plannedCallbackRate) <= callbackTolerance && activationMatches(order.StopPrice, plannedActivationPrice) {
+			qtyOK := math.Abs(order.Quantity-qtyTarget) <= qtyTolerance
+			callbackOK := math.Abs(order.CallbackRate-plannedCallbackRate) <= callbackTolerance
+			// Match the tier's activation anchor OR, once mark has passed the planned
+			// activation, accept the immediate-anchor/activated order by qty+callback so a
+			// deliberately re-placed passed tier isn't seen as missing (would churn/double-fire).
+			activationOK := activationMatches(order.StopPrice, plannedActivationPrice) || markPassedPlanned
+			if qtyOK && callbackOK && activationOK {
 				return &nativeTrailingOrder{
 					PositionSide:     order.PositionSide,
 					StopPrice:        order.StopPrice,
@@ -1631,6 +1962,7 @@ func (at *AutoTrader) findEquivalentPartialTrailingOrder(symbol, side string, ru
 					Quantity:         order.Quantity,
 					OrderID:          order.OrderID,
 					ActivationStatus: order.ActivationStatus,
+					ActivationPrice:  order.ActivationPrice,
 				}, qtyTarget, plannedActivationPrice, plannedCallbackRate
 			}
 		}
@@ -1679,6 +2011,15 @@ func (at *AutoTrader) findPartialTrailingReplacementCandidate(side string, openO
 
 func (at *AutoTrader) shouldReplacePartialTrailingTier(existing *nativeTrailingOrder, plannedActivationPrice, plannedCallbackRate float64) bool {
 	if existing == nil {
+		return false
+	}
+	// An ACTIVATED order is actively trailing the peak: its reported StopPrice is the
+	// moving stop, NOT the planned activation anchor, so activation-drift is meaningless
+	// and re-placing it would cancel live protection and reset the tracked peak. This
+	// includes the immediate-anchor order we deliberately place for a passed tier
+	// (activated at ≈mark, deep in profit). Never replace an activated tier — matches the
+	// full-trailing path which short-circuits activated orders before this check.
+	if strings.EqualFold(existing.ActivationStatus, "activated") {
 		return false
 	}
 	if existing.StopPrice <= 0 || plannedActivationPrice <= 0 {
@@ -1850,16 +2191,49 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 			} else {
 				existingTier, _, plannedActivationPrice, plannedCallbackRate := at.findEquivalentPartialTrailingOrder(symbol, side, rule, entryPrice, openOrders)
 				if existingTier != nil && !at.shouldReplacePartialTrailingTier(existingTier, plannedActivationPrice, plannedCallbackRate) {
-					// Plan A (2026-06-09): an existing partial trailing tier that matches the
-					// plan (activePx anchored at +6%, correct callback) is KEPT as-is — even if
-					// price has passed activePx and OKX hasn't activated it. We no longer
-					// re-place it without activePx (that would drop the +6% anchor and loop).
-					// The phantom-not-activated case is converted to a managed drawdown monitor
-					// by checkAndFixStaleTrailingActivation, which preserves the +6% semantics.
-					if existingTier.StopPrice > 0 && plannedActivationPrice > 0 {
-						logger.Infof("ℹ️ Native partial trailing tier already exists on exchange (%s %s close=%.1f%% activation=%.6f callback=%.6f status=%s)", symbol, side, rule.CloseRatioPct, existingTier.StopPrice, existingTier.CallbackRate, existingTier.ActivationStatus)
+					// A matching partial trailing tier exists. Normally keep it as-is. The
+					// ONE exception is a PHANTOM tier: resting (not activated) with its
+					// activePx already passed by the mark, while profit is at/above the tier
+					// floor. OKX will never activate it (dead protection). Previously we left
+					// it and handed the runner to a managed monitor; now we RE-PLACE it as an
+					// immediate-anchor order (see activation-anchor block below) so real
+					// protection sits on the exchange. Detect that case and fall through to
+					// re-placement; otherwise keep the existing order.
+					phantomProfitable := false
+					if existingTier.StopPrice > 0 && !strings.EqualFold(existingTier.ActivationStatus, "activated") && markPrice > 0 {
+						activePx := existingTier.ActivationPrice
+						if activePx <= 0 {
+							activePx = existingTier.StopPrice
+						}
+						passed := false
+						if strings.EqualFold(side, "long") {
+							passed = markPrice >= activePx
+						} else {
+							passed = markPrice <= activePx
+						}
+						if passed && calculatePositionPnLPct(side, entryPrice, markPrice) >= rule.MinProfitPct {
+							phantomProfitable = true
+						}
 					}
-					return true
+					if !phantomProfitable {
+						if existingTier.StopPrice > 0 && plannedActivationPrice > 0 {
+							logger.Infof("ℹ️ Native partial trailing tier already exists on exchange (%s %s close=%.1f%% activation=%.6f callback=%.6f status=%s)", symbol, side, rule.CloseRatioPct, existingTier.StopPrice, existingTier.CallbackRate, existingTier.ActivationStatus)
+						}
+						return true
+					}
+					logger.Infof("⚡ Phantom partial trailing tier passed activePx while profitable (%s %s close=%.1f%% activePx=%.6f mark=%.6f) — re-placing as immediate-anchor order",
+						symbol, side, rule.CloseRatioPct, existingTier.StopPrice, markPrice)
+					// Cancel the phantom first so the re-place doesn't stack a duplicate tier.
+					if existingTier.OrderID != "" {
+						if cancelTrader, ok := at.trader.(interface {
+							CancelAlgoOrderByID(symbol string, algoID string) error
+						}); ok {
+							if err := cancelTrader.CancelAlgoOrderByID(symbol, existingTier.OrderID); err != nil {
+								logger.Warnf("⚠️ Failed to cancel phantom trailing tier %s before immediate re-place (%s %s): %v — keeping existing", existingTier.OrderID, symbol, side, err)
+								return true
+							}
+						}
+					}
 				}
 			}
 		}
@@ -1876,16 +2250,49 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 	}
 
 	plannedActivationPrice := calculateProfitBasedTrailingTriggerPrice(entryPrice, side, rule.MinProfitPct)
-	// Plan B1/A: the runner DD trailing MUST always carry an activation price anchored
-	// at the outer ladder TP (+6%). We do NOT drop activePx to "activate immediately"
-	// when price has already moved past it — that would leave the runner with no fixed
-	// activation anchor. If OKX then fails to auto-activate a passed-activePx order
-	// (phantom protection), checkAndFixStaleTrailingActivation converts it to a managed
-	// drawdown monitor instead of re-placing without activePx (fix 2026-06-09).
-	activationPrice := plannedActivationPrice
 	priceBasedCallbackRatio := calculateDrawdownRuleCallbackRatio(entryPrice, side, rule)
 	if plannedActivationPrice <= 0 || priceBasedCallbackRatio <= 0 {
 		return false
+	}
+	// Activation anchor (unified reached/unreached protection, 2026-07-26):
+	//   - Normal case (mark has NOT yet reached the planned activePx, or mark unknown
+	//     at open): keep the planned +minProfit anchor. The order rests on the
+	//     exchange and OKX auto-activates when price reaches it.
+	//   - Passed case (mark already at/through the planned activePx AND profit is at/
+	//     above this tier's floor): the planned anchor is unreachable — placing it
+	//     would create a phantom (dead order) or, if dropped, loop. Instead place a
+	//     NO-ACTIVATION-PRICE order (activePx=0): the OKX adapter omits activePx so the
+	//     venue ACTIVATES IT IMMEDIATELY and trails from the current (profit-locked)
+	//     price. This is exactly the user's "无激活价" fallback and is safe precisely
+	//     because profit>=floor: the peak is anchored in profit, worst-case close is the
+	//     tier's designed retained profit, never a fresh loss.
+	//
+	//     Why NOT a near-mark anchor (mark*0.9999 etc.): OKX tick-rounding pushes such a
+	//     thin (0.01%) offset to the WRONG side of the mark, so the order never activates
+	//     (stays pending_activation) → judged phantom → re-placed every poll (observed
+	//     live: ~5 replacements/min on WLD short, activePx rounded 0.333867→0.334 above a
+	//     0.3339 mark). activePx=0 sidesteps rounding entirely — there is no price to
+	//     round. The profit-aware guards (trailingOrderIsDangerousNoActivation /
+	//     nativeTrailingEffective) already treat an activated no-activePx order at
+	//     profit>=floor as SAFE + EFFECTIVE, and the matcher's markPassedPlanned branch
+	//     recognizes it by qty+callback, so it neither churns nor is mistaken for danger.
+	//     Un-reached tiers are unaffected: their planned anchor sits >=minProfit% away
+	//     from mark, dwarfing tick noise (~0.03%), well inside the matcher's 0.3%
+	//     activation tolerance — so they rest cleanly and OKX auto-activates on reach.
+	activationPrice := plannedActivationPrice
+	if markPrice > 0 && rule.MinProfitPct > 0 {
+		currentPnLPct := calculatePositionPnLPct(side, entryPrice, markPrice)
+		passed := false
+		if strings.EqualFold(side, "long") {
+			passed = markPrice >= plannedActivationPrice
+		} else {
+			passed = markPrice <= plannedActivationPrice
+		}
+		if passed && currentPnLPct >= rule.MinProfitPct {
+			activationPrice = 0 // no activation price → OKX activates immediately from current price
+			logger.Infof("⚡ Trailing activation passed → immediate (no-activePx) order: %s %s | mark=%.6f planned=%.6f pnl=%.2f%% floor=%.2f%%",
+				symbol, side, markPrice, plannedActivationPrice, currentPnLPct, rule.MinProfitPct)
+		}
 	}
 
 	logger.Infof("🎯 Trailing activation resolved: %s %s | activation=%.6f planned=%.6f callbackRatio=%.6f rule=minProfit=%.4f maxDrawdown=%.4f close=%.2f%% stage=%s",
@@ -2905,7 +3312,76 @@ func (at *AutoTrader) resetPerPositionStateOnOpen(symbol, side string) {
 	at.gbGuardMutex.Lock()
 	delete(at.gbPnlHist, key)
 	at.gbGuardMutex.Unlock()
+
+	// Re-arm breaker counters for this position (keyed symbol_side_tierFP).
+	at.clearReArmFailForPosition(symbol, sideLower)
+
+	// Candidate-ATR scaffold cache (only populated when StructuralSL.DynamicATR on).
+	// Keyed by frozenATRKey (id|symbol|SIDE[|@tf]) — clear both the default 1h and any
+	// suffixed-timeframe entries for this symbol|side so a new position recomputes.
+	atrPrefix := at.id + "|" + symbol
+	at.candidateATRMutex.Lock()
+	for k := range at.candidateATRCache {
+		if strings.HasPrefix(k, atrPrefix) && strings.Contains(strings.ToUpper(k), strings.ToUpper(sideLower)) {
+			delete(at.candidateATRCache, k)
+			delete(at.candidateATRAtMs, k)
+		}
+	}
+	at.candidateATRMutex.Unlock()
 }
+
+// reArmFailKey builds the per-tier breaker key. The tier fingerprint isolates the
+// counter per drawdown rule so one flaky tier tripping its breaker never disables
+// arming for the other tiers on the same position.
+func reArmFailKey(symbol, side string, rule store.DrawdownTakeProfitRule, entryPrice float64) string {
+	return strings.ToLower(symbol) + "_" + strings.ToLower(side) + "_" + stableDrawdownRuleFingerprint(entryPrice, rule)
+}
+
+// bumpReArmFail increments and returns the consecutive-failure count for a tier.
+func (at *AutoTrader) bumpReArmFail(key string) int {
+	at.reArmFailMutex.Lock()
+	defer at.reArmFailMutex.Unlock()
+	if at.reArmFailCache == nil {
+		at.reArmFailCache = make(map[string]int)
+	}
+	at.reArmFailCache[key]++
+	return at.reArmFailCache[key]
+}
+
+// resetReArmFail clears a tier's consecutive-failure count after a verified success.
+func (at *AutoTrader) resetReArmFail(key string) {
+	at.reArmFailMutex.Lock()
+	delete(at.reArmFailCache, key)
+	at.reArmFailMutex.Unlock()
+}
+
+// getReArmFail reads a tier's current consecutive-failure count.
+func (at *AutoTrader) getReArmFail(key string) int {
+	at.reArmFailMutex.RLock()
+	defer at.reArmFailMutex.RUnlock()
+	return at.reArmFailCache[key]
+}
+
+// clearReArmFailForPosition wipes all breaker counters belonging to a position
+// (any tier). Called on new-position identity so counters never carry across
+// positions on the same symbol|side.
+func (at *AutoTrader) clearReArmFailForPosition(symbol, side string) {
+	prefix := strings.ToLower(symbol) + "_" + strings.ToLower(side) + "_"
+	at.reArmFailMutex.Lock()
+	for k := range at.reArmFailCache {
+		if strings.HasPrefix(k, prefix) {
+			delete(at.reArmFailCache, k)
+		}
+	}
+	at.reArmFailMutex.Unlock()
+}
+
+// reArmBreakerLimit is the consecutive re-arm/verify failure count at which the
+// breaker trips: we stop trying to place the exchange trailing order for this tier,
+// cancel any residual, and fall back to the in-process managed monitor. Chosen (3)
+// to give transient network/exchange hiccups a couple of retries while still cutting
+// a churn loop quickly.
+const reArmBreakerLimit = 3
 
 // UpdateExcursion tracks the full favorable/adverse excursion (MFE/MAE) of a
 // position: the high-water peak profit% and low-water trough profit%, plus each

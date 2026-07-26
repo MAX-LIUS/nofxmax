@@ -674,6 +674,19 @@ type StructuralSLConfig struct {
 	// never-widen guard makes it strictly a tighten-or-noop. A trader may still opt
 	// out by setting this false explicitly (surfaced as a strategy-UI toggle).
 	PreferProvenLevels *bool `json:"prefer_proven_levels,omitempty"`
+
+	// DynamicATR (scaffold, DEFAULT OFF): when true the ratcheting structural trail may
+	// use a per-main-cycle RECOMPUTED "candidate" ATR (see AutoTrader.candidateATRForRatchet)
+	// instead of the open-time frozen ATR, so the trail cushion adapts to changing
+	// volatility over a long hold. Only the structural ratchet reads this — every other
+	// protection (DD/TP/BE/SL activation anchors) stays on the frozen open-time ATR, since
+	// those are fixed at-open targets and re-anchoring them would move already-placed
+	// exchange orders. The candidate ATR is recomputed at most once per analysis cycle
+	// (never on the 5-60s drawdown poll) and can only TIGHTEN the trail (one-way, never
+	// loosen), preserving the ratchet's monotonic-tighten invariant. When false (default)
+	// the ratchet uses the frozen ATR exactly as before — this field is inert scaffolding
+	// so the dynamic path can be enabled later without a code change.
+	DynamicATR bool `json:"dynamic_atr,omitempty"`
 }
 
 // WithDefaults fills unset structural-SL fields with safe, backtested defaults.

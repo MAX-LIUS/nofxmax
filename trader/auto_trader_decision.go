@@ -917,6 +917,154 @@ func (at *AutoTrader) GetOpenOrders(symbol string) ([]OpenOrder, error) {
 
 // isTierSatisfied checks if a DD tier has been satisfied (reached min_profit at some point).
 // Uses persistent tier alloc state + peak PnL + live trailing presence to determine status.
+// computeExchangeLight derives the true 4-colour protection status for a drawdown
+// tier from the REAL exchange order state (not the peak-derived is_activated
+// heuristic that the old panel used). Colours:
+//
+//	"blue"   — triggered / filled (drawdown threshold met while covered).
+//	"green"  — healthy protection: an activated trailing order, or a resting one
+//	           whose activation price the mark has NOT yet passed (will auto-fire),
+//	           OR a managed in-process monitor is armed (no exchange order expected).
+//	"yellow" — order present but FLAWED: no activation price, or phantom (activePx
+//	           already passed but the venue never activated it → dead order).
+//	"red"    — this tier SHOULD be armed (profit reached its activation) but no
+//	           effective exchange order exists (missing coverage).
+//
+// It is deliberately conservative: anything it cannot positively confirm as
+// healthy renders yellow/red so the panel surfaces the gap rather than a false
+// green.
+func computeExchangeLight(
+	side string,
+	markPrice, currentPnLPct, drawdownPct float64,
+	rule store.DrawdownTakeProfitRule,
+	matchedLive bool,
+	matchedActivationStatus string,
+	matchedActivationPrice float64,
+	plannedActivationPrice float64,
+	supportsNative bool,
+	executionMode string,
+) string {
+	// Triggered/filled dominates every other state.
+	if currentPnLPct >= rule.MinProfitPct && isDrawdownThresholdMet(currentPnLPct, drawdownPct, rule) {
+		return "blue"
+	}
+
+	// Managed / local-monitor modes carry protection in-process — there is no
+	// exchange order to inspect, so a healthy managed arm is green (the exchange-
+	// failed variant is surfaced separately via exchange_order_failed → the panel
+	// already renders that reverse-colour warning).
+	modeLower := strings.ToLower(executionMode)
+	if strings.Contains(modeLower, "managed") {
+		// The in-process managed monitor IS actively protecting (peak-tracked
+		// giveback close every poll). That is healthy protection → green. The
+		// exchange_failed variant differs only in that no exchange order backs it;
+		// the panel surfaces that distinction as a GREEN FLASHING tile (via the
+		// exchange_order_failed flag), not as an alarming yellow. Both are green
+		// here because both close promptly.
+		return "green"
+	}
+
+	// Venues without native trailing rely purely on the code-side monitor; treat an
+	// armed tier as green (managed) and an un-reached tier as green-waiting too.
+	if !supportsNative {
+		return "green"
+	}
+
+	if !matchedLive {
+		// No matching exchange order. Under place-at-open, EVERY tier should carry a
+		// resting order from the moment the position opens (each at its own activePx,
+		// safest when price is furthest away). So a missing order is a genuine gap —
+		// the monitor re-fills it on the next poll. Surface it as red (missing) rather
+		// than a soft "waiting": there is no legitimate steady state where a configured
+		// tier has no exchange order. (Brief red between detection and re-fill is
+		// honest and self-heals.)
+		return "red"
+	}
+
+	// A live order matched this tier. Judge its effectiveness.
+	if strings.EqualFold(matchedActivationStatus, "activated") {
+		// "activated" WITH an activation price is genuine protection (green).
+		// "activated" WITHOUT one is profit-dependent: at/above this tier's profit
+		// floor it is a DELIBERATE immediate-trail we place on purpose for a tier
+		// whose activePx the mark already passed (peak anchored in profit → green,
+		// safe). BELOW the floor it is the dangerous near-entry immediate-active order
+		// that mis-closes on any retrace (yellow; the danger reconciler cancels it).
+		if matchedActivationPrice > 0 {
+			return "green"
+		}
+		if currentPnLPct >= rule.MinProfitPct {
+			return "green"
+		}
+		return "yellow"
+	}
+	// Use the ORDER's own activation price — do NOT fall back to the planned value
+	// here: a present order whose own activation price is missing is flawed (the
+	// user-facing "no activation price" yellow), and masking it with the plan would
+	// hide exactly the defect this light exists to surface.
+	activePx := matchedActivationPrice
+	if activePx <= 0 {
+		// Order present but no activation anchor → flawed.
+		return "yellow"
+	}
+	if markPrice <= 0 {
+		// Cannot evaluate reachability; don't claim green.
+		return "yellow"
+	}
+	// Resting order: green while activePx not yet passed (will auto-activate);
+	// phantom (activePx already passed, not activated) → yellow.
+	passed := false
+	if strings.EqualFold(side, "long") {
+		passed = markPrice >= activePx
+	} else {
+		passed = markPrice <= activePx
+	}
+	if passed {
+		return "yellow" // phantom: passed activation but venue never activated
+	}
+	return "green" // resting, waiting for activation — healthy
+}
+
+// computeExchangeLightReason sub-classifies a YELLOW exchange light so the panel
+// can show a precise warning. It mirrors the decision points inside computeExchange-
+// Light but only for the yellow cases; it returns "" for non-yellow lights. The
+// three yellow reasons carry very different urgency:
+//
+//   - "no_activation": a live order is present but its activation price is <=0. On
+//     OKX this is the immediately-active order that trails from the current price
+//     and WILL mis-close on any retrace — the most urgent flaw. The danger
+//     reconciler cancels and re-places it with the correct anchor.
+//   - "exchange_failed": the re-arm breaker tripped or placement failed; the local
+//     managed monitor is active with NO exchange order (cannot mis-close).
+//   - "phantom": activation price set but mark already passed it, so the venue never
+//     activated the order — it is dead (no protection) but cannot mis-close.
+func computeExchangeLightReason(
+	side string,
+	markPrice float64,
+	exchangeLight, executionMode string,
+	matchedLive bool,
+	matchedActivationStatus string,
+	matchedActivationPrice float64,
+) string {
+	if exchangeLight != "yellow" {
+		return ""
+	}
+	if strings.Contains(strings.ToLower(executionMode), "exchange_failed") {
+		return "exchange_failed"
+	}
+	// A live order that is "activated" with no activation price is the dangerous
+	// immediate-activation kind (mis-closes). Also covers a matched resting order
+	// whose own activation price is missing.
+	if matchedLive && matchedActivationPrice <= 0 {
+		return "no_activation"
+	}
+	if !matchedLive {
+		// Order absent but tier not yet reached rendered yellow (needs attention).
+		return "not_placed"
+	}
+	// Matched order with a positive activation price that mark has passed → phantom.
+	return "phantom"
+}
+
 func isTierSatisfied(ruleIdx int, currentPnLPct, minProfitPct float64, allocs []store.DrawdownTierAllocation, hasLiveTrailing bool) bool {
 	// Check persistent tier alloc state first (doesn't flip back once tracking)
 	for _, a := range allocs {
@@ -1159,15 +1307,17 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 				liveTrailingCallbackRate = order.CallbackRate
 			}
 			trailingOrders = append(trailingOrders, map[string]interface{}{
-				"order_id":        order.OrderID,
-				"type":            order.Type,
-				"side":            order.Side,
-				"position_side":   order.PositionSide,
-				"trigger_price":   triggerPrice,
-				"callback_rate":   order.CallbackRate,
-				"quantity":        order.Quantity,
-				"status":          order.Status,
-				"client_order_id": order.ClientOrderID,
+				"order_id":          order.OrderID,
+				"type":              order.Type,
+				"side":              order.Side,
+				"position_side":     order.PositionSide,
+				"trigger_price":     triggerPrice,
+				"callback_rate":     order.CallbackRate,
+				"quantity":          order.Quantity,
+				"status":            order.Status,
+				"client_order_id":   order.ClientOrderID,
+				"activation_status": order.ActivationStatus,
+				"activation_price":  order.ActivationPrice,
 			})
 		}
 		role := strings.ToLower(strings.TrimSpace(order.ProtectionRole))
@@ -1285,6 +1435,8 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 			callbackSource := "planned"
 			plannedQty := quantity * rule.CloseRatioPct / 100.0
 			matchedLive := false
+			matchedActivationStatus := ""
+			matchedActivationPrice := 0.0
 			if executionMode == "native_partial_trailing" || executionMode == "native_trailing_full" {
 				activationSource = "request"
 				callbackSource = "request"
@@ -1310,6 +1462,8 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 							callbackRate = cbVal
 							callbackSource = "exchange"
 						}
+						matchedActivationStatus, _ = order["activation_status"].(string)
+						matchedActivationPrice, _ = order["activation_price"].(float64)
 						matchedLive = true
 						break
 					}
@@ -1320,6 +1474,17 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 					callbackSource = "planned"
 				}
 			}
+			// exchange_light: the TRUE 4-colour status driven by the real exchange
+			// order state (not the peak-derived is_activated heuristic). Semantics:
+			//   red    = no order for this tier on the exchange (should be armed, isn't)
+			//   yellow = order present but flawed: no activation price, or phantom
+			//            (activePx already passed but venue never activated → dead)
+			//   green  = healthy: activated, or resting with activePx not yet reached
+			//   blue   = triggered / filled
+			exchangeLight := computeExchangeLight(
+				side, markPrice, currentPnLPct, drawdownPct,
+				rule, matchedLive, matchedActivationStatus, matchedActivationPrice,
+				activationPrice, at.supportsNativeTrailingStop(), executionMode)
 			anchor := (*drawdownTierAnchor)(nil)
 			if structureCtx != nil {
 				anchor = structureCtx.selectTierAnchor(side, rule, entryPrice)
@@ -1363,6 +1528,19 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 				// reverse-colour warning so profit is never silently left on a
 				// mis-registered (immediate-triggering) exchange order.
 				"exchange_order_failed": executionMode == "managed_drawdown_exchange_failed",
+				// exchange_light: real 4-colour status from actual exchange order state.
+				"exchange_light": exchangeLight,
+				// exchange_light_reason: sub-classifies a yellow light so the panel can
+				// warn precisely. "no_activation" = a live order is present but has NO
+				// activation price (activated immediately → WILL mis-close on any retrace;
+				// the danger reconciler cancels + re-places it). "phantom" = activePx set
+				// but mark already passed it so the venue never activated (dead, provides
+				// no protection, but cannot mis-close). "exchange_failed" = re-arm breaker
+				// tripped / placement failed, local managed monitor active. Empty for
+				// non-yellow lights.
+				"exchange_light_reason": computeExchangeLightReason(
+					side, markPrice, exchangeLight, executionMode,
+					matchedLive, matchedActivationStatus, matchedActivationPrice),
 				// is_armed: a trailing order for this tier exists on the exchange
 				// (or a managed tier is tracking) — i.e. protection is in place but
 				// not necessarily activated. is_activated: the peak profit actually

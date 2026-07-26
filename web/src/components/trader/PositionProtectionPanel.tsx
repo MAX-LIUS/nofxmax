@@ -46,6 +46,17 @@ type ProtectionRow = {
   // Drives a reverse-colour (red-filled) tile so it can't be mistaken for a
   // resting exchange order.
   exchangeFailed?: boolean
+  // light is the authoritative 4-colour status dot for DD tiers, from the
+  // backend's exchange_light (real exchange order state). When set it overrides
+  // the statusCls-derived dot colour. red=未委托到交易所(缺失待补), yellow=委托有瑕疵
+  // (无激活价且未达标/幻影), green=正常, blue=已触发.
+  light?: 'red' | 'yellow' | 'green' | 'blue'
+  // codeProtected marks a tier whose exchange order failed but the in-process
+  // managed monitor IS actively protecting (peak-tracked giveback close). Drives
+  // a GREEN FLASHING tile — protection is healthy, it just runs code-side.
+  codeProtected?: boolean
+  // reason is a human-readable status explanation shown on hover (tooltip).
+  reason?: string
 }
 
 // FAMILY_CLS maps a family to its Tailwind text+border classes. Kept in one place
@@ -75,6 +86,21 @@ interface ScheduledTier {
   reason_anchor: string
   execution_mode: string
   exchange_order_failed?: boolean
+  // exchange_light: real 4-colour status from the backend, driven by the actual
+  // exchange order state. red=not placed, yellow=flawed (no activation price /
+  // phantom), green=healthy, blue=triggered. Preferred over the is_* heuristics.
+  exchange_light?: 'red' | 'yellow' | 'green' | 'blue'
+  // exchange_light_reason sub-classifies a yellow light: 'no_activation'
+  // (live order with no activation price while below profit floor → WILL mis-close,
+  // most urgent), 'phantom' (activePx passed, venue never activated → dead but safe,
+  // re-placed as immediate on next poll), 'exchange_failed' (breaker tripped /
+  // placement failed, local monitor active), 'not_placed'.
+  exchange_light_reason?:
+    | 'no_activation'
+    | 'phantom'
+    | 'exchange_failed'
+    | 'not_placed'
+    | ''
 }
 
 function normalizeSide(side?: string): string {
@@ -147,6 +173,72 @@ function classifyZone(
   return 'Ladder'
 }
 
+// buildTierReason produces a full human-readable status explanation for a DD
+// tile's hover tooltip. It maps the authoritative exchange_light + reason (and
+// the code-side managed state) into plain language so the user understands why
+// a tile is a given colour — most importantly the red "missing · re-filling"
+// state (all tiers placed at open; this one is temporarily absent and self-heals)
+// and the green-flashing "code-side" state (exchange order failed but the
+// in-process monitor is protecting).
+function buildTierReason(
+  language: string,
+  light: ProtectionRow['light'],
+  codeProtected: boolean,
+  tier: ScheduledTier,
+  isActivated: boolean,
+  peakPnlPct: number,
+  callbackRate: number
+): string {
+  const zh = language === 'zh'
+  const min = tier.min_profit_pct.toFixed(1)
+  const dd = tier.max_drawdown_pct.toFixed(1)
+  const cb = (callbackRate * 100).toFixed(1)
+  if (light === 'blue') {
+    return zh
+      ? `已触发落袋：利润回撤达到 ${dd}%，按 ${tier.close_ratio_pct.toFixed(0)}% 平仓。`
+      : `Triggered: giveback hit ${dd}%, closing ${tier.close_ratio_pct.toFixed(0)}%.`
+  }
+  if (codeProtected) {
+    return zh
+      ? `交易所挂单失败，已切换到代码侧监控保护（绿色闪烁）。系统每 5–60 秒轮询，从峰值利润回撤达 ${dd}% 即市价平仓——即使错过瞬间，下一轮询也会立即补平。`
+      : `Exchange order failed; code-side monitor is protecting (flashing green). Polls every 5–60s and market-closes on ${dd}% giveback from peak — if a moment is missed, the next poll still closes promptly.`
+  }
+  if (light === 'green') {
+    if (isActivated) {
+      return zh
+        ? `已激活跟踪：峰值利润 ${peakPnlPct.toFixed(1)}%，回撤 ${cb}% 触发平仓。`
+        : `Activated trailing: peak ${peakPnlPct.toFixed(1)}%, closes on ${cb}% giveback.`
+    }
+    return zh
+      ? `已在交易所挂单，静待价格触及激活价（利润 ${min}%）后自动跟踪。`
+      : `Resting on exchange; auto-activates once price reaches the ${min}% profit trigger.`
+  }
+  if (light === 'yellow') {
+    switch (tier.exchange_light_reason) {
+      case 'no_activation':
+        return zh
+          ? '交易所委托无激活价：会在任意回撤时立即误平，系统正在撤单并按正确激活价重挂。'
+          : 'Exchange order has no activation price: it would mis-close on any retrace. System is cancelling and re-placing with the correct anchor.'
+      case 'phantom':
+        return zh
+          ? '幻影委托：激活价已被行情越过但交易所未激活，该单已失效（无保护，但也不会误平）。代码侧监控兜底。'
+          : 'Phantom order: mark passed the activation price but the venue never activated it — dead (no protection, but cannot mis-close). Code-side monitor backs it up.'
+      case 'exchange_failed':
+        return zh
+          ? '交易所挂单失败，代码侧监控保护中。'
+          : 'Exchange placement failed; code-side monitor is protecting.'
+      default:
+        return zh
+          ? '委托存在瑕疵，系统正在处理。'
+          : 'Order is flawed; the system is handling it.'
+    }
+  }
+  // red
+  return zh
+    ? `该档在交易所暂无委托（开仓即挂全档，此处缺失）。系统下一轮监控会自动补挂：未越过激活价的静候重挂、已越过且盈利的按贴现价立即挂；持续失败才切代码侧监控。`
+    : `This tier currently has no exchange order (all tiers are placed at open; this one is missing). The next monitor poll re-fills it automatically — resting if activePx not yet passed, immediate-anchor if passed and profitable — falling back to the code-side monitor only if it keeps failing.`
+}
+
 function buildProtectionRows(
   position: Position,
   orders: OpenOrder[],
@@ -216,21 +308,93 @@ function buildProtectionRows(
 
     let status: string
     let statusCls: string
-    if (tier.exchange_order_failed) {
+    // Prefer the backend's exchange_light (real exchange order state) as the
+    // authoritative 4-colour status. Fall back to the legacy is_* heuristic only
+    // when the backend didn't send a light (older backend).
+    let light: ProtectionRow['light']
+    let codeProtected = false
+    if (tier.exchange_light) {
+      switch (tier.exchange_light) {
+        case 'blue':
+          status = language === 'zh' ? '已触发' : 'Triggered'
+          statusCls = 'text-sky-300'
+          light = 'blue'
+          break
+        case 'green':
+          // Green = healthy protection. Two sub-cases: a resting/activated
+          // exchange order (steady green), OR the exchange order failed but the
+          // in-process managed monitor is actively protecting (code-side). The
+          // latter flashes green (codeProtected) so the user can tell it apart
+          // while trusting that protection is live.
+          if (tier.exchange_order_failed) {
+            status = language === 'zh' ? '代码侧保护中' : 'Code-side protecting'
+            statusCls = 'text-emerald-300'
+            light = 'green'
+            codeProtected = true
+          } else {
+            status = language === 'zh' ? '正常委托' : 'OK'
+            statusCls = 'text-emerald-300'
+            light = 'green'
+          }
+          break
+        case 'yellow':
+          // Sub-classify the yellow flaw so the warning is precise. no_activation
+          // is the urgent one (order WILL mis-close on any retrace); phantom is dead
+          // but safe; exchange_failed means the local managed monitor is covering.
+          switch (tier.exchange_light_reason) {
+            case 'no_activation':
+              status =
+                language === 'zh'
+                  ? '无激活价·会误平·待撤'
+                  : 'No activation · will mis-close · cancelling'
+              break
+            case 'phantom':
+              status =
+                language === 'zh' ? '幻影·无保护' : 'Phantom · no protection'
+              break
+            case 'exchange_failed':
+              status =
+                language === 'zh'
+                  ? '交易所挂单失败·本地保护'
+                  : 'Exch. failed · local'
+              break
+            default:
+              status =
+                language === 'zh' ? '委托有瑕疵·待处理' : 'Flawed · pending'
+              break
+          }
+          statusCls = 'text-amber-300'
+          light = 'yellow'
+          break
+        case 'red':
+        default:
+          // Missing tier: under place-at-open every tier should have an order, so a
+          // missing one is a gap the monitor re-fills next poll (self-heals).
+          status = language === 'zh' ? '缺失·待补挂' : 'Missing · re-filling'
+          statusCls = 'text-nofx-red'
+          light = 'red'
+          break
+      }
+    } else if (tier.exchange_order_failed) {
       // Exchange trailing order failed to place; the LOCAL managed-drawdown
       // monitor is enforcing the same peak+drawdown rule in-process. Reverse-
       // colour warning so this is never mistaken for a resting exchange order.
-      status = language === 'zh' ? '交易所挂单失败·本地保护' : 'Exch. Failed · Local'
+      status =
+        language === 'zh' ? '交易所挂单失败·本地保护' : 'Exch. Failed · Local'
       statusCls = 'text-white bg-nofx-red px-1 rounded'
+      light = 'red'
     } else if (tier.is_triggered) {
       status = language === 'zh' ? '已触发' : 'Triggered'
       statusCls = 'text-nofx-red'
+      light = 'blue'
     } else if (isActivated) {
       status = language === 'zh' ? '已激活' : 'Active'
       statusCls = 'text-emerald-300'
+      light = 'green'
     } else if (isArmed) {
       status = language === 'zh' ? '已布单' : 'Armed'
       statusCls = 'text-amber-300'
+      light = 'yellow'
     } else {
       status = language === 'zh' ? '待满足' : 'Waiting'
       statusCls = 'text-nofx-text-muted'
@@ -251,6 +415,19 @@ function buildProtectionRows(
       detail = `min${tier.min_profit_pct.toFixed(1)}% dd${tier.max_drawdown_pct.toFixed(1)}%`
     }
 
+    // reason: a full human-readable status explanation for the hover tooltip.
+    // Explains WHY the tile is the colour it is — especially the red "missing ·
+    // re-filling" and green-flashing "code-side" cases the user asked to disambiguate.
+    const reason = buildTierReason(
+      language,
+      light,
+      codeProtected,
+      tier,
+      isActivated,
+      peakPnlPct,
+      callbackRate
+    )
+
     rows.push({
       zone,
       family: 'dynamic',
@@ -263,7 +440,10 @@ function buildProtectionRows(
       status,
       statusCls,
       detail,
+      reason,
       exchangeFailed: tier.exchange_order_failed,
+      codeProtected,
+      light,
     })
   }
 
@@ -726,19 +906,25 @@ const PositionCard = memo(function PositionCard({
                 return (
                   <div
                     key={`price-line-${ri}`}
-                    className="flex flex-col items-center justify-center px-2 rounded border border-cyan-500/40 bg-cyan-500/5 shrink-0"
+                    title={row.reason || row.detail || ''}
+                    className="flex flex-col items-center justify-center px-2 rounded border border-cyan-300 bg-cyan-500 shrink-0"
                   >
-                    <span className="text-[9px] text-cyan-300/70 uppercase tracking-wider">
-                      {language === 'zh' ? '现价' : 'Now'}
+                    <span className="flex items-center gap-1 uppercase tracking-wider">
+                      <span className="text-[9px] text-cyan-950 font-bold">
+                        {language === 'zh' ? '现价' : 'Now'}
+                      </span>
+                      {row.atrMult !== 0 && (
+                        <span className="text-[8px] font-mono text-cyan-900/70 normal-case tracking-normal">
+                          {row.atrMult >= 0 ? '+' : ''}
+                          {row.atrMult.toFixed(1)}×
+                        </span>
+                      )}
                     </span>
-                    <span className="text-[11px] font-mono font-bold text-cyan-300 whitespace-nowrap">
+                    <span className="text-[11px] font-mono font-bold text-cyan-950 whitespace-nowrap">
                       {formatPrice(row.price)}
                     </span>
-                    <span className="text-[10px] font-mono text-cyan-300/80 whitespace-nowrap">
+                    <span className="text-[10px] font-mono font-semibold text-cyan-900 whitespace-nowrap">
                       {formatPct(row.deltaPct)}
-                      {row.atrMult !== 0
-                        ? ` / ${row.atrMult >= 0 ? '+' : ''}${row.atrMult.toFixed(1)}×`
-                        : ''}
                     </span>
                   </div>
                 )
@@ -751,41 +937,75 @@ const PositionCard = memo(function PositionCard({
                     ? 'text-nofx-red'
                     : 'text-nofx-text-muted'
               const zoneCls = FAMILY_CLS[row.family] || FAMILY_CLS.dynamic
-              const statusDot = row.statusCls.includes('emerald')
-                ? 'bg-emerald-400'
-                : row.statusCls.includes('amber')
-                  ? 'bg-amber-400'
-                  : row.statusCls.includes('red')
-                    ? 'bg-red-400'
-                    : 'bg-white/30'
+              // Authoritative 4-colour dot when the backend sent exchange_light;
+              // otherwise fall back to inferring from statusCls (legacy).
+              const statusDot = row.light
+                ? row.light === 'green'
+                  ? 'bg-emerald-400'
+                  : row.light === 'yellow'
+                    ? 'bg-amber-400'
+                    : row.light === 'blue'
+                      ? 'bg-sky-400'
+                      : 'bg-red-400'
+                : row.statusCls.includes('emerald')
+                  ? 'bg-emerald-400'
+                  : row.statusCls.includes('amber')
+                    ? 'bg-amber-400'
+                    : row.statusCls.includes('red')
+                      ? 'bg-red-400'
+                      : 'bg-white/30'
 
-              // Reverse-colour warning tile: the native exchange trailing order
-              // failed to place and the LOCAL monitor is protecting instead. A
-              // red-filled border makes it impossible to mistake for a resting
-              // exchange order (which would silently erode profit).
-              const tileCls = row.exchangeFailed
-                ? 'flex flex-col px-2 py-1 rounded border border-nofx-red bg-nofx-red/20 hover:bg-nofx-red/30 shrink-0 min-w-[78px] animate-pulse'
-                : `flex flex-col px-2 py-1 rounded border bg-black/20 hover:bg-white/5 shrink-0 min-w-[78px] ${zoneCls}`
+              // Tile styling by protection state:
+              //  - codeProtected: exchange order failed BUT the in-process managed
+              //    monitor is actively protecting → GREEN FLASHING (healthy, just
+              //    code-side). The pulsing green tells the user protection is live.
+              //  - exchangeFailed (legacy, no code-side confirm): red-filled pulse
+              //    so it can't be mistaken for a resting exchange order.
+              //  - otherwise: normal zone-coloured tile.
+              const tileCls = row.codeProtected
+                ? 'flex flex-col px-2 py-1 rounded border border-emerald-400 bg-emerald-500/25 hover:bg-emerald-500/35 shrink-0 min-w-[78px] animate-pulse'
+                : row.exchangeFailed
+                  ? 'flex flex-col px-2 py-1 rounded border border-nofx-red bg-nofx-red/20 hover:bg-nofx-red/30 shrink-0 min-w-[78px] animate-pulse'
+                  : `flex flex-col px-2 py-1 rounded border bg-black/20 hover:bg-white/5 shrink-0 min-w-[78px] ${zoneCls}`
+
+              // Title-row label: code-side protection gets a green shield; a
+              // legacy exchange failure keeps the red warning; else the zone name.
+              const titleLabel = row.codeProtected
+                ? language === 'zh'
+                  ? '🛡 本地'
+                  : '🛡 Local'
+                : row.exchangeFailed
+                  ? language === 'zh'
+                    ? '⚠ 本地'
+                    : '⚠ Local'
+                  : row.zone
+              const titleCls = row.codeProtected
+                ? 'text-emerald-300'
+                : row.exchangeFailed
+                  ? 'text-nofx-red'
+                  : zoneCls.split(' ')[0]
 
               return (
                 <div
                   key={`row-${ri}`}
                   className={tileCls}
-                  title={row.detail || ''}
+                  title={row.reason || row.detail || ''}
                 >
                   <div className="flex items-center justify-between gap-1">
-                    <span
-                      className={`text-[10px] font-bold ${row.exchangeFailed ? 'text-nofx-red' : zoneCls.split(' ')[0]}`}
-                    >
-                      {row.exchangeFailed
-                        ? language === 'zh'
-                          ? '⚠ 本地'
-                          : '⚠ Local'
-                        : row.zone}
+                    <span className="flex items-baseline gap-1 min-w-0">
+                      <span className={`text-[10px] font-bold ${titleCls}`}>
+                        {titleLabel}
+                      </span>
+                      {row.atrMult !== 0 && (
+                        <span className="text-[8px] font-mono text-nofx-text-muted/50 whitespace-nowrap">
+                          {row.atrMult >= 0 ? '+' : ''}
+                          {row.atrMult.toFixed(1)}×
+                        </span>
+                      )}
                     </span>
                     <span
-                      className={`w-1.5 h-1.5 rounded-full ${statusDot}`}
-                      title={row.status}
+                      className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDot}`}
+                      title={row.reason || row.status}
                     />
                   </div>
                   <span className="text-[11px] font-mono font-semibold text-nofx-text-main whitespace-nowrap">
@@ -795,21 +1015,9 @@ const PositionCard = memo(function PositionCard({
                     className={`text-[10px] font-mono whitespace-nowrap ${deltaColor}`}
                   >
                     {row.price > 0 ? formatPct(row.deltaPct) : '—'}
-                    {row.price > 0 && row.atrMult !== 0
-                      ? ` / ${row.atrMult >= 0 ? '+' : ''}${row.atrMult.toFixed(1)}×`
-                      : ''}
                   </span>
                   <span className="text-[10px] font-mono text-nofx-text-muted whitespace-nowrap">
-                    {row.ratioPct > 0 ? (
-                      <>
-                        {row.ratioPct.toFixed(0)}%
-                        {row.usdValue > 0
-                          ? ` ${formatUsd(row.usdValue).replace('+', '')}`
-                          : ''}
-                      </>
-                    ) : (
-                      '—'
-                    )}
+                    {row.ratioPct > 0 ? `${row.ratioPct.toFixed(0)}%` : '—'}
                   </span>
                 </div>
               )

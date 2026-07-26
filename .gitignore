@@ -13,6 +13,8 @@ nofx-auto
 nofx
 nofx.pre-*
 nofx_test
+nofx_new
+nofx.bak.*
 
 # Go 相关
 *.test
@@ -128,6 +130,11 @@ PR_DESCRIPTION.md
 
 # compiled backtest binary (build artifact)
 btrobust_bin
+backtest
+
+# Local strategy-config backups / scratch prompt dirs (may contain live config)
+.backups/
+.tmp_prompt/
 
 # Local deploy backups (contain live config + secrets — never commit)
 .deploy-backup/

@@ -21,6 +21,7 @@ import (
 	"nofx/trader/lighter"
 	"nofx/trader/okx"
 	"nofx/wallet"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -184,6 +185,11 @@ type AutoTrader struct {
 	drawdownTierAllocs     map[string][]store.DrawdownTierAllocation // symbol_side -> fixed tier allocations computed at open
 	drawdownTierAllocMu    sync.RWMutex                              // Protects drawdownTierAllocs
 	nativeTrailingArmTime  map[string]time.Time                      // fingerprint -> last successful arm time (prevents re-arm loop)
+	reArmFailCache         map[string]int                            // symbol_side_tierFingerprint -> consecutive re-arm/verify failures (breaker at 3 → managed)
+	reArmFailMutex         sync.RWMutex                              // Protects reArmFailCache
+	candidateATRCache      map[string]float64                        // frozenATRKey -> per-main-cycle recomputed ATR (scaffold; only used when StructuralSL.DynamicATR on)
+	candidateATRAtMs       map[string]int64                          // frozenATRKey -> ms of last candidate recompute (throttle to once per main cycle)
+	candidateATRMutex      sync.RWMutex                              // Protects candidateATRCache + candidateATRAtMs
 	immediateTrailingIDs   map[string]string                         // symbol_side -> immediate trailing order ID (canceled when tier trailing arms)
 	cooldownManager        *entryCooldownManager                     // Post-loss entry cooldown per symbol
 	lastBalanceSyncTime    time.Time                                 // Last balance sync time
@@ -423,6 +429,9 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		drawdownRunnerState:   make(map[string]DrawdownRunnerState),
 		drawdownTierAllocs:    make(map[string][]store.DrawdownTierAllocation),
 		nativeTrailingArmTime: make(map[string]time.Time),
+		reArmFailCache:        make(map[string]int),
+		candidateATRCache:     make(map[string]float64),
+		candidateATRAtMs:      make(map[string]int64),
 		immediateTrailingIDs:  make(map[string]string),
 		cooldownManager:       newEntryCooldownManagerFromConfig(config),
 		lastBalanceSyncTime:   time.Now(),
@@ -682,6 +691,105 @@ func isDynamicNativeProtectionType(protectionType string) bool {
 }
 
 // Run runs the automatic trading main loop
+// Aligned first-run timing (AI analysis strategies only). Instead of firing the
+// first analysis cycle the instant the trader starts, we align it to the next
+// wall-clock boundary of the scan interval, then wait a settle delay so the just
+// closed candle's data has landed at the source, then apply a per-trader stagger
+// so multiple traders don't hit the AI endpoint at the same instant.
+//
+//	firstRun = nextBoundary(ScanInterval) + firstRunSettleDelay + slot*firstRunStaggerStep
+//
+// The stagger slot is the trader's index in the globally sorted list of all
+// trader IDs — stable across container restarts (no persistence needed) and
+// shared across intervals, so a 15m and a 20m trader that collide on a common
+// (LCM) boundary are still separated by the stagger. Everything is derived from
+// the wall clock, so a restart re-aligns automatically.
+const (
+	firstRunSettleDelay = 60 * time.Second // wait after the boundary for candle data to settle
+	firstRunStaggerStep = 15 * time.Second // spacing between consecutive traders' first fire
+	// Below this interval, alignment would push the first fire past a whole
+	// period (settle+stagger ≥ interval), so we skip alignment and run now.
+	firstRunMinAlignInterval = 2 * time.Minute
+)
+
+// staggerSlot returns this trader's position (0-based) among the RUNNING
+// traders, sorted by ID. Only is_running traders count, so slots stay compact
+// (0, 1, 2, …) with no gaps left by stopped/deleted traders — the offsets are
+// always a contiguous 0/+15s/+30s sequence. Falls back to 0 if the list can't
+// be read.
+//
+// On normal boot every persisted-running trader is already flagged is_running
+// in the DB before any Run() computes its slot (boot respects the stored state
+// and never clears it first), so all running traders see the same running set
+// and agree on 0/1/2/… regardless of goroutine start order — stable across
+// restarts. This trader includes itself: Run() sets at.isRunning before the
+// alignment step, and the DB row is is_running=true for a trader being started.
+func (at *AutoTrader) staggerSlot() int {
+	if at.store == nil {
+		return 0
+	}
+	traders, err := at.store.Trader().ListAll()
+	if err != nil || len(traders) == 0 {
+		return 0
+	}
+	ids := make([]string, 0, len(traders))
+	selfSeen := false
+	for _, t := range traders {
+		if t == nil {
+			continue
+		}
+		if t.ID == at.id {
+			// Always count self: this trader is starting, so it's running by
+			// definition. The API single-start path flips the DB is_running flag
+			// only AFTER launching Run() (a race), so the DB row may still read
+			// false here — include self regardless to keep slots contiguous.
+			ids = append(ids, t.ID)
+			selfSeen = true
+			continue
+		}
+		if t.IsRunning {
+			ids = append(ids, t.ID)
+		}
+	}
+	if !selfSeen {
+		ids = append(ids, at.id)
+	}
+	sort.Strings(ids)
+	for i, id := range ids {
+		if id == at.id {
+			return i
+		}
+	}
+	return 0
+}
+
+// alignedFirstRunAt is the pure timing math: given the current time, the scan
+// interval, and this trader's stagger slot, return when the first AI cycle
+// should fire. If the interval is too small to align, it returns now (fire
+// immediately). Split out from computeAlignedFirstRun so it can be unit-tested
+// without a store.
+func alignedFirstRunAt(now time.Time, interval time.Duration, slot int) time.Time {
+	if interval < firstRunMinAlignInterval {
+		return now
+	}
+	// Next wall-clock boundary of the interval. Truncate works on absolute time
+	// since the Unix epoch (UTC), so a 20m interval lands on :00/:20/:40 etc.
+	boundary := now.Truncate(interval)
+	if !boundary.After(now) {
+		boundary = boundary.Add(interval)
+	}
+	return boundary.Add(firstRunSettleDelay).Add(time.Duration(slot) * firstRunStaggerStep)
+}
+
+// computeAlignedFirstRun returns the wall-clock time the first AI analysis cycle
+// should fire, given the current time. When the scan interval is too small to
+// align (or invalid), it returns now (fire immediately). The returned slot is
+// included for logging.
+func (at *AutoTrader) computeAlignedFirstRun(now time.Time) (fire time.Time, slot int) {
+	slot = at.staggerSlot()
+	return alignedFirstRunAt(now, at.config.ScanInterval, slot), slot
+}
+
 func (at *AutoTrader) Run() error {
 	at.isRunningMutex.Lock()
 	at.isRunning = true
@@ -788,9 +896,6 @@ func (at *AutoTrader) Run() error {
 		}
 	}
 
-	ticker := time.NewTicker(at.config.ScanInterval)
-	defer ticker.Stop()
-
 	// Check if this is a grid trading strategy
 	isGridStrategy := at.IsGridStrategy()
 	if isGridStrategy {
@@ -803,8 +908,43 @@ func (at *AutoTrader) Run() error {
 		logger.Infof("🟦 [%s] Breakout trading strategy detected (data-validated edge + AI soft-veto sizing)", at.name)
 	}
 
-	// Execute immediately on first run
-	at.executeCycleByType(isGridStrategy)
+	// First-run timing:
+	//   - Grid strategies place orders ASAP → run immediately (unchanged).
+	//   - AI analysis strategies → align the first cycle to the next scan-interval
+	//     boundary + settle delay + per-trader stagger (computeAlignedFirstRun).
+	// The ticker is created AFTER the first fire so the (possibly minutes-long)
+	// alignment wait doesn't accumulate a backlog of ticks.
+	if isGridStrategy {
+		at.executeCycleByType(isGridStrategy)
+	} else {
+		fire, slot := at.computeAlignedFirstRun(time.Now())
+		delay := time.Until(fire)
+		if delay > 0 {
+			logger.Infof("⏰ [%s] First analysis aligned: fires at %s (in %v) — interval=%v, settle=%v, stagger slot=%d (+%v)",
+				at.name, fire.Format("15:04:05"), delay.Round(time.Second),
+				at.config.ScanInterval, firstRunSettleDelay, slot,
+				time.Duration(slot)*firstRunStaggerStep)
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-at.stopMonitorCh:
+				timer.Stop()
+				logger.Infof("[%s] ⏹ Stop signal received during first-run alignment wait, exiting", at.name)
+				return nil
+			}
+		}
+		// Re-check running state before the (delayed) first fire.
+		at.isRunningMutex.RLock()
+		stillRunning := at.isRunning
+		at.isRunningMutex.RUnlock()
+		if !stillRunning {
+			return nil
+		}
+		at.executeCycleByType(isGridStrategy)
+	}
+
+	ticker := time.NewTicker(at.config.ScanInterval)
+	defer ticker.Stop()
 
 	for {
 		at.isRunningMutex.RLock()

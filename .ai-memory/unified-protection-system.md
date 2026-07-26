@@ -1,8 +1,105 @@
 # 统一保护系统 - AI 记忆文档
 
-> **状态**: 生产运行 | churn 已根治 | 回吐护栏实盘全策略生效 | excursion(MFE/MAE)跟踪已上线 | structural_sl 归因已修
-> **更新**: 2026-07-07 (excursion 峰谷+ATR倍数落库 + structural_sl 平仓归因回归修复,前后端已部署)
-> **版本**: v1.13.0
+> **状态**: 生产运行 | **v1.16.1 已部署(2026-07-26 14:53 UTC pid 2183422,activePx=0 热修根除 WLD churn)**
+> **更新**: 2026-07-26 (v1.16.1 activePx=0 热修已上线,全绿,churn 归零)
+> **版本**: v1.16.1 (已部署) / v1.16.0 (近价锚定,已弃) / v1.15.0
+
+> **⚠️ v1.16.1 热修(2026-07-26,决定性,勿忘)**:v1.16.0 用"近价锚定"(short=mark×0.9999)重挂越过档 → **OKX tick 取整把 activePx 推到 mark 错误一侧**(0.333867→0.334 > mark 0.3339 的 short),OKX 永不激活→判幻影→每 poll 重挂 ~5/min(WLD 实测,断路器跳闸 1581 次/天)。**未危险**(持仓始终有保护、单不叠加)但违反可靠性。**修法**:越过+盈利(profit≥floor)的档,`activePx=0`(不传 activePx,OKX 从现价立即激活,报 `activated`/StopPrice=0),彻底绕开 tick 取整。用户选"2 热修"→测试锁定→重建 binary→重部署,已上线 churn 归零。**未到触发价的档不受影响**:计划锚离 mark ≥minProfit%(远大于 ~0.03% tick 噪音,在 0.3% matcher 容差内),静置干净,OKX 到价自动激活。
+
+> **⚠️ v1.15 生产观察(2026-07-26 20:27-20:37,决定性,勿忘)**:
+> 1. **无激活价危险单撤重挂路径:生产未触发**——全局 `DANGEROUS no-activation` 撤销=0。WLD 不是危险单场景(它的单都带合法 activePx=0.3399/0.3455,是**幻影单** mark 0.335 已越过激活价),不是 `activated && activePx<=0`。撤单+重挂仅单测覆盖,**等 OKX 真产出无激活价单才会在生产验证**。
+> 2. **re-arm 断路器:确实工作**——WLD 跳闸 114 次,每次落 managed 本地监控接管,持仓有兜底。但计数无界增长(fails=42+),每 poll 重复 arm managed(噪音,无害)。
+> 3. **老 place/cancel churn:撤单=0(老 106),消除;但幻影单仍 ~2/min 重挂(老 ~8/min,约4×减轻),open orders 3~7 震荡不无界(OKX 过期消化)**。根因:断路器跳闸对,但**重挂走另一条 arm 路径 `getDrawdownArmRulesForSelectedRule`**,当 entry/持仓量部分平仓后变动(188→95)幻影单偶尔匹配不上被当"缺失"重挂。非 v1.15 引入,既有逻辑边角。
+> **待跟进补丁**:让 arm 路径也认跳闸状态(跳闸 tier 不再走重挂),压掉 ~2/min 幻影重挂。改 `getDrawdownArmRulesForSelectedRule`/arm 循环,独立小改动,未做。
+
+---
+
+## 🟢 place-at-open 统一保护 + profit-aware 判别 + activePx=0 立即重挂(2026-07-26 v1.16.1,已部署)
+
+**触发**:用户两条纠正。(1)"过了触发价就挂不上单了啊,又死循环了,开仓就把带着触发价的移动止盈止损挂上,无论哪个交易所,咱们代码都是这个策略,开仓就挂好所有保护,过程监控,丢了才补"。(2)"越过 activePx 的丢失档,允许挂离他最近的无激活价/触发价的移动止盈止损。这样不论是否达到指定价格,都统一了保护效果——完善周边功能和冲突"。用户随后"同意上线"。
+
+**模型(v1.16 定稿)**:
+- **开仓挂全档**:`getDrawdownArmRulesForNativeExposure` 从"单 tier 利润迁移"**重写**为"查全部→返回缺档"。所有合法 tier 开仓即各自挂 resting 单在自己的 activePx(此刻离价最远最安全)。**与利润无关**。
+- **运行时只补丢档**:每 poll 查全部 tier,有 live 单的跳过,缺的补挂。
+- **过了 activePx 的丢失档=立即重挂(activePx=0)**:不再"死拒/降级 managed",而是**不传 activePx**(`activationPrice=0`),OKX 从现价立即激活并从**盈利锁定的峰值**跟踪。因 profit≥floor,最坏=该档设计的保留利润,绝不亏新钱。⚠️**注意**:v1.16.0 曾试"近价锚定 mark×0.9999",但 OKX tick 取整会把 activePx 推到 mark 错误一侧→永不激活→幻影 churn(见顶部 v1.16.1 热修)。`activePx=0` 彻底绕开取整,是定稿方案。此时单报告为 `activated`/StopPrice=0,由 profit-aware 判别认定为"故意锁利润立即跟踪"(安全、有效、green)。
+- **managed 降级**:仅交易所 API 失败/断路器跳闸才接管(v1.15 断路器机制保留)。
+
+**profit-aware 判别(防止误撤刚放行的立即单→再 churn)**:
+- `safeProfitFloor = lowestTierMinProfit(rules)`(最小正 MinProfitPct)。
+- `trailingOrderIsDangerousNoActivation(exchange, order, currentPnLPct, safeProfitFloor)`:OKX `activated && activePx<=0` 时,`profit≥floor`→**安全**(故意的锁利润立即跟踪,返 false);`profit<floor`→危险(近入场误平,返 true)。
+- `nativeTrailingEffective(exchange, order, side, mark, currentPnLPct, safeProfitFloor)`:OKX activated 分支 `activePx>0→true`,否则 `profit≥floor→true`(有效锁利润立即跟踪)。
+- `reconcileDangerousTrailingOrders(symbol, side, currentPnLPct, safeProfitFloor)`:同步传参,只撤真危险单。
+- **关键不变式**:危险 floor = 最低档 MinProfit → 无激活价单**仅当 profit<所有档**才危险,而那时无档达标 managed 本就不平 → "危险撤单 + managed 平仓"天然互斥(旧 E10 前提失效,已重写)。
+
+**周边冲突修复(整合的关键)**:立即锚定单的 activePx≈mark,远离**计划** tier activePx → matcher(`findEquivalentPartialTrailingOrder` 按计划 activePx 匹配)下一 poll 会当"丢失"→重挂 churn + managed 双平。修:
+- `findEquivalentPartialTrailingOrder` 取 markPrice,算 `markPassedPlanned`;越过后**只按 qty+callback 认单**(两者是 per-tier 判别符),activation 条件放宽为 `activationMatches(...) || markPassedPlanned`。
+- `shouldReplacePartialTrailingTier`:**activated 单一律不替换**(它在跟踪峰值,报告的 StopPrice 是移动止损非计划锚,替换会毁掉在场保护并重置峰值)。与 full-trailing 路径对齐。
+- `computeExchangeLight`:`!matchedLive`**恒 red**(开仓即挂→缺失=真缺口,自愈,不再"gray waiting");activated&activePx<=0 分支 `profit≥min→green`(故意立即跟踪)否则 yellow。前端 `PositionProtectionPanel.tsx` 撤销 gray 分支(回退四色),red 文案="缺失·待补挂"。
+
+**测试(全绿,`go test ./trader/` ok 19s)**:F 组新增 `TestLowestTierMinProfit`、`TestDangerousNoActivation_ProfitAware`、`TestNativeTrailingEffective_ProfitAware_NoActivePx`、`TestReconcile_ProfitAware_KeepsDeliberateImmediateTrail`、`TestComputeExchangeLight_ActivatedNoActivePx_ProfitAware`、`TestNoActivePxAtProfitFloor_KeptAndManagedYields`(旧 E10 重写:profit≥floor 立即单不撤+managed 让位不双平)。`TestGetDrawdownArmRulesForNativeExposure...`(旧单 tier)重写为 `...ArmsAllValidTiers`(全档+跳过非法档)。E 组/matrix/四色全部签名更新加 `currentPnLPct, safeProfitFloor` 参数(旧行为传 0,0)。gray_waiting 用例改 red_missing_below_floor。
+
+**验证**:`go build ./trader/... ./api/... ./manager/... ./kernel/...` ok、`go test ./trader/ ./api/` ok、`go vet ./trader/` 净、前端 `tsc --noEmit` ok、eslint 净、`npm run build`(进行中)。**改动文件**:`trader/{auto_trader_risk,auto_trader_decision}.go`、`trader/dd_reliability_test.go`、`trader/auto_trader_risk_test.go`、`web/src/components/trader/PositionProtectionPanel.tsx`。**待部署**(高风险须遵部署流程):后端 rm+mv binary + start.sh;前端 docker compose build+up;验证 trader 加载。
+
+**关键洞察(勿再踩)**:
+1. **单 tier 利润迁移 = 死循环根因**——过了触发价挂不上→循环。改开仓挂全档+运行时补丢档,彻底绕开。
+2. **越过档立即重挂必须用 activePx=0,不能用近价锚定**——mark×0.9999 会被 OKX tick 取整推到 mark 错误一侧→永不激活→幻影 churn(v1.16.0→v1.16.1 血的教训)。activePx=0 让 OKX 从现价立即激活,报 `activated`/StopPrice=0,绕开一切取整。profit-aware 判别兜住它(profit≥floor→安全/有效/green)。
+3. **matcher 在 mark 越过计划 activePx 后必须按 qty+callback 认单**——否则立即单被当丢失→churn+双平。qty(累计比例)+callback(MaxDrawdown 导出)是充分的 per-tier 判别符。
+4. **activated 单永不替换**——StopPrice 是移动止损不是计划锚,替换=毁保护+重置峰值。
+5. **未到触发价的档不会 tick 取整错位**——计划锚离 mark ≥minProfit%(远大于 ~0.03% tick 噪音,在 0.3% matcher 容差内),静置干净,OKX 到价自动激活。取整问题只在近价(0.01% 偏移)档出现,已被 activePx=0 消除。
+
+---
+
+## 🔴 无激活价危险单处置 + re-arm 断路器 + ATR冻结脚手架(2026-07-26 v1.15,代码完成待部署)
+
+**触发**:用户纠正 v1.14 的"幻影单一律留着别动"策略。核心区分:**无激活价单 ≠ 幻影单**。
+- **无激活价单**(OKX `activated` 但 `activePx<=0`):OKX 立即激活,从**现价**跟踪,任意小回撤即**误平**——**危险,必须撤单重挂**。
+- **幻影单**(`pending_activation`,`activePx>0`,mark 已越过):OKX 永不激活,是死单,**不会误平**——放任别动,由 managed 兜底(v1.14 结论对幻影仍成立)。
+
+**用户模型(状态机)**:没挂上→managed 保护;挂上但挂错(无激活价)→撤+按正确 activePx 重挂;**连续错误(3次)→停挂+撤错误单+落到 managed**;DD/TP/BE/SL 都是**开仓挂好固定**的,只有**结构位棘轮**跟随;ATR **基本都开仓时固化**,结构棘轮**可能**用动态 ATR→建兼容脚手架但**默认冻结,现在不上动态**。
+
+**"managed" 是什么**:代码侧独立兜底监控(`checkPositionDrawdown` 每 5-60s 轮询,追峰值 PnL,回吐≥MaxDrawdownPct 就 market-close),**不依赖交易所挂单**。它是 fallback:交易所没挂上/挂错撤掉/断路器跳闸后由它接管。
+
+**实现(L0-L4)**:
+- **L0 有效性/危险判别(exchange-gated)** `trader/auto_trader_risk.go`:
+  - `trailingOrderIsDangerousNoActivation(exchange, order)`:`activated && activePx<=0 && OKX` → true。**交易所门控关键**:Binance `activated` 单永远带 `activePx=triggerPrice>0`(见 `binance/futures_orders.go:1034`),此规则**仅 OKX**,否则会误撤健康的 Binance 保护。
+  - `nativeTrailingEffective(exchange, order, side, markPrice)`:`activated` 分支——OKX 要求 `activePx>0` 才有效(无激活价=危险=无效),非 OKX(Binance)`activated` 恒有效。
+- **L1 撤危险单** `reconcileDangerousTrailingOrders(symbol, side) int`:拉 open orders,找危险单(经上判别器),用 `CancelTrailingStopOrdersByIDs`(type-assert)撤;返回撤单数。**幻影单不碰**。在 monitor arm 循环**开头**跑(~L282),撤完后 arm 循环本周期以正确 activePx 重挂。
+- **L2 re-arm 断路器** `accountReArmBreaker(symbol,side,entry,mark,pnl,rules) bool`(arm 循环后,~L303):每个已满足 tier,有效覆盖→`resetReArmFail`;未覆盖→`bumpReArmFail`,达 `reArmBreakerLimit=3` 即**跳闸**→`applyExchangeFailedLocalMonitor`(停挂+managed 接管,状态升 `managed_drawdown_exchange_failed_armed`,面板反色黄警)。跳闸 tier 视为 covered(避免同 poll 双平)。读失败**不跳闸不谎报**。`reArmBreakerTripped` 谓词让 arm 循环 `continue` 跳过重挂(~L289)。断路器计数:`reArmFailKey`/`bumpReArmFail`(nil-map lazy-init)/`resetReArmFail`/`getReArmFail`/`clearReArmFailForPosition`(新开仓归零,`resetPerPositionStateOnOpen` 调用);struct 加 `reArmFailCache map[string]int`+`reArmFailMutex`。
+- **L3 ATR 冻结/动态脚手架**:`store/strategy.go` `StructuralSLConfig` 加 `DynamicATR bool`(**默认 off**,仅结构棘轮用,单向收紧);`atr_protection_resolver.go` `candidateATRForRatchet(...)`:`!DynamicATR`→直接返 `frozenATRForPosition`(惰性,行为不变);`DynamicATR`→每主周期(`candidateATRRecomputeIntervalMs=5min`)节流重算候选 ATR,缓存,单向。`structural_sl_guard.go` 把 `frozenATRForPosition` 换成 `candidateATRForRatchet`(off 时完全等价)。struct 加 `candidateATRCache`/`candidateATRAtMs`/`candidateATRMutex`。
+- **L4 前端灯细分** `trader/auto_trader_decision.go`:`computeExchangeLight` activated 分支 `activePx>0?green:yellow`;新增 `computeExchangeLightReason(...)`(仅 yellow 细分):`exchange_failed`/`no_activation`(matchedLive&&activePx<=0)/`not_placed`(!matchedLive)/`phantom`;tier map 加 `exchange_light_reason`。`web/.../PositionProtectionPanel.tsx` `ScheduledTier` 加该字段,yellow 文案按 reason 切换:no_activation→"无激活价·会误平·待撤"、phantom→"幻影·无保护"、exchange_failed→"交易所挂单失败·本地保护"、default→"委托有瑕疵·待处理"。
+
+**破坏性/仿真测试(全绿)** `trader/dd_reliability_test.go` E 组 11 个:`TestDangerousNoActivation_Detected`(判别器6例含 Binance 门控/nil)、`_CancelledAndReplaced`、`TestPhantom_NotTreatedAsDangerous_NoCancel`、`TestGenuinelyActivated_activePxPositive_NotCancelled`、`TestComputeExchangeLight_ActivatedNoActivePx_Yellow`、`TestReArmBreaker_TripsAfter3Fails`(第3次跳闸→exchange_failed mode)、`_ResetsOnNewPosition`、`_SuccessResetsCounter`、`_GetOpenOrdersError_NoTripNoClaim`、`TestManagedClosesOnGiveback_WithDangerousCancelled`(决定性:危险单撤+managed 平1次)、`TestReArmBreaker_TrippedStopsRePlacing`(跳闸后 arm 不再挂)。**Binance 回归修复**:`nativeTrailingEffective`/`trailingOrderIsDangerousNoActivation` 加 `exchange` 参数后,`TestNativeTrailingEffective_BinanceActivatedRegression` 传 "binance" 保持 activated 恒有效;matrix/fallback 传 "okx"。前端 panel 加 no_activation + phantom 两个 reason 断言。
+
+**验证**:`go test ./trader/`(18.5s ok)、`./store/ ./api/` ok、`go build .` ok、`go vet ./trader/ ./store/` ok;前端 panel 单测 3/3、eslint 干净(prettier auto-fix 2 次)、`npm run build`(进行中/无循环依赖)。**改动未 commit(遵规矩)**:trader/{auto_trader,auto_trader_risk,auto_trader_decision,atr_protection_resolver,structural_sl_guard}、trader/dd_reliability_test.go、store/strategy.go、web/.../PositionProtectionPanel.{tsx,test.tsx}。**待部署**(高风险须用户确认):后端 ./nofx HOST 进程重启 + 前端 Docker 重建重启。**WLD**:用户自行前端平仓(分类器阻止我铸 JWT)。
+
+**关键洞察(勿再踩)**:
+1. **无激活价 vs 幻影是两回事**——前者会误平必须撤,后者是死单留着别动;v1.14 的"一律别动"只对幻影成立。
+2. **危险判别必须 exchange-gate 到 OKX**——Binance activated 单合法带 activePx>0,off-OKX 套用会误撤健康保护(这是 v1.15 唯一踩过的坑,已用 exchange 参数+回归测试锁死)。
+3. **DD/TP/BE/SL 开仓固定,只有结构棘轮跟随**——ATR 默认冻结,动态 ATR 只是脚手架(DynamicATR 默认 off),即便将来开也只每主周期重算一次做备用、单向收紧。
+4. **断路器读失败不跳闸不谎报覆盖**——网络抖动不该误判交易所不可靠。
+
+---
+
+## 🚦 幻影 trailing 抑制 managed 根因修复 + 四色状态灯(2026-07-26 v1.14,代码完成,已被 v1.15 增强)
+
+**触发**:WLD trailing 反复挂/撤(churn)、无激活价的死单;BTC DD-1 回吐没平(+4.19×ATR 缩到 +0.69%)。用户诉求=修 managed 备份可靠性 + 前端红黄绿蓝真实反映交易所挂单状态(红=未委托到交易所/黄=有瑕疵如无激活价/绿=正常/蓝=已触发)。
+
+**三个叠加根因**:
+1. **(决定性)managed 抑制看"有无"不看"有效性"**:`exchangeSideCoversDrawdownTier` 只要交易所有对应 tier 的 trailing 单就认为已覆盖→抑制 managed 兜底。但"幻影单"(下单时 mark 已越过 activePx,OKX 永不自动激活)是死单,毫无保护→managed 被错误抑制→回吐不平。
+2. **幻影单 churn**:挂/撤循环。
+3. **前端假灯**:`is_activated = peakPnLPct >= MinProfitPct`(纯本地推断,与交易所真实状态无关)。
+
+**修复(4 层,均在 trader/ + web/)**:
+- **L1 有效性判定** `trader/auto_trader_risk.go`:`nativeTrailingOrder` 加 `ActivationPrice` 字段(两处 build 站点填充);新增 `nativeTrailingEffective(order,side,markPrice)`=已激活恒 true;resting 单仅在 activePx 未越过时 true(long: mark<activePx, short: mark>activePx);activePx<=0 或 mark<=0 或 nil→false。StopPrice 作 activePx 兜底。
+- **L2 managed 只让位有效单** `exchangeSideCoversDrawdownTier` 加 markPrice 参;缺单/幻影/瑕疵→返回 false(放行 managed),仅 `nativeTrailingEffective` 才 true,幻影时日志 `🟡 Exchange trailing tier present but NOT effective`。新增 `allSatisfiedNativeTiersEffective` 遍历已满足 tier,任一未被有效覆盖即返 false。monitor 分支重写(~L265):去掉 `checkAndFixStaleTrailingActivation`(变死代码,无害),改幂等 `applyNativeTrailingDrawdown`(缺才补)+ `nativeTrailingHandled=allSatisfiedNativeTiersEffective`。
+- **L4 后端灯** `trader/auto_trader_decision.go`:trailingOrders DTO 加 `activation_status`/`activation_price`;matchedLive 块捕获 matched 单激活态并算 `computeExchangeLight(...)`→tier map 加 `exchange_light`。逻辑:已触发→蓝;managed→绿(exchange_failed→黄);非 native→绿;!matchedLive→tierReached?红:黄;已激活→绿;matched 单自身 activePx<=0→黄(**不回退 planned**);mark<=0→黄;已越过 activePx→黄(幻影)否则→绿。
+- **L4 前端灯** `web/src/components/trader/PositionProtectionPanel.tsx`:`ScheduledTier` 加 `exchange_light`,row 加 `light`;状态文案由 `exchange_light` 驱动(蓝=已触发/绿=正常委托/黄=委托有瑕疵·无激活价·幻影/红=未委托到交易所),缺失才回退旧 is_* 启发;圆点色 `statusDot` 优先 `row.light`。文案渲染在圆点 `title` 属性(L841)。
+
+**关键洞察(勿再踩)**:幻影单**留着别动**才不 churn——去重门 `hasMatchingNativeTrailingOrderForRule` 把匹配的幻影单视为"已存在"→返 nil 不重挂;reconciler 清理仅对"整个 symbol 全无效"才撤单。所以"有效性"只用于**是否放行 managed**,不用于决定撤单。
+
+**破坏性/仿真测试(全绿)** `trader/dd_reliability_test.go`:`TestNativeTrailingEffective_Matrix`(四态×多空)、StopPrice 兜底、`TestComputeExchangeLight_FourColors`(10 例含幻影/无 activePx/managed)、非 native venue、`TestExchangeSideCoversDrawdownTier_Matrix`、GetOpenOrders 出错→放行 managed、重复幻影单仍不覆盖、零 activePx 不覆盖、`TestAllSatisfiedNativeTiersEffective`、BN 已激活回归、**`TestPhantomTrailing_NoChurnAcrossManyCycles`(20 周期断言 0 撤单 ≤1 挂单)**、`TestActivatedTrailing_NotCancelled_ManagedYields`、**`TestPhantomPresent_ManagedStillClosesOnGiveback`(决定性:有幻影单时 managed 仍在回吐时平 1 次)**。前端 panel 测试加 yellow 灯断言。
+
+**验证**:`go test ./trader/`(22.7s ok)、`./api/ ./store/` ok、前端 `npm run build`(1m45s,无循环依赖)、panel 单测 2/2、eslint 干净。**改动未 commit(遵规矩)**:trader/{auto_trader_risk,auto_trader_decision}、trader/dd_reliability_test.go、trader/auto_trader_risk_test.go、web/src/components/trader/PositionProtectionPanel.{tsx,test.tsx}。**WLD 即时处置**:用户自行前端平仓锁盈(分类器阻止我铸 JWT 平仓);平仓后 churn 自停。**待部署**:后端 ./nofx HOST 进程重启 + 前端 Docker 重建重启(高风险,须用户确认)。
 
 ---
 
