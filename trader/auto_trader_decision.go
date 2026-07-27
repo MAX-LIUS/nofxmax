@@ -1444,28 +1444,49 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 				case "binance", "bitget":
 					callbackRate = callbackRate * 100.0
 				}
-				for _, order := range trailingOrders {
-					qtyVal, _ := order["quantity"].(float64)
-					cbVal, _ := order["callback_rate"].(float64)
+				applyMatch := func(order map[string]interface{}) {
 					trVal, _ := order["trigger_price"].(float64)
-					qtyTolerance := math.Max(0.0001, plannedQty*0.1)
-					callbackTolerance := 0.0002
-					if strings.ToLower(at.exchange) == "binance" || strings.ToLower(at.exchange) == "bitget" {
-						callbackTolerance = 0.05
+					cbVal, _ := order["callback_rate"].(float64)
+					if trVal > 0 {
+						activationPrice = trVal
+						activationSource = "exchange"
 					}
-					if plannedQty > 0 && math.Abs(qtyVal-plannedQty) <= qtyTolerance && math.Abs(cbVal-callbackRate) <= callbackTolerance {
-						if trVal > 0 {
-							activationPrice = trVal
-							activationSource = "exchange"
+					if cbVal > 0 {
+						callbackRate = cbVal
+						callbackSource = "exchange"
+					}
+					matchedActivationStatus, _ = order["activation_status"].(string)
+					matchedActivationPrice, _ = order["activation_price"].(float64)
+					matchedLive = true
+				}
+				// ID-first matching: every tier persists its placement's exchange
+				// orderID (OKX algoId / Binance algoId) keyed by RuleFingerprint. Match
+				// on that first — it is collision-free across concurrent multi-tier
+				// orders (dd1 + partial resting together), unlike qty+callback fuzzy
+				// matching which cannot tell sibling tiers apart. Only fall back to
+				// fuzzy matching when no stored ID exists (legacy / pre-restart orders).
+				if wantID := at.storedTrailingOrderIDForRule(symbol, side, entryPrice, rule); wantID != "" {
+					for _, order := range trailingOrders {
+						if oid, _ := order["order_id"].(string); oid != "" && oid == wantID {
+							applyMatch(order)
+							break
 						}
-						if cbVal > 0 {
-							callbackRate = cbVal
-							callbackSource = "exchange"
+					}
+					// Stored ID present but order gone → this tier is genuinely
+					// missing. Do NOT fuzzy-match onto a sibling tier's order.
+				} else {
+					for _, order := range trailingOrders {
+						qtyVal, _ := order["quantity"].(float64)
+						cbVal, _ := order["callback_rate"].(float64)
+						qtyTolerance := math.Max(0.0001, plannedQty*0.1)
+						callbackTolerance := 0.0002
+						if strings.ToLower(at.exchange) == "binance" || strings.ToLower(at.exchange) == "bitget" {
+							callbackTolerance = 0.05
 						}
-						matchedActivationStatus, _ = order["activation_status"].(string)
-						matchedActivationPrice, _ = order["activation_price"].(float64)
-						matchedLive = true
-						break
+						if plannedQty > 0 && math.Abs(qtyVal-plannedQty) <= qtyTolerance && math.Abs(cbVal-callbackRate) <= callbackTolerance {
+							applyMatch(order)
+							break
+						}
 					}
 				}
 				if !matchedLive {

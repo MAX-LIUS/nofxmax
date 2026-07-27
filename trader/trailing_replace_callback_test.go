@@ -89,7 +89,7 @@ func TestFindExistingFullTrailingOrder_PreservesActivationStatus(t *testing.T) {
 			ActivationStatus: "activated",
 		},
 	}
-	got := at.findExistingFullTrailingOrder("short", openOrders)
+	got := at.findExistingFullTrailingOrder("SHORTSYM", "short", 100.0, store.DrawdownTakeProfitRule{MinProfitPct: 2, MaxDrawdownPct: 30, CloseRatioPct: 100}, openOrders)
 	if got == nil {
 		t.Fatal("expected to find the trailing order")
 	}

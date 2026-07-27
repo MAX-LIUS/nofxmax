@@ -35,6 +35,8 @@ func (at *AutoTrader) applyPostOpenProtection(req *protectionExecutionRequest) e
 		return nil
 	}
 
+	at.syncRequestEntryPriceToExchange(req)
+
 	configuredPlan, err := at.BuildConfiguredProtectionPlanForSymbol(req.EntryPrice, req.Action, req.Symbol)
 	if err != nil {
 		return err
@@ -69,7 +71,7 @@ func (at *AutoTrader) applyPostOpenProtection(req *protectionExecutionRequest) e
 					decisionPlan.DrawdownRules = ddRules
 				}
 				at.setAIDrawdownRules(req.Symbol, req.PositionSide, ddRules)
-				at.initDrawdownTiersFromResolvedRules(req.Symbol, req.PositionSide, req.Quantity, ddRules)
+				at.initDrawdownTiersFromResolvedRules(req.Symbol, req.PositionSide, req.Quantity, req.EntryPrice, ddRules)
 			}
 		}
 	}
@@ -257,6 +259,65 @@ func preferDecisionProtectionPlan(configuredPlan, decisionPlan *ProtectionPlan) 
 	return &preferred
 }
 
+// maxPostOpenEntrySyncDeviation caps how far the exchange's reported entry price may sit
+// from the price protection was planned against before we distrust the exchange value and
+// keep the planned one. 2% is far wider than any real slippage on a market entry, so it only
+// rejects genuinely wrong reads (a stale same-symbol position from a prior cycle, a partially
+// reported average) — never a legitimate fill.
+const maxPostOpenEntrySyncDeviation = 0.02
+
+// syncRequestEntryPriceToExchange replaces req.EntryPrice with the exchange's actual
+// position entry price before any protection is computed.
+//
+// The open path passes marketData.CurrentPrice — the price from the analysis snapshot,
+// taken BEFORE the order was sent — so it differs from the real fill by slippage plus
+// however long the cycle took (live 2026-07-27: BN SOLUSDT planned 76.36 vs actual 76.28,
+// BN ETHUSDT 1944.01 vs 1943.65). The runtime drawdown monitor reads entry price from the
+// exchange position (auto_trader_risk.go:146), and entry price is BOTH the first field of
+// stableDrawdownRuleFingerprint AND the divisor in the ATR→percent conversion. So the two
+// paths derived different fingerprints for the same configured tier, the runtime path found
+// no stored order for "its" rule, and armed a SECOND trailing order — a strategy with two
+// tiers ended up with three resting orders.
+//
+// Anchoring to the exchange value here also makes every protection distance (ladder SL/TP,
+// break-even, drawdown) measure from the price actually paid rather than a pre-trade estimate.
+//
+// Best-effort by design: on any failure (fetch error, position not visible yet, absurd
+// deviation) req.EntryPrice is left exactly as it was, so this can never block an open or
+// leave a position unprotected.
+func (at *AutoTrader) syncRequestEntryPriceToExchange(req *protectionExecutionRequest) {
+	if req == nil || at.trader == nil || req.EntryPrice <= 0 {
+		return
+	}
+	positions, err := at.trader.GetPositions()
+	if err != nil || len(positions) == 0 {
+		return
+	}
+	wantSide := strings.ToLower(req.PositionSide)
+	for _, pos := range positions {
+		symbol, _ := pos["symbol"].(string)
+		side, _ := pos["side"].(string)
+		if !strings.EqualFold(symbol, req.Symbol) || !strings.EqualFold(side, wantSide) {
+			continue
+		}
+		actual, _ := pos["entryPrice"].(float64)
+		if actual <= 0 {
+			return
+		}
+		if math.Abs(actual-req.EntryPrice)/req.EntryPrice > maxPostOpenEntrySyncDeviation {
+			logger.Warnf("  ⚠️ Post-open entry sync rejected for %s %s: exchange entry %.8f deviates >%.0f%% from planned %.8f — keeping planned price",
+				req.Symbol, req.PositionSide, actual, maxPostOpenEntrySyncDeviation*100, req.EntryPrice)
+			return
+		}
+		if actual != req.EntryPrice {
+			logger.Infof("  📐 Post-open entry synced for %s %s: planned %.8f → exchange %.8f (protection anchors on the actual fill)",
+				req.Symbol, req.PositionSide, req.EntryPrice, actual)
+			req.EntryPrice = actual
+		}
+		return
+	}
+}
+
 func (at *AutoTrader) applyNativeProtectionTargetsAfterOpen(req *protectionExecutionRequest, plan *ProtectionPlan) error {
 	if req == nil || req.Decision == nil || at.config.StrategyConfig == nil {
 		return nil
@@ -288,6 +349,23 @@ func (at *AutoTrader) applyNativeProtectionTargetsAfterOpen(req *protectionExecu
 	}
 
 	side := strings.ToLower(req.PositionSide)
+
+	// Resolve ATR-unit min-profit / max-drawdown distances to an effective percent
+	// against the position's frozen open-time ATR, exactly as the three other arm
+	// paths do (auto_trader_risk.go:204 runtime monitor, auto_trader_decision.go:1223
+	// display, protection_reconciler.go:476 reconciler). Percent-unit rules are
+	// untouched — resolveDrawdownRulesATR returns the input unchanged unless a rule
+	// actually carries unit "atr".
+	//
+	// Without this, place-at-open (added in a56f741 / v1.16.1) armed the RAW ATR
+	// multiple as a percent: a strategy declaring `max_drawdown_pct: 1.8, unit: atr`
+	// got callbackRate 1.8% here while the runtime path armed the same tier at
+	// 1.8 × ATR / entry. Both records then carry different rule fingerprints, so
+	// neither recognises the other's exchange order and BOTH stay resting — the
+	// position shows more tiers than the strategy configures, at distances that are
+	// too wide on low-volatility symbols and too tight on high-volatility ones
+	// (observed 2026-07-27 on Binance SOL/ETH and OKX KAITO/SPCX/WLD).
+	drawdownRules = at.resolveDrawdownRulesATR(drawdownRules, req.Symbol, side, req.EntryPrice)
 
 	// 0. Immediate trailing: 50% partial trailing at entry for immediate drawdown protection.
 	// Acts as first line of defense against bad entries or fast reversals. Canceled when

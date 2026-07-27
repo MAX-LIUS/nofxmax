@@ -285,24 +285,39 @@ func (at *AutoTrader) getCumulativeCloseRatioByRule(symbol, side string, rule st
 	if len(allocs) == 0 {
 		return rule.CloseRatioPct
 	}
+	// Match on tier IDENTITY, not on numeric proximity. StageName and CloseRatioPct both
+	// survive ATR→percent resolution unchanged, so they identify the same logical tier on
+	// either side of the resolver; MinProfitPct does not.
 	tierIndex := -1
 	for _, tier := range allocs {
-		if math.Abs(tier.MinProfitPct-rule.MinProfitPct) < 0.01 {
+		if tier.StageName != "" && tier.StageName == rule.StageName &&
+			math.Abs(tier.CloseRatioPct-rule.CloseRatioPct) < 0.01 {
 			tierIndex = tier.TierIndex
 			break
 		}
 	}
 	if tierIndex < 0 {
-		// Fallback: find the highest tier whose MinProfitPct <= rule.MinProfitPct
+		// Unnamed tiers (legacy records) fall back to an EXACT threshold match.
 		for _, tier := range allocs {
-			if tier.MinProfitPct <= rule.MinProfitPct+0.01 {
-				if tier.TierIndex > tierIndex {
-					tierIndex = tier.TierIndex
-				}
+			if math.Abs(tier.MinProfitPct-rule.MinProfitPct) < 0.01 {
+				tierIndex = tier.TierIndex
+				break
 			}
 		}
 	}
 	if tierIndex < 0 {
+		// No identifiable tier. Return the rule's OWN ratio and nothing more.
+		//
+		// The previous fallback here took "the highest tier whose MinProfitPct <= the rule's"
+		// and summed the ladder up to it. That is unsafe in exactly the case it fired: when
+		// the rule and the allocs disagree on units or the tier was dropped from the ladder,
+		// an unrelated tier gets adopted and a PARTIAL tier inherits a cumulative ratio it
+		// was never meant to carry — clamped to 100, i.e. a whole-position trailing order.
+		// Live 2026-07-27: WLDUSDT partial (close=30) armed for all 380 units, and CLUSDT
+		// partial (close=30) for all 1.4. Inheriting nothing is the safe direction: the tier
+		// protects its own slice, and the sibling full tier still covers the remainder.
+		logger.Infof("⚠️ Drawdown cumulative ratio: %s %s no tier matches rule stage=%q close=%.1f%% min=%.4f — using the rule's own ratio (no ladder inheritance)",
+			symbol, side, rule.StageName, rule.CloseRatioPct, rule.MinProfitPct)
 		return rule.CloseRatioPct
 	}
 	var total float64
@@ -424,7 +439,17 @@ func logTierAllocStatus(symbol, side string, allocs []store.DrawdownTierAllocati
 
 // initDrawdownTiersFromResolvedRules resolves AI/manual per-field modes against strategy config,
 // then computes and stores the fixed tier allocations.
-func (at *AutoTrader) initDrawdownTiersFromResolvedRules(symbol, side string, quantity float64, aiRules []store.DrawdownTakeProfitRule) {
+//
+// entryPrice is required so ATR-unit thresholds can be re-resolved to percent AFTER the
+// mode merge. resolveDrawdownRulesWithModes starts each output from `result := base`, i.e.
+// the RAW strategy rule, and only copies a caller value in when that field's mode is "ai".
+// A fully-manual strategy (claude-ct30: min_profit_mode/max_drawdown_mode both "manual")
+// therefore discards whatever resolution the caller had already applied, and the raw ATR
+// multiple (3.0) lands in MinProfitPct — a field every consumer reads as a PERCENT.
+// Observed 2026-07-27 on WLDUSDT long: allocs held "peak_trigger=3.00%" while the arm path
+// used the resolved 4.2012%, so getCumulativeCloseRatioByRule matched no tier and its
+// fallback summed the ladder to 100 — the 30% partial tier armed at the FULL 380 position.
+func (at *AutoTrader) initDrawdownTiersFromResolvedRules(symbol, side string, quantity, entryPrice float64, aiRules []store.DrawdownTakeProfitRule) {
 	if quantity <= 0 || len(aiRules) == 0 {
 		return
 	}
@@ -439,14 +464,21 @@ func (at *AutoTrader) initDrawdownTiersFromResolvedRules(symbol, side string, qu
 		resolved = aiRules
 	}
 
-	at.initDrawdownTiersForPosition(symbol, side, quantity, resolved)
+	at.initDrawdownTiersForPosition(symbol, side, quantity, entryPrice, resolved)
 }
 
 // initDrawdownTiersForPosition computes and stores tier allocations when a position is opened.
-func (at *AutoTrader) initDrawdownTiersForPosition(symbol, side string, quantity float64, rules []store.DrawdownTakeProfitRule) {
+//
+// Allocations are stored in PERCENT units: resolveDrawdownRulesATR runs here so that
+// tier.MinProfitPct is directly comparable to a live PnL percent (updateDrawdownTierStates)
+// and to the arm path's resolved rules (getCumulativeCloseRatioByRule). Percent-unit
+// strategies are unaffected — the resolver no-ops when no rule carries ATR units.
+func (at *AutoTrader) initDrawdownTiersForPosition(symbol, side string, quantity, entryPrice float64, rules []store.DrawdownTakeProfitRule) {
 	if len(rules) == 0 || quantity <= 0 {
 		return
 	}
+
+	rules = at.resolveDrawdownRulesATR(rules, symbol, side, entryPrice)
 
 	// Apply runner policy enforcement to each rule before allocation
 	var cfg store.DrawdownTakeProfitConfig

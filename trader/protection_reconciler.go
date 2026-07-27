@@ -879,8 +879,66 @@ func (at *AutoTrader) persistDynamicProtectionRecordWithDetails(symbol, side, pr
 		CallbackRatio:       callbackRatio,
 		Quantity:            quantity,
 	}
+	// Populate Key/UpdatedAt up front (SaveDynamicProtectionRecord would otherwise fill
+	// them in internally) so supersedeOlderArmedRecords can compare this record against
+	// the stored ones by identity and recency.
+	record.UpdatedAt = time.Now().UTC().UnixMilli()
+	record.Key = store.BuildDynamicProtectionKey(record.TraderID, record.ExchangeID, record.Symbol, record.Side, record.PositionFingerprint, record.ProtectionType, record.RuleFingerprint, record.CloseRatioPct)
 	if err := at.store.SaveDynamicProtectionRecord(record); err != nil {
 		logger.Warnf("⚠️ Dynamic protection state: failed to persist %s for %s %s: %v", protectionType, symbol, side, err)
+		return
+	}
+	if status == "armed" && exchangeOrderID != "" {
+		at.supersedeOlderArmedRecords(record)
+	}
+}
+
+// supersedeOlderArmedRecords retires armed records that describe the SAME tier as a
+// freshly armed one but point at a dead exchange order.
+//
+// A position accumulates duplicate same-RuleFingerprint armed records because the
+// position-identity filter in getArmedDrawdownRecordsForPosition matches on entry
+// price rather than quantity (quantity legitimately changes on partial close), so a
+// re-arm after a partial close adds a record instead of replacing one. Leaving the
+// dead ones armed made tier→order resolution depend on which record happened to be
+// read first.
+//
+// The match is deliberately narrow — same trader, protection type, symbol, side and
+// RuleFingerprint, different order ID, strictly older UpdatedAt. Because the
+// RuleFingerprint encodes the tier's MinProfitPct, the surviving record carries the
+// same tier threshold, so the anti-downgrade floor that getHighestArmedTierMinProfit
+// rebuilds from these records after a restart is unchanged.
+func (at *AutoTrader) supersedeOlderArmedRecords(current store.DynamicProtectionRecord) {
+	state, err := at.store.LoadDynamicProtectionState()
+	if err != nil || state == nil {
+		return
+	}
+	for key, record := range state.Records {
+		if key == current.Key && current.Key != "" {
+			continue
+		}
+		if record.Status != "armed" || record.ExchangeOrderID == current.ExchangeOrderID {
+			continue
+		}
+		if record.TraderID != current.TraderID || record.ProtectionType != current.ProtectionType {
+			continue
+		}
+		if !strings.EqualFold(record.Symbol, current.Symbol) || !strings.EqualFold(record.Side, current.Side) {
+			continue
+		}
+		if record.RuleFingerprint != current.RuleFingerprint {
+			continue
+		}
+		if record.UpdatedAt >= current.UpdatedAt && current.UpdatedAt != 0 {
+			continue
+		}
+		superseded := record
+		superseded.Status = "superseded"
+		if err := at.store.SaveDynamicProtectionRecord(superseded); err != nil {
+			logger.Warnf("⚠️ Dynamic protection state: failed to supersede stale %s record for %s %s: %v", record.ProtectionType, record.Symbol, record.Side, err)
+			continue
+		}
+		logger.Infof("🗂 Superseded stale armed %s record: %s %s posFP=%s orderID=%s (newer arm orderID=%s)", record.ProtectionType, record.Symbol, record.Side, record.PositionFingerprint, record.ExchangeOrderID, current.ExchangeOrderID)
 	}
 }
 

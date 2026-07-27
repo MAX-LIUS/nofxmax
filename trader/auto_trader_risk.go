@@ -247,7 +247,7 @@ func (at *AutoTrader) checkPositionDrawdown() {
 		// MUST happen before native trailing arm so getCumulativeCloseRatioByRule can find allocs.
 		allocs := at.getDrawdownTierAllocs(symbol, side)
 		if len(allocs) == 0 {
-			at.initDrawdownTiersFromResolvedRules(symbol, side, quantity, rules)
+			at.initDrawdownTiersFromResolvedRules(symbol, side, quantity, entryPrice, rules)
 			allocs = at.getDrawdownTierAllocs(symbol, side)
 		}
 
@@ -1030,17 +1030,119 @@ func (at *AutoTrader) getArmedDrawdownRuleFingerprintsForPosition(symbol, side s
 	return armed
 }
 
+// storedTrailingOrderIDForRule returns the exchange orderID (OKX algoId / Binance
+// algoId) we persisted for THIS specific drawdown tier when we last armed it, or ""
+// if none is on record. It is the authoritative per-tier identity: every arm path
+// persists the placement's orderID via persistDynamicProtectionRecordWithDetails,
+// keyed by the tier's stable rule fingerprint, so a later poll can find exactly the
+// order it placed for this tier instead of guessing by qty/activation/callback (which
+// collide once multiple tiers rest concurrently under place-at-open). Uniform across
+// all exchanges: both OKX and Binance set OpenOrder.OrderID = the placement algoId.
+func (at *AutoTrader) storedTrailingOrderIDForRule(symbol, side string, entryPrice float64, rule store.DrawdownTakeProfitRule) string {
+	wantFP := stableDrawdownRuleFingerprint(entryPrice, rule)
+	// A position can carry SEVERAL armed records with the SAME RuleFingerprint: the
+	// position-identity filter matches on entry price only (quantity legitimately
+	// changes on partial close, and the native-trailing rule fingerprint is
+	// quantity-independent), so a pre-partial-close record survives alongside the
+	// current one with a DIFFERENT ExchangeOrderID. Returning the first map hit made
+	// the answer depend on Go's randomized map iteration order — half the polls
+	// returned the stale order ID, whose order no longer exists on the exchange, so
+	// the tier was judged missing (2026-07-27: CL/HYPE/ETH re-armed every cooldown
+	// window and the panel showed dd1/dd2 red on the unlucky polls). Always pick the
+	// most recently armed record: that is the order actually resting on the exchange.
+	best := ""
+	var bestUpdatedAt int64 = -1
+	for _, record := range at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, 0, 0) {
+		if record.ExchangeOrderID == "" || record.RuleFingerprint != wantFP {
+			continue
+		}
+		if record.UpdatedAt > bestUpdatedAt {
+			bestUpdatedAt = record.UpdatedAt
+			best = record.ExchangeOrderID
+		}
+	}
+	return best
+}
+
+// claimedTrailingOrderIDsForPosition returns the set of exchange orderIDs that armed
+// protection records currently claim for this position, optionally excluding one rule
+// fingerprint (the tier being (re-)armed right now).
+//
+// Under the place-at-open multi-tier model several trailing orders rest concurrently
+// (dd1 full + partial), each owned by its own armed record. Any bulk cancel must skip
+// these — canceling a sibling tier's live order leaves that tier's record pointing at
+// a dead orderID forever, so its matcher reports "missing" on every poll (panel red +
+// re-arm once per cooldown window). Orders NOT in this set are genuine orphans.
+func (at *AutoTrader) claimedTrailingOrderIDsForPosition(symbol, side string, entryPrice float64, excludeRuleFP string) map[string]struct{} {
+	claimed := make(map[string]struct{})
+	for _, record := range at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, 0, 0) {
+		if record.ExchangeOrderID == "" {
+			continue
+		}
+		if excludeRuleFP != "" && record.RuleFingerprint == excludeRuleFP {
+			continue
+		}
+		claimed[record.ExchangeOrderID] = struct{}{}
+	}
+	return claimed
+}
+
+// findTrailingOrderByID returns the live trailing order whose exchange OrderID equals
+// wantID (and matches side), or nil. This is the precise, collision-free identity
+// match that replaces fuzzy qty/activation/callback matching whenever we have a stored
+// orderID for the tier.
+func findTrailingOrderByID(side, wantID string, openOrders []OpenOrder) *nativeTrailingOrder {
+	if wantID == "" {
+		return nil
+	}
+	for _, order := range openOrders {
+		if order.OrderID != wantID {
+			continue
+		}
+		if order.PositionSide != "" && !strings.EqualFold(order.PositionSide, strings.ToUpper(side)) {
+			continue
+		}
+		return &nativeTrailingOrder{
+			PositionSide:     order.PositionSide,
+			StopPrice:        order.StopPrice,
+			CallbackRate:     order.CallbackRate,
+			Quantity:         order.Quantity,
+			OrderID:          order.OrderID,
+			ActivationStatus: order.ActivationStatus,
+			ActivationPrice:  order.ActivationPrice,
+		}
+	}
+	return nil
+}
+
 func (at *AutoTrader) hasMatchingNativeTrailingOrderForRule(symbol, side string, entryPrice float64, rule store.DrawdownTakeProfitRule, openOrders []OpenOrder) bool {
 	if len(openOrders) == 0 {
 		return false
 	}
+	// Authoritative identity match first: if we recorded an orderID for this exact
+	// tier, its presence in the live order book IS the match (and its absence is a
+	// genuine gap → re-arm). This is collision-free across concurrently-resting tiers,
+	// unlike the qty/activation/callback heuristics below. Fuzzy matching remains only
+	// as a fallback for tiers armed before we had a stored ID (legacy / pre-restart).
+	if wantID := at.storedTrailingOrderIDForRule(symbol, side, entryPrice, rule); wantID != "" {
+		return findTrailingOrderByID(side, wantID, openOrders) != nil
+	}
 	plannedActivationPrice := calculateProfitBasedTrailingTriggerPrice(entryPrice, side, rule.MinProfitPct)
 	plannedCallbackRate := calculateDrawdownRuleCallbackRatio(entryPrice, side, rule)
+	// Orders owned by a SIBLING tier's armed record are not candidates for this tier.
+	// Without this, the fuzzy fallback below matches the first trailing order on the
+	// side and — because an activated order short-circuits to true at any parameters —
+	// reports this tier covered by another tier's order. See the identical guard in
+	// findExistingFullTrailingOrder for the 2026-07-27 BN SOLUSDT case.
+	claimed := at.claimedTrailingOrderIDsForPosition(symbol, side, entryPrice, stableDrawdownRuleFingerprint(entryPrice, rule))
 	for _, order := range openOrders {
 		if order.PositionSide != "" && !strings.EqualFold(order.PositionSide, strings.ToUpper(side)) {
 			continue
 		}
 		if !strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
+			continue
+		}
+		if _, owned := claimed[order.OrderID]; owned {
 			continue
 		}
 		// Once a trailing order has ACTIVATED, its exchange-reported trigger
@@ -1198,6 +1300,27 @@ func (at *AutoTrader) getDrawdownArmRulesForSelectedRule(entryPrice, quantity fl
 	armedFingerprints := at.getArmedDrawdownRuleFingerprintsForPosition(symbol, side, entryPrice, quantity)
 	openOrders, _ := at.trader.GetOpenOrders(symbol)
 	fingerprint := stableDrawdownRuleFingerprint(entryPrice, rule)
+	// Structural backstop, checked BEFORE the armed-record branch on purpose.
+	// nativeTrailingArmTime is written by every successful arm, so it is the one
+	// piece of state that survives a failed/missing persist. Historically this
+	// cooldown lived only INSIDE the `armedFingerprints[fingerprint]` branch, and
+	// armedFingerprints is built from records whose ProtectionType passes
+	// isDynamicNativeProtectionType (native_trailing / native_partial_trailing only).
+	// So any arm path that placed an order but did not persist a native record
+	// could never reach the cooldown: the gate re-selected the tier every ~20s poll
+	// with NO upper bound (2026-07-27: 174 identical HYPEUSDT partial trailing
+	// orders on Binance). Hoisting it here bounds every such bug to one re-arm per
+	// 300s instead of unbounded, whatever the record state. Cost: a genuinely
+	// missing order waits up to 300s before re-arming — the same delay that already
+	// applied when a record did exist, and the reason this cooldown is a required
+	// safety fallback rather than an optimisation.
+	// It is an unconditional rate limit, not a fallback: we armed this exact tier
+	// moments ago, so placing another order now cannot be correct regardless of what
+	// the records or the matchers say.
+	if lastArm, ok := at.nativeTrailingArmTime[fingerprint]; ok && time.Since(lastArm) < 300*time.Second {
+		logger.Infof("🟠 Drawdown native trailing arm cooldown: %s %s fingerprint=%s (armed %.0fs ago, not re-arming)", symbol, side, fingerprint, time.Since(lastArm).Seconds())
+		return nil
+	}
 	if _, ok := armedFingerprints[fingerprint]; ok {
 		if at.hasMatchingNativeTrailingOrderForRule(symbol, side, entryPrice, rule, openOrders) {
 			logger.Infof("🟣 Drawdown native exposure skipped: %s %s already armed fingerprint=%s", symbol, side, fingerprint)
@@ -1215,13 +1338,8 @@ func (at *AutoTrader) getDrawdownArmRulesForSelectedRule(entryPrice, quantity fl
 			logger.Infof("🟣 Drawdown tier already executed: %s %s fingerprint=%s (trailing order filled, not re-arming)", symbol, side, fingerprint)
 			return nil
 		}
-		// Prevent re-arm loop: if we recently armed this fingerprint (within 300s) and
-		// the trailing order is not visible, OKX likely activated and filled it immediately
-		// (activation price already breached). Don't re-arm to avoid spamming orders.
-		if lastArm, ok := at.nativeTrailingArmTime[fingerprint]; ok && time.Since(lastArm) < 300*time.Second {
-			logger.Infof("🟠 Drawdown native trailing arm cooldown: %s %s fingerprint=%s (armed %.0fs ago, not re-arming)", symbol, side, fingerprint, time.Since(lastArm).Seconds())
-			return nil
-		}
+		// (The 300s re-arm cooldown that used to sit here is now checked above, before
+		// this branch — it applies whether or not a record exists. See the comment there.)
 		logger.Infof("⚠️ Drawdown native exposure record stale: %s %s fingerprint=%s has no matching exchange trailing order, re-arming", symbol, side, fingerprint)
 	}
 	logger.Infof("🟣 Drawdown native exposure selected: %s %s min=%.4f close=%.1f%% fingerprint=%s", symbol, side, rule.MinProfitPct, rule.CloseRatioPct, fingerprint)
@@ -1251,6 +1369,13 @@ func (at *AutoTrader) getDrawdownArmRules(currentPnLPct, entryPrice, quantity fl
 	}
 
 	fingerprint := stableDrawdownRuleFingerprint(entryPrice, bestRule)
+	// Same structural backstop as getDrawdownArmRulesForSelectedRule — see the
+	// rationale there. Bounds an arm path with a missing persist to one re-arm per
+	// 300s rather than one per poll.
+	if lastArm, ok := at.nativeTrailingArmTime[fingerprint]; ok && time.Since(lastArm) < 300*time.Second {
+		logger.Infof("🟠 Drawdown arm cooldown: %s %s fingerprint=%s (armed %.0fs ago, not re-arming)", symbol, side, fingerprint, time.Since(lastArm).Seconds())
+		return nil
+	}
 	if _, ok := armedFingerprints[fingerprint]; ok {
 		if at.hasMatchingNativeTrailingOrderForRule(symbol, side, entryPrice, bestRule, openOrders) {
 			logger.Infof("🟣 Drawdown arm skipped: %s %s highest tier already armed fingerprint=%s (min=%.4f close=%.1f%%)", symbol, side, fingerprint, bestRule.MinProfitPct, bestRule.CloseRatioPct)
@@ -1260,11 +1385,8 @@ func (at *AutoTrader) getDrawdownArmRules(currentPnLPct, entryPrice, quantity fl
 			logger.Infof("🟣 Drawdown tier already executed: %s %s fingerprint=%s (not re-arming)", symbol, side, fingerprint)
 			return nil
 		}
-		// Prevent re-arm loop when OKX immediately fills trailing orders (activation already breached)
-		if lastArm, ok := at.nativeTrailingArmTime[fingerprint]; ok && time.Since(lastArm) < 300*time.Second {
-			logger.Infof("🟠 Drawdown arm cooldown: %s %s fingerprint=%s (armed %.0fs ago, not re-arming)", symbol, side, fingerprint, time.Since(lastArm).Seconds())
-			return nil
-		}
+		// (The 300s re-arm cooldown that used to sit here is now checked above, before
+		// this branch, so it applies whether or not a record exists.)
 		logger.Infof("⚠️ Drawdown arm record stale: %s %s fingerprint=%s has no matching exchange trailing order, re-arming highest tier (min=%.4f close=%.1f%%)", symbol, side, fingerprint, bestRule.MinProfitPct, bestRule.CloseRatioPct)
 	}
 	logger.Infof("🟣 Drawdown arm eligible: %s %s profit %.4f >= min %.4f close=%.1f%% fingerprint=%s (highest satisfied tier)", symbol, side, currentPnLPct, bestRule.MinProfitPct, bestRule.CloseRatioPct, fingerprint)
@@ -1530,12 +1652,44 @@ type nativeTrailingOrder struct {
 	ActivationPrice float64
 }
 
-func (at *AutoTrader) findExistingFullTrailingOrder(side string, openOrders []OpenOrder) *nativeTrailingOrder {
+// findExistingFullTrailingOrder locates the full-close (100%) trailing order for this
+// position. It matches by the tier's stored orderID first (collision-free — critical
+// now that a partial tier can rest concurrently; the old "return the first TRAILING
+// order" logic would hand back the partial tier's order and make the full tier look
+// drifted, re-arming every cooldown). Falls back to first-trailing-order only when no
+// orderID is on record (legacy / pre-restart positions).
+func (at *AutoTrader) findExistingFullTrailingOrder(symbol, side string, entryPrice float64, rule store.DrawdownTakeProfitRule, openOrders []OpenOrder) *nativeTrailingOrder {
+	if wantID := at.storedTrailingOrderIDForRule(symbol, side, entryPrice, rule); wantID != "" {
+		// A stored ID exists: only that exact order is this tier. If it is gone, the
+		// tier is genuinely missing (return nil → re-arm) rather than mis-binding to a
+		// sibling tier's order.
+		return findTrailingOrderByID(side, wantID, openOrders)
+	}
+	// No stored ID for this tier: fall back to "any trailing order on this side".
+	//
+	// That fallback predates place-at-open (a56f741). When only one trailing order per
+	// side could exist, "the first trailing order" WAS this tier. Now dd1 and one or more
+	// partial tiers rest concurrently, so the first trailing order is very often a
+	// SIBLING tier's order — and claiming it makes this tier look present forever:
+	// applyNativeTrailingDrawdown sees ActivationStatus=="activated" (which Binance
+	// hard-codes for every trailing order) and returns true without arming anything.
+	//
+	// Observed 2026-07-27 on BN SOLUSDT: after removing the wrongly-parameterised raw dd1
+	// order, the only trailing order left was the 30% partial (qty 1.32 of 4.41). The dd1
+	// tier matched it, reported itself satisfied on every 10s poll ("native exposure
+	// selected" with no "armed" line), and the position ran with NO full-close trailing
+	// protection at all. Excluding sibling-claimed orders makes the tier correctly report
+	// missing so it gets armed. Same remedy as v1.16.8 applied to the partial matchers —
+	// no new threshold, just "an order another record owns is not mine".
+	claimed := at.claimedTrailingOrderIDsForPosition(symbol, side, entryPrice, stableDrawdownRuleFingerprint(entryPrice, rule))
 	for _, order := range openOrders {
 		if order.PositionSide != "" && !strings.EqualFold(order.PositionSide, strings.ToUpper(side)) {
 			continue
 		}
 		if !strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
+			continue
+		}
+		if _, owned := claimed[order.OrderID]; owned {
 			continue
 		}
 		return &nativeTrailingOrder{
@@ -1891,6 +2045,20 @@ func (at *AutoTrader) reArmBreakerTripped(symbol, side string, rule store.Drawdo
 func (at *AutoTrader) findEquivalentPartialTrailingOrder(symbol, side string, rule store.DrawdownTakeProfitRule, entryPrice float64, openOrders []OpenOrder) (*nativeTrailingOrder, float64, float64, float64) {
 	plannedActivationPrice := calculateProfitBasedTrailingTriggerPrice(entryPrice, side, rule.MinProfitPct)
 	plannedCallbackRate := calculateDrawdownRuleCallbackRatio(entryPrice, side, rule)
+	// Authoritative identity match first: the orderID we persisted for this exact tier
+	// pins its live order regardless of how qty/activation/callback have drifted (an
+	// activated trail reports a moving StopPrice; siblings share the same cumulative
+	// qty). This is what stops the multi-tier churn where a partial tier could not be
+	// re-found and was re-placed every 300s cooldown. Fuzzy matching below is the
+	// fallback for tiers with no stored ID (legacy / pre-restart).
+	if wantID := at.storedTrailingOrderIDForRule(symbol, side, entryPrice, rule); wantID != "" {
+		if found := findTrailingOrderByID(side, wantID, openOrders); found != nil {
+			return found, found.Quantity, plannedActivationPrice, plannedCallbackRate
+		}
+		// Stored ID exists but the order is gone → genuinely missing; report nil so the
+		// caller re-arms this tier (do NOT fuzzy-match onto a sibling tier's order).
+		return nil, 0, plannedActivationPrice, plannedCallbackRate
+	}
 	currentQty := 0.0
 	markPrice := 0.0
 	positions, err := at.trader.GetPositions()
@@ -1941,6 +2109,15 @@ func (at *AutoTrader) findEquivalentPartialTrailingOrder(symbol, side string, ru
 		}
 		callbackTolerance := 0.0002
 		qtyTolerance := math.Max(0.0001, qtyTarget*0.1)
+		// Orders another armed tier already claims by orderID are off-limits. We only
+		// reach this fuzzy loop because THIS tier has no stored ID, and the
+		// discriminators below are weak under place-at-open: dd1 (full) and the partial
+		// tiers rest concurrently, a 100%-cumulative partial shares qty with the full
+		// tier, and on Binance both callbackOK and activationOK degenerate to "always
+		// true" (the venue reports neither callbackRate nor a real activation status).
+		// Without this guard an unidentified tier fuzzy-matches onto a SIBLING's live
+		// order and the caller then cancels it as its own replacement.
+		claimed := at.claimedTrailingOrderIDsForPosition(symbol, side, entryPrice, stableDrawdownRuleFingerprint(entryPrice, rule))
 		for _, order := range openOrders {
 			if order.PositionSide != "" && !strings.EqualFold(order.PositionSide, strings.ToUpper(side)) {
 				continue
@@ -1948,12 +2125,44 @@ func (at *AutoTrader) findEquivalentPartialTrailingOrder(symbol, side string, ru
 			if !strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
 				continue
 			}
+			if _, owned := claimed[order.OrderID]; owned {
+				continue
+			}
 			qtyOK := math.Abs(order.Quantity-qtyTarget) <= qtyTolerance
-			callbackOK := math.Abs(order.CallbackRate-plannedCallbackRate) <= callbackTolerance
+			// Callback comparison is only meaningful when the venue reports the live
+			// order's callback rate. Binance's algo-order list endpoint (SDK
+			// GetAlgoOrderResp) carries NO callbackRate field, so CallbackRate reads
+			// back as 0 for every Binance trailing order while plannedCallbackRate is
+			// e.g. 0.0074 — the comparison could NEVER be satisfied, making this whole
+			// fuzzy fallback structurally dead on Binance. That left the stored-orderID
+			// path as the only working matcher there, so any tier whose arm failed to
+			// persist an ID was judged missing on every poll and re-armed forever
+			// (2026-07-27 HYPEUSDT: 174 identical partial trailing orders). The same
+			// venue-capability guard already exists in shouldReplacePartialTrailingTier
+			// (2026-07-16, commit 5bd81b9) — this mirrors it. OKX populates
+			// CallbackRate and keeps the full comparison.
+			//
+			// Note the trade-off: without callback, qty+activation are weaker
+			// discriminators between sibling tiers (a 100%-cumulative partial tier and
+			// a full tier can share both). That is acceptable ONLY as a fallback —
+			// the stored-orderID path above is authoritative and is tried first.
+			callbackOK := order.CallbackRate <= 0 ||
+				math.Abs(order.CallbackRate-plannedCallbackRate) <= callbackTolerance
 			// Match the tier's activation anchor OR, once mark has passed the planned
 			// activation, accept the immediate-anchor/activated order by qty+callback so a
 			// deliberately re-placed passed tier isn't seen as missing (would churn/double-fire).
-			activationOK := activationMatches(order.StopPrice, plannedActivationPrice) || markPassedPlanned
+			//
+			// An order the venue reports as ACTIVATED is trailing the peak: its StopPrice
+			// is the moving stop, which has no relation to the planned activation anchor,
+			// so comparing them is meaningless (shouldReplacePartialTrailingTier
+			// short-circuits activated orders for exactly this reason). This also covers
+			// Binance, whose algo list omits activatePrice — the adapter substitutes
+			// triggerPrice for ActivationPrice/StopPrice and always reports
+			// ActivationStatus="activated" (futures_orders.go), so before this guard the
+			// anchor comparison was 58.5 (moving stop) vs 60.6 (planned) and never matched.
+			activationOK := activationMatches(order.StopPrice, plannedActivationPrice) ||
+				markPassedPlanned ||
+				strings.EqualFold(order.ActivationStatus, "activated")
 			if qtyOK && callbackOK && activationOK {
 				return &nativeTrailingOrder{
 					PositionSide:     order.PositionSide,
@@ -1978,7 +2187,24 @@ func activationMatches(actual, planned float64) bool {
 	return math.Abs(actual-planned)/math.Max(math.Abs(actual), math.Abs(planned)) <= 0.003
 }
 
-func (at *AutoTrader) findPartialTrailingReplacementCandidate(side string, openOrders []OpenOrder, qtyTarget, plannedActivationPrice, plannedCallbackRate float64) *nativeTrailingOrder {
+// findPartialTrailingReplacementCandidate picks the live trailing order most likely to
+// BE this partial tier when neither the stored orderID nor the fuzzy matcher identified
+// it. There is deliberately no score threshold — the caller treats the winner as "my
+// tier, drifted" and cancels it after placing the replacement.
+//
+// That greedy contract was safe when it was written (commit b5a7aca): at most ONE
+// trailing order rested per position side, so the best match could only be this tier.
+// place-at-open (v1.16.1, a56f741) broke the premise — dd1 (full) and the partial tiers
+// now rest CONCURRENTLY — and with no threshold the "best" match is simply whatever
+// single order happens to be open, i.e. dd1. Arming a partial tier then cancelled the
+// full-close protection outright (reproduced by TestFullAndPartialTiersCoexistPerVenue,
+// OKX: full tier armed as algo-1, gone one partial arm later).
+//
+// claimedExclusions is the set of orderIDs other armed tiers own; they can never be
+// this tier and must survive. Residual gap: a sibling whose arm failed to persist an
+// orderID is unclaimed and can still be consumed here — the reason every arm path must
+// persist its placement ID (see the v1.16.7 Binance/Bitget/OKX persist fixes).
+func (at *AutoTrader) findPartialTrailingReplacementCandidate(side string, openOrders []OpenOrder, qtyTarget, plannedActivationPrice, plannedCallbackRate float64, claimedExclusions map[string]struct{}) *nativeTrailingOrder {
 	var best *nativeTrailingOrder
 	bestScore := math.MaxFloat64
 	for _, order := range openOrders {
@@ -1986,6 +2212,9 @@ func (at *AutoTrader) findPartialTrailingReplacementCandidate(side string, openO
 			continue
 		}
 		if !strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
+			continue
+		}
+		if _, owned := claimedExclusions[order.OrderID]; owned {
 			continue
 		}
 		qtyScore := math.Abs(order.Quantity - qtyTarget)
@@ -2166,20 +2395,20 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 			if !isPartial {
 				plannedActivationPrice := calculateProfitBasedTrailingTriggerPrice(entryPrice, side, rule.MinProfitPct)
 				plannedCallbackRate := calculateDrawdownRuleCallbackRatio(entryPrice, side, rule)
-				existing := at.findExistingFullTrailingOrder(side, openOrders)
+				existing := at.findExistingFullTrailingOrder(symbol, side, entryPrice, rule, openOrders)
 				if existing != nil {
-						// Once a native trailing order has ACTIVATED, its exchange-reported
-						// trigger is the MOVING trail level (it trails the market), not the
-						// fixed activation price planned at open. Comparing that moving level
-						// against plannedActivationPrice drifts every cycle as price moves, so
-						// the drift check re-armed forever (Binance SPCX/XAG/XAU churn: 4788
-						// false "drifted" re-arms, 0 genuine missing events). An armed, present
-						// trailing order IS the protection — leave it alone; re-place only when
-						// genuinely missing (else branch below). Pre-activation drift comparison
-						// still applies to venues reporting a resting, not-yet-activated order.
-						if existing.ActivationStatus == "activated" {
-							return true
-						}
+					// Once a native trailing order has ACTIVATED, its exchange-reported
+					// trigger is the MOVING trail level (it trails the market), not the
+					// fixed activation price planned at open. Comparing that moving level
+					// against plannedActivationPrice drifts every cycle as price moves, so
+					// the drift check re-armed forever (Binance SPCX/XAG/XAU churn: 4788
+					// false "drifted" re-arms, 0 genuine missing events). An armed, present
+					// trailing order IS the protection — leave it alone; re-place only when
+					// genuinely missing (else branch below). Pre-activation drift comparison
+					// still applies to venues reporting a resting, not-yet-activated order.
+					if existing.ActivationStatus == "activated" {
+						return true
+					}
 					if !at.shouldReplacePartialTrailingTier(existing, plannedActivationPrice, plannedCallbackRate) {
 						return true
 					}
@@ -2399,8 +2628,21 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 					CancelTrailingStopOrders(symbol string) error
 				}); ok {
 					// Phase 1a: pass decimal ratio directly (adapter converts internally)
-					if _, err := tagged.SetTrailingStopLossTaggedWithID(symbol, positionSide, activationPrice, priceBasedCallbackRatio, partialQty, "native_trailing"); err == nil {
+					if placedOrderID, err := tagged.SetTrailingStopLossTaggedWithID(symbol, positionSide, activationPrice, priceBasedCallbackRatio, partialQty, "native_trailing"); err == nil {
 						at.setProtectionState(symbol, side, "native_partial_trailing_armed")
+						// Persist the tier record + arm timestamp, symmetric with the OKX
+						// partial path. Without these two lines this branch armed the tier on
+						// the exchange but left NO trace: getArmedDrawdownRuleFingerprintsForPosition
+						// never saw the tier, so getDrawdownArmRulesForSelectedRule re-selected it
+						// every poll, and with no nativeTrailingArmTime entry the 300s cooldown
+						// could not engage either. Result (observed 2026-07-27 on the Binance
+						// trader, HYPEUSDT long): a fresh partial trailing order placed every
+						// ~10s, dynamicOwner climbing +2 per cycle with no upper bound — the same
+						// leak class that hit the OKX 55-order cap.
+						at.persistDynamicProtectionRecordWithDetails(symbol, side, "native_partial_trailing", stableDrawdownRuleFingerprint(entryPrice, rule), cumulativeRatio, "armed", placedOrderID, activationPrice, priceBasedCallbackRatio, partialQty)
+						if at.nativeTrailingArmTime != nil {
+							at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
+						}
 						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.4f(ratio) close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, priceBasedCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
 						at.cancelImmediateTrailing(symbol, side)
 						return true
@@ -2429,6 +2671,16 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 					}
 					if err := bitgetTrader.SetTrailingStopLoss(symbol, positionSide, activationPrice, bitgetCallbackPercent, partialQty); err == nil {
 						at.setProtectionState(symbol, side, "native_partial_trailing_armed")
+						// Same asymmetry as the Binance branch above: without a persisted
+						// record and an arm timestamp this tier is invisible to the arm gate
+						// and re-arms every poll forever. Bitget's SetTrailingStopLoss returns
+						// no order ID, so the record carries an empty ExchangeOrderID and the
+						// matcher falls back to fuzzy matching — acceptable, and far better
+						// than no record at all.
+						at.persistDynamicProtectionRecordWithDetails(symbol, side, "native_partial_trailing", stableDrawdownRuleFingerprint(entryPrice, rule), cumulativeRatio, "armed", "", activationPrice, priceBasedCallbackRatio, partialQty)
+						if at.nativeTrailingArmTime != nil {
+							at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
+						}
 						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.4f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, bitgetCallbackPercent, cumulativeRatio, partialQty, rule.StageName)
 						at.cancelImmediateTrailing(symbol, side)
 						return true
@@ -2457,7 +2709,8 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 						var plannedActivationPrice float64
 						existingTier, qtyTarget, plannedActivationPrice, plannedCallbackRate = at.findEquivalentPartialTrailingOrder(symbol, side, rule, entryPrice, openOrders)
 						if existingTier == nil {
-							existingTier = at.findPartialTrailingReplacementCandidate(side, openOrders, qtyTarget, plannedActivationPrice, plannedCallbackRate)
+							existingTier = at.findPartialTrailingReplacementCandidate(side, openOrders, qtyTarget, plannedActivationPrice, plannedCallbackRate,
+								at.claimedTrailingOrderIDsForPosition(symbol, side, entryPrice, stableDrawdownRuleFingerprint(entryPrice, rule)))
 						}
 						for _, order := range openOrders {
 							if order.PositionSide != "" && !strings.EqualFold(order.PositionSide, strings.ToUpper(side)) {
@@ -2533,6 +2786,12 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 						}
 					} else if err := okxTrader.SetTrailingStopLoss(symbol, positionSide, activationPrice, okxCallbackRatio, partialQty); err == nil {
 						at.setProtectionState(symbol, side, "native_partial_trailing_armed")
+						// The arm timestamp alone is not enough: getDrawdownArmRulesForSelectedRule
+						// only consults the cooldown INSIDE the armedFingerprints branch, so a tier
+						// with a timestamp but no persisted record skips straight to "selected" and
+						// re-arms every poll. Persist the record too (no order ID available on this
+						// untagged fallback — the matcher falls back to fuzzy matching).
+						at.persistDynamicProtectionRecordWithDetails(symbol, side, "native_partial_trailing", stableDrawdownRuleFingerprint(entryPrice, rule), cumulativeRatio, "armed", "", activationPrice, okxCallbackRatio, partialQty)
 						if at.nativeTrailingArmTime != nil {
 							at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
 						}
@@ -2564,14 +2823,33 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 
 	if !isPartial && currentState == "native_partial_trailing_armed" {
 		if openOrders, err := at.trader.GetOpenOrders(symbol); err == nil {
+			// Only collapse ORPHAN trailing orders. Predating place-at-open this block
+			// canceled EVERY trailing order on the side, assuming a full tier replaces
+			// the partial one. Under place-at-open dd1 and partial legitimately rest
+			// together, and protectionState is a single string per position that cannot
+			// express "both tiers armed" — so arming the full tier while state still
+			// reads native_partial_trailing_armed nuked the partial's live order
+			// (2026-07-27 SPCX: partial armed 01:56:41, collapsed 01:56:45, then its
+			// record kept pointing at the dead algoId → judged missing every poll →
+			// panel red + re-arm each cooldown window). Skip any order another armed
+			// tier claims; cancel only the genuinely unowned leftovers.
+			claimed := at.claimedTrailingOrderIDsForPosition(symbol, side, entryPrice, stableDrawdownRuleFingerprint(entryPrice, rule))
 			ids := make([]string, 0)
+			skipped := 0
 			for _, order := range openOrders {
 				if order.PositionSide != "" && !strings.EqualFold(order.PositionSide, strings.ToUpper(side)) {
 					continue
 				}
 				if strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
+					if _, owned := claimed[order.OrderID]; owned {
+						skipped++
+						continue
+					}
 					ids = append(ids, order.OrderID)
 				}
+			}
+			if skipped > 0 {
+				logger.Infof("🛡 Preserving %d live sibling trailing tier(s) claimed by armed records during full-tier migration: %s %s", skipped, symbol, side)
 			}
 			if len(ids) > 0 {
 				if tagged, ok := at.trader.(interface {
@@ -2675,6 +2953,14 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 	} else {
 		at.setProtectionState(symbol, side, "native_trailing_armed")
 		at.persistDynamicProtectionRecordWithDetails(symbol, side, "native_trailing", stableDrawdownRuleFingerprint(entryPrice, rule), rule.CloseRatioPct, "armed", placedOrderID, activationPrice, priceBasedCallbackRatio, 0)
+		// Record the arm time so the 300s cooldown (getDrawdownArmRulesForSelectedRule) suppresses
+		// re-arm loops for the full tier, symmetric with the partial-tier paths above. Without this,
+		// a full-tier arm never populates nativeTrailingArmTime[fingerprint], so if the stored orderID
+		// falls out of the exchange snapshot (e.g. after restart collapse + snapshot lag) the full tier
+		// re-arms every cycle and stacks orders until the OKX 55-order cap rejects everything.
+		if at.nativeTrailingArmTime != nil {
+			at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
+		}
 		logger.Infof("🟣 Native trailing drawdown armed: %s %s | activation=%.6f callbackRatio=%.6f", symbol, side, activationPrice, priceBasedCallbackRatio)
 	}
 	at.cancelImmediateTrailing(symbol, side)

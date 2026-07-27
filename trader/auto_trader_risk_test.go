@@ -515,6 +515,80 @@ func TestApplyNativeTrailingDrawdownPersistsFullTrailingOrderID(t *testing.T) {
 	}
 }
 
+// TestApplyNativeTrailingDrawdownFullTierRecordsArmCooldown reproduces the
+// 2026-07-27 production incident where CL/HYPE/ETH dd1 (full) tiers re-armed
+// every 10-20s and stacked orders until the OKX 55-order cap (code=51299)
+// rejected ALL new protection placements. Root cause: the full-tier arm success
+// path (applyNativeTrailingDrawdown, isPartial==false branch) persisted the
+// record + orderID but — unlike BOTH partial-tier paths — never wrote
+// nativeTrailingArmTime[fingerprint]. So when a stored orderID fell out of the
+// exchange snapshot (restart collapse + OKX snapshot lag), the 300s cooldown in
+// getDrawdownArmRulesForSelectedRule had no timestamp to consult and re-armed
+// unbounded. The fix records the arm time for the full tier too, symmetric with
+// the partial paths, so the cooldown suppresses the re-arm storm.
+func TestApplyNativeTrailingDrawdownFullTierRecordsArmCooldown(t *testing.T) {
+	st, err := store.New(filepath.Join(t.TempDir(), "native-trailing-cooldown.db"))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	fake := &fakeProtectionTrader{
+		positions: []map[string]interface{}{{
+			"symbol":      "BTCUSDT",
+			"side":        "long",
+			"entryPrice":  100.0,
+			"markPrice":   106.0,
+			"positionAmt": 1.0,
+		}},
+	}
+	at := &AutoTrader{
+		id:                    "trader-1",
+		exchangeID:            "exchange-1",
+		store:                 st,
+		exchange:              "okx",
+		trader:                fake,
+		config:                AutoTraderConfig{StrategyConfig: &store.StrategyConfig{}},
+		protectionState:       make(map[string]string),
+		nativeTrailingArmTime: make(map[string]time.Time),
+	}
+
+	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 40, CloseRatioPct: 100}
+	fp := stableDrawdownRuleFingerprint(100, rule)
+
+	if _, ok := at.nativeTrailingArmTime[fp]; ok {
+		t.Fatal("precondition: arm time must be unset before first arm")
+	}
+	if ok := at.applyNativeTrailingDrawdown("BTCUSDT", "long", 100, 0, rule); !ok {
+		t.Fatal("expected full-tier native trailing drawdown to arm")
+	}
+
+	// The fix: full-tier arm must record its cooldown timestamp, exactly like the
+	// partial paths. Without it the 300s cooldown never engages for the full tier.
+	armAt, ok := at.nativeTrailingArmTime[fp]
+	if !ok {
+		t.Fatal("full-tier arm must record nativeTrailingArmTime[fingerprint] to feed the 300s re-arm cooldown")
+	}
+	if time.Since(armAt) > time.Minute {
+		t.Fatalf("recorded arm time should be ~now, got %v ago", time.Since(armAt))
+	}
+
+	// And the cooldown must actually suppress re-arm: simulate the stored order
+	// dropping out of the snapshot (restart collapse), then confirm the arm-rule
+	// selector treats the tier as still-cooling rather than re-arming.
+	fake.mu.Lock()
+	fake.openOrders = nil
+	fake.mu.Unlock()
+
+	armRules := at.getDrawdownArmRulesForSelectedRule(100, 1.0, "BTCUSDT", "long", rule)
+	for _, r := range armRules {
+		if stableDrawdownRuleFingerprint(100, r) == fp {
+			t.Fatal("within 300s cooldown the full tier must NOT be selected for re-arm (this is the churn bug)")
+		}
+	}
+	if len(armRules) != 0 {
+		t.Fatalf("cooldown must suppress re-arm selection, got %d rules", len(armRules))
+	}
+}
+
 func TestApplyNativeTrailingDrawdownSkipsDuplicateWhenEquivalentPartialTierAlreadyExists(t *testing.T) {
 	fake := &fakeProtectionTrader{
 		positions: []map[string]interface{}{{
