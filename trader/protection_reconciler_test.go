@@ -188,7 +188,7 @@ func TestDetectMissingProtectionRequiresLadderStopsDespiteTaggedFallbackPriceDri
 	if !missingSL || missingTP {
 		t.Fatalf("expected tagged fallback not to mask missing ladder SL tiers, got missingSL=%v missingTP=%v", missingSL, missingTP)
 	}
-	ownership := evaluateProtectionOwnership(orders, "LONG", plan, false, false)
+	ownership := evaluateProtectionOwnership(orders, "LONG", plan, false, nativeTrailingArmedOnly(false))
 	if ownership.StopOwner != "fallback" || ownership.Verified {
 		t.Fatalf("expected fallback visible but ownership degraded until ladder SL is restored, got %+v", ownership)
 	}
@@ -479,7 +479,7 @@ func TestProtectionReconciler_SkipsBreakEvenWhenRunnerSuppressesIt(t *testing.T)
 func TestDetectUnexpectedProtectionOrdersDoesNotCountMatchingFallbackAsUnexpected(t *testing.T) {
 	plan := &ProtectionPlan{FallbackMaxLossPrice: 90.027}
 	orders := []OpenOrder{{PositionSide: "SHORT", Type: "STOP_MARKET", StopPrice: 90.027}}
-	unexpectedSL, unexpectedTP := detectUnexpectedProtectionOrders(orders, "SHORT", plan, false, false)
+	unexpectedSL, unexpectedTP := detectUnexpectedProtectionOrders(orders, "SHORT", plan, false, nativeTrailingArmedOnly(false))
 	if unexpectedSL != 0 || unexpectedTP != 0 {
 		t.Fatalf("expected matching fallback not to be unexpected, got sl=%d tp=%d", unexpectedSL, unexpectedTP)
 	}

@@ -9,7 +9,7 @@ func TestReconcilerPreservesVisibleLadderStops(t *testing.T) {
 		{PositionSide: "SHORT", Type: "STOP_MARKET", StopPrice: 100.9},
 	}
 	missingSL, missingTP := detectMissingProtection(openOrders, "SHORT", plan, false)
-	unexpectedSL, unexpectedTP := detectUnexpectedProtectionOrders(openOrders, "SHORT", plan, false, false)
+	unexpectedSL, unexpectedTP := detectUnexpectedProtectionOrders(openOrders, "SHORT", plan, false, nativeTrailingArmedOnly(false))
 	if missingSL || missingTP || unexpectedSL != 0 || unexpectedTP != 0 {
 		t.Fatalf("expected visible ladder stops to be preserved, missingSL=%v missingTP=%v unexpectedSL=%d unexpectedTP=%d", missingSL, missingTP, unexpectedSL, unexpectedTP)
 	}

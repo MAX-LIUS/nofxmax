@@ -114,9 +114,9 @@ func main() {
 		sort.Slice(orders, func(i, j int) bool { return orders[i].Type < orders[j].Type })
 		fmt.Printf("\n=== %s open orders: %d ===\n", sym, len(orders))
 		for _, o := range orders {
-			fmt.Printf("  %-22s type=%-22s side=%-5s posSide=%-6s qty=%-12.6f stop=%-12.6f act=%-10s cb=%.4f status=%s\n",
+			fmt.Printf("  %-22s type=%-22s side=%-5s posSide=%-6s qty=%-12.6f stop=%-12.6f act=%-10s cb=%.4f status=%-4s cid=%s\n",
 				o.OrderID, o.Type, o.Side, o.PositionSide, o.Quantity, o.StopPrice,
-				o.ActivationStatus, o.CallbackRate, o.Status)
+				o.ActivationStatus, o.CallbackRate, o.Status, o.ClientOrderID)
 		}
 	}
 }

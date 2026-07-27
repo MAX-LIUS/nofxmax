@@ -10,7 +10,7 @@ func TestClassifyUnexpectedProtectionOrdersSeparatesManualForeignFromBotDuplicat
 		{OrderID: "manual-protective-stop", PositionSide: "SHORT", Type: "STOP_MARKET", StopPrice: 110},
 	}
 
-	summary := classifyUnexpectedProtectionOrders(orders, "SHORT", plan, false, false, true)
+	summary := classifyUnexpectedProtectionOrders(orders, "SHORT", plan, false, nativeTrailingArmedOnly(false), true)
 	if summary.ExpectedStaticOwner != 1 {
 		t.Fatalf("expected one static owner, got %+v", summary)
 	}
@@ -21,7 +21,7 @@ func TestClassifyUnexpectedProtectionOrdersSeparatesManualForeignFromBotDuplicat
 		t.Fatalf("expected one manual/foreign id, got %+v", summary)
 	}
 
-	ids := collectUnexpectedProtectionOrderIDs(orders, "SHORT", plan, false, false)
+	ids := collectUnexpectedProtectionOrderIDs(orders, "SHORT", plan, false, nativeTrailingArmedOnly(false))
 	if len(ids) != 1 || ids[0] != "4c363c81edc5bcde_ladder_sl_old" {
 		t.Fatalf("expected cleanup ids to include only stale bot duplicate, got %+v", ids)
 	}
@@ -29,7 +29,7 @@ func TestClassifyUnexpectedProtectionOrdersSeparatesManualForeignFromBotDuplicat
 
 func TestClassifyUnexpectedProtectionOrdersOrphanForInactivePosition(t *testing.T) {
 	orders := []OpenOrder{{OrderID: "native_trailing_old", PositionSide: "SHORT", Type: "TRAILING_STOP_MARKET", StopPrice: 99, CallbackRate: 0.02}}
-	summary := classifyUnexpectedProtectionOrders(orders, "SHORT", nil, false, false, false)
+	summary := classifyUnexpectedProtectionOrders(orders, "SHORT", nil, false, nativeTrailingArmedOnly(false), false)
 	if summary.OrphanForInactive != 1 || len(summary.OrphanForInactiveIDs) != 1 || summary.OrphanForInactiveIDs[0] != "native_trailing_old" {
 		t.Fatalf("expected inactive trailing order classified as orphan, got %+v", summary)
 	}
@@ -40,7 +40,7 @@ func TestClassifyUnexpectedProtectionOrdersExpectedDynamicOwners(t *testing.T) {
 		{OrderID: "be-stop", PositionSide: "LONG", Type: "STOP_MARKET", StopPrice: 100},
 		{OrderID: "native_trailing_1", PositionSide: "LONG", Type: "TRAILING_STOP_MARKET", StopPrice: 105, CallbackRate: 0.02},
 	}
-	summary := classifyUnexpectedProtectionOrders(orders, "LONG", nil, true, true, true)
+	summary := classifyUnexpectedProtectionOrders(orders, "LONG", nil, true, nativeTrailingArmedOnly(true), true)
 	if summary.ExpectedDynamicOwner != 2 {
 		t.Fatalf("expected break-even and trailing as dynamic owners, got %+v", summary)
 	}
@@ -63,7 +63,7 @@ func TestBinanceBrokerPrefixRecognizedAsBot(t *testing.T) {
 		// a genuine foreign/manual order (no broker prefix) must still be preserved
 		{OrderID: "manual-1", ClientOrderID: "someones-manual-stop", PositionSide: "LONG", Type: "STOP_MARKET", StopPrice: 90.0},
 	}
-	summary := classifyUnexpectedProtectionOrders(orders, "LONG", plan, false, false, true)
+	summary := classifyUnexpectedProtectionOrders(orders, "LONG", plan, false, nativeTrailingArmedOnly(false), true)
 	if summary.StaleBotDuplicate != 1 || len(summary.StaleBotDuplicateIDs) != 1 {
 		t.Fatalf("expected the Binance-prefixed stale stop to be a bot duplicate, got %+v", summary)
 	}

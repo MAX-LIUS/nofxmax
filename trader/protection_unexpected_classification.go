@@ -27,22 +27,30 @@ type unexpectedProtectionSummary struct {
 	StaleBotDuplicateIDs []string
 	OrphanForInactiveIDs []string
 	ManualOrForeignIDs   []string
+	// StaleTrailingDuplicate 是 StaleBotDuplicate 中属于 trailing 的部分。单独计数
+	// 是因为 reconciler 有一条"止损覆盖已满足就容忍多余止损单"的分支,而 trailing
+	// 单会被 detectUnexpectedProtectionOrders 归到 unexpectedStops 里 —— 多一张止损
+	// 只是多一层保险,多一张部分平仓 trailing 则会真的多平仓,两者不能同等容忍。
+	StaleTrailingDuplicate int
 }
 
-func classifyUnexpectedProtectionOrders(openOrders []OpenOrder, positionSide string, plan *ProtectionPlan, breakEvenArmed bool, nativeTrailingArmed bool, positionActive bool) unexpectedProtectionSummary {
+func classifyUnexpectedProtectionOrders(openOrders []OpenOrder, positionSide string, plan *ProtectionPlan, breakEvenArmed bool, trailingOwnership nativeTrailingOwnership, positionActive bool) unexpectedProtectionSummary {
 	allowedStops, allowedTPs := allowedProtectionPricesForPlan(plan)
 	summary := unexpectedProtectionSummary{}
 	for _, order := range openOrders {
 		if positionSide != "" && order.PositionSide != "" && !strings.EqualFold(order.PositionSide, positionSide) {
 			continue
 		}
-		classification := classifyProtectionOrder(order, &allowedStops, &allowedTPs, breakEvenArmed, nativeTrailingArmed, positionActive)
+		classification := classifyProtectionOrder(order, &allowedStops, &allowedTPs, breakEvenArmed, trailingOwnership, positionActive)
 		if classification.Category == unexpectedCategoryExpectedDynamicOwner && looksLikeStopLoss(order) && breakEvenArmed {
 			breakEvenArmed = false
 		}
 		switch classification.Category {
 		case unexpectedCategoryStaleBotDuplicate:
 			summary.StaleBotDuplicate++
+			if classification.Kind == "trailing" {
+				summary.StaleTrailingDuplicate++
+			}
 			if classification.OrderID != "" {
 				summary.StaleBotDuplicateIDs = append(summary.StaleBotDuplicateIDs, classification.OrderID)
 			}
@@ -96,14 +104,14 @@ func allowedProtectionPricesForPlan(plan *ProtectionPlan) ([]float64, []float64)
 	return allowedStops, allowedTPs
 }
 
-func classifyProtectionOrder(order OpenOrder, allowedStops, allowedTPs *[]float64, breakEvenArmed bool, nativeTrailingArmed bool, positionActive bool) unexpectedProtectionOrderClassification {
+func classifyProtectionOrder(order OpenOrder, allowedStops, allowedTPs *[]float64, breakEvenArmed bool, trailingOwnership nativeTrailingOwnership, positionActive bool) unexpectedProtectionOrderClassification {
 	classification := unexpectedProtectionOrderClassification{OrderID: order.OrderID}
 	upperType := strings.ToUpper(order.Type)
 	if strings.Contains(upperType, "TRAILING") {
 		classification.Kind = "trailing"
 		if !positionActive {
 			classification.Category = unexpectedCategoryOrphanForInactive
-		} else if nativeTrailingArmed {
+		} else if trailingOwnership.classifyTrailing(order.OrderID) {
 			classification.Category = unexpectedCategoryExpectedDynamicOwner
 		} else if isLikelyBotProtectionOrder(order) {
 			classification.Category = unexpectedCategoryStaleBotDuplicate

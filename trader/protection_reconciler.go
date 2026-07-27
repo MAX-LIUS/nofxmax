@@ -291,11 +291,15 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 		}
 		missingSL, missingTP := detectMissingProtection(openOrders, positionSide, plan, breakEvenArmed)
 		planOrderCount := protectionOrderCountForPlan(plan)
-		unexpectedStops, unexpectedTPs := detectUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed, nativeTrailingArmed)
-		unexpectedSummary := classifyUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed, nativeTrailingArmed, true)
-		ownership := evaluateProtectionOwnership(openOrders, positionSide, plan, breakEvenArmed, nativeTrailingArmed)
-		logger.Infof("🧭 Protection ownership: %s %s | state=%s verified=%t stopOwner=%s profitOwner=%s missingSL=%t missingTP=%t unexpectedSL=%d unexpectedTP=%d staleBot=%d manualForeign=%d dynamicOwner=%d reasons=%s",
-			symbol, positionSide, ownership.State, ownership.Verified, ownership.StopOwner, ownership.ProfitOwner, ownership.MissingStop, ownership.MissingProfit, ownership.UnexpectedStops, ownership.UnexpectedProfits, unexpectedSummary.StaleBotDuplicate, unexpectedSummary.ManualOrForeign, unexpectedSummary.ExpectedDynamicOwner, strings.Join(ownership.Reasons, "; "))
+		// 带认领集合的所有权视图:哪些 trailing 单真的被 armed 记录认领。
+		// 只有这样才能识别"我挂的但已无人认领"的重复 trailing 单(见
+		// native_trailing_ownership.go 的说明)。
+		trailingOwnership := at.nativeTrailingOwnershipForPosition(symbol, side, entryPrice, nativeTrailingArmed)
+		unexpectedStops, unexpectedTPs := detectUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership)
+		unexpectedSummary := classifyUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership, true)
+		ownership := evaluateProtectionOwnership(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership)
+		logger.Infof("🧭 Protection ownership: %s %s | state=%s verified=%t stopOwner=%s profitOwner=%s missingSL=%t missingTP=%t unexpectedSL=%d unexpectedTP=%d staleBot=%d staleTrail=%d manualForeign=%d dynamicOwner=%d claimedTrail=%d reasons=%s",
+			symbol, positionSide, ownership.State, ownership.Verified, ownership.StopOwner, ownership.ProfitOwner, ownership.MissingStop, ownership.MissingProfit, ownership.UnexpectedStops, ownership.UnexpectedProfits, unexpectedSummary.StaleBotDuplicate, unexpectedSummary.StaleTrailingDuplicate, unexpectedSummary.ManualOrForeign, unexpectedSummary.ExpectedDynamicOwner, len(trailingOwnership.Claimed), strings.Join(ownership.Reasons, "; "))
 		if ownership.State == "unprotected" && ownership.Verified {
 			return result, fmt.Errorf("invalid protection ownership invariant: unprotected but verified")
 		}
@@ -303,7 +307,11 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 		// Detect duplicate/stale orders by explicit order-role mismatch, not only coarse order counts.
 		// This keeps valid break-even / trailing orders while removing old ladder/fallback debris.
 		// Exception: if stale bot duplicates exceed a threshold, clean them up to prevent accumulation.
-		if unexpectedStops > 0 && unexpectedTPs == 0 && !missingSL && ownership.StopOwner != "" && unexpectedSummary.StaleBotDuplicate <= 5 {
+		// 注意 StaleTrailingDuplicate == 0 这一项:多一张止损单只是多一层保险,
+		// 容忍它是对的;但多一张无人认领的 trailing 单会真的多平仓(部分档重复
+		// 触发 = 平掉两倍比例),不能走这条容忍分支,必须落到下面的撤单路径。
+		if unexpectedStops > 0 && unexpectedTPs == 0 && !missingSL && ownership.StopOwner != "" &&
+			unexpectedSummary.StaleBotDuplicate <= 5 && unexpectedSummary.StaleTrailingDuplicate == 0 {
 			logger.Infof("🛡 Protection reconciler: %s %s preserving extra protective stop orders (unexpectedSL=%d) because stop coverage is already satisfied", symbol, positionSide, unexpectedStops)
 			unexpectedStops = 0
 			ownership.UnexpectedStops = 0
@@ -314,7 +322,7 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 			}
 		}
 		if unexpectedStops > 0 || unexpectedTPs > 0 {
-			unexpectedIDs := collectUnexpectedProtectionOrderIDs(openOrders, positionSide, plan, breakEvenArmed, nativeTrailingArmed)
+			unexpectedIDs := collectUnexpectedProtectionOrderIDs(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership)
 			// Coverage-complete fast path (fix 2026-06-22 churn): when every required
 			// protection tier is already visible (no missing SL/TP) and the unexpected
 			// orders are pure stale bot duplicates, the position is fully protected and
@@ -340,7 +348,8 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 				if cleanErr != nil {
 					return result, fmt.Errorf("verify stale duplicate cleanup open orders: %w", cleanErr)
 				}
-				remStops, remTPs := detectUnexpectedProtectionOrders(remainingOrders, positionSide, plan, breakEvenArmed, nativeTrailingArmed)
+				remStops, remTPs := detectUnexpectedProtectionOrders(remainingOrders, positionSide, plan, breakEvenArmed,
+					at.nativeTrailingOwnershipForPosition(symbol, side, entryPrice, nativeTrailingArmed))
 				if remStops > 0 || remTPs > 0 {
 					return result, fmt.Errorf("stale duplicate cleanup incomplete (unexpectedSL=%d unexpectedTP=%d)", remStops, remTPs)
 				}
@@ -364,7 +373,8 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 				at.setReconcileCooldown(positionKey(symbol, side))
 				return result, fmt.Errorf("verify unexpected cleanup open orders: %w", cleanErr)
 			}
-			remainingUnexpectedStops, remainingUnexpectedTPs := detectUnexpectedProtectionOrders(remainingOrders, positionSide, plan, breakEvenArmed, nativeTrailingArmed)
+			remainingUnexpectedStops, remainingUnexpectedTPs := detectUnexpectedProtectionOrders(remainingOrders, positionSide, plan, breakEvenArmed,
+				at.nativeTrailingOwnershipForPosition(symbol, side, entryPrice, nativeTrailingArmed))
 			if remainingUnexpectedStops > 0 || remainingUnexpectedTPs > 0 {
 				at.setReconcileCooldown(positionKey(symbol, side))
 				return result, fmt.Errorf("unexpected cleanup incomplete after replacement (unexpectedSL=%d unexpectedTP=%d)", remainingUnexpectedStops, remainingUnexpectedTPs)
@@ -635,8 +645,8 @@ func protectionOrderCountForPlan(plan *ProtectionPlan) int {
 	return count
 }
 
-func detectUnexpectedProtectionOrders(openOrders []OpenOrder, positionSide string, plan *ProtectionPlan, breakEvenArmed bool, nativeTrailingArmed bool) (unexpectedStops int, unexpectedTPs int) {
-	summary := classifyUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed, nativeTrailingArmed, true)
+func detectUnexpectedProtectionOrders(openOrders []OpenOrder, positionSide string, plan *ProtectionPlan, breakEvenArmed bool, trailingOwnership nativeTrailingOwnership) (unexpectedStops int, unexpectedTPs int) {
+	summary := classifyUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership, true)
 	for _, order := range openOrders {
 		if positionSide != "" && order.PositionSide != "" && !strings.EqualFold(order.PositionSide, positionSide) {
 			continue

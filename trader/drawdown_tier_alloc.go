@@ -102,6 +102,24 @@ func computeDrawdownTierAllocations(totalQuantity float64, rules []store.Drawdow
 	return allocs
 }
 
+// entryQuantityAnchor 返回该仓位的原始开仓量;取不到时退回 callerQty。
+//
+// 为什么必须是"原始开仓量"而不是"当前剩余量":档位比例(CloseRatioPct)的分母
+// 在仓位整个生命周期里必须固定,否则每次部分止盈之后同一档算出的数量都会变小,
+// 而已经挂在交易所上的单不会跟着变 —— 匹配不上就重挂,重挂就是重复单。
+// 这与 v1.16.16 把 ATR→百分比 的除数锚定到冻结开仓价是同一条原则:
+// 身份/口径里的分母不能是会随时间变的量。
+func (at *AutoTrader) entryQuantityAnchor(symbol, side string, callerQty float64) float64 {
+	if at.store == nil {
+		return callerQty
+	}
+	dbPos, err := at.store.Position().GetOpenPositionBySymbol(at.id, symbol, strings.ToUpper(side))
+	if err != nil || dbPos == nil || dbPos.EntryQuantity <= 0 {
+		return callerQty
+	}
+	return dbPos.EntryQuantity
+}
+
 // setDrawdownTierAllocs stores the fixed tier allocations for a position.
 func (at *AutoTrader) setDrawdownTierAllocs(symbol, side string, allocs []store.DrawdownTierAllocation) {
 	key := positionKey(symbol, side)
@@ -544,6 +562,21 @@ func (at *AutoTrader) initDrawdownTiersForPosition(symbol, side string, quantity
 	if len(rules) == 0 || quantity <= 0 {
 		return
 	}
+
+	// 档位比例是"原始开仓量的百分之几",不是"当前剩余量的百分之几"。
+	//
+	// 分配表只存在内存里(drawdownTierAllocs),重启后由 auto_trader_risk.go 的
+	// lazy-init 兜底重算,而那里传进来的是**当前**持仓量。于是:仓位被某一档
+	// 部分止盈砍过 → 重启 → 分配表按缩小后的量重算,而交易所上躺着的单还是
+	// 按原始量挂的。2026-07-27 线上实测 CL:分配表 1.1/0.33,交易所 1.4/0.4。
+	//
+	// 后果不止是"数字不好看":arm 路径的数量匹配(auto_trader_risk.go:2208)
+	// 已经按 EntryQuantity 锚定,分配表却按当前量 —— 两边算出的目标数量不一致,
+	// 匹配失败就会重挂,这正是重复挂单同族问题的又一个入口。
+	//
+	// 这里向 DB 取原始开仓量;开仓瞬间 DB 行可能还没落地,取不到就退回调用方
+	// 传的量(此时它本来就等于开仓量),与 anchorOrCallerEntry 同一形状。
+	quantity = at.entryQuantityAnchor(symbol, side, quantity)
 
 	rules = at.resolveDrawdownRulesATR(rules, symbol, side, entryPrice)
 

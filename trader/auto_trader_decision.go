@@ -1256,7 +1256,8 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 		fallbackPlanned = plan.FallbackMaxLossPrice > 0
 		breakEvenArmed := at.getBreakEvenState(symbol, side) == "armed"
 		nativeTrailingArmed := at.getProtectionState(symbol, side) == "native_trailing_armed" || at.getProtectionState(symbol, side) == "native_partial_trailing_armed"
-		unexpectedSummary = classifyUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed, nativeTrailingArmed, true)
+		unexpectedSummary = classifyUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed,
+			at.nativeTrailingOwnershipForPosition(symbol, side, entryPrice, nativeTrailingArmed), true)
 	}
 
 	activeOrders := make([]map[string]interface{}, 0)

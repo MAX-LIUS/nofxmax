@@ -352,7 +352,7 @@ func TestDetectUnexpectedProtectionOrdersFlagsUnplannedStopsAndTakeProfits(t *te
 		{PositionSide: "LONG", Type: "STOP_MARKET", StopPrice: 101.2, OrderID: "4c363c81edc5bcde_old_be_stop"}, // stray bot break-even-like stop without armed state
 		{PositionSide: "LONG", Type: "TAKE_PROFIT_MARKET", StopPrice: 111, OrderID: "4c363c81edc5bcde_old_tp"},
 	}
-	unexpectedSL, unexpectedTP := detectUnexpectedProtectionOrders(openOrders, "LONG", plan, false, false)
+	unexpectedSL, unexpectedTP := detectUnexpectedProtectionOrders(openOrders, "LONG", plan, false, nativeTrailingArmedOnly(false))
 	if unexpectedSL != 1 {
 		t.Fatalf("expected 1 unexpected stop, got %d", unexpectedSL)
 	}
@@ -370,7 +370,7 @@ func TestDetectUnexpectedProtectionOrdersAllowsBreakEvenAndTrailingWhenArmed(t *
 		{PositionSide: "LONG", Type: "STOP_MARKET", StopPrice: 100.2}, // break-even
 		{PositionSide: "LONG", Type: "TRAILING_STOP_MARKET", StopPrice: 106, CallbackRate: 0.001},
 	}
-	unexpectedSL, unexpectedTP := detectUnexpectedProtectionOrders(openOrders, "LONG", plan, true, true)
+	unexpectedSL, unexpectedTP := detectUnexpectedProtectionOrders(openOrders, "LONG", plan, true, nativeTrailingArmedOnly(true))
 	if unexpectedSL != 0 || unexpectedTP != 0 {
 		t.Fatalf("expected no unexpected orders when break-even/trailing are armed, got SL=%d TP=%d", unexpectedSL, unexpectedTP)
 	}
