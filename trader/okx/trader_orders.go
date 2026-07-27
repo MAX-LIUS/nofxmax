@@ -1365,6 +1365,7 @@ func (t *OKXTrader) fetchOpenOrders(symbol string) ([]types.OpenOrder, error) {
 			Sz          string `json:"sz"`
 			State       string `json:"state"`
 			Tag         string `json:"tag"`
+			AlgoClOrdID string `json:"algoClOrdId"`
 		}
 		if err := json.Unmarshal(algoData, &algoOrders); err == nil {
 			for _, order := range algoOrders {
@@ -1391,7 +1392,7 @@ func (t *OKXTrader) fetchOpenOrders(symbol string) ([]types.OpenOrder, error) {
 							StopPrice:     slPrice,
 							Quantity:      quantity,
 							Status:        "NEW",
-							ClientOrderID: order.Tag,
+							ClientOrderID: order.AlgoClOrdID,
 						})
 					}
 				}
@@ -1410,7 +1411,7 @@ func (t *OKXTrader) fetchOpenOrders(symbol string) ([]types.OpenOrder, error) {
 							StopPrice:     tpPrice,
 							Quantity:      quantity,
 							Status:        "NEW",
-							ClientOrderID: order.Tag,
+							ClientOrderID: order.AlgoClOrdID,
 						})
 					}
 				}
@@ -1429,7 +1430,7 @@ func (t *OKXTrader) fetchOpenOrders(symbol string) ([]types.OpenOrder, error) {
 							StopPrice:     triggerPrice,
 							Quantity:      quantity,
 							Status:        "NEW",
-							ClientOrderID: order.Tag,
+							ClientOrderID: order.AlgoClOrdID,
 						})
 					}
 				}
@@ -1465,6 +1466,7 @@ func (t *OKXTrader) fetchOpenOrders(symbol string) ([]types.OpenOrder, error) {
 			MoveTriggerPx string `json:"moveTriggerPx"`
 			Sz            string `json:"sz"`
 			Tag           string `json:"tag"`
+			AlgoClOrdID   string `json:"algoClOrdId"`
 		}
 		if err := json.Unmarshal(trailingData, &trailingOrders); err == nil {
 			for _, order := range trailingOrders {
@@ -1513,8 +1515,8 @@ func (t *OKXTrader) fetchOpenOrders(symbol string) ([]types.OpenOrder, error) {
 					CallbackRatePct:  callbackRatio,
 					Quantity:         quantity,
 					Status:           "NEW",
-					ClientOrderID:    order.Tag,
-					ProtectionRole:   protectionReasonFromTag(order.Tag),
+					ClientOrderID:    order.AlgoClOrdID,
+					ProtectionRole:   reasonFromAlgoIDs(order.AlgoClOrdID, order.Tag),
 					ParentOrderID:    order.AlgoId,
 				})
 			}

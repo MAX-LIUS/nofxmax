@@ -23,3 +23,18 @@ func encodeReasonClientID(reason string) string {
 func decodeReasonFromClientID(clientID string) string {
 	return store.DecodeReasonFromClientID(okxTag, clientID)
 }
+
+// reasonFromAlgoIDs resolves an order's mechanism from the two identity fields OKX
+// gives back, in order of information content: the client-controlled algo id (32
+// chars, carries a mechanism code we set at placement) first, then the tag.
+//
+// The tag path only ever matches legacy orders placed before the reason moved into
+// the client id — okxTag consumes all 16 chars a tag can hold, so a current order's
+// tag is the bare broker tag and carries no mechanism. Returns "" rather than
+// guessing, which callers must read as "unknown", never as "not ours".
+func reasonFromAlgoIDs(algoClOrdID string, tag string) string {
+	if reason := decodeReasonFromClientID(algoClOrdID); reason != "" {
+		return reason
+	}
+	return protectionReasonFromTag(tag)
+}
