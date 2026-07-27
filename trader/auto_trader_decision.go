@@ -1598,6 +1598,33 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 		}
 	}
 
+	// 面板红灯必须在日志里留痕。
+	//
+	// DD1/DD2 恒红灯那个 bug(见 protection_reconciler.go 里 drawdownExecutionModeIsNative
+	// 的注释)在整个存活期内**日志一片干净** —— reconciler 报 state=protected
+	// verified=true dynamicOwner=2 claimedTrail=2,红灯只存在于 HTTP 响应里,而
+	// protection_runtime 从不落库。于是它只能靠人盯着面板发现,发现了也无从回溯。
+	//
+	// 红灯的语义是"这一档在交易所上没有单",这本身就是需要动作的事件,频率天然很低
+	// (健康时恒为 0 条)。把它打出来:既让"面板红 vs reconciler 正常"这种自相矛盾的
+	// 状态在同一份日志里对齐,也让事后能查"什么时候开始红的"。
+	if len(tiers) > 0 {
+		redTiers := make([]string, 0, len(tiers))
+		for _, tier := range tiers {
+			if light, _ := tier["exchange_light"].(string); light != "red" {
+				continue
+			}
+			stage, _ := tier["stage_name"].(string)
+			idx, _ := tier["index"].(int)
+			redTiers = append(redTiers, fmt.Sprintf("dd%d/%s", idx, stage))
+		}
+		if len(redTiers) > 0 {
+			logger.Warnf("🔴 Protection panel: %s %s drawdown tiers report RED (no exchange order matched): %s | mode=%s state=%s trailingOrdersOnExchange=%d",
+				symbol, positionSide, strings.Join(redTiers, ","),
+				at.getDrawdownExecutionMode(symbol, side), at.getProtectionState(symbol, side), len(trailingOrders))
+		}
+	}
+
 	ladderDegradedStop := plannedLadderStopCount > 0 && ladderStopCount < plannedLadderStopCount
 	ladderDegradedTakeProfit := plannedLadderTakeProfitCount > 0 && ladderTakeProfitCount < plannedLadderTakeProfitCount
 	ladderDegradedToFullStop := ladderDegradedStop && fullStopCount > 0
