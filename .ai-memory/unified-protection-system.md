@@ -1,6 +1,7 @@
 # 统一保护系统 - AI 记忆文档
 
-> **状态**: 生产运行 | **线上 = v1.16.18(2026-07-27 23:40 pid 2381838 md5 e6abee6582e455b908b9efa32c37f51f,含 v1.16.17+v1.16.18,提交 `5f2163f`,回滚备份 `/opt/webstack/nofx/nofx.bak_v11616_20260727_153756` = v1.16.16 md5 4820ddd8)**;部署后核对:4 trader 全部加载、API 200、无 panic、CL 持仓 `staleTrail=0 claimedTrail=2 dynamicOwner=2`(**claimedTrail=2 证明认领集合真的解析到了两张在场单,不是走 nil/空集合容忍兜底**)、交易所 7 张单与部署前逐一致(无误撤)
+> **状态**: 生产运行 | **线上 = v1.16.21(2026-07-28 03:04 pid 2413205 md5 f4fe200aec65bc3900c5eb8c175dab52,含 v1.16.19+v1.16.20+v1.16.21,提交 `5cef90d`,回滚备份 `/opt/webstack/nofx/nofx.bak_v11621_20260727_185500` = v1.16.18 md5 e6abee65)**;部署后核对见下方 v1.16.21 条目
+> **历史**: v1.16.18(2026-07-27 23:40 pid 2381838 md5 e6abee6582e455b908b9efa32c37f51f,提交 `5f2163f`);部署后核对:4 trader 全部加载、API 200、无 panic、CL 持仓 `staleTrail=0 claimedTrail=2 dynamicOwner=2`(**claimedTrail=2 证明认领集合真的解析到了两张在场单,不是走 nil/空集合容忍兜底**)、交易所 7 张单与部署前逐一致(无误撤)
 > **部署后核对(v1.16.13)**:ETH/CL/WLD 从 `1 tiers` 变 `2 tiers` 且数量正确,`partial_profit_lock` 命名正常;KAITO 单档已确认是策略本身只配一档(GPT-ct50),非丢档。
 > **更新**: 2026-07-27 (v1.16.9 该 bug 类第 6 次实例:开仓即挂路径漏 ATR 换算,把 ATR 倍数当百分数挂单——用户从面板发现"两档配置显示三档 0.6/1.2/1.8";并订正"OKX 没问题"的判断:OKX 同样中招,只是它上报 callbackRate 把原始那条掩住了 | v1.16.8 构造交易所对等测试项目,挖出 HEAD 里既存的 OKX 局部档吃掉 dd1 全平单缺陷;并订正两处我自己的错误结论:Binance triggerPrice≠活动价、审计工具漏配 USDC 路由导致谎报无保护)
 > **版本**: v1.16.18 (待部署:OKX tag 装不下 reason → 定向撤单实为广撤;reason 收口到 coded client id) / v1.16.17 (待部署:trailing 归属按认领集合判定 + 档位分配锚定开仓量,提交 `87490ba`) / v1.16.16 (已部署:ATR→% 换算的除数锚定到冻结开仓价,提交 `80845a2`) / v1.16.15 (已部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,提交 `75854df`) / v1.16.14 (已部署:immediate trailing 落库归属 + 撤单点按返回值收口,提交 `b4f35e0`) / v1.16.13 (已部署:managed 全程陪跑双保险,取消账户级接管,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
@@ -17,7 +18,26 @@
 >
 > **测试**:`trader/native_trailing_ownership_test.go` 5 例 + `trader/drawdown_tier_alloc_entry_anchor_test.go` 2 例,全部反向验证(旧语义下必失败:`legacy.ExpectedDynamicOwner==3`、分配表 0.33 vs 0.42)。`cmd/orderlist` 增打 `cid=` 便于人工核对 broker tag。另补 `trader/protection_stale_trailing_gate_test.go` 2 例:只测分类器不够,**撤单快路径的闸门本身没测过**(要求 `!missingSL && !missingTP && ManualOrForeign==0 && 可清理数==unexpected 总数`),按线上 BN/ETH 形状把每一项钉住,并反向验证"少一张档位止盈时 missingTP 会翻真",证明断言非空。顺带记录一处既有设计:plan 无 ladder SL 且 break-even armed 时,trailing 自身算 `looksLikeStopLoss`,所以 `missingSL=false` 不等于"真止损单在场",别误读成强断言。
 
-> **🔥 v1.16.20 阶梯 TP anchor 信了滞后的持仓量、没看新鲜的挂单(2026-07-28,该 bug 类第 16 次实例,提交 `815feae`,待部署)**
+> **🔥 v1.16.21 面板 DD1/DD2 恒红灯:归属判断的字面量白名单漏掉多档 mode(2026-07-28,该 bug 类第 17 次实例,提交 `81cf187`+`5cef90d`,已部署)**
+>
+> **症状**:用户从面板发现 DD1/DD2 两档**同时**红灯("缺失·待补挂"),而同一时刻 reconciler 每轮都报 `state=protected verified=true stopOwner=breakeven profitOwner=drawdown missingSL=false missingTP=false staleTrail=0 manualForeign=0 dynamicOwner=2 claimedTrail=2` —— 交易所上两张 trailing 单健康挂着,armed 记录里 algoId 齐全。**面板与 reconciler 对同一份事实给出相反结论。**
+>
+> **根因(状态机的生产方加了取值,消费方的白名单没跟上)**:`getDrawdownExecutionMode` 会返回 6 个 `native_*` 取值,其中 `native_trailing_tiers` / `native_partial_trailing_tiers` 是后来为"面板区分多档"新增的。而面板 runtime 的归属判断写的是字面量白名单 `mode == "native_partial_trailing" || mode == "native_trailing_full"`。**只要一个仓位同时武装了 full 档(dd1)+ partial 档(partial_profit_lock)—— 也就是现在线上的标准双档形态 —— mode 就变成 `native_trailing_tiers`,两个字面量都不等**,整段"按 algoId 找回交易所那张单"的 ID 匹配被跳过,`matchedLive` 恒 false,`computeExchangeLight` 走 `if !matchedLive { return "red" }`。`is_armed` 同样被带偏(matchedLive 假 + 利润未及门槛 ⇒ 显示"未布单")。
+>
+> **线上实证**:CLUSDT SHORT / SKHYUSDT SHORT 双档,`getDrawdownExecutionMode` 实测均为 `native_trailing_tiers`(日志 `already has all satisfied native trailing tiers armed (native_trailing_tiers)`)。反向验证:把谓词换回旧白名单,`TestDDLight_TwoArmedTiersWithLiveOrdersAreNotRed` 以线上原症状失败(两档 `exchange_light=red`)。
+>
+> **修法(不是把新的两个字面量补进白名单 —— 那是"哪漏补哪",下次再加 mode 还会漏)**:mode 串同时编码了**归属**(native / managed / 本地兜底)和**形态**(单档 / 多档 / full / partial),消费方要问的只有归属这一件事。把归属收敛成唯一谓词 `drawdownExecutionModeIsNative` / `...IsManaged`(按前缀判断,与生产方同文件相邻),任何 `native_*` 新值天然涵盖;形态信息仍由原串透给前端。
+>
+> **同族并发修掉的三处"手写并集各漏一个"**:
+> - `managed_drawdown_armed` **根本没有 mode 映射** → 掉到函数尾部按交易所能力返回 `native_trailing_pending`,纯 managed 兜底的仓位被判成"native 待挂单",面板去交易所找单找不到就红灯。
+> - `protection_reconciler.go:98` 的"保留动态状态"白名单漏 `managed_drawdown_armed` → 交易所校验通过那一轮把 managed 武装记忆覆盖成 `exchange_protection_verified`,下一轮重复武装。`:523` 反方向漏 `managed_partial_drawdown_armed`。两处本该是同一集合 → 统一为 `isManagedDrawdownProtectionState` / `isDynamicDrawdownArmState`。
+> - 面板的 `nativeTrailingArmed` 漏 `*_arming` 两态,而 `nativeTrailingOwnership.Armed` 的语义(见其类型注释)本就是"armed 或 arming" → 武装窗口内面板会把在场 trailing 单归成"非我认领",与 reconciler 同一时刻的判断相反。另有四处手写 native 状态并集统一走已存在的 `isNativeTrailingProtectionState`。
+>
+> **观测盲区(第二个提交)**:这个 bug 在整个存活期内**日志一片干净** —— `protection_runtime` / `scheduled_tiers` 是每次 `/api/positions` 现算、从不落库的,红灯只存在于 HTTP 响应里。于是它只能靠人盯面板发现,发现了也无从回溯"什么时候开始红的"。补一条 Warn:任一档红灯即打 `symbol/side/档名/mode/protectionState/交易所在场 trailing 单数` —— 正是定位这类分歧要的量。健康时恒 0 条,调用点走 8s fresh window + singleflight,单仓位最快 8s 一条。
+>
+> **教训**:v1.16.17 是"所有权判定不能用布尔量,只能用集合";这次是它的上游 —— **状态机的消费方不能用字面量白名单,只能用与生产方同处一地的谓词**。白名单的失效是静默的:漏一个取值不会报错,只会让整段判断悄悄不执行。而"非空但零信息"的误报(健康单被报成缺单)比不报更坏 —— **它训练人忽略红灯**。
+
+> **🔥 v1.16.20 阶梯 TP anchor 信了滞后的持仓量、没看新鲜的挂单(2026-07-28,该 bug 类第 16 次实例,提交 `815feae`,已部署)**
 >
 > **发现路径**:v1.16.18/19 部署后例行健康巡检,`unexpectedTP` 计数从 0 变成 2。**这个 2 本身是正确动作的日志**(v1.16.17 新增的定向撤单路径在干活),但顺着它查"撤的到底是哪两张",发现撤掉的是 tier2(82.1954)和 tier4(80.5360),而同一轮日志声称"已执行"的是 tier1+tier2 —— **撤单集合与已执行集合对不上**,才挖到根因。
 >
