@@ -126,17 +126,25 @@ var okxTag = func() string {
 	return string(b)
 }()
 
-func okxReasonTag(reason string) string {
-	reason = strings.TrimSpace(strings.ToLower(reason))
-	if reason == "" {
-		return okxTag
-	}
-	tag := fmt.Sprintf("%s_%s", okxTag, reason)
-	if len(tag) > 16 {
-		tag = tag[:16]
-	}
-	return tag
-}
+// okxReasonTag was REMOVED (2026-07). It built "<okxTag>_<reason>" and clamped to
+// 16 chars — but okxTag is itself exactly 16 chars, so the clamp always cut the
+// result back to the bare broker tag. Every reason collapsed to the same constant.
+//
+// That silent collapse caused two real defects:
+//   - cancelAlgoOrdersByTag filtered live algo orders on `tag == okxReasonTag(r)`,
+//     which matched EVERY bot conditional algo on the symbol. A call meant to
+//     cancel only ladder_sl also wiped every other SL tier and every TP tier
+//     (both use ordType=conditional) — a broad-cancel wearing a targeted-cancel
+//     signature, in a path whose own contract says it must not broad-cancel while
+//     a position is active.
+//   - protectionReasonFromTag could never match our own orders, so close
+//     attribution silently degraded to unattributed.
+//
+// The reason does NOT fit in `tag`; do not try again. It travels in the
+// client-controlled id (clOrdId / algoClOrdId, 32 chars) via reason_codec.go,
+// which the exchange echoes back on the fill. Placement sites pass okxTag
+// directly so the 16-char limit is visible at the call site instead of hidden
+// behind a helper that looks like it encodes something.
 
 // clOrdIDForReason returns a client order id that encodes the close mechanism
 // when the reason has a registered code (see reason_codec.go), so the resulting

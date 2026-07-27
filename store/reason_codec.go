@@ -79,6 +79,14 @@ func CodeForReason(reason string) string {
 	return mechanismToCode[normalizeReason(reason)]
 }
 
+// NormalizeMechanism is the exported form of normalizeReason, for adapters that must
+// compare a caller-supplied reason against a decoded mechanism on equal footing
+// (e.g. OKX targeted algo cleanup). Kept here so the dynamic-variant folding rule
+// lives in exactly one place.
+func NormalizeMechanism(reason string) string {
+	return normalizeReason(reason)
+}
+
 // EncodeReasonClientID builds a client order id carrying the mechanism code:
 // brokerPrefix + code(2) + nonce, clamped to 32 chars. Returns "" when the reason
 // has no registered code so callers can skip encoding.

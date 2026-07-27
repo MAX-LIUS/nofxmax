@@ -252,6 +252,9 @@ func (t *OKXTrader) SyncOpenProtectionOrdersToStore(traderID string, exchangeID 
 				ActivePx      string `json:"activePx"`
 				CallbackRatio string `json:"callbackRatio"`
 				Tag           string `json:"tag"`
+				// AlgoClOrdID is the client id we set at placement — the ONLY field that
+				// can carry the mechanism (tag is 16 chars, fully consumed by okxTag).
+				AlgoClOrdID string `json:"algoClOrdId"`
 			}
 			if err := json.Unmarshal(data, &orders); err != nil {
 				return err
@@ -261,7 +264,13 @@ func (t *OKXTrader) SyncOpenProtectionOrdersToStore(traderID string, exchangeID 
 					continue
 				}
 				reason := query.reason
-				if tagged := protectionReasonFromTag(order.Tag); tagged != "" {
+				// Exact-first: the coded algoClOrdId we set at placement decodes to the
+				// real mechanism with zero guessing. protectionReasonFromTag is only a
+				// fallback for legacy/foreign orders — it can never match our own orders,
+				// because okxTag consumes all 16 tag chars (see trader.go).
+				if coded := decodeReasonFromClientID(order.AlgoClOrdID); coded != "" {
+					reason = coded
+				} else if tagged := protectionReasonFromTag(order.Tag); tagged != "" {
 					reason = tagged
 				}
 				if reason == "" {
@@ -310,7 +319,7 @@ func (t *OKXTrader) SyncOpenProtectionOrdersToStore(traderID string, exchangeID 
 				// comparisons use decimal ratios. Keep persisted metadata consistent with
 				// GetOpenOrders so synced native trailing orders can be matched reliably.
 				callbackRate := normalizeOKXCallbackRatio(callback)
-				t.recordProtectionOrder(st, traderID, exchangeID, exchangeType, symbol, order.Side, posSide, order.AlgoID, reason, activation, callbackRate, qty)
+				t.recordProtectionOrder(st, traderID, exchangeID, exchangeType, symbol, order.Side, posSide, order.AlgoID, order.AlgoClOrdID, reason, activation, callbackRate, qty)
 			}
 		}
 	}
@@ -326,7 +335,14 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func (t *OKXTrader) recordProtectionOrder(st *store.Store, traderID string, exchangeID string, exchangeType string, symbol string, side string, positionSide string, algoID string, reason string, activationPrice float64, callbackRatio float64, quantity float64) {
+// recordProtectionOrder mirrors a live protection algo into the DB. clientOrderID must
+// be the REAL algoClOrdId echoed by the exchange: it previously stored the collapsed
+// broker tag, so every recorded protection order carried an identical client id and the
+// column was useless for identifying a specific order. When the exchange returns no
+// client id, the column stays empty rather than being back-filled with a synthesized
+// coded id — a fabricated nonce would not match anything on the exchange while looking
+// authoritative. OrderAction still carries the mechanism.
+func (t *OKXTrader) recordProtectionOrder(st *store.Store, traderID string, exchangeID string, exchangeType string, symbol string, side string, positionSide string, algoID string, clientOrderID string, reason string, activationPrice float64, callbackRatio float64, quantity float64) {
 	if st == nil || st.Order() == nil || algoID == "" {
 		return
 	}
@@ -343,7 +359,7 @@ func (t *OKXTrader) recordProtectionOrder(st *store.Store, traderID string, exch
 		ExchangeID:      exchangeID,
 		ExchangeType:    exchangeType,
 		ExchangeOrderID: algoID,
-		ClientOrderID:   okxReasonTag(reason),
+		ClientOrderID:   strings.TrimSpace(clientOrderID),
 		Symbol:          market.Normalize(symbol),
 		Side:            orderSide,
 		PositionSide:    strings.ToUpper(positionSide),

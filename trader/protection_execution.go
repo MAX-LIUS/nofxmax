@@ -1262,15 +1262,17 @@ func (at *AutoTrader) cancelOrphanedDrawdownOrders(symbol string, plan *Protecti
 		return
 	}
 
-	if canceller, ok := at.trader.(interface {
-		CancelTakeProfitOrders(symbol string) error
-	}); ok {
-		if err := canceller.CancelTakeProfitOrders(symbol); err != nil {
-			logger.Warnf("  ⚠️ Failed to cancel orphaned drawdown TP orders for %s: %v", symbol, err)
-		} else {
-			logger.Infof("  🧹 Cancelled orphaned drawdown TP orders for %s", symbol)
-		}
-	}
+	// No broad fallback. The previous fallback called CancelTakeProfitOrders(symbol),
+	// which cancels EVERY take-profit order on the symbol — including healthy ladder TP
+	// tiers that this function was never asked to touch. Only OKX implements the
+	// price-targeted interface, so on every other venue the "cancel only the orphaned
+	// drawdown orders" contract silently became "cancel all take-profits".
+	//
+	// Fail-safe direction matches the rest of the protection path: skip rather than
+	// over-cancel. A leftover orphan TP is caught by the reconciler's ownership diff
+	// (cancelUnexpectedProtectionOrdersByID, by explicit order id); a wrongly cancelled
+	// profit target is unrecoverable.
+	logger.Infof("  ⏭️ Skipped orphaned drawdown TP cleanup for %s: venue has no price-targeted TP cancel; leaving orders for the reconciler's id-based diff", symbol)
 }
 
 // extractStructuralTargets extracts resistance (for long) or support (for short) price levels

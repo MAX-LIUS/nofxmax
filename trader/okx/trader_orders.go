@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"nofx/logger"
+	"nofx/store"
 	"nofx/trader/types"
 	"strconv"
 	"strings"
@@ -260,7 +261,7 @@ func (t *OKXTrader) closeLongWithTag(symbol string, quantity float64, reasonTag 
 		"ordType": "market",
 		"sz":      szStr,
 		"clOrdId": clOrdIDForReason(reasonTag),
-		"tag":     okxReasonTag(reasonTag),
+		"tag":     okxTag,
 	}
 
 	// Only add posSide in dual mode (long_short_mode)
@@ -398,7 +399,7 @@ func (t *OKXTrader) closeShortWithTag(symbol string, quantity float64, reasonTag
 		"ordType": "market",
 		"sz":      szStr,
 		"clOrdId": clOrdIDForReason(reasonTag),
-		"tag":     okxReasonTag(reasonTag),
+		"tag":     okxTag,
 	}
 
 	// Only add posSide in dual mode (long_short_mode)
@@ -560,7 +561,13 @@ func (t *OKXTrader) setTrailingStopLossWithTagReturningID(symbol string, positio
 		"ordType":       "move_order_stop",
 		"sz":            szStr,
 		"callbackRatio": strconv.FormatFloat(callbackRate, 'f', -1, 64),
-		"tag":           okxReasonTag(reasonTag),
+		"tag":           okxTag,
+	}
+	// Carry the mechanism in the client-controlled algo id. Without this the trailing
+	// order's reason is unrecoverable (tag is fully consumed by okxTag) and targeted
+	// cleanup cannot distinguish it from any other algo on the symbol.
+	if algoClOrdID := encodeReasonClientID(reasonTag); algoClOrdID != "" {
+		body["algoClOrdId"] = algoClOrdID
 	}
 	if activationPrice > 0 {
 		body["activePx"] = t.formatPrice(activationPrice, inst)
@@ -698,10 +705,36 @@ func (t *OKXTrader) CancelTrailingStopOrdersByIDs(symbol string, orderIDs []stri
 	return nil
 }
 
-func (t *OKXTrader) cancelAlgoOrdersByTag(symbol string, ordType string, reasonTag string) error {
+// cancelAlgoOrdersByReason cancels ONLY the live algo orders whose coded client id
+// decodes to the requested mechanism.
+//
+// It used to filter on `tag == okxReasonTag(reason)`. Because okxTag already fills
+// the 16-char tag budget, that comparison reduced to "tag == okxTag" and matched
+// every bot conditional algo on the symbol — so a call asking for ladder_sl also
+// cancelled every other SL tier and every TP tier (conditional covers both). The
+// caller's contract forbids broad-cancelling protection while a position is active,
+// and this silently violated it.
+//
+// Fail-safe direction: an order whose client id cannot be decoded is SKIPPED, never
+// cancelled. Leaving one extra protection order alive is recoverable; cancelling a
+// live stop that is actually protecting a position is not.
+//
+// Consequence to be aware of: orders placed before coded client ids existed carry
+// nothing to decode, so this degrades to a no-op for them. That is deliberate and
+// leaves no real gap — actual surplus-order cleanup runs through
+// cancelUnexpectedProtectionOrdersByID (explicit algoId, driven by the reconciler's
+// ownership diff) and, for fully inactive symbols, the broad orphan sweep. This
+// function is only the targeted mechanism-scoped variant.
+func (t *OKXTrader) cancelAlgoOrdersByReason(symbol string, ordType string, reasonTag string) error {
 	defer t.invalidateOpenOrdersCache(symbol)
+	wantReason := store.NormalizeMechanism(reasonTag)
+	if wantReason == "" || store.CodeForReason(wantReason) == "" {
+		// No registered code means we cannot prove which orders belong to this
+		// mechanism. Refuse rather than fall back to cancelling everything.
+		logger.Infof("  ⏭️ [OKX] Skip tagged cleanup for %s: reason %q has no registered mechanism code", symbol, reasonTag)
+		return nil
+	}
 	instId := t.convertSymbol(symbol)
-	tag := okxReasonTag(reasonTag)
 	path := fmt.Sprintf("%s?instType=SWAP&instId=%s&ordType=%s", okxAlgoPendingPath, instId, ordType)
 	data, err := t.doRequest("GET", path, nil)
 	if err != nil {
@@ -709,32 +742,40 @@ func (t *OKXTrader) cancelAlgoOrdersByTag(symbol string, ordType string, reasonT
 	}
 
 	var orders []struct {
-		AlgoId string `json:"algoId"`
-		InstId string `json:"instId"`
-		Tag    string `json:"tag"`
+		AlgoId      string `json:"algoId"`
+		InstId      string `json:"instId"`
+		Tag         string `json:"tag"`
+		AlgoClOrdID string `json:"algoClOrdId"`
 	}
 	if err := json.Unmarshal(data, &orders); err != nil {
 		return fmt.Errorf("failed to parse algo orders for cleanup: %w", err)
 	}
 
+	matched, skipped := 0, 0
 	for _, order := range orders {
-		if strings.TrimSpace(order.Tag) != tag {
+		if decodeReasonFromClientID(order.AlgoClOrdID) != wantReason {
+			skipped++
 			continue
 		}
+		matched++
 		body := []map[string]interface{}{{"algoId": order.AlgoId, "instId": order.InstId}}
 		if _, err := t.doRequest("POST", okxCancelAlgoPath, body); err != nil {
 			return fmt.Errorf("failed to cancel tagged algo order %s: %w", order.AlgoId, err)
 		}
 	}
+	if matched > 0 || skipped > 0 {
+		logger.Infof("  🎯 [OKX] Targeted cleanup %s %s: cancelled=%d preserved=%d (preserved = other mechanisms or no decodable client id)",
+			symbol, wantReason, matched, skipped)
+	}
 	return nil
 }
 
 func (t *OKXTrader) CancelStopLossOrdersTagged(symbol string, reasonTag string) error {
-	return t.cancelAlgoOrdersByTag(symbol, "conditional", reasonTag)
+	return t.cancelAlgoOrdersByReason(symbol, "conditional", reasonTag)
 }
 
 func (t *OKXTrader) CancelTakeProfitOrdersTagged(symbol string, reasonTag string) error {
-	return t.cancelAlgoOrdersByTag(symbol, "conditional", reasonTag)
+	return t.cancelAlgoOrdersByReason(symbol, "conditional", reasonTag)
 }
 
 // SetStopLoss sets stop loss order
@@ -781,7 +822,7 @@ func (t *OKXTrader) setStopLossWithTag(symbol string, positionSide string, quant
 		"sz":          szStr,
 		"slTriggerPx": t.formatPrice(stopPrice, inst),
 		"slOrdPx":     "-1", // Market price
-		"tag":         okxReasonTag(reasonTag),
+		"tag":         okxTag,
 	}
 	// Deterministic attribution: carry the mechanism inside a client-controlled
 	// algo id so the eventual close fill decodes its own reason (no price guessing).
@@ -849,7 +890,7 @@ func (t *OKXTrader) setTakeProfitWithTag(symbol string, positionSide string, qua
 		"sz":          szStr,
 		"tpTriggerPx": t.formatPrice(takeProfitPrice, inst),
 		"tpOrdPx":     "-1", // Market price
-		"tag":         okxReasonTag(reasonTag),
+		"tag":         okxTag,
 	}
 	// Deterministic attribution: carry the mechanism inside a client-controlled
 	// algo id (see reason_codec.go). Only set for reasons with a registered code.

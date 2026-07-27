@@ -1,9 +1,9 @@
 # 统一保护系统 - AI 记忆文档
 
-> **状态**: 生产运行 | **线上 = v1.16.16(2026-07-27 12:50 pid 2339558 md5 4820ddd8e09f238fdeaf25622d73dce6,含 v1.16.14+v1.16.15+v1.16.16,回滚备份 `/opt/webstack/nofx/nofx.bak_v11613_20260727_125039`)**;v1.16.17 已提交 `87490ba` 待部署
+> **状态**: 生产运行 | **线上 = v1.16.16(2026-07-27 12:50 pid 2339558 md5 4820ddd8e09f238fdeaf25622d73dce6,含 v1.16.14+v1.16.15+v1.16.16,回滚备份 `/opt/webstack/nofx/nofx.bak_v11613_20260727_125039`)**;v1.16.17 已提交 `87490ba`、v1.16.18(OKX tag/撤单)待部署 —— **两版均等用户确认后再重启**
 > **部署后核对(v1.16.13)**:ETH/CL/WLD 从 `1 tiers` 变 `2 tiers` 且数量正确,`partial_profit_lock` 命名正常;KAITO 单档已确认是策略本身只配一档(GPT-ct50),非丢档。
 > **更新**: 2026-07-27 (v1.16.9 该 bug 类第 6 次实例:开仓即挂路径漏 ATR 换算,把 ATR 倍数当百分数挂单——用户从面板发现"两档配置显示三档 0.6/1.2/1.8";并订正"OKX 没问题"的判断:OKX 同样中招,只是它上报 callbackRate 把原始那条掩住了 | v1.16.8 构造交易所对等测试项目,挖出 HEAD 里既存的 OKX 局部档吃掉 dd1 全平单缺陷;并订正两处我自己的错误结论:Binance triggerPrice≠活动价、审计工具漏配 USDC 路由导致谎报无保护)
-> **版本**: v1.16.17 (待部署:trailing 归属按认领集合判定 + 档位分配锚定开仓量,提交 `87490ba`) / v1.16.16 (已部署:ATR→% 换算的除数锚定到冻结开仓价,提交 `80845a2`) / v1.16.15 (已部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,提交 `75854df`) / v1.16.14 (已部署:immediate trailing 落库归属 + 撤单点按返回值收口,提交 `b4f35e0`) / v1.16.13 (已部署:managed 全程陪跑双保险,取消账户级接管,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
+> **版本**: v1.16.18 (待部署:OKX tag 装不下 reason → 定向撤单实为广撤;reason 收口到 coded client id) / v1.16.17 (待部署:trailing 归属按认领集合判定 + 档位分配锚定开仓量,提交 `87490ba`) / v1.16.16 (已部署:ATR→% 换算的除数锚定到冻结开仓价,提交 `80845a2`) / v1.16.15 (已部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,提交 `75854df`) / v1.16.14 (已部署:immediate trailing 落库归属 + 撤单点按返回值收口,提交 `b4f35e0`) / v1.16.13 (已部署:managed 全程陪跑双保险,取消账户级接管,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
 
 > **🔥 v1.16.17 trailing 归属判定是布尔量 + 档位分配表按当前量重算(2026-07-27,该 bug 类第 12/13 次实例,提交 `87490ba`,待部署)**
 >
@@ -15,7 +15,23 @@
 >
 > **教训**:v1.16.16 是"除数不能是会变的量",v1.16.17 缺陷 B 是同一条原则的另一半 —— **比例的分母在仓位生命周期内必须固定**;缺陷 A 则是"所有权判定不能用布尔量,只能用集合":布尔量回答不了"这张具体的单是谁的",而多档并存的系统里,这正是唯一需要回答的问题。
 >
-> **测试**:`trader/native_trailing_ownership_test.go` 5 例 + `trader/drawdown_tier_alloc_entry_anchor_test.go` 2 例,全部反向验证(旧语义下必失败:`legacy.ExpectedDynamicOwner==3`、分配表 0.33 vs 0.42)。`cmd/orderlist` 增打 `cid=` 便于人工核对 broker tag。
+> **测试**:`trader/native_trailing_ownership_test.go` 5 例 + `trader/drawdown_tier_alloc_entry_anchor_test.go` 2 例,全部反向验证(旧语义下必失败:`legacy.ExpectedDynamicOwner==3`、分配表 0.33 vs 0.42)。`cmd/orderlist` 增打 `cid=` 便于人工核对 broker tag。另补 `trader/protection_stale_trailing_gate_test.go` 2 例:只测分类器不够,**撤单快路径的闸门本身没测过**(要求 `!missingSL && !missingTP && ManualOrForeign==0 && 可清理数==unexpected 总数`),按线上 BN/ETH 形状把每一项钉住,并反向验证"少一张档位止盈时 missingTP 会翻真",证明断言非空。顺带记录一处既有设计:plan 无 ladder SL 且 break-even armed 时,trailing 自身算 `looksLikeStopLoss`,所以 `missingSL=false` 不等于"真止损单在场",别误读成强断言。
+
+> **🔥 v1.16.18 OKX `tag` 装不下 reason,导致"定向撤单"实为"广撤"(2026-07-27,该 bug 类第 14 次实例,待部署)**
+>
+> **根因(结构性)**:`okxTag` 恰好 16 字符,而 OKX `tag` 字段上限就是 16。`okxReasonTag(reason)` 拼 `"<okxTag>_<reason>"` 再截断到 16 —— **永远截回裸 broker tag**,所有 reason 塌缩成同一个常量。这不是写错一行,是**字段容量根本装不下**,却被一个"看起来在编码"的 helper 藏住了。
+>
+> **由此长出两个真缺陷**:①`cancelAlgoOrdersByTag` 按 `tag == okxReasonTag(reason)` 过滤,实际等价于 `tag == okxTag`,**命中该 symbol 上所有 bot conditional 单**。一次"只撤 ladder_sl"会连带撤掉其余止损档**和全部止盈档**(conditional 两者共用),而该函数自己的契约写着"持仓活跃时不得广撤保护单" —— 契约被静默违反。所幸目前**无生产调用方**(只有测试),属未引爆的地雷。②`protectionReasonFromTag` 永远匹配不上自家单,平仓归因静默降级为未归因。
+>
+> **修法(全局,非补洞)**:删掉 `okxReasonTag`(留长注释说明为何不能再加回来),6 处挂单点直接传 `okxTag`,让 16 字符上限暴露在调用点而不是藏在 helper 里。reason 只走 client id(`clOrdId`/`algoClOrdId`,32 字符,`reason_codec.go` 已有且线上已验证有效)。撤单函数改名 `cancelAlgoOrdersByReason`,按**解码出的 mechanism** 精确匹配;`store.NormalizeMechanism` 导出以复用动态变体折叠规则(`managed_drawdown_<stage>` → `managed_drawdown`)。**失败方向必须是"少撤"**:client id 解不出的单一律跳过,reason 没注册 code 的整体拒绝 —— 绝不退化成撤全部。补上 trailing 挂单点缺失的 `algoClOrdId`(此前它的 reason 完全不可恢复)。同步路径改为"先解码 client id,tag 启发式只作 legacy/外部单兜底"。DB 镜像 `recordProtectionOrder` 的 `ClientOrderID` 原先写的是塌缩后的 tag(所有保护单同一个值,列完全无用),改为落**交易所真回的** `algoClOrdId`;取不到就留空,**不用合成 nonce 回填** —— 伪造的 id 匹配不上任何东西却显得权威。
+>
+> **边界与代价**:老单没有可解码 client id,该函数对它们退化为 no-op。这是刻意的,且不留缺口 —— 真正的多余单清理走 `cancelUnexpectedProtectionOrdersByID`(按明确 algoId,由 reconciler 归属 diff 驱动)+ 非活跃 symbol 的广扫,均不依赖 coded id。
+>
+> **Binance 无此缺陷**(已核):前缀 `x-KzrpZaP9` 只占 32 中的 10,余 21;且它没有 cancel-by-tag 路径,trailing 挂单本就走 `clientIDForReason`。这也解释了为何只有 OKX 实现 `okxTaggedProtectionCanceller`。
+>
+> **教训**:helper 的名字承诺了字段容量给不了的东西,就会长出静默 bug。**编码类 helper 必须让容量上限在调用点可见**;凡"按标签批量撤单",都要先问"这个标签真能区分实例吗" —— 这与 v1.16.17 缺陷 A(布尔量答不了"这张单是谁的")是同一个病:**用一个分辨不出实例的东西去做实例级决策**。
+>
+> **测试**:`trader/okx/cancel_by_reason_test.go` 4 例(只撤匹配 mechanism 那张 + 反向验证旧语义会命中 4 张 + 不可解码则一张不撤 + 未注册 reason 整体拒绝 + 动态变体折叠命中)。
 
 > **🔥 v1.16.15 梯度身份里混进了会变的开仓均价 → 同一档挂两张单(2026-07-27,该 bug 类第 11 次实例,提交 `75854df`,已部署)**
 >
