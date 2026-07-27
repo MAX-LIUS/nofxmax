@@ -51,12 +51,31 @@ var (
 // keeps ATR-mode activation/callback stable for the life of the position; the
 // in-memory cache is a fast path in front of the persisted record.
 func (at *AutoTrader) frozenATRForPosition(symbol, side string, entryPrice float64, cfg store.ATRProtectionConfig) (float64, bool) {
+	atr, _, ok := at.frozenATRAndEntryForPosition(symbol, side, entryPrice, cfg)
+	return atr, ok
+}
+
+// frozenATRAndEntryForPosition 除了冻结的 ATR,还返回**冻结时那个开仓均价**。
+//
+// 为什么需要它:ATR→百分比的换算是 `倍数 × ATR / entry × 100`。ATR 冻结了,但分母
+// 如果用调用方当下传进来的 entry,换算结果就会随开仓均价被修正而漂 —— 而这个百分比
+// 会进 MinProfitPct/MaxDrawdownPct,再进 rule fingerprint,于是同一档梯度分叉成两个
+// 身份、在交易所挂出两张单(2026-07-27 线上 SOXLUSDT:计划价 149.09 一族
+// 3.8025/2.2815,成交均价 149.07246479 一族 3.8029/2.2818,比值正好 = 两个 entry 的
+// 比值)。drawdownRuleIdentity 抹平 fingerprint 第 0 段解决不了这一半 —— entry 在这里
+// 是**算进数值里**的,不是单独一个字段。
+//
+// 所以规则是:**换算分母必须用 ATR 冻结时的那个 entry**,不是调用方当下的 entry。
+// 这样"这一档等于百分之几"就成了仓位的稳定属性,和 ATR 一样冻住。entrySamePosition
+// 的 0.05% 容差之内(线上 SOXL 漂了 0.0118%)缓存命中,两条路径拿到同一个分母;
+// 漂出容差才算换了仓位,重新冻结,那时重算百分比是正确行为。
+func (at *AutoTrader) frozenATRAndEntryForPosition(symbol, side string, entryPrice float64, cfg store.ATRProtectionConfig) (float64, float64, bool) {
 	key := frozenATRKey(at.id, symbol, cfg.WithDefaults().Timeframe, side)
 	frozenATRMu.Lock()
 	ent, ok := frozenATRCache[key]
 	frozenATRMu.Unlock()
 	if ok && entryPrice > 0 && entrySamePosition(ent.entryPrice, entryPrice) && ent.atr > 0 {
-		return ent.atr, true
+		return ent.atr, ent.entryPrice, true
 	}
 
 	// Cache miss (cold start / restart): try the persisted record before
@@ -67,14 +86,14 @@ func (at *AutoTrader) frozenATRForPosition(symbol, side string, entryPrice float
 				frozenATRMu.Lock()
 				frozenATRCache[key] = frozenATREntry{entryPrice: rec.EntryPrice, atr: rec.ATR}
 				frozenATRMu.Unlock()
-				return rec.ATR, true
+				return rec.ATR, rec.EntryPrice, true
 			}
 		}
 	}
 
 	atr, ok := at.atrForProtection(symbol, cfg)
 	if !ok {
-		return 0, false
+		return 0, 0, false
 	}
 	frozenATRMu.Lock()
 	frozenATRCache[key] = frozenATREntry{entryPrice: entryPrice, atr: atr}
@@ -86,7 +105,17 @@ func (at *AutoTrader) frozenATRForPosition(symbol, side string, entryPrice float
 			logger.Warnf("⚠️ Frozen ATR: failed to persist %s: %v", key, err)
 		}
 	}
-	return atr, true
+	return atr, entryPrice, true
+}
+
+// anchorOrCallerEntry 选换算分母:锚可用就用锚,否则退回调用方的 entry —— 也就是旧
+// 行为。绝不能因为拿不到锚就放弃换算:那会把裸 ATR 倍数当百分比挂单,正是 v1.16.9 /
+// v1.16.11 那一族事故(1.2 ATR 被当成 1.2% 挂出去)。
+func anchorOrCallerEntry(anchorEntry, callerEntry float64) float64 {
+	if anchorEntry > 0 {
+		return anchorEntry
+	}
+	return callerEntry
 }
 
 // candidateATRRecomputeIntervalMs throttles the dynamic-ATR recompute to at most
@@ -643,11 +672,18 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol, action st
 	if !protectionUsesATR(base) {
 		return base, false
 	}
-	atr, ok := at.frozenATRForPosition(symbol, action, entryPrice, acfg)
+	atr, anchorEntry, ok := at.frozenATRAndEntryForPosition(symbol, action, entryPrice, acfg)
 	if !ok {
 		logger.Warnf("  ⚠️ ATR-protection: no ATR for %s; falling back to configured percents", symbol)
 		return base, false
 	}
+	// anchorEntry = ATR 冻结时的开仓均价,专门用作"ATR 倍数 → 占 entry 百分比"的分母。
+	// 分母若用调用方当下的 entry,开仓均价一被修正,所有 TP/SL/BE/DD 的百分比就整体漂
+	// 一点,导致保护计划与交易所已挂单永远比不上,反复重挂;DD 那一路还会让 rule
+	// fingerprint 分叉、同一档挂出两张单。详见 frozenATRAndEntryForPosition。
+	// 注意:结构位相关计算(frozenStructBoundaryForPosition / structuralSLPercent)仍
+	// 用真实 entryPrice —— 那是 entry 到结构价位的真实几何距离,不是 ATR 倍数换算。
+	anchorEntry = anchorOrCallerEntry(anchorEntry, entryPrice)
 
 	adj := base // value copy; nested slices copied below before mutation
 	applied := false
@@ -660,7 +696,7 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol, action st
 		ss := base.LadderTPSL.StructuralSL.WithDefaults()
 		isLong := action == "open_long"
 		// TP target the fallback structural stop is RR-capped against (max across tiers).
-		tpTargetPct := ladderMaxTPTargetPct(base.LadderTPSL.Rules, atr, entryPrice, acfg)
+		tpTargetPct := ladderMaxTPTargetPct(base.LadderTPSL.Rules, atr, anchorEntry, acfg)
 		// Resolve the structural stop percent ONCE (shared by all structural SL rules).
 		structPct, structOK := 0.0, false
 		if base.LadderTPSL.StructuralSL.Enabled {
@@ -671,7 +707,7 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol, action st
 			// backstop (bot-downtime safety net); the tight structural level is enforced
 			// by the engine poll (runStructuralSLGuard) instead of the resting order.
 			if ss.CloseConfirm {
-				if pct, ok := acfg.EffectivePercent(ss.BackstopATRMul, atr, entryPrice); ok {
+				if pct, ok := acfg.EffectivePercent(ss.BackstopATRMul, atr, anchorEntry); ok {
 					structPct, structOK = pct, true
 				}
 			}
@@ -680,7 +716,7 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol, action st
 			switch rules[i].StopLossUnit {
 			case store.ProtectionUnitATR:
 				if rules[i].StopLossPct > 0 {
-					if pct, ok := acfg.EffectivePercent(rules[i].StopLossPct, atr, entryPrice); ok {
+					if pct, ok := acfg.EffectivePercent(rules[i].StopLossPct, atr, anchorEntry); ok {
 						rules[i].StopLossPct = pct
 						applied = true
 					}
@@ -692,14 +728,14 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol, action st
 				} else if rules[i].StopLossPct > 0 {
 					// Fallback: no structural boundary (breakout entry / no data) — treat
 					// the configured value as an ATR multiple backstop.
-					if pct, ok := acfg.EffectivePercent(rules[i].StopLossPct, atr, entryPrice); ok {
+					if pct, ok := acfg.EffectivePercent(rules[i].StopLossPct, atr, anchorEntry); ok {
 						rules[i].StopLossPct = pct
 						applied = true
 					}
 				}
 			}
 			if rules[i].TakeProfitUnit == store.ProtectionUnitATR && rules[i].TakeProfitPct > 0 {
-				if pct, ok := acfg.EffectivePercent(rules[i].TakeProfitPct, atr, entryPrice); ok {
+				if pct, ok := acfg.EffectivePercent(rules[i].TakeProfitPct, atr, anchorEntry); ok {
 					rules[i].TakeProfitPct = pct
 					applied = true
 				}
@@ -715,14 +751,14 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol, action st
 		for i := range beRules {
 			if beRules[i].TriggerUnit == store.ProtectionUnitATR &&
 				beRules[i].TriggerMode == store.BreakEvenTriggerProfitPct && beRules[i].TriggerValue > 0 {
-				if pct, ok := acfg.EffectivePercent(beRules[i].TriggerValue, atr, entryPrice); ok {
+				if pct, ok := acfg.EffectivePercent(beRules[i].TriggerValue, atr, anchorEntry); ok {
 					beRules[i].TriggerValue = pct
 					applied = true
 				}
 			}
 			// Offset shares the rule's TriggerUnit (sign preserved for losing-side BE).
 			if beRules[i].TriggerUnit == store.ProtectionUnitATR && beRules[i].OffsetPct != 0 {
-				if pct, ok := atrOffsetEffectivePercent(acfg, beRules[i].OffsetPct, atr, entryPrice); ok {
+				if pct, ok := atrOffsetEffectivePercent(acfg, beRules[i].OffsetPct, atr, anchorEntry); ok {
 					beRules[i].OffsetPct = pct
 					applied = true
 				}
@@ -738,7 +774,7 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol, action st
 		copy(ddRules, base.DrawdownTakeProfit.Rules)
 		for i := range ddRules {
 			if ddRules[i].MinProfitUnit == store.ProtectionUnitATR && ddRules[i].MinProfitPct > 0 {
-				if pct, ok := acfg.EffectivePercent(ddRules[i].MinProfitPct, atr, entryPrice); ok {
+				if pct, ok := acfg.EffectivePercent(ddRules[i].MinProfitPct, atr, anchorEntry); ok {
 					ddRules[i].MinProfitPct = pct
 					applied = true
 				}
@@ -748,8 +784,10 @@ func (at *AutoTrader) resolveATRProtection(entryPrice float64, symbol, action st
 	}
 
 	if applied {
-		logger.Infof("  🎯 ATR-units resolved for %s: ATR(%s)=%.6f entry=%.6f → per-field ATR→%% (SL/TP/BE/DD)",
-			symbol, acfg.WithDefaults().Timeframe, atr, entryPrice)
+		// 同时打出换算分母(anchor)和调用方的 entry:两者不同就说明开仓均价被修正过,
+		// 而百分比仍锚在冻结价上 —— 这正是期望行为,日志留痕便于事后核对。
+		logger.Infof("  🎯 ATR-units resolved for %s: ATR(%s)=%.6f anchor=%.6f entry=%.6f → per-field ATR→%% (SL/TP/BE/DD)",
+			symbol, acfg.WithDefaults().Timeframe, atr, anchorEntry, entryPrice)
 	}
 	return adj, applied
 }
@@ -798,20 +836,24 @@ func (at *AutoTrader) resolveDrawdownRulesATR(rules []store.DrawdownTakeProfitRu
 	if !anyATR {
 		return rules
 	}
-	atr, ok := at.frozenATRForPosition(symbol, side, entryPrice, acfg)
+	atr, anchorEntry, ok := at.frozenATRAndEntryForPosition(symbol, side, entryPrice, acfg)
 	if !ok {
 		return rules
 	}
+	anchorEntry = anchorOrCallerEntry(anchorEntry, entryPrice)
 	out := make([]store.DrawdownTakeProfitRule, len(rules))
 	copy(out, rules)
 	for i := range out {
+		// 分母用 anchorEntry(ATR 冻结时的开仓均价),不是调用方当下的 entryPrice。
+		// 这是"同一档梯度挂出两张单"的根因所在:百分比会进 rule fingerprint,
+		// 分母一漂身份就分叉。详见 frozenATRAndEntryForPosition 的注释。
 		if out[i].MinProfitUnit == store.ProtectionUnitATR && out[i].MinProfitPct > 0 {
-			if pct, ok := acfg.EffectivePercent(out[i].MinProfitPct, atr, entryPrice); ok {
+			if pct, ok := acfg.EffectivePercent(out[i].MinProfitPct, atr, anchorEntry); ok {
 				out[i].MinProfitPct = pct
 			}
 		}
 		if out[i].MaxDrawdownUnit == store.ProtectionUnitATR && out[i].MaxDrawdownPct > 0 {
-			if pct, ok := acfg.EffectivePercent(out[i].MaxDrawdownPct, atr, entryPrice); ok {
+			if pct, ok := acfg.EffectivePercent(out[i].MaxDrawdownPct, atr, anchorEntry); ok {
 				out[i].MaxDrawdownPct = pct
 			}
 		}
@@ -846,16 +888,19 @@ func (at *AutoTrader) getActiveBreakEvenRulesATR(symbol, side string, entryPrice
 	if !anyATR {
 		return rules
 	}
-	atr, ok := at.frozenATRForPosition(symbol, side, entryPrice, acfg)
+	atr, anchorEntry, ok := at.frozenATRAndEntryForPosition(symbol, side, entryPrice, acfg)
 	if !ok {
 		return rules
 	}
+	anchorEntry = anchorOrCallerEntry(anchorEntry, entryPrice)
 	out := make([]store.BreakEvenStopRule, len(rules))
 	copy(out, rules)
 	for i := range out {
+		// 同 resolveDrawdownRulesATR:分母用冻结时的 entry,否则 BE 触发线会随开仓均价
+		// 修正而漂,导致 break_even 记录的指纹和止损价每轮都变(重复重挂)。
 		if out[i].TriggerUnit == store.ProtectionUnitATR &&
 			out[i].TriggerMode == store.BreakEvenTriggerProfitPct && out[i].TriggerValue > 0 {
-			if pct, ok := acfg.EffectivePercent(out[i].TriggerValue, atr, entryPrice); ok {
+			if pct, ok := acfg.EffectivePercent(out[i].TriggerValue, atr, anchorEntry); ok {
 				out[i].TriggerValue = pct
 			}
 		}
@@ -863,7 +908,7 @@ func (at *AutoTrader) getActiveBreakEvenRulesATR(symbol, side string, entryPrice
 		// so is the offset (an ATR multiple of entry). Sign is preserved so a
 		// negative offset (park the stop slightly losing-side) stays negative.
 		if out[i].TriggerUnit == store.ProtectionUnitATR && out[i].OffsetPct != 0 {
-			if pct, ok := atrOffsetEffectivePercent(acfg, out[i].OffsetPct, atr, entryPrice); ok {
+			if pct, ok := atrOffsetEffectivePercent(acfg, out[i].OffsetPct, atr, anchorEntry); ok {
 				out[i].OffsetPct = pct
 			}
 		}
