@@ -557,7 +557,9 @@ func TestApplyNativeTrailingDrawdownFullTierRecordsArmCooldown(t *testing.T) {
 	}
 
 	rule := store.DrawdownTakeProfitRule{MinProfitPct: 5, MaxDrawdownPct: 40, CloseRatioPct: 100}
-	fp := stableDrawdownRuleFingerprint(100, rule)
+	// 冷却 map 的 key 是 symbol|side|规则身份(nativeTrailingArmKey),不是裸 fingerprint ——
+	// 身份不含开仓均价,所以 key 必须显式带 symbol|side 才能隔离仓位。
+	fp := nativeTrailingArmKey("BTCUSDT", "long", stableDrawdownRuleFingerprint(100, rule))
 
 	if _, ok := at.nativeTrailingArmTime[fp]; ok {
 		t.Fatal("precondition: arm time must be unset before first arm")
@@ -585,7 +587,7 @@ func TestApplyNativeTrailingDrawdownFullTierRecordsArmCooldown(t *testing.T) {
 
 	armRules := at.getDrawdownArmRulesForSelectedRule(100, 1.0, "BTCUSDT", "long", rule)
 	for _, r := range armRules {
-		if stableDrawdownRuleFingerprint(100, r) == fp {
+		if nativeTrailingArmKey("BTCUSDT", "long", stableDrawdownRuleFingerprint(100, r)) == fp {
 			t.Fatal("within 300s cooldown the full tier must NOT be selected for re-arm (this is the churn bug)")
 		}
 	}

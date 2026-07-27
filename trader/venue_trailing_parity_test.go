@@ -343,7 +343,7 @@ func TestPartialTierFuzzyMatchSurvivesRecordLoss(t *testing.T) {
 			if err := at.store.DeleteDynamicProtectionRecordsForInactive(at.id, map[string]struct{}{}); err != nil {
 				t.Fatalf("wipe protection state: %v", err)
 			}
-			delete(at.nativeTrailingArmTime, fp)
+			delete(at.nativeTrailingArmTime, nativeTrailingArmKey(symbol, side, fp))
 			if recs := at.getArmedDrawdownRecordsForPosition(symbol, side, entry, posQty, 0); len(recs) != 0 {
 				t.Fatalf("precondition: records must be gone, got %d", len(recs))
 			}
@@ -413,7 +413,7 @@ func TestArmCooldownBoundsLeakWithoutRecord(t *testing.T) {
 			if err := at.store.DeleteDynamicProtectionRecordsForInactive(at.id, map[string]struct{}{}); err != nil {
 				t.Fatalf("wipe protection state: %v", err)
 			}
-			if _, ok := at.nativeTrailingArmTime[fp]; !ok {
+			if _, ok := at.nativeTrailingArmTime[nativeTrailingArmKey(symbol, side, fp)]; !ok {
 				t.Fatal("precondition: arm timestamp must be present")
 			}
 

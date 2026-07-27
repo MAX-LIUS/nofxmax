@@ -378,6 +378,7 @@ func TestPartialTierArmPersistsRecordAndCooldownPerExchange(t *testing.T) {
 			// CloseRatioPct < 99.999 selects the partial branch.
 			rule := store.DrawdownTakeProfitRule{MinProfitPct: 2.4616, MaxDrawdownPct: 0.7385, CloseRatioPct: 30}
 			fp := stableDrawdownRuleFingerprint(59.14, rule)
+			armKey := nativeTrailingArmKey("HYPEUSDT", "long", fp)
 
 			if ok := at.applyNativeTrailingDrawdown("HYPEUSDT", "long", 59.14, 62.0, rule); !ok {
 				t.Fatal("expected partial native trailing drawdown to arm")
@@ -393,7 +394,7 @@ func TestPartialTierArmPersistsRecordAndCooldownPerExchange(t *testing.T) {
 			if !found {
 				t.Fatal("partial arm must persist a native_partial_trailing armed record, otherwise the arm gate re-selects the tier every poll")
 			}
-			if _, ok := at.nativeTrailingArmTime[fp]; !ok {
+			if _, ok := at.nativeTrailingArmTime[armKey]; !ok {
 				t.Fatal("partial arm must record nativeTrailingArmTime[fingerprint] to feed the 300s re-arm cooldown")
 			}
 

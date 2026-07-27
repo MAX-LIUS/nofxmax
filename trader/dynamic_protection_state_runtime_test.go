@@ -37,11 +37,20 @@ func TestLoadDynamicProtectionStateFromStoreRestoresRuntimeMaps(t *testing.T) {
 	if got := at.getProtectionState("SOLUSDT", "long"); got != "" {
 		t.Fatalf("expected other trader state ignored, got %q", got)
 	}
-	if got := at.getDrawdownExecutionFingerprint("BTCUSDT", "short"); got != "100|2|5|40|50" {
-		t.Fatalf("expected BTC drawdown fingerprint restored, got %q", got)
+	// armed 的 native 记录**不能**进 drawdownState。这个 map 只有一个读者:
+	// auto_trader_risk.go:469 的"这一档已经平过了,别重复平"门禁。"已武装"≠"已执行" ——
+	// 写进去等于重启后关掉 managed 兜底(交易所挂单万一失效就没人平了),违反双保险。
+	// native 记录该恢复的是 protectionState(上面已断言)和 armed 集合
+	// (getArmedDrawdownRuleFingerprints 直接从库里现读)。
+	if got := at.getDrawdownExecutionFingerprint("BTCUSDT", "short"); got != "" {
+		t.Fatalf("armed native 记录污染了已执行门禁:got %q —— 重启后 managed 兜底会被自己关掉", got)
 	}
-	if got := at.getDrawdownExecutionFingerprint("ETHUSDT", "long"); got != "200|1|5|40|100" {
-		t.Fatalf("expected ETH drawdown fingerprint restored, got %q", got)
+	if got := at.getDrawdownExecutionFingerprint("ETHUSDT", "long"); got != "" {
+		t.Fatalf("armed native 记录污染了已执行门禁:got %q —— 重启后 managed 兜底会被自己关掉", got)
+	}
+	// 但 armed 集合必须照旧恢复,否则重启后每一档都会被判"没武装过"再挂一遍。
+	if armed := at.getArmedDrawdownRuleFingerprints("ETHUSDT", "long"); len(armed) == 0 {
+		t.Fatal("armed native 集合没有恢复 —— 重启后会重复挂单")
 	}
 	if got := at.getBreakEvenState("DOGEUSDT", "long"); got != "armed" {
 		t.Fatalf("expected DOGE break-even state restored, got %q", got)

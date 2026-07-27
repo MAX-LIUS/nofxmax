@@ -764,7 +764,9 @@ func (at *AutoTrader) isManagedDrawdownRecord(symbol, side, fingerprint string) 
 		if record.Status != "armed" {
 			continue
 		}
-		if record.RuleFingerprint == fingerprint && record.ProtectionType == "managed_drawdown" {
+		// 身份比较,理由同 storedTrailingOrderIDForRule:开仓均价被修正后,
+		// managed 记录会认不出自己,于是这一档被当成"没武装过"再走一遍。
+		if drawdownRuleIdentity(record.RuleFingerprint) == drawdownRuleIdentity(fingerprint) && record.ProtectionType == "managed_drawdown" {
 			return true
 		}
 	}
@@ -1060,11 +1062,17 @@ func (at *AutoTrader) getArmedDrawdownRuleFingerprints(symbol, side string) map[
 	return at.getArmedDrawdownRuleFingerprintsForPosition(symbol, side, 0, 0)
 }
 
+// getArmedDrawdownRuleFingerprintsForPosition 返回本仓位已武装梯度的**规则身份**集合。
+//
+// 存的是 drawdownRuleIdentity(record.RuleFingerprint) 而不是原始 RuleFingerprint:
+// 记录里那个串带着武装当时的开仓均价,而开仓均价会被修正(见 drawdown_rule_identity.go)。
+// 用原串比较时,开仓价一漂,同一档梯度就查不到自己的武装记录 → 重复挂单。
+// 调用方必须同样用身份去查(见 getDrawdownArmRules* 里的 armedIdentity)。
 func (at *AutoTrader) getArmedDrawdownRuleFingerprintsForPosition(symbol, side string, entryPrice, quantity float64) map[string]struct{} {
 	armed := make(map[string]struct{})
 	for _, record := range at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, quantity, 0) {
 		if record.RuleFingerprint != "" {
-			armed[record.RuleFingerprint] = struct{}{}
+			armed[drawdownRuleIdentity(record.RuleFingerprint)] = struct{}{}
 		}
 	}
 	return armed
@@ -1079,7 +1087,7 @@ func (at *AutoTrader) getArmedDrawdownRuleFingerprintsForPosition(symbol, side s
 // collide once multiple tiers rest concurrently under place-at-open). Uniform across
 // all exchanges: both OKX and Binance set OpenOrder.OrderID = the placement algoId.
 func (at *AutoTrader) storedTrailingOrderIDForRule(symbol, side string, entryPrice float64, rule store.DrawdownTakeProfitRule) string {
-	wantFP := stableDrawdownRuleFingerprint(entryPrice, rule)
+	wantFP := drawdownRuleIdentity(stableDrawdownRuleFingerprint(entryPrice, rule))
 	// A position can carry SEVERAL armed records with the SAME RuleFingerprint: the
 	// position-identity filter matches on entry price only (quantity legitimately
 	// changes on partial close, and the native-trailing rule fingerprint is
@@ -1093,7 +1101,10 @@ func (at *AutoTrader) storedTrailingOrderIDForRule(symbol, side string, entryPri
 	best := ""
 	var bestUpdatedAt int64 = -1
 	for _, record := range at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, 0, 0) {
-		if record.ExchangeOrderID == "" || record.RuleFingerprint != wantFP {
+		// 按规则身份比,不按原始 fingerprint 比:记录里的串带着武装当时的开仓均价,
+		// 而开仓均价会被修正(place-at-open 用计划/成交价,运行时用交易所同步均价)。
+		// 用原串比时开仓价一漂就查不到自己挂的单,于是这一档被判"缺单"并重复挂出。
+		if record.ExchangeOrderID == "" || drawdownRuleIdentity(record.RuleFingerprint) != wantFP {
 			continue
 		}
 		if record.UpdatedAt > bestUpdatedAt {
@@ -1119,7 +1130,10 @@ func (at *AutoTrader) claimedTrailingOrderIDsForPosition(symbol, side string, en
 		if record.ExchangeOrderID == "" {
 			continue
 		}
-		if excludeRuleFP != "" && record.RuleFingerprint == excludeRuleFP {
+		// 身份比较:excludeRuleFP 由调用方现算(带当前开仓均价),记录里那串带的是
+		// 武装当时的开仓均价。两者可能因均价修正而不同 —— 用原串比时"排除自己这一档"
+		// 会失效,于是本档把自己上一次挂的单当成兄弟档的单保护起来,永远撤不掉。
+		if excludeRuleFP != "" && drawdownRuleIdentity(record.RuleFingerprint) == drawdownRuleIdentity(excludeRuleFP) {
 			continue
 		}
 		claimed[record.ExchangeOrderID] = struct{}{}
@@ -1352,7 +1366,9 @@ func (at *AutoTrader) getDrawdownArmRulesForSelectedRule(entryPrice, quantity fl
 	rule = normalizeDrawdownRule(rule)
 	armedFingerprints := at.getArmedDrawdownRuleFingerprintsForPosition(symbol, side, entryPrice, quantity)
 	openOrders, _ := at.trader.GetOpenOrders(symbol)
-	fingerprint := stableDrawdownRuleFingerprint(entryPrice, rule)
+	// 规则身份(不含开仓均价):armedFingerprints 里存的也是身份,两边必须同源。
+	// 见 drawdown_rule_identity.go —— 开仓均价被修正时用原串比会判定"没武装过"从而重复挂单。
+	fingerprint := drawdownRuleIdentity(stableDrawdownRuleFingerprint(entryPrice, rule))
 	// Structural backstop, checked BEFORE the armed-record branch on purpose.
 	// nativeTrailingArmTime is written by every successful arm, so it is the one
 	// piece of state that survives a failed/missing persist. Historically this
@@ -1370,7 +1386,7 @@ func (at *AutoTrader) getDrawdownArmRulesForSelectedRule(entryPrice, quantity fl
 	// It is an unconditional rate limit, not a fallback: we armed this exact tier
 	// moments ago, so placing another order now cannot be correct regardless of what
 	// the records or the matchers say.
-	if lastArm, ok := at.nativeTrailingArmTime[fingerprint]; ok && time.Since(lastArm) < 300*time.Second {
+	if lastArm, ok := at.nativeTrailingArmTime[nativeTrailingArmKey(symbol, side, fingerprint)]; ok && time.Since(lastArm) < 300*time.Second {
 		logger.Infof("🟠 Drawdown native trailing arm cooldown: %s %s fingerprint=%s (armed %.0fs ago, not re-arming)", symbol, side, fingerprint, time.Since(lastArm).Seconds())
 		return nil
 	}
@@ -1421,11 +1437,12 @@ func (at *AutoTrader) getDrawdownArmRules(currentPnLPct, entryPrice, quantity fl
 		return nil
 	}
 
-	fingerprint := stableDrawdownRuleFingerprint(entryPrice, bestRule)
+	// 规则身份,同 getDrawdownArmRulesForSelectedRule。
+	fingerprint := drawdownRuleIdentity(stableDrawdownRuleFingerprint(entryPrice, bestRule))
 	// Same structural backstop as getDrawdownArmRulesForSelectedRule — see the
 	// rationale there. Bounds an arm path with a missing persist to one re-arm per
 	// 300s rather than one per poll.
-	if lastArm, ok := at.nativeTrailingArmTime[fingerprint]; ok && time.Since(lastArm) < 300*time.Second {
+	if lastArm, ok := at.nativeTrailingArmTime[nativeTrailingArmKey(symbol, side, fingerprint)]; ok && time.Since(lastArm) < 300*time.Second {
 		logger.Infof("🟠 Drawdown arm cooldown: %s %s fingerprint=%s (armed %.0fs ago, not re-arming)", symbol, side, fingerprint, time.Since(lastArm).Seconds())
 		return nil
 	}
@@ -2758,7 +2775,7 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 						// leak class that hit the OKX 55-order cap.
 						at.persistDynamicProtectionRecordWithDetails(symbol, side, "native_partial_trailing", stableDrawdownRuleFingerprint(entryPrice, rule), cumulativeRatio, "armed", placedOrderID, activationPrice, priceBasedCallbackRatio, partialQty)
 						if at.nativeTrailingArmTime != nil {
-							at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
+							at.nativeTrailingArmTime[nativeTrailingArmKey(symbol, side, stableDrawdownRuleFingerprint(entryPrice, rule))] = time.Now()
 						}
 						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.4f(ratio) close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, priceBasedCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
 						return true
@@ -2795,7 +2812,7 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 						// than no record at all.
 						at.persistDynamicProtectionRecordWithDetails(symbol, side, "native_partial_trailing", stableDrawdownRuleFingerprint(entryPrice, rule), cumulativeRatio, "armed", "", activationPrice, priceBasedCallbackRatio, partialQty)
 						if at.nativeTrailingArmTime != nil {
-							at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
+							at.nativeTrailingArmTime[nativeTrailingArmKey(symbol, side, stableDrawdownRuleFingerprint(entryPrice, rule))] = time.Now()
 						}
 						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.4f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, bitgetCallbackPercent, cumulativeRatio, partialQty, rule.StageName)
 						return true
@@ -2889,7 +2906,7 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 								at.setProtectionState(symbol, side, "native_partial_trailing_armed")
 								at.persistDynamicProtectionRecordWithDetails(symbol, side, "native_partial_trailing", stableDrawdownRuleFingerprint(entryPrice, rule), cumulativeRatio, "armed", newOrderID, activationPrice, okxCallbackRatio, partialQty)
 								if at.nativeTrailingArmTime != nil {
-									at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
+									at.nativeTrailingArmTime[nativeTrailingArmKey(symbol, side, stableDrawdownRuleFingerprint(entryPrice, rule))] = time.Now()
 								}
 								logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.6f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, okxCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
 								return true
@@ -2907,7 +2924,7 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 						// untagged fallback — the matcher falls back to fuzzy matching).
 						at.persistDynamicProtectionRecordWithDetails(symbol, side, "native_partial_trailing", stableDrawdownRuleFingerprint(entryPrice, rule), cumulativeRatio, "armed", "", activationPrice, okxCallbackRatio, partialQty)
 						if at.nativeTrailingArmTime != nil {
-							at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
+							at.nativeTrailingArmTime[nativeTrailingArmKey(symbol, side, stableDrawdownRuleFingerprint(entryPrice, rule))] = time.Now()
 						}
 						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.6f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, okxCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
 						return true
@@ -3072,7 +3089,7 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 		// falls out of the exchange snapshot (e.g. after restart collapse + snapshot lag) the full tier
 		// re-arms every cycle and stacks orders until the OKX 55-order cap rejects everything.
 		if at.nativeTrailingArmTime != nil {
-			at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
+			at.nativeTrailingArmTime[nativeTrailingArmKey(symbol, side, stableDrawdownRuleFingerprint(entryPrice, rule))] = time.Now()
 		}
 		logger.Infof("🟣 Native trailing drawdown armed: %s %s | activation=%.6f callbackRatio=%.6f", symbol, side, activationPrice, priceBasedCallbackRatio)
 	}
@@ -3714,6 +3731,18 @@ func (at *AutoTrader) resetPerPositionStateOnOpen(symbol, side string) {
 	// Re-arm breaker counters for this position (keyed symbol_side_tierFP).
 	at.clearReArmFailForPosition(symbol, sideLower)
 
+	// 300s 重复武装冷却(keyed symbol|side|ruleIdentity)。
+	// 这一项以前不需要清:key 里含开仓均价,换仓自然换 key。改成"与开仓价无关的
+	// 规则身份"之后 key 变稳定了,不清就会让新仓位继承上一个仓位的冷却窗口 ——
+	// 平仓后 300s 内在同一 symbol|side 上重开,保护单会被冷却挡住挂不上去。
+	// 与本包既有约定一致:该 map 由交易循环单线程访问,不额外加锁。
+	armKeyPrefix := strings.ToLower(symbol) + "|" + sideLower + "|"
+	for k := range at.nativeTrailingArmTime {
+		if strings.HasPrefix(k, armKeyPrefix) {
+			delete(at.nativeTrailingArmTime, k)
+		}
+	}
+
 	// Candidate-ATR scaffold cache (only populated when StructuralSL.DynamicATR on).
 	// Keyed by frozenATRKey (id|symbol|SIDE[|@tf]) — clear both the default 1h and any
 	// suffixed-timeframe entries for this symbol|side so a new position recomputes.
@@ -3731,8 +3760,10 @@ func (at *AutoTrader) resetPerPositionStateOnOpen(symbol, side string) {
 // reArmFailKey builds the per-tier breaker key. The tier fingerprint isolates the
 // counter per drawdown rule so one flaky tier tripping its breaker never disables
 // arming for the other tiers on the same position.
+// 用规则身份而不是带开仓价的原串:否则开仓均价一被修正,同一档梯度的失败计数就换了
+// 一个新桶从 0 开始,连续失败永远攒不到 3 次,熔断器(降级到 managed)形同不存在。
 func reArmFailKey(symbol, side string, rule store.DrawdownTakeProfitRule, entryPrice float64) string {
-	return strings.ToLower(symbol) + "_" + strings.ToLower(side) + "_" + stableDrawdownRuleFingerprint(entryPrice, rule)
+	return strings.ToLower(symbol) + "_" + strings.ToLower(side) + "_" + drawdownRuleIdentity(stableDrawdownRuleFingerprint(entryPrice, rule))
 }
 
 // bumpReArmFail increments and returns the consecutive-failure count for a tier.

@@ -179,12 +179,13 @@ type AutoTrader struct {
 	breakEvenFingerprints  map[string]string                         // symbol_side -> entry/qty fingerprint for lifecycle reset
 	breakEvenSource        map[string]string                         // symbol_side -> strategy|ai_decision
 	drawdownState          map[string]string                         // symbol_side -> last executed drawdown rule fingerprint
+	drawdownPosIdentity    map[string]string                         // symbol_side -> 仓位身份(交易所 cTime),用于识别"换了新仓位"
 	drawdownSource         map[string]string                         // symbol_side -> strategy|ai_decision
 	drawdownAIRules        map[string][]store.DrawdownTakeProfitRule // symbol_side -> per-position AI drawdown rules restored from entry decision
 	drawdownRunnerState    map[string]DrawdownRunnerState            // symbol_side -> active runner semantics after partial drawdown
 	drawdownTierAllocs     map[string][]store.DrawdownTierAllocation // symbol_side -> fixed tier allocations computed at open
 	drawdownTierAllocMu    sync.RWMutex                              // Protects drawdownTierAllocs
-	nativeTrailingArmTime  map[string]time.Time                      // fingerprint -> last successful arm time (prevents re-arm loop)
+	nativeTrailingArmTime  map[string]time.Time                      // nativeTrailingArmKey(symbol|side|ruleIdentity) -> last successful arm time (prevents re-arm loop)
 	reArmFailCache         map[string]int                            // symbol_side_tierFingerprint -> consecutive re-arm/verify failures (breaker at 3 → managed)
 	reArmFailMutex         sync.RWMutex                              // Protects reArmFailCache
 	candidateATRCache      map[string]float64                        // frozenATRKey -> per-main-cycle recomputed ATR (scaffold; only used when StructuralSL.DynamicATR on)
@@ -423,6 +424,7 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		breakEvenState:        make(map[string]string),
 		breakEvenFingerprints: make(map[string]string),
 		drawdownState:         make(map[string]string),
+		drawdownPosIdentity:   make(map[string]string),
 		breakEvenSource:       make(map[string]string),
 		drawdownSource:        make(map[string]string),
 		drawdownAIRules:       make(map[string][]store.DrawdownTakeProfitRule),
@@ -658,9 +660,14 @@ func (at *AutoTrader) loadDynamicProtectionStateFromStore() {
 					at.protectionState[key] = "native_partial_trailing_armed"
 				}
 			}
-			if record.RuleFingerprint != "" {
-				at.drawdownState[key] = record.RuleFingerprint
-			}
+			// 注意:这里**不能**往 drawdownState 写。drawdownState 只有一个读者 ——
+			// auto_trader_risk.go:469 的"这一档已经平过了,别重复平"门禁。native 记录是
+			// "已武装",不是"已执行";把它写进去等于重启后告诉 managed 兜底"这一档平过了",
+			// 于是交易所挂单万一失效时,唯一的兜底执行器被自己关掉(违反 managed 陪跑双保险)。
+			// 以前这个写入被掩盖了:refreshDrawdownExecutionFingerprint 每轮往同一格写仓位
+			// cTime,第一轮就把它覆盖掉。现在两个语义分了家(drawdownPosIdentity),掩盖没了。
+			// native 记录真正需要恢复的是 protectionState(上面已做)和 armed 记录集合
+			// (getArmedDrawdownRuleFingerprintsForPosition 直接从库里现读,不依赖本 map)。
 		}
 		if record.ProtectionType == "break_even_stop" {
 			existingRecord, hasExisting := latestBreakEvenRecord[key]
@@ -679,6 +686,12 @@ func (at *AutoTrader) loadDynamicProtectionStateFromStore() {
 	}
 	for _, record := range managedRecords {
 		if record.ProtectionType != "managed_drawdown" || record.RuleFingerprint == "" {
+			continue
+		}
+		// 只有 executed 的 managed 记录才是"已平过"。armed 的 managed 记录表示"兜底已武装、
+		// 还没执行" —— 写进 drawdownState 会让 :469 判定这一档平过了,兜底永远不执行。
+		// armed 的 managed 状态另有去处:isManagedDrawdownRecord 直接查库。
+		if record.Status != "executed" {
 			continue
 		}
 		at.drawdownState[positionKey(record.Symbol, record.Side)] = record.RuleFingerprint

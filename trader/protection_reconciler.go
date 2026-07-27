@@ -821,6 +821,9 @@ func (at *AutoTrader) getDrawdownExecutionFingerprint(symbol, side string) strin
 func (at *AutoTrader) clearDrawdownExecutionFingerprint(symbol, side string) {
 	at.protectionStateMutex.Lock()
 	defer at.protectionStateMutex.Unlock()
+	// 仓位身份也一并清掉:两者都是"这一个仓位"的状态,只清一半会让下一个仓位
+	// 继承上一个的身份,refreshDrawdownExecutionFingerprint 就检测不到换仓。
+	delete(at.drawdownPosIdentity, positionKey(symbol, side))
 	if at.drawdownState == nil {
 		return
 	}
@@ -926,7 +929,11 @@ func (at *AutoTrader) supersedeOlderArmedRecords(current store.DynamicProtection
 		if !strings.EqualFold(record.Symbol, current.Symbol) || !strings.EqualFold(record.Side, current.Side) {
 			continue
 		}
-		if record.RuleFingerprint != current.RuleFingerprint {
+		// 按规则身份比,不按原始 RuleFingerprint 比。原串含武装当时的开仓均价,均价被
+		// 修正后同一档梯度会分叉成两条记录,原串比较判定它们"不是同一档",于是分叉出来
+		// 的旧记录永远不会被退役 —— 这正是线上 SOXLUSDT 两档策略挂出 4 张单的收尾环节。
+		// 换成身份比较后,新武装会把分叉的旧记录一并标 superseded,老仓位自愈。
+		if drawdownRuleIdentity(record.RuleFingerprint) != drawdownRuleIdentity(current.RuleFingerprint) {
 			continue
 		}
 		if record.UpdatedAt >= current.UpdatedAt && current.UpdatedAt != 0 {
@@ -995,19 +1002,27 @@ func stableDrawdownRuleFingerprint(entryPrice float64, rule store.DrawdownTakePr
 // completely new position (not just a partial close of the same one).
 // Uses position created time (cTime from exchange) as the identity — this never
 // changes during partial closes, only when a brand new position is opened.
+// 仓位身份存放在 drawdownPosIdentity(独立的 map),不再和 drawdownState 共用一格。
+//
+// 共用曾经造成一个静默失效:drawdownState 的语义是"最近已执行的 drawdown 规则
+// fingerprint"(setDrawdownExecutionFingerprint 写、:469 的重复平仓门禁读、重启后从
+// managed_drawdown 记录恢复),而本函数往同一格写的是仓位 cTime。本函数在每轮
+// monitor 的最前面跑,读到一个非数字的规则 fingerprint 时会走下面的 "legacy format"
+// 分支,把它覆盖成 cTime —— 于是"这一档已经执行过"的记忆在下一轮就被抹掉,重复平仓
+// 门禁永远匹配不上。两个语义各自一格,谁也不会盖掉谁。
 func (at *AutoTrader) refreshDrawdownExecutionFingerprint(symbol, side string, posCreatedTime int64) bool {
 	key := positionKey(symbol, side)
 
 	at.protectionStateMutex.Lock()
 	defer at.protectionStateMutex.Unlock()
-	if at.drawdownState == nil {
-		at.drawdownState = make(map[string]string)
+	if at.drawdownPosIdentity == nil {
+		at.drawdownPosIdentity = make(map[string]string)
 	}
-	prev, ok := at.drawdownState[key]
+	prev, ok := at.drawdownPosIdentity[key]
 	if !ok || prev == "" {
 		// First time seeing this position — store its identity, no change
 		if posCreatedTime > 0 {
-			at.drawdownState[key] = fmt.Sprintf("%d", posCreatedTime)
+			at.drawdownPosIdentity[key] = fmt.Sprintf("%d", posCreatedTime)
 		}
 		return false
 	}
@@ -1017,13 +1032,17 @@ func (at *AutoTrader) refreshDrawdownExecutionFingerprint(symbol, side string, p
 	}
 	storedTime, err := strconv.ParseInt(strings.Split(prev, "|")[0], 10, 64)
 	if err != nil {
-		// Legacy format (was entry price) — migrate to new format, don't clear
-		at.drawdownState[key] = fmt.Sprintf("%d", posCreatedTime)
+		// Legacy format (was entry price, or a rule fingerprint left over from the
+		// era when this shared drawdownState) — migrate to cTime, don't clear.
+		at.drawdownPosIdentity[key] = fmt.Sprintf("%d", posCreatedTime)
 		return false
 	}
 	if storedTime != posCreatedTime {
-		// Different position entirely — clear armed records
+		// Different position entirely — clear armed records + the executed guard,
+		// which was keyed to the OLD position and must not suppress the new one.
+		delete(at.drawdownPosIdentity, key)
 		delete(at.drawdownState, key)
+		delete(at.drawdownRunnerState, key)
 		return true
 	}
 	return false
