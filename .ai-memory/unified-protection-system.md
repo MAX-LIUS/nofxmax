@@ -3,8 +3,28 @@
 > **状态**: 生产运行 | **线上 = v1.16.13(2026-07-27 08:25 pid 2298513 md5 b92d92da,提交 `b18ff54`,回滚备份 `/opt/webstack/nofx/nofx.bak_v11611_20260727_082308` = md5 478e8ed8;上一版备份 `nofx.bak_v11610_20260727_055310`)**
 > **部署后核对(v1.16.13)**:ETH/CL/WLD 从 `1 tiers` 变 `2 tiers` 且数量正确,`partial_profit_lock` 命名正常;KAITO 单档已确认是策略本身只配一档(GPT-ct50),非丢档。
 > **更新**: 2026-07-27 (v1.16.9 该 bug 类第 6 次实例:开仓即挂路径漏 ATR 换算,把 ATR 倍数当百分数挂单——用户从面板发现"两档配置显示三档 0.6/1.2/1.8";并订正"OKX 没问题"的判断:OKX 同样中招,只是它上报 callbackRate 把原始那条掩住了 | v1.16.8 构造交易所对等测试项目,挖出 HEAD 里既存的 OKX 局部档吃掉 dd1 全平单缺陷;并订正两处我自己的错误结论:Binance triggerPrice≠活动价、审计工具漏配 USDC 路由导致谎报无保护)
-> **版本**: v1.16.14 (待部署:immediate trailing 落库归属 + 撤单点按返回值收口,md5 ab4f4e81,提交 `b4f35e0`) / v1.16.13 (待部署:managed 全程陪跑双保险,取消账户级接管,md5 b92d92da,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
+> **版本**: v1.16.15 (待部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,md5 e37b0c83,提交 `75854df`) / v1.16.14 (待部署:immediate trailing 落库归属 + 撤单点按返回值收口,md5 ab4f4e81,提交 `b4f35e0`) / v1.16.13 (待部署:managed 全程陪跑双保险,取消账户级接管,md5 b92d92da,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
 
+> **🔥 v1.16.15 梯度身份里混进了会变的开仓均价 → 同一档挂两张单(2026-07-27,该 bug 类第 11 次实例,提交 `75854df`,待部署 md5 e37b0c83)**
+>
+> **现象**:线上 SOXLUSDT 两档策略,交易所 4 张挂单 / 库里 4 条 armed 记录,`dynamicOwner=4 verified=true`(系统自认为一切正常)。日志序列:`Native trailing state exists but no trailing order found on exchange (SOXLUSDT long), re-arming` → `Preserving 2 live sibling trailing tier(s) claimed by armed records during full-tier migration`。KAITOUSDT 另有两条 armed 全平档记录(v1.16.9 之前"裸 ATR vs 百分比"分裂的 07-26 残留)。
+>
+> **根因(一个,不是四个)**:`drawdownRuleFingerprint` 的第 0 段是开仓均价。这让 fingerprint 同时当"这一档的身份证"和"当时的开仓价"用,而开仓均价**会被修正** —— place-at-open 用计划/成交价(SOXL 149.09),运行时用交易所同步回来的持仓均价(149.07246479),加仓/部分平仓/交易所刷新都会让它漂零点几个百分点。一漂,身份就分叉:`storedTrailingOrderIDForRule` 查不到自己挂的单 → 判"缺单";`armedFingerprints` 里只有旧串 → 判"没武装过";`nativeTrailingArmTime` 也查不到 → 300s 冷却一起失效 → 挂出第二张。仓位身份那一层早就改用交易所 cTime 了(`refreshDrawdownExecutionFingerprint`,同样的理由),**规则身份这一层漏了**。
+>
+> **修法**:身份和"当时的开仓价"拆开。新增 `trader/drawdown_rule_identity.go`,`drawdownRuleIdentity` 把 entry/qty 两段抹成 `*`,**字段数保持不变**(`auto_trader_risk.go:940`/`:1281` 有两处按下标解析 `parts[2]` 取 MinProfitPct,改布局会静默读错档位)。**比较与做 key 一律用身份,写库仍写带 entry 的原串** —— 线上已有记录不迁移就能被新代码认领,回滚到旧版本时旧代码读到的也还是它熟悉的串。
+>
+> 身份化的 6 个比较点:`getArmedDrawdownRuleFingerprintsForPosition`(集合里存身份)、`storedTrailingOrderIDForRule`、`claimedTrailingOrderIDsForPosition` 的"排除自己这一档"(否则本档把自己上一次挂的单当兄弟档保护起来,永远撤不掉)、`isManagedDrawdownRecord`、`supersedeOlderArmedRecords`(**分叉出来的旧记录现在会被新武装自动标 superseded,老仓位自愈**)、`reArmFailKey`(否则 entry 一漂失败计数换新桶从 0 开始,熔断器永远攒不到 3 次)。
+>
+> `nativeTrailingArmTime` 改用 `nativeTrailingArmKey(symbol|side|身份)`:**身份不含 entry 之后,"不同币种/不同方向"再也不能靠开仓价碰巧不同来区分**(同币种 long/short 对冲尤其容易撞),必须显式带 symbol|side。这个 key 从此不再自然过期,所以 `resetPerPositionStateOnOpen` 里按 `symbol|side|` 前缀显式清理 —— 否则平仓后 300s 内在同一 symbol|side 重开,保护单会被上一个仓位的冷却挡住挂不上去。
+>
+> **顺带修掉同一片状态里的两个静默失效**(拆分后才暴露,必须一起修):
+> 1. `drawdownState` 一格两用:它的语义是"最近已执行的 drawdown 规则 fingerprint"(`:469` 重复平仓门禁的唯一数据源),但 `refreshDrawdownExecutionFingerprint` 每轮 monitor 在最前面往同一格写仓位 cTime。读到非数字的规则串时走 "legacy format" 分支覆盖成 cTime → **已执行的记忆下一轮就没了,重复平仓门禁永不命中**。仓位身份拆到独立的 `drawdownPosIdentity`。
+> 2. 恢复流程(`loadDynamicProtectionStateFromStore`)把 **armed 的 native 记录、armed 的 managed 记录**也写进 `drawdownState`。"已武装"≠"已执行" → **重启后交易所挂单万一失效,唯一的兜底执行器会因为"以为平过了"拒绝动手**,直接违反"managed 一直陪跑、双保险"。只有 `status=executed` 的 managed 记录才进门禁。这一条以前被上面那个 cTime 覆盖掩盖着(生产的 `%.8f` entry 串 ParseInt 失败走 legacy 分支覆盖掉),拆开后必须一起修 —— **修一个 bug 让另一个从"被掩盖"变成"会发作",是拆共用状态时必须一起检查的**。
+>
+> **测试锚点**(`trader/drawdown_rule_identity_test.go`,6 条,每条都反向验证过 —— 改回旧行为即失败):`TestDrawdownRuleIdentityIgnoresEntryDrift`(归一 + 不过度归一 + 字段数/parts[2] 不变)、`TestNativeTrailingArmKeyIsolatesPositions`、`TestEntryDriftDoesNotForkTierIdentity`(端到端 SOXL 形状)、`TestPositionIdentityDoesNotClobberExecutedGuard`、`TestRestartDoesNotDisableManagedFallback`、`TestArmCooldownClearedOnNewPosition`。
+>
+> **教训**:身份(identity)里绝不能放会变的量。这条规则在"仓位身份"上已经交过一次学费(entry → cTime),但没有推广到"规则身份"—— 同一个错误在相邻的一层又犯了一次。判断标准很简单:**这个字段会不会在对象生命周期内被修正?会,就不能进身份。**
+>
 > **🔥 v1.16.14 immediate trailing 单无落库归属 → 漏单 + 被全平档误认领(2026-07-27,该 bug 类第 10 次实例,提交 `b4f35e0`,待部署 md5 ab4f4e81)**
 >
 > **用户报告**:"binance 又挂错了,有三单,比例好像还是固定百分比不是 atr"。
