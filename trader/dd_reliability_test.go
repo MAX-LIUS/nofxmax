@@ -573,7 +573,13 @@ func TestComputeExchangeLight_ActivatedNoActivePx_Yellow(t *testing.T) {
 	}
 }
 
-// E6. 断路器: 连续 3 次未有效覆盖 → 第 3 次跳闸 → 状态升级 exchange_failed → managed 接管。
+// E6. 断路器: 连续 3 次未有效覆盖 → 第 3 次跳闸 → 状态升级 exchange_failed → managed 陪跑执行。
+//
+// 2026-07-27 语义变更(co-run,不接管): 跳闸后本函数必须报告 NOT covered。
+// 原来报 covered 的依据是"applyExchangeFailedLocalMonitor 已接管该档",但对 close>=100 的
+// 档位那个 helper 什么都不挂、也不注册执行者,只写状态;同时 arm 循环因跳闸不再挂单 →
+// 交易所无单 + managed 被跳过 = 零保护,而面板显示 armed。所以跳闸只代表"交易所侧不再维护",
+// 必须让 managed 成为真正的执行者。
 func TestReArmBreaker_TripsAfter3Fails(t *testing.T) {
 	st, err := store.New(filepath.Join(t.TempDir(), "breaker-trip.db"))
 	if err != nil {
@@ -600,9 +606,19 @@ func TestReArmBreaker_TripsAfter3Fails(t *testing.T) {
 			t.Fatalf("call %d: breaker not yet tripped, must report NOT covered", i)
 		}
 	}
-	// 第 3 次: fails 达到 limit → 跳闸 → applyExchangeFailedLocalMonitor → 视为 covered(true)。
-	if !at.accountReArmBreaker("WLDUSDT", "short", entry, 92.0, 8.0, rules) {
-		t.Fatal("3rd call: breaker must TRIP and report covered (managed now owns tier)")
+	// 第 3 次: fails 达到 limit → 跳闸 → applyExchangeFailedLocalMonitor,且必须报 NOT covered。
+	if at.accountReArmBreaker("WLDUSDT", "short", entry, 92.0, 8.0, rules) {
+		t.Fatal("3rd call: breaker TRIPPED — must report NOT covered so the managed monitor executes; " +
+			"reporting covered leaves a close=100% tier with no exchange order AND no executor")
+	}
+	// 第 4 次(跳闸后再轮询): 仍报 NOT covered,且不得重复调用 applyExchangeFailedLocalMonitor
+	// (对局部档它会真的下单 → 正是断路器要消除的 churn)。计数不再增长即为证据。
+	failsAfterTrip := at.getReArmFail(reArmFailKey("WLDUSDT", "short", normalizeDrawdownRule(rule), entry))
+	if at.accountReArmBreaker("WLDUSDT", "short", entry, 92.0, 8.0, rules) {
+		t.Fatal("4th call: a tripped tier must keep reporting NOT covered")
+	}
+	if got := at.getReArmFail(reArmFailKey("WLDUSDT", "short", normalizeDrawdownRule(rule), entry)); got != failsAfterTrip {
+		t.Fatalf("tripped tier must short-circuit before bump/re-arm: fails %d → %d (re-arming every poll is churn)", failsAfterTrip, got)
 	}
 	// 跳闸后状态升级, execution mode 反映 exchange_failed。
 	if mode := at.getDrawdownExecutionMode("WLDUSDT", "short"); mode != "managed_drawdown_exchange_failed" {
@@ -941,5 +957,194 @@ func TestPassedTier_ReplacedWithZeroActivePx_NoChurn(t *testing.T) {
 	// 关键:重挂被 activated 单认下 → 不再 churn。允许开头 1~2 次(撤幻影+挂立即单),但不得无界。
 	if fake.trailingCalls > 2 {
 		t.Fatalf("CHURN: passed tier must place immediate order ≤2 times across 20 cycles, got %d", fake.trailingCalls)
+	}
+}
+
+// ---- E8~E10. co-run(双保险,不接管) 2026-07-27 -------------------------------
+//
+// 产品决定: managed 监控永远陪跑,交易所侧只在 per-tier 门禁处让位。
+// 原来主循环是账户级 `if nativeTrailingHandled { continue }` —— 一个聚合判定就把整个
+// 仓位的 managed 关掉。下面三例分别钉住这个改动的三条腿。
+
+// E8. 断路器跳闸 + 交易所仍留着一张"看起来有效"的单 → managed 必须仍然平仓。
+//
+// 这是零保护缺口的完整复现:跳闸后 arm 循环不再挂单(反 churn,正确),而
+// applyExchangeFailedLocalMonitor 对 close=100% 的档什么都不挂、不注册执行者,只写状态。
+// 修复前 accountReArmBreaker 把跳闸档当"已覆盖"→ nativeTrailingHandled=true →
+// 主循环 continue → 交易所无维护 + managed 被跳过 = 谁都不平仓,而面板显示 armed。
+func TestTrippedBreaker_ManagedStillCloses(t *testing.T) {
+	st, err := store.New(filepath.Join(t.TempDir(), "tripped-corun.db"))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	entry := 100.0
+	rule := store.DrawdownTakeProfitRule{MinProfitPct: 0.7, MaxDrawdownPct: 1.5, CloseRatioPct: 100}
+	nRule := normalizeDrawdownRule(rule)
+	activePx := calculateProfitBasedTrailingTriggerPrice(entry, "short", nRule.MinProfitPct)
+	cb := calculateDrawdownRuleCallbackRatio(entry, "short", nRule)
+	// 一张 activated 单 —— 平时会被门禁判为"有效覆盖"并抑制 managed。
+	stale := tradertypes.OpenOrder{
+		OrderID: "stale-act", Symbol: "BTCUSDT", PositionSide: "SHORT", Type: "TRAILING_STOP_MARKET",
+		Quantity: 10.0, StopPrice: activePx, ActivationPrice: activePx, CallbackRate: cb,
+		ActivationStatus: "activated", Status: "NEW",
+	}
+	fake := &fakeProtectionTrader{
+		positions: []map[string]interface{}{{
+			"symbol": "BTCUSDT", "side": "short", "entryPrice": entry, "markPrice": 99.0, "positionAmt": 10.0,
+		}},
+		openOrders: []tradertypes.OpenOrder{stale},
+	}
+	at := &AutoTrader{
+		id: "trader-trip", exchangeID: "exch-trip", store: st, exchange: "okx", trader: fake,
+		config: AutoTraderConfig{StrategyConfig: &store.StrategyConfig{
+			Protection: store.ProtectionConfig{
+				DrawdownTakeProfit: store.DrawdownTakeProfitConfig{Enabled: true, Rules: []store.DrawdownTakeProfitRule{rule}},
+			},
+		}},
+		protectionState: map[string]string{"BTCUSDT_short": "native_trailing_armed"},
+		drawdownState:   make(map[string]string),
+		peakPnLCache:    map[string]float64{"BTCUSDT_short": 3.0},
+		reArmFailCache:  make(map[string]int),
+	}
+	// 预置该档为已跳闸。
+	key := reArmFailKey("BTCUSDT", "short", nRule, entry)
+	for i := 0; i < reArmBreakerLimit; i++ {
+		at.bumpReArmFail(key)
+	}
+
+	at.checkPositionDrawdown()
+
+	if fake.closeShortCalls != 1 {
+		t.Fatalf("DECISIVE: tier 的断路器已跳闸(交易所侧不再维护),managed 必须平仓一次,got %d。"+
+			"报 covered 会让该档既无交易所单也无执行者 = 零保护而面板显示 armed", fake.closeShortCalls)
+	}
+	// 反 churn 必须同时保住: 跳闸档不得再挂单。
+	if fake.trailingCalls != 0 {
+		t.Fatalf("跳闸档不得再向交易所挂单(反 churn),got %d", fake.trailingCalls)
+	}
+}
+
+// E9. 门禁抑制时,档位状态必须回滚为 tracking。
+//
+// evaluateDrawdownTiers 在返回前就把档位标成 executed,外层门禁再 continue。
+// 不回滚 → 该档被后续所有轮次过滤掉(executed 不再评估)→ managed 永久停止看护一个
+// 它从未平掉的档,且 hasAllTiersCompleted 会宣称仓位已全部退出。
+// managed 现在每轮都评估,所以这条从"偶发"变成"必然"。
+func TestGateSuppressedTier_StaysTrackingNotExecuted(t *testing.T) {
+	st, err := store.New(filepath.Join(t.TempDir(), "gate-revert.db"))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	entry := 100.0
+	rule := store.DrawdownTakeProfitRule{MinProfitPct: 0.7, MaxDrawdownPct: 1.5, CloseRatioPct: 100}
+	nRule := normalizeDrawdownRule(rule)
+	activePx := calculateProfitBasedTrailingTriggerPrice(entry, "short", nRule.MinProfitPct)
+	cb := calculateDrawdownRuleCallbackRatio(entry, "short", nRule)
+	activated := tradertypes.OpenOrder{
+		OrderID: "eff-act", Symbol: "BTCUSDT", PositionSide: "SHORT", Type: "TRAILING_STOP_MARKET",
+		Quantity: 10.0, StopPrice: activePx, ActivationPrice: activePx, CallbackRate: cb,
+		ActivationStatus: "activated", Status: "NEW",
+	}
+	fake := &fakeProtectionTrader{
+		positions: []map[string]interface{}{{
+			"symbol": "BTCUSDT", "side": "short", "entryPrice": entry, "markPrice": 99.0, "positionAmt": 10.0,
+		}},
+		openOrders: []tradertypes.OpenOrder{activated},
+	}
+	at := &AutoTrader{
+		id: "trader-gate", exchangeID: "exch-gate", store: st, exchange: "okx", trader: fake,
+		config: AutoTraderConfig{StrategyConfig: &store.StrategyConfig{
+			Protection: store.ProtectionConfig{
+				DrawdownTakeProfit: store.DrawdownTakeProfitConfig{Enabled: true, Rules: []store.DrawdownTakeProfitRule{rule}},
+			},
+		}},
+		protectionState: map[string]string{"BTCUSDT_short": "native_trailing_armed"},
+		drawdownState:   make(map[string]string),
+		peakPnLCache:    map[string]float64{"BTCUSDT_short": 3.0},
+		reArmFailCache:  make(map[string]int),
+	}
+
+	// 回撤已触发,但交易所单有效 → 门禁抑制 managed 平仓。
+	at.checkPositionDrawdown()
+	if fake.closeShortCalls != 0 {
+		t.Fatalf("交易所单有效时 managed 必须让位(不重复平仓),got %d closes", fake.closeShortCalls)
+	}
+	allocs := at.getDrawdownTierAllocs("BTCUSDT", "short")
+	if len(allocs) == 0 {
+		t.Fatal("expected tier allocations to be initialized")
+	}
+	for _, a := range allocs {
+		if a.Status == "executed" {
+			t.Fatalf("档位 %s 被门禁抑制却留在 executed —— 后续轮次会把它过滤掉,"+
+				"managed 从此不再看护一个从未平掉的档(hasAllTiersCompleted 还会宣称已全退出);"+
+				"应回滚为 tracking。allocs=%+v", a.StageName, allocs)
+		}
+	}
+
+	// 再跑若干轮:档位必须始终保持可评估(不被 executed 过滤),且仍然不重复平仓。
+	for i := 0; i < 5; i++ {
+		at.checkPositionDrawdown()
+	}
+	if fake.closeShortCalls != 0 {
+		t.Fatalf("交易所单持续有效,managed 必须一直让位,got %d closes", fake.closeShortCalls)
+	}
+	if hasAllTiersCompleted(at.getDrawdownTierAllocs("BTCUSDT", "short")) {
+		t.Fatal("门禁抑制不得让 hasAllTiersCompleted 宣称仓位已全部退出(该档从未真正平仓)")
+	}
+	// 决定性断言:该档仍能被 managed 评估出触发 —— 状态没有被 executed 永久吞掉。
+	// (直接调用会把状态置为 executed,断言后立即回滚。)
+	triggered := at.evaluateDrawdownTiers("BTCUSDT", "short", 1.0, 3.0)
+	if triggered == nil {
+		t.Fatal("档位应仍可被评估触发;返回 nil 说明它已被 executed 过滤,managed 再也不会看护它 —— " +
+			"这正是门禁抑制时不回滚状态的后果")
+	}
+	at.updateTierAlloc("BTCUSDT", "short", triggered.TierIndex, func(a *store.DrawdownTierAllocation) {
+		a.Status = "tracking"
+	})
+}
+
+// E10. 交易所侧完全有效时,managed 陪跑但不重复平仓 —— 双保险不得变成双下单。
+// (与 E8/E9 一起:门禁是唯一去重点,且它按"有效性"而非"存在性"判定。)
+func TestCoRun_EffectiveExchangeSide_NoDoubleClose(t *testing.T) {
+	st, err := store.New(filepath.Join(t.TempDir(), "corun-nodouble.db"))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	entry := 100.0
+	rule := store.DrawdownTakeProfitRule{MinProfitPct: 0.7, MaxDrawdownPct: 1.5, CloseRatioPct: 100}
+	nRule := normalizeDrawdownRule(rule)
+	activePx := calculateProfitBasedTrailingTriggerPrice(entry, "short", nRule.MinProfitPct)
+	cb := calculateDrawdownRuleCallbackRatio(entry, "short", nRule)
+	activated := tradertypes.OpenOrder{
+		OrderID: "eff-2", Symbol: "BTCUSDT", PositionSide: "SHORT", Type: "TRAILING_STOP_MARKET",
+		Quantity: 10.0, StopPrice: activePx, ActivationPrice: activePx, CallbackRate: cb,
+		ActivationStatus: "activated", Status: "NEW",
+	}
+	fake := &fakeProtectionTrader{
+		positions: []map[string]interface{}{{
+			"symbol": "BTCUSDT", "side": "short", "entryPrice": entry, "markPrice": 99.0, "positionAmt": 10.0,
+		}},
+		openOrders: []tradertypes.OpenOrder{activated},
+	}
+	at := &AutoTrader{
+		id: "trader-corun", exchangeID: "exch-corun", store: st, exchange: "okx", trader: fake,
+		config: AutoTraderConfig{StrategyConfig: &store.StrategyConfig{
+			Protection: store.ProtectionConfig{
+				DrawdownTakeProfit: store.DrawdownTakeProfitConfig{Enabled: true, Rules: []store.DrawdownTakeProfitRule{rule}},
+			},
+		}},
+		protectionState: map[string]string{"BTCUSDT_short": "native_trailing_armed"},
+		drawdownState:   make(map[string]string),
+		peakPnLCache:    map[string]float64{"BTCUSDT_short": 3.0},
+		reArmFailCache:  make(map[string]int),
+	}
+	for i := 0; i < 20; i++ {
+		at.checkPositionDrawdown()
+	}
+	if fake.closeShortCalls != 0 {
+		t.Fatalf("co-run 不得变成双下单: 交易所单持续有效,managed 必须 20 轮都让位,got %d closes", fake.closeShortCalls)
+	}
+	if fake.cancelTrailingCalls != 0 {
+		t.Fatalf("有效单不得被撤,got %d cancels", fake.cancelTrailingCalls)
 	}
 }

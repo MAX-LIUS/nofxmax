@@ -298,12 +298,9 @@ func (at *AutoTrader) checkPositionDrawdown() {
 				// order untouched. This "arm only when missing" is the whole point.
 				_ = at.applyNativeTrailingDrawdown(symbol, side, entryPrice, markPrice, armRule)
 			}
-			// Decide managed suppression by EFFECTIVENESS, not placement, while
-			// maintaining the per-tier re-arm breaker. If every currently-satisfied
-			// native tier is effectively covered (or its breaker has tripped and the
-			// managed monitor now owns it), the exchange/managed side owns the exit and
-			// we skip the tier-alloc managed market-close pass. Otherwise we fall through
-			// so the managed block (with its per-tier Layer-1 gate) can supplement.
+			// Run the breaker accounting for its side effects (per-tier failure counting
+			// and the local-monitor upgrade), but do NOT use its verdict to skip the
+			// managed pass. See the co-run note below.
 			if at.accountReArmBreaker(symbol, side, entryPrice, markPrice, currentPnLPct, rules) {
 				nativeTrailingHandled = true
 			} else {
@@ -312,10 +309,37 @@ func (at *AutoTrader) checkPositionDrawdown() {
 		}
 
 		if len(allocs) > 0 {
-			if nativeTrailingHandled {
-				// Native trailing is handling exchange orders; skip managed market-close execution
-				// but tier state has been updated above for high-water-mark tracking.
-				continue
+			// CO-RUN, NEVER HAND OVER (2026-07-27, product decision).
+			//
+			// This used to be `if nativeTrailingHandled { continue }` — an ACCOUNT-level
+			// hand-over: one aggregate "everything looks covered" verdict switched the
+			// managed monitor off for the whole position. Two ways that lost protection
+			// outright:
+			//
+			//  1. accountReArmBreaker returns true for a tier whose re-arm breaker has
+			//     TRIPPED (it `continue`s without clearing allCovered, on the assumption
+			//     that applyExchangeFailedLocalMonitor now owns the tier). For a
+			//     close>=100 tier that helper places NOTHING and registers NO executor —
+			//     it only sets protection state and persists a record. Meanwhile the arm
+			//     loop skips tripped tiers, so no exchange order is placed either. Net
+			//     result: no exchange order, no managed close, panel says "armed", and
+			//     positionHasArmedProtection() reports the position as protected so the
+			//     giveback breadth breaker leaves the retracing winner alone. The breaker
+			//     never resets either (resetReArmFail only runs on verified coverage,
+			//     which needs an order that is never placed), so the gap is permanent for
+			//     the life of the position.
+			//  2. Any aggregate verdict is only as good as its inputs. v1.16.10 showed a
+			//     path where logs and the reconciler both claimed coverage while nothing
+			//     was on the exchange — an account-level switch turns one bad read into
+			//     zero protection.
+			//
+			// So the managed monitor now ALWAYS evaluates. Double execution is prevented
+			// where it belongs: the per-tier gate below (exchangeSideCoversDrawdownTier),
+			// which checks EFFECTIVENESS of that specific tier's live order and fails open
+			// (allows the managed close) when exchange state cannot be read. nativeTrailingHandled
+			// is kept only for logging/telemetry.
+			if nativeTrailingHandled && currentPnLPct > 0 {
+				logger.Infof("🤝 Drawdown co-run: %s %s exchange side looks covered — managed monitor keeps tracking as second insurance (per-tier gate decides execution)", symbol, side)
 			}
 
 			// Log tier status periodically
@@ -348,8 +372,19 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			// this monitor — so suppressing here keeps display and execution aligned.
 			if matchingRule := findRuleForTier(rules, triggered); matchingRule != nil {
 				if at.exchangeSideCoversDrawdownTier(symbol, side, normalizeDrawdownRule(*matchingRule), entryPrice, markPrice) {
-					// Exchange owns this tier; keep tier state as-is (do not mark
-					// executed — the exchange fill detector handles that) and move on.
+					// Exchange owns this tier. evaluateDrawdownTiers ALREADY flipped the
+					// tier to "executed" before returning it, so we must put it back —
+					// otherwise the tier is skipped by every later evaluation (executed
+					// tiers are filtered out) and the managed side silently stops watching
+					// a tier it never actually closed. hasAllTiersCompleted would also
+					// report the position fully exited. The exchange fill detector is what
+					// legitimately marks this tier executed, when the order really fills.
+					at.updateTierAlloc(symbol, side, triggered.TierIndex, func(a *store.DrawdownTierAllocation) {
+						a.Status = "tracking"
+						if triggered.PeakPnLPct > a.PeakPnLPct {
+							a.PeakPnLPct = triggered.PeakPnLPct
+						}
+					})
 					continue
 				}
 			}
@@ -418,8 +453,13 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			for _, triggeredRule := range triggeredRules {
 				at.applyNativeTrailingDrawdown(symbol, side, entryPrice, markPrice, triggeredRule)
 			}
-			if at.hasArmedNativeDrawdownForPosition(symbol, side, entryPrice) {
-				logger.Infof("🟣 Drawdown monitor: %s %s native trailing drawdown is armed; skipping managed market close fallback", symbol, side)
+			// Same co-run rule as the tier-alloc path: suppress the managed close only when
+			// the exchange order for THIS triggered tier is genuinely EFFECTIVE. The old
+			// check here was hasArmedNativeDrawdownForPosition — an armed-RECORD check, so a
+			// stale record pointing at a dead order (or a phantom order) silently disabled
+			// the only remaining executor on this path.
+			if at.exchangeSideCoversDrawdownTier(symbol, side, normalizeDrawdownRule(triggeredRules[0]), entryPrice, markPrice) {
+				logger.Infof("🟣 Drawdown monitor: %s %s exchange trailing is effective for the triggered tier; managed market close stands down this poll", symbol, side)
 				continue
 			}
 		}
@@ -1877,6 +1917,16 @@ func (at *AutoTrader) exchangeSideCoversDrawdownTier(symbol, side string, rule s
 // (breaker accounting) can fetch once instead of once per tier. exchangeSideCovers-
 // DrawdownTier is the fetch-then-delegate wrapper used everywhere else.
 func (at *AutoTrader) exchangeSideCoversDrawdownTierWithOrders(symbol, side string, rule store.DrawdownTakeProfitRule, entryPrice, markPrice float64, openOrders []OpenOrder) bool {
+	// A tier whose re-arm breaker has TRIPPED is deliberately no longer placed on the
+	// exchange (the arm loop skips it to stop the place→fail→re-place churn). The managed
+	// monitor is therefore its ONLY executor, so this gate must never suppress the managed
+	// close for it — regardless of what stale order might still match. Before this check,
+	// a tripped tier could be reported as covered and end up with no executor at all.
+	if at.getReArmFail(reArmFailKey(symbol, side, rule, entryPrice)) >= reArmBreakerLimit {
+		logger.Warnf("🟠 Drawdown tier %s %s close=%.1f%% has a TRIPPED re-arm breaker — exchange side is not being maintained, managed monitor owns execution",
+			symbol, side, rule.CloseRatioPct)
+		return false
+	}
 	existing, _, _, _ := at.findEquivalentPartialTrailingOrder(symbol, side, rule, entryPrice, openOrders)
 	if existing == nil {
 		return false
@@ -2015,6 +2065,16 @@ func (at *AutoTrader) accountReArmBreaker(symbol, side string, entryPrice, markP
 			continue
 		}
 		key := reArmFailKey(symbol, side, rule, entryPrice)
+		if at.getReArmFail(key) >= reArmBreakerLimit {
+			// Already tripped on an earlier poll. Do NOT query coverage (the gate now
+			// reports a tripped tier as uncovered by design) and do NOT re-arm the local
+			// monitor — for a partial tier that helper places exchange orders, so calling
+			// it every poll would be exactly the churn the breaker exists to stop. Report
+			// the tier as uncovered so this verdict stays honest: the exchange side is not
+			// being maintained for it, and the managed monitor is its only executor.
+			allCovered = false
+			continue
+		}
 		if at.exchangeSideCoversDrawdownTierWithOrders(symbol, side, rule, entryPrice, markPrice, openOrders) {
 			at.resetReArmFail(key)
 			continue
@@ -2022,10 +2082,13 @@ func (at *AutoTrader) accountReArmBreaker(symbol, side string, entryPrice, markP
 		// Satisfied tier not effectively covered despite the arm attempt this poll.
 		fails := at.bumpReArmFail(key)
 		if fails >= reArmBreakerLimit {
-			logger.Warnf("🔴 Re-arm breaker TRIPPED (%s %s close=%.1f%% fails=%d) — stop re-placing exchange trailing, arming in-process managed monitor", symbol, side, rule.CloseRatioPct, fails)
+			logger.Warnf("🔴 Re-arm breaker TRIPPED (%s %s close=%.1f%% fails=%d) — stop re-placing exchange trailing, managed monitor owns this tier", symbol, side, rule.CloseRatioPct, fails)
+			// Best-effort: for a partial tier this stages conditional TP-style orders and
+			// upgrades the panel state. For a close>=100 tier it only records state — it
+			// places nothing and registers no executor, which is precisely why the tier
+			// must NOT be reported as covered here.
 			at.applyExchangeFailedLocalMonitor(symbol, side, entryPrice, rule, calculateProfitBasedTrailingTriggerPrice(entryPrice, side, rule.MinProfitPct), calculateDrawdownRuleCallbackRatio(entryPrice, side, rule))
-			// Managed now owns this tier; treat as covered so the tier-alloc managed
-			// close does not ALSO fire in the same pass (double-execution guard).
+			allCovered = false
 			continue
 		}
 		logger.Warnf("🟡 Re-arm attempt %d/%d not yet effective (%s %s close=%.1f%%) — managed backup supplements this poll", fails, reArmBreakerLimit, symbol, side, rule.CloseRatioPct)

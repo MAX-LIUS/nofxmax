@@ -468,9 +468,21 @@ func (at *AutoTrader) positionHasArmedProtection(symbol, side string, entryPrice
 	state := at.getProtectionState(symbol, side)
 	if isNativeTrailingProtectionState(state) ||
 		state == "managed_drawdown_armed" || state == "managed_partial_drawdown_armed" ||
-		state == "managed_drawdown_exchange_failed_armed" || state == "managed_partial_drawdown_exchange_failed_armed" ||
 		state == "exchange_protection_verified" {
 		return true
+	}
+	// The "exchange_failed" variants mean the exchange order could NOT be placed and the
+	// in-process monitor is the only thing left. For a partial tier that monitor stages real
+	// orders; for a close>=100 tier applyManagedDrawdownFallback places nothing and only
+	// records state, so the state alone is not evidence of protection. Require a live tier
+	// allocation — that is the managed executor (evaluateDrawdownTiers) actually watching
+	// this position. Without it, treat the position as NAKED so the breadth breaker cuts a
+	// retracing winner instead of leaving it to give the profit back.
+	if state == "managed_drawdown_exchange_failed_armed" || state == "managed_partial_drawdown_exchange_failed_armed" {
+		if len(at.getDrawdownTierAllocs(symbol, side)) > 0 {
+			return true
+		}
+		logger.Warnf("⚠️ GivebackGuard: %s %s state=%s but no managed tier allocation exists — no executor is watching this tier, treating position as unprotected", symbol, side, state)
 	}
 	// Native drawdown trailing record armed for this position.
 	if at.hasArmedNativeDrawdownForPosition(symbol, side, entryPrice) {
