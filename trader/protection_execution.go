@@ -35,6 +35,11 @@ func (at *AutoTrader) applyPostOpenProtection(req *protectionExecutionRequest) e
 		return nil
 	}
 
+	// 本地已确认成交。交易所的持仓接口可能还要几秒才返回这条仓位,期间 liveness
+	// gate 会把它误判成"已平"并做破坏性清理(撤掉刚挂好的保护单)。打上时间戳,
+	// 让 gate 在宽限期内只推迟、不清理。详见 protectionFillGraceWindow。
+	at.markPositionFilled(req.Symbol, req.PositionSide) // positionKey 自己会小写化
+
 	at.syncRequestEntryPriceToExchange(req)
 
 	configuredPlan, err := at.BuildConfiguredProtectionPlanForSymbol(req.EntryPrice, req.Action, req.Symbol)

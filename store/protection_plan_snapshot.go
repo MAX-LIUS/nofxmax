@@ -41,11 +41,19 @@ func (ProtectionPlanSnapshot) TableName() string { return "protection_plan_snaps
 // ProtectionPlanTier is one resolved protection level. Mirrors the frontend
 // PlanItem so the API can pass it through without re-derivation.
 type ProtectionPlanTier struct {
-	Mechanism     string   `json:"mechanism"`
-	Kind          string   `json:"kind"` // tp | sl | be | drawdown | trailing
-	Label         string   `json:"label"`
-	TriggerPct    float64  `json:"triggerPct"`
-	TriggerPrice  *float64 `json:"triggerPrice,omitempty"`
+	Mechanism  string  `json:"mechanism"`
+	Kind       string  `json:"kind"` // tp | sl | be | drawdown | trailing | structural
+	Label      string  `json:"label"`
+	TriggerPct float64 `json:"triggerPct"`
+	// TriggerPrice 是"这一档开始起作用"的价位。对静态单(TP/SL/BE/结构位)它同时
+	// 就是成交价;对回撤档它只是**激活价** —— 到这里只是开始跟踪峰值,不成交。
+	TriggerPrice *float64 `json:"triggerPrice,omitempty"`
+	// ExecutionPrice 是这一档真正成交的价位。回撤档 = 峰值 ×(1 ∓ callback),
+	// 静态单等于 TriggerPrice。快照按它排序 —— 排序问的是"接下来先碰到哪一道",
+	// 而回撤档按激活价排会被顶到远端(3ATR 启动的档实际成交在 1.2ATR)。
+	ExecutionPrice *float64 `json:"executionPrice,omitempty"`
+	// ExecutionPct 是 ExecutionPrice 相对入场的带符号盈利%(正=盈利方向)。
+	ExecutionPct  *float64 `json:"executionPct,omitempty"`
 	CloseRatioPct *float64 `json:"closeRatioPct,omitempty"`
 	Note          string   `json:"note,omitempty"`
 }

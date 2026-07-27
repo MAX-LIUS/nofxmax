@@ -1303,6 +1303,9 @@ const PLAN_KIND_COLOR: Record<PlanItem['kind'], string> = {
   be: '#F0B90B',
   drawdown: '#C084FC',
   trailing: '#60A5FA',
+  // Matches the live panel's structural family (text-blue-300) so the same
+  // protection reads the same colour in both places.
+  structural: '#93C5FD',
 }
 
 // matchCloseEventToPlan links an actual close event to the entry-plan item that
@@ -1749,6 +1752,8 @@ function PositionRow({
         label: p.label,
         triggerPct: p.triggerPct,
         triggerPrice: p.triggerPrice,
+        executionPrice: p.executionPrice,
+        executionPct: p.executionPct,
         closeRatioPct: p.closeRatioPct,
         note: p.note,
       }))

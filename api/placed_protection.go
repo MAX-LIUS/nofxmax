@@ -15,20 +15,30 @@ import (
 // skipped entirely when a protection leg is in manual mode and therefore never
 // reflects what actually protected the position.
 type placedProtectionItem struct {
-	Mechanism     string   `json:"mechanism"`
-	Kind          string   `json:"kind"` // tp | sl | be | drawdown | trailing
-	Label         string   `json:"label"`
-	TriggerPct    float64  `json:"triggerPct"`
-	TriggerPrice  *float64 `json:"triggerPrice,omitempty"`
-	CloseRatioPct *float64 `json:"closeRatioPct,omitempty"`
-	Note          string   `json:"note,omitempty"`
+	Mechanism  string  `json:"mechanism"`
+	Kind       string  `json:"kind"` // tp | sl | be | drawdown | trailing | structural
+	Label      string  `json:"label"`
+	TriggerPct float64 `json:"triggerPct"`
+	// TriggerPrice 是"这一档开始起作用"的价位。静态档(TP/SL/BE/结构位)它就是成交价;
+	// 回撤档它只是**激活价** —— 到这里只是开始跟踪峰值,不成交。
+	TriggerPrice *float64 `json:"triggerPrice,omitempty"`
+	// ExecutionPrice 是真正成交的价位(回撤档 = 峰值 ×(1∓callback))。排序键用它。
+	ExecutionPrice *float64 `json:"executionPrice,omitempty"`
+	ExecutionPct   *float64 `json:"executionPct,omitempty"`
+	CloseRatioPct  *float64 `json:"closeRatioPct,omitempty"`
+	Note           string   `json:"note,omitempty"`
 }
 
 // placedFromSnapshotTiers converts a canonical protection_plan_snapshot's tiers into
 // the panel item shape. The snapshot is already duplicate-free and correctly labeled
 // (built at open from the resolved plan), so this is a straight field copy with no
 // entry-window filtering or dedup. Tiers with an unrenderable kind are skipped.
-func placedFromSnapshotTiers(tiers []store.ProtectionPlanTier) []placedProtectionItem {
+//
+// isLong 用于**按成交价重排**。写库时已经排好序(trader/protection_plan_snapshot.go),
+// 但历史行是按机制分组落的、且回撤档当时没有价格,所以这里对读出来的行再排一次 ——
+// 否则老仓位的面板顺序仍是旧的机制序。排序键是成交价而不是激活价:回撤档的激活价
+// 会把它顶到远端,而它实际成交在离入场更近的位置。
+func placedFromSnapshotTiers(tiers []store.ProtectionPlanTier, isLong bool) []placedProtectionItem {
 	if len(tiers) == 0 {
 		return nil
 	}
@@ -38,16 +48,48 @@ func placedFromSnapshotTiers(tiers []store.ProtectionPlanTier) []placedProtectio
 			continue
 		}
 		out = append(out, placedProtectionItem{
-			Mechanism:     t.Mechanism,
-			Kind:          t.Kind,
-			Label:         t.Label,
-			TriggerPct:    t.TriggerPct,
-			TriggerPrice:  t.TriggerPrice,
-			CloseRatioPct: t.CloseRatioPct,
-			Note:          t.Note,
+			Mechanism:      t.Mechanism,
+			Kind:           t.Kind,
+			Label:          t.Label,
+			TriggerPct:     t.TriggerPct,
+			TriggerPrice:   t.TriggerPrice,
+			ExecutionPrice: t.ExecutionPrice,
+			ExecutionPct:   t.ExecutionPct,
+			CloseRatioPct:  t.CloseRatioPct,
+			Note:           t.Note,
 		})
 	}
+	sortPlacedProtection(out, isLong)
 	return out
+}
+
+// placedSortPrice 取一行用于排序的价格:优先成交价,退回触发/激活价。
+func placedSortPrice(it placedProtectionItem) float64 {
+	if it.ExecutionPrice != nil && *it.ExecutionPrice > 0 {
+		return *it.ExecutionPrice
+	}
+	if it.TriggerPrice != nil && *it.TriggerPrice > 0 {
+		return *it.TriggerPrice
+	}
+	return 0
+}
+
+// sortPlacedProtection 按成交价排:多头由高到低,空头由低到高(都是"由远到近"),
+// 无价格的行沉到末尾并保持原相对顺序。
+func sortPlacedProtection(items []placedProtectionItem, isLong bool) {
+	sort.SliceStable(items, func(i, j int) bool {
+		pi, pj := placedSortPrice(items[i]), placedSortPrice(items[j])
+		if (pi > 0) != (pj > 0) {
+			return pi > 0
+		}
+		if pi == pj {
+			return false
+		}
+		if isLong {
+			return pi > pj
+		}
+		return pi < pj
+	})
 }
 
 // kindForMechanism maps a canonical close mechanism to the panel's plan "kind"
@@ -188,6 +230,11 @@ func buildPlacedProtectionPlan(intents []store.CloseIntent, entryPrice float64, 
 		}
 		out = append(out, item)
 	}
+	// 上面的机制分组序只是为了给阶梯档编号(TP1 最靠近入场)。编号完成后必须按价格
+	// 重排,和快照路径一致 —— 否则同一个面板里,新仓位(走快照)按价格排、老仓位
+	// (走 close_intents 回放)按机制排,两种顺序看起来像 bug。
+	// 注:close_intents 里回撤档记的是激活价,没有成交价可用,只能按触发价排。
+	sortPlacedProtection(out, isLong)
 	return out
 }
 

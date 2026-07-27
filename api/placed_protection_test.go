@@ -115,6 +115,98 @@ func TestBuildProtectionDeviationEntry(t *testing.T) {
 
 func f(v float64) *float64 { return &v }
 
+// 快照读路径必须按**成交价**排,不是激活价。一个"涨到 3ATR 才启动、回吐 1.8ATR
+// 才平"的回撤档,成交在 1.2ATR —— 应该排在 1.1ATR 和 1.7ATR 两个阶梯档之间,
+// 而按激活价排会把它顶到最远端。
+func TestPlacedFromSnapshotTiersSortsByExecutionPrice(t *testing.T) {
+	// entry 100, ATR 2 => 1.1ATR=102.2, 1.7ATR=103.4, 3ATR=106
+	tiers := []store.ProtectionPlanTier{
+		{Mechanism: store.MechLadderTP, Kind: "tp", Label: "TP1", TriggerPrice: f(102.2)},
+		{Mechanism: store.MechManagedDrawdown, Kind: "drawdown", Label: "DD1",
+			TriggerPrice: f(106), ExecutionPrice: f(102.4)},
+		{Mechanism: store.MechLadderTP, Kind: "tp", Label: "TP2", TriggerPrice: f(103.4)},
+		{Mechanism: store.MechStructuralSL, Kind: "structural", Label: "Struct",
+			TriggerPrice: f(97), ExecutionPrice: f(97)},
+		{Mechanism: store.MechLadderSL, Kind: "sl", Label: "SL", TriggerPrice: f(95)},
+		{Kind: "", Label: "dropped"}, // 无 kind 的行必须丢弃
+	}
+
+	got := placedFromSnapshotTiers(tiers, true /*isLong*/)
+	labels := make([]string, 0, len(got))
+	for _, it := range got {
+		labels = append(labels, it.Label)
+	}
+	want := []string{"TP2", "DD1", "TP1", "Struct", "SL"}
+	if len(labels) != len(want) {
+		t.Fatalf("rows = %v, want %v", labels, want)
+	}
+	for i := range want {
+		if labels[i] != want[i] {
+			t.Fatalf("long order = %v, want %v", labels, want)
+		}
+	}
+	// 成交价必须透传到前端(前端用它排序/显示),否则回撤档只剩激活价。
+	if got[1].ExecutionPrice == nil || *got[1].ExecutionPrice != 102.4 {
+		t.Fatalf("DD1 execution price not propagated: %+v", got[1])
+	}
+	if got[1].TriggerPrice == nil || *got[1].TriggerPrice != 106 {
+		t.Fatalf("DD1 activation price must survive alongside execution: %+v", got[1])
+	}
+
+	// SHORT 反向:由低到高。
+	shortTiers := []store.ProtectionPlanTier{
+		{Mechanism: store.MechLadderTP, Kind: "tp", Label: "TP1", TriggerPrice: f(97.8)},
+		{Mechanism: store.MechManagedDrawdown, Kind: "drawdown", Label: "DD1",
+			TriggerPrice: f(94), ExecutionPrice: f(97.6)},
+		{Mechanism: store.MechLadderTP, Kind: "tp", Label: "TP2", TriggerPrice: f(96.6)},
+		{Mechanism: store.MechLadderSL, Kind: "sl", Label: "SL", TriggerPrice: f(105)},
+	}
+	gotShort := placedFromSnapshotTiers(shortTiers, false)
+	wantShort := []string{"TP2", "DD1", "TP1", "SL"}
+	for i := range wantShort {
+		if gotShort[i].Label != wantShort[i] {
+			t.Fatalf("short order[%d] = %s, want %s", i, gotShort[i].Label, wantShort[i])
+		}
+	}
+}
+
+// 老仓位走 close_intents 回放,新仓位走快照 —— 两条路的顺序必须一致,否则同一个
+// 面板里两种排法看起来像 bug。
+func TestBuildPlacedProtectionPlanSortsByPrice(t *testing.T) {
+	entry := 100.0
+	intents := []store.CloseIntent{
+		{Reason: store.MechLadderSL, TriggerPrice: 95},
+		{Reason: store.MechLadderTP, TriggerPrice: 103.4},
+		{Reason: store.MechBreakEven, TriggerPrice: 100.2},
+		{Reason: store.MechLadderTP, TriggerPrice: 102.2},
+	}
+	plan := buildPlacedProtectionPlan(intents, entry, true, 0)
+	prices := make([]float64, 0, len(plan))
+	for _, it := range plan {
+		if it.TriggerPrice != nil {
+			prices = append(prices, *it.TriggerPrice)
+		}
+	}
+	want := []float64{103.4, 102.2, 100.2, 95}
+	if len(prices) != len(want) {
+		t.Fatalf("prices = %v, want %v", prices, want)
+	}
+	for i := range want {
+		if prices[i] != want[i] {
+			t.Fatalf("order = %v, want %v", prices, want)
+		}
+	}
+	// 编号仍按"离入场最近的阶梯档 = TP1",排序不能把编号搞乱。
+	for _, it := range plan {
+		if it.TriggerPrice != nil && *it.TriggerPrice == 102.2 && it.Label != "TP1" {
+			t.Fatalf("nearest ladder TP should be TP1, got %q", it.Label)
+		}
+		if it.TriggerPrice != nil && *it.TriggerPrice == 103.4 && it.Label != "TP2" {
+			t.Fatalf("farther ladder TP should be TP2, got %q", it.Label)
+		}
+	}
+}
+
 // TestPlacedProtectionDedupAndEntryWindow reproduces the 42-row bug: protection
 // re-armed/re-anchored throughout the hold writes duplicate close_intents rows for
 // the same tier, and later trailing re-anchors add superseded tiers. The builder

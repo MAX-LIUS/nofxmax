@@ -224,6 +224,104 @@ describe('PositionProtectionPanel price ladder', () => {
     expect(danger.length).toBeGreaterThanOrEqual(1)
   })
 
+  // A drawdown tier has two prices: the activation price (where trailing starts
+  // tracking — nothing fills there) and the execution price (peak × (1 - cb),
+  // where it actually closes). The ladder is ordered by "which level does price
+  // reach next", so a tier that activates at 3ATR but gives back 1.8ATR must land
+  // between the 1.1ATR and 1.7ATR ladder rungs — not out at the 3ATR slot.
+  it('orders a DD tier by its execution price, between the ladder rungs', async () => {
+    const { api } = await import('../../lib/api')
+    // entry 100, ATR 2 => 1.1ATR = 102.2, 1.7ATR = 103.4
+    vi.mocked(api.getOpenOrders).mockResolvedValueOnce([
+      {
+        order_id: 'tp1',
+        symbol: 'BTCUSDT',
+        type: 'TAKE_PROFIT_MARKET',
+        side: 'SELL',
+        position_side: 'LONG',
+        stop_price: 102.2,
+        quantity: 0.4,
+        client_order_id: 'ladder_tp1',
+      },
+      {
+        order_id: 'tp2',
+        symbol: 'BTCUSDT',
+        type: 'TAKE_PROFIT_MARKET',
+        side: 'SELL',
+        position_side: 'LONG',
+        stop_price: 103.4,
+        quantity: 0.35,
+        client_order_id: 'ladder_tp2',
+      },
+    ] as never)
+
+    const positions = [
+      {
+        symbol: 'BTCUSDT',
+        side: 'long',
+        entry_price: 100,
+        mark_price: 101,
+        quantity: 1,
+        leverage: 5,
+        unrealized_pnl: 1,
+        unrealized_pnl_pct: 1,
+        liquidation_price: 70,
+        margin_used: 20,
+        protection_state: 'exchange_protection_verified',
+        break_even_state: 'idle',
+        drawdown_execution_mode: 'native_trailing_full',
+        protection_runtime: {
+          current_pnl_pct: 1,
+          drawdown_peak_pnl_pct: 0,
+          current_drawdown_pct: 0,
+          atr_at_entry: 2,
+          scheduled_tiers: [
+            {
+              index: 1,
+              min_profit_pct: 6,
+              max_drawdown_pct: 30,
+              close_ratio_pct: 100,
+              // activates at 3ATR ...
+              activation_price: 106,
+              callback_rate: 0.0339622641509434,
+              // ... but fills at 1.2ATR (backend-computed, single source of truth)
+              execution_price: 102.4,
+              planned_quantity: 1,
+              source: 'native',
+              execution_mode: 'native_trailing_full',
+              is_satisfied: false,
+              is_triggered: false,
+              exchange_light: 'green',
+            },
+          ],
+        },
+      },
+    ] as unknown as Position[]
+
+    render(
+      <PositionProtectionPanel
+        traderId="t-4"
+        positions={positions}
+        language="en"
+        exchange="binance"
+      />
+    )
+
+    expect(await screen.findByText('DD-1')).toBeInTheDocument()
+    // The DD row must show the EXECUTION price, not the 106 activation price.
+    expect(screen.getByText('102.40')).toBeInTheDocument()
+    expect(screen.queryByText('106.00')).not.toBeInTheDocument()
+
+    // DOM order = ladder order (LONG: furthest upside first).
+    const prices = screen
+      .getAllByText(/^10[0-9]\.[0-9]{2}$/)
+      .map((el) => el.textContent)
+    const idx = (p: string) => prices.indexOf(p)
+    expect(idx('103.40')).toBeGreaterThanOrEqual(0)
+    expect(idx('102.40')).toBeGreaterThan(idx('103.40'))
+    expect(idx('102.20')).toBeGreaterThan(idx('102.40'))
+  })
+
   it('renders phantom yellow light distinctly from no-activation danger', async () => {
     const positions: Position[] = [
       {

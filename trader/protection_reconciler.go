@@ -590,6 +590,59 @@ func (at *AutoTrader) getPositionMarkPrice(symbol, side string) (float64, bool) 
 	return 0, false
 }
 
+// protectionFillGraceWindow 是开仓成交后的**宽限期**。
+//
+// 为什么需要它:下单成交是本地先确认的(maker entry 轮询到 filled),但交易所的
+// 持仓接口要再过几秒才返回这条仓位。在这个窗口里,liveness gate 去查持仓会查不到,
+// 于是把一个刚开的、活着的仓位判成"已平",然后走 cleanupInactiveProtectionState ——
+// 那是**破坏性**的:撤掉刚挂好的保护单、清掉冻结 ATR/结构位。实测两次:
+//   2026-07-28 04:44 ETHUSDT(撤了 5 张 algo 单,3 秒后重挂,面板红灯一轮)
+//   2026-07-28 05:24 KAITOUSDT(同样路径)
+//
+// 关键区分:窗口内查不到持仓,含义是"还不知道",不是"已经平了"。所以宽限期内
+// 仍然跳过这一轮保护动作(下一轮 poll 会补,这是安全的),但**绝不做清理**。
+// 30s 足够覆盖 okx/binance 的持仓传播延迟,又远短于任何真实持仓周期。
+const protectionFillGraceWindow = 30 * time.Second
+
+// markPositionFilled 记下"本地已确认成交"的时刻,供 liveness gate 的宽限期判断。
+func (at *AutoTrader) markPositionFilled(symbol, side string) {
+	if at == nil || symbol == "" || side == "" {
+		return
+	}
+	at.recentFillMu.Lock()
+	if at.recentFillAt == nil {
+		at.recentFillAt = make(map[string]time.Time)
+	}
+	at.recentFillAt[positionKey(symbol, side)] = time.Now()
+	at.recentFillMu.Unlock()
+}
+
+// withinFillGraceWindow 判断这个 symbol_side 是否刚成交、仓位可能还没传播到交易所。
+func (at *AutoTrader) withinFillGraceWindow(symbol, side string) (time.Duration, bool) {
+	if at == nil {
+		return 0, false
+	}
+	at.recentFillMu.RLock()
+	filledAt, ok := at.recentFillAt[positionKey(symbol, side)]
+	at.recentFillMu.RUnlock()
+	if !ok {
+		return 0, false
+	}
+	since := time.Since(filledAt)
+	return since, since < protectionFillGraceWindow
+}
+
+// clearFillGraceWindow 在确认仓位真的存在后清掉标记,避免地图无界增长,也避免
+// 同一 symbol 后续真的平仓时还被宽限期挡住清理。
+func (at *AutoTrader) clearFillGraceWindow(symbol, side string) {
+	if at == nil {
+		return
+	}
+	at.recentFillMu.Lock()
+	delete(at.recentFillAt, positionKey(symbol, side))
+	at.recentFillMu.Unlock()
+}
+
 func (at *AutoTrader) verifyLivePositionForProtection(symbol, side, reason string) bool {
 	if at == nil || at.trader == nil {
 		return false
@@ -612,8 +665,18 @@ func (at *AutoTrader) verifyLivePositionForProtection(symbol, side, reason strin
 		}
 		active[positionKey(ps, pd)] = struct{}{}
 		if ps == symbol && strings.EqualFold(pd, side) {
+			// 仓位已经传播到交易所,宽限期使命结束 —— 立刻清掉标记,这样这个
+			// symbol 之后真的平仓时清理不会被挡住。
+			at.clearFillGraceWindow(symbol, side)
 			return true
 		}
+	}
+	// 刚成交、交易所还没返回这条仓位 —— "还不知道",不是"已经平了"。跳过这一轮
+	// 保护动作(下一轮 poll 会补),但绝不清理:清理会撤掉刚挂好的保护单。
+	if since, fresh := at.withinFillGraceWindow(symbol, side); fresh {
+		logger.Warnf("🕓 Protection liveness gate: %s %s filled %.1fs ago but not yet visible on exchange; deferring %s WITHOUT cleanup (grace %s)",
+			symbol, side, since.Seconds(), reason, protectionFillGraceWindow)
+		return false
 	}
 	logger.Warnf("🧯 Protection liveness gate: skipping %s for inactive %s %s; cleaning orphaned protection state", reason, symbol, side)
 	at.cleanupInactiveProtectionState(active)

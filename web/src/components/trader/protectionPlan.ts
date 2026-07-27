@@ -167,10 +167,17 @@ export function categoryMeta(category: CloseCategory): CategoryMeta {
 // event can be matched back to the plan item that fired.
 export interface PlanItem {
   mechanism: string // taxonomy key (ladder_tp, full_sl, break_even_stop, ...)
-  kind: 'tp' | 'sl' | 'be' | 'drawdown' | 'trailing'
+  kind: 'tp' | 'sl' | 'be' | 'drawdown' | 'trailing' | 'structural'
   label: string // short human label (localized by caller via mechanismLabel)
   triggerPct: number // signed % move from entry that arms/fires it (+ favorable)
+  // triggerPrice is where the level starts to act. For static levels (TP/SL/BE/
+  // structural) that IS the fill price; for a drawdown tier it is only the
+  // ACTIVATION price — reaching it starts peak tracking and fills nothing.
   triggerPrice?: number // absolute price when computable from entry+pct
+  // executionPrice is where the level actually fills: peak × (1 ∓ callback) for a
+  // drawdown tier, == triggerPrice for static levels. This is the ordering key.
+  executionPrice?: number
+  executionPct?: number
   closeRatioPct?: number // portion of position this level closes
   note?: string // extra context (e.g. "min +3% first", "offset +0.3%")
 }

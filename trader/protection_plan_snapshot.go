@@ -2,6 +2,7 @@ package trader
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,7 +24,9 @@ func (at *AutoTrader) snapshotResolvedPlan(req *protectionExecutionRequest, plan
 	if at == nil || at.store == nil || req == nil {
 		return
 	}
-	tiers := buildPlanSnapshotTiers(plan, drawdownRules, req.EntryPrice, req.Action)
+	// 结构位两级从共享解析器取(面板走同一个函数),否则快照里这道保护档缺失。
+	structLevels := at.resolveStructuralSLLevels(req.Symbol, req.PositionSide, req.EntryPrice, 0)
+	tiers := buildPlanSnapshotTiers(plan, drawdownRules, req.EntryPrice, req.Action, structLevels)
 	if len(tiers) == 0 {
 		return
 	}
@@ -44,7 +47,7 @@ func (at *AutoTrader) snapshotResolvedPlan(req *protectionExecutionRequest, plan
 // tags (ladder_tp/ladder_sl/full_tp/full_sl/fallback_maxloss_sl/break_even_stop/
 // managed_drawdown) so the panel's fired-tier highlight keeps aligning with
 // close_events. entryPrice+action anchor the signed % move.
-func buildPlanSnapshotTiers(plan *ProtectionPlan, drawdownRules []store.DrawdownTakeProfitRule, entryPrice float64, action string) []store.ProtectionPlanTier {
+func buildPlanSnapshotTiers(plan *ProtectionPlan, drawdownRules []store.DrawdownTakeProfitRule, entryPrice float64, action string, structLevels structuralSLLevels) []store.ProtectionPlanTier {
 	if entryPrice <= 0 {
 		return nil
 	}
@@ -117,8 +120,9 @@ func buildPlanSnapshotTiers(plan *ProtectionPlan, drawdownRules []store.Drawdown
 		}
 	}
 
-	// Drawdown floors (percent-of-peak giveback; no absolute price). arms at
-	// min_profit_pct.
+	// Drawdown floors (percent-of-peak giveback). 激活价 = entry ×(1 ± minProfit%),
+	// 但**成交价**在峰值回吐 callback 之后才发生 —— 两个价位必须都落库,否则回撤档
+	// 无法参与按价格的排序(早先只存 TriggerPct、连价格都没有)。
 	for i, r := range drawdownRules {
 		if r.CloseRatioPct <= 0 {
 			continue
@@ -128,10 +132,93 @@ func buildPlanSnapshotTiers(plan *ProtectionPlan, drawdownRules []store.Drawdown
 			label = fmt.Sprintf("Drawdown %d", i+1)
 		}
 		cr := r.CloseRatioPct
-		out = append(out, store.ProtectionPlanTier{
+		side := "short"
+		if isLong {
+			side = "long"
+		}
+		activation := entryPrice * (1 + sign(isLong)*r.MinProfitPct/100)
+		callback := calculateDrawdownRuleCallbackRatio(entryPrice, side, r)
+		tier := store.ProtectionPlanTier{
 			Mechanism: store.MechManagedDrawdown, Kind: "drawdown", Label: label,
 			TriggerPct: roundSnap2(r.MinProfitPct), CloseRatioPct: &cr,
-			Note: fmt.Sprintf("min +%.2g%% · giveback %.0f%%", r.MinProfitPct, r.MaxDrawdownPct),
+			// giveback 用 %.2f:早先是 %.0f,把 1.4142% 印成 "giveback 1%",
+			// ATR 换算出来的回撤值(1.8×ATR 之类)全被抹成整数,note 失真。
+			Note: fmt.Sprintf("min +%.2f%% · giveback %.2f%%", r.MinProfitPct, r.MaxDrawdownPct),
+		}
+		if activation > 0 {
+			tier.TriggerPrice = pricePtr(activation)
+			// 开仓快照:此刻峰值就是入场价,还没有已实现峰值,所以成交价按
+			// "峰值最少走到激活价" 这个下限算 —— 即这一档最早可能的成交价。
+			if exec := drawdownTierExecutionPrice(side, activation, 0, callback); exec > 0 {
+				tier.ExecutionPrice = pricePtr(exec)
+				tier.ExecutionPct = pricePtr(pct(exec))
+			}
+		}
+		out = append(out, tier)
+	}
+
+	// 结构位止损:区间锚定的两级(收盘确认边界 + 挂在交易所的安全网)。它们是真实
+	// 会成交的保护档,早先完全没落库 —— 快照里看不到,也就没参与排序。
+	out = append(out, structuralSnapshotTiers(structLevels, pct, pricePtr)...)
+
+	// 按成交价排序:多头由近到远 = 价格由高到低,空头反之。排的是"接下来先碰到
+	// 哪一道",所以键必须是成交价(回撤档的激活价会把它顶到远端)。没有价格的档
+	// (理论上不该有)沉到末尾,保持稳定顺序。
+	sortPlanSnapshotTiers(out, isLong)
+	return out
+}
+
+// tierSortPrice 取一档用于排序的价格:优先成交价,退回激活/触发价。
+func tierSortPrice(t store.ProtectionPlanTier) float64 {
+	if t.ExecutionPrice != nil && *t.ExecutionPrice > 0 {
+		return *t.ExecutionPrice
+	}
+	if t.TriggerPrice != nil && *t.TriggerPrice > 0 {
+		return *t.TriggerPrice
+	}
+	return 0
+}
+
+func sortPlanSnapshotTiers(tiers []store.ProtectionPlanTier, isLong bool) {
+	sort.SliceStable(tiers, func(i, j int) bool {
+		pi, pj := tierSortPrice(tiers[i]), tierSortPrice(tiers[j])
+		if (pi > 0) != (pj > 0) {
+			return pi > 0 // 有价格的排在无价格的前面
+		}
+		if pi == pj {
+			return false // SliceStable 保留原相对顺序
+		}
+		if isLong {
+			return pi > pj
+		}
+		return pi < pj
+	})
+}
+
+// structuralSnapshotTiers 落库结构位止损的两级。Phase 2 边界价按 K 线收盘确认才平,
+// Phase 1 安全网是真的挂在交易所的单(防宕机/跳空)。
+func structuralSnapshotTiers(levels structuralSLLevels,
+	pct func(float64) float64, pricePtr func(float64) *float64) []store.ProtectionPlanTier {
+	if !levels.Enabled {
+		return nil
+	}
+	out := make([]store.ProtectionPlanTier, 0, 2)
+	full := 100.0
+	if p := levels.BoundaryPrice; p > 0 {
+		out = append(out, store.ProtectionPlanTier{
+			Mechanism: store.MechStructuralSL, Kind: "structural", Label: "Struct",
+			TriggerPct: pct(p), TriggerPrice: pricePtr(p), ExecutionPrice: pricePtr(p),
+			ExecutionPct: pricePtr(pct(p)), CloseRatioPct: &full,
+			// 措辞对多空中性:多头是收盘跌破、空头是收盘涨破,统称"越过"。
+			Note: "结构位边界:K线收盘越过即平",
+		})
+	}
+	if p := levels.BackstopPrice; p > 0 {
+		out = append(out, store.ProtectionPlanTier{
+			Mechanism: store.MechStructuralSL, Kind: "structural", Label: "Backstop",
+			TriggerPct: pct(p), TriggerPrice: pricePtr(p), ExecutionPrice: pricePtr(p),
+			ExecutionPct: pricePtr(pct(p)), CloseRatioPct: &full,
+			Note: "结构位安全网:挂交易所,防宕机/跳空",
 		})
 	}
 	return out

@@ -831,7 +831,18 @@ func (at *AutoTrader) enrichProtectionOrders(openOrders []OpenOrder) []OpenOrder
 	}
 	enriched := make([]OpenOrder, 0, len(openOrders))
 	for _, order := range openOrders {
-		order.ProtectionRole = classifyProtectionOrderRole(order)
+		// 适配器可能已经从 clientOrderID/algoClOrdId 解出**细粒度**归因
+		// (break_even / ladder_tp / ladder_sl / fallback_maxloss / structural_sl,
+		// 见 okx/trader_orders.go:1519 的 reasonFromAlgoIDs)。这里原先无条件覆写成
+		// classifyProtectionOrderRole 的四类粗粒度(trailing/take_profit/stop_loss/
+		// unknown),把交易所侧唯一可靠的归因来源冲掉了 —— 落库和面板都只剩"这是个
+		// 止损",分不清是保本、阶梯还是兜底。只在适配器没给出归因时才回退推断。
+		if strings.TrimSpace(order.ProtectionRole) == "" {
+			order.ProtectionRole = classifyProtectionOrderRole(order)
+		}
+		// ProtectionRoleCoarse 恒为四类粗粒度,给只关心"止损还是止盈"的消费者用,
+		// 这样细粒度归因和粗分类可以共存,不必二选一。
+		order.ProtectionRoleCoarse = classifyProtectionOrderRole(order)
 		order.ProtectionStatus = classifyProtectionOrderStatus(order)
 		enriched = append(enriched, order)
 	}
@@ -1130,46 +1141,15 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 	//                       guard enforces, or nothing when none was frozen.
 	//   Phase 1 backstop  — the wide resting exchange stop (entry ∓ BackstopATRMul×ATR)
 	//                       that covers bot downtime / catastrophic gaps.
-	isLong := strings.EqualFold(side, "LONG")
-	structuralSLEnabled := false
-	structuralCloseConfirm := false
-	structuralBoundaryPrice := 0.0
-	structuralBackstopPrice := 0.0
-	structuralFloorATRMul := 0.0
-	structuralBackstopATRMul := 0.0
-	if at.config.StrategyConfig != nil {
-		ladderCfg := at.config.StrategyConfig.Protection.LadderTPSL
-		sscfg := ladderCfg.StructuralSL
-		if sscfg.Enabled {
-			structuralSLEnabled = true
-			ss := sscfg.WithDefaults()
-			structuralCloseConfirm = ss.CloseConfirm
-			structuralFloorATRMul = ss.FloorATRMul
-			structuralBackstopATRMul = ss.BackstopATRMul
-			acfg := at.config.StrategyConfig.ATRProtection
-			if b, ok := at.frozenStructBoundaryForPosition(symbol, entryPrice, isLong, false, sscfg, acfg); ok && b > 0 {
-				// Show the CLAMPED boundary (what the guard actually enforces), never
-				// the raw swing — otherwise the panel shows a Struct level beyond the
-				// backstop that can never fire.
-				structuralBoundaryPrice = b
-				if fa, aok := at.frozenATRForPosition(symbol, side, entryPrice, acfg); aok && fa > 0 {
-					tpTargetPct := ladderMaxTPTargetPct(ladderCfg.Rules, fa, entryPrice, acfg)
-					if clamped, cok := clampStructuralBoundary(entryPrice, b, fa, tpTargetPct, isLong, sscfg); cok {
-						structuralBoundaryPrice = clamped
-					}
-				}
-			}
-			// Backstop price mirrors the resting stop distance (entry ∓ backstop×ATR).
-			if atrAtEntry > 0 && entryPrice > 0 && ss.BackstopATRMul > 0 {
-				dist := ss.BackstopATRMul * atrAtEntry
-				if isLong {
-					structuralBackstopPrice = entryPrice - dist
-				} else {
-					structuralBackstopPrice = entryPrice + dist
-				}
-			}
-		}
-	}
+	// 结构位两级统一走 resolveStructuralSLLevels(structural_sl_levels.go)—— 开仓
+	// 快照也要落这两个价位,两处各算一遍必然漂移。
+	structLevels := at.resolveStructuralSLLevels(symbol, side, entryPrice, atrAtEntry)
+	structuralSLEnabled := structLevels.Enabled
+	structuralCloseConfirm := structLevels.CloseConfirm
+	structuralBoundaryPrice := structLevels.BoundaryPrice
+	structuralBackstopPrice := structLevels.BackstopPrice
+	structuralFloorATRMul := structLevels.FloorATRMul
+	structuralBackstopATRMul := structLevels.BackstopMul
 
 	// Time / max-hold forced-close conditions (no fixed price — condition-based).
 	timeStopHours := 0.0
@@ -1325,7 +1305,13 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 				"activation_price":  order.ActivationPrice,
 			})
 		}
-		role := strings.ToLower(strings.TrimSpace(order.ProtectionRole))
+		// 这里的计数只关心"止损还是止盈"，所以必须读**粗粒度**字段:
+		// ProtectionRole 现在保留适配器解出的细粒度归因(break_even / ladder_sl /
+		// fallback_maxloss / structural_sl …)，直接 switch "stop_loss" 会全部落空。
+		role := strings.ToLower(strings.TrimSpace(order.ProtectionRoleCoarse))
+		if role == "" {
+			role = strings.ToLower(strings.TrimSpace(order.ProtectionRole))
+		}
 		clientOrderIDLower := strings.ToLower(strings.TrimSpace(order.ClientOrderID))
 		switch role {
 		case "stop_loss":
@@ -1375,8 +1361,11 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 			"quantity":          order.Quantity,
 			"status":            order.Status,
 			"client_order_id":   order.ClientOrderID,
-			"protection_role":   order.ProtectionRole,
-			"protection_status": order.ProtectionStatus,
+			// 两个归因都发:protection_role 是细粒度(保本/阶梯/兜底/结构位),
+			// protection_role_coarse 是四类粗粒度,面板按前者展示、按后者归类。
+			"protection_role":        order.ProtectionRole,
+			"protection_role_coarse": order.ProtectionRoleCoarse,
+			"protection_status":      order.ProtectionStatus,
 		})
 	}
 
@@ -1451,10 +1440,14 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 			if drawdownExecutionModeIsNative(executionMode) {
 				activationSource = "request"
 				callbackSource = "request"
-				switch strings.ToLower(at.exchange) {
-				case "binance", "bitget":
-					callbackRate = callbackRate * 100.0
-				}
+				// matchCallback 是**给模糊匹配用的**交易所单位形态:binance/bitget 的
+				// API 收发 callbackRate 用百分数(1.8 = 1.8%),okx 等用比率(0.018)。
+				// 注意它只能留在匹配逻辑里 —— 早先这里直接把 callbackRate 本身乘了
+				// 100,于是 tier JSON 里 "callback_rate" 的单位随交易所而变,前端只能
+				// 靠 ">1 就当百分数" 猜。这个猜法在 dd% < 1 时静默错 100 倍
+				// (dd=0.54% → 传 0.54 → 前端当成 54% 回撤),trigger 价直接算飞。
+				// 现在 callbackRate 全程保持比率,单位歧义从根上去掉。
+				matchCallback := callbackRatioToExchangeUnit(at.exchange, callbackRate)
 				applyMatch := func(order map[string]interface{}) {
 					trVal, _ := order["trigger_price"].(float64)
 					cbVal, _ := order["callback_rate"].(float64)
@@ -1463,7 +1456,10 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 						activationSource = "exchange"
 					}
 					if cbVal > 0 {
-						callbackRate = cbVal
+						// 交易所回读值也要归一到比率。binance/bitget 的 OpenOrder.CallbackRate
+						// 是百分数形态(与下单时同单位);okx 适配器已在 trader_orders.go:1514
+						// 归一成比率。不归一就会把 1.8% 当成 180% 存进 tier。
+						callbackRate = callbackExchangeUnitToRatio(at.exchange, cbVal)
 						callbackSource = "exchange"
 					}
 					matchedActivationStatus, _ = order["activation_status"].(string)
@@ -1494,7 +1490,8 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 						if strings.ToLower(at.exchange) == "binance" || strings.ToLower(at.exchange) == "bitget" {
 							callbackTolerance = 0.05
 						}
-						if plannedQty > 0 && math.Abs(qtyVal-plannedQty) <= qtyTolerance && math.Abs(cbVal-callbackRate) <= callbackTolerance {
+						// 比的是交易所单位形态(matchCallback),不是归一后的 callbackRate。
+						if plannedQty > 0 && math.Abs(qtyVal-plannedQty) <= qtyTolerance && math.Abs(cbVal-matchCallback) <= callbackTolerance {
 							applyMatch(order)
 							break
 						}
@@ -1549,8 +1546,16 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 				"activation_price":            activationPrice,
 				"planned_activation_price":    plannedActivationPrice,
 				"activation_source":           activationSource,
-				"callback_rate":               callbackRate,
-				"callback_source":             callbackSource,
+				// callback_rate 恒为**比率**(0.018 = 1.8%),不随交易所变单位。
+				"callback_rate":   callbackRate,
+				"callback_source": callbackSource,
+				// execution_price:这一档真正成交的价位 = 峰值 ×(1 ∓ callback)。
+				// 激活价只是"开始跟踪"的门槛,到激活价不成交任何东西 —— 面板按价格
+				// 排序必须用这个成交价,否则一个"3ATR 启动/1.8ATR 回吐"的档会被排到
+				// 3ATR 的位置,而它实际成交在 +1.2ATR(该排在 1.1/1.7 两个阶梯之间)。
+				// 详见 drawdown_execution_price.go。
+				"execution_price": drawdownTierExecutionPrice(side, activationPrice,
+					peakPriceFromPnLPct(side, entryPrice, peakPnLPct), callbackRate),
 				"planned_quantity":            quantity * rule.CloseRatioPct / 100.0,
 				"source":                      source,
 				"execution_mode":              executionMode,

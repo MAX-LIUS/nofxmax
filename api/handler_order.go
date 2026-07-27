@@ -652,7 +652,7 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 			if snapStore := traderStore.ProtectionPlanSnapshot(); snapStore != nil {
 				if snap, err := snapStore.FindForPosition(pos.TraderID, pos.Symbol, pos.Side, pos.EntryTime, 10*60*1000); err == nil && snap != nil {
 					if tiers, err := snap.Tiers(); err == nil {
-						placed = placedFromSnapshotTiers(tiers)
+						placed = placedFromSnapshotTiers(tiers, isLong)
 					}
 				}
 			}

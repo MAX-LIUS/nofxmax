@@ -192,6 +192,8 @@ type AutoTrader struct {
 	candidateATRAtMs       map[string]int64                          // frozenATRKey -> ms of last candidate recompute (throttle to once per main cycle)
 	candidateATRMutex      sync.RWMutex                              // Protects candidateATRCache + candidateATRAtMs
 	immediateTrailingIDs   map[string]string                         // symbol_side -> immediate trailing order ID (canceled when tier trailing arms)
+	recentFillAt           map[string]time.Time                      // symbol_side -> 本地确认成交的时刻,给开仓竞态宽限期用(见 protectionFillGraceWindow)
+	recentFillMu           sync.RWMutex                              // Protects recentFillAt
 	cooldownManager        *entryCooldownManager                     // Post-loss entry cooldown per symbol
 	lastBalanceSyncTime    time.Time                                 // Last balance sync time
 	userID                 string                                    // User ID

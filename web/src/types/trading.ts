@@ -50,7 +50,10 @@ export interface ProtectionRuntimeOrder {
   quantity: number
   status: string
   client_order_id?: string
+  /** 细粒度归因:break_even / ladder_tp / ladder_sl / fallback_maxloss / structural_sl … */
   protection_role?: string
+  /** 粗粒度归因:trailing / take_profit / stop_loss / unknown */
+  protection_role_coarse?: string
   protection_status?: string
 }
 
@@ -68,8 +71,11 @@ export interface ProtectionRuntimeTier {
   activation_price: number
   planned_activation_price?: number
   activation_source?: string
+  /** 恒为比率(0.018 = 1.8%),不随交易所变单位 */
   callback_rate: number
   callback_source?: string
+  /** 这一档真正成交的价位 = 峰值 ×(1 ∓ callback)。activation_price 只是开始跟踪的价。 */
+  execution_price?: number
   planned_quantity: number
   source: string
   execution_mode: string
@@ -809,10 +815,14 @@ export interface RatchetEvent {
 // Shape matches the frontend PlanItem so it renders through EntryProtectionPlan.
 export interface PlacedProtectionItem {
   mechanism: string
-  kind: 'tp' | 'sl' | 'be' | 'drawdown' | 'trailing'
+  kind: 'tp' | 'sl' | 'be' | 'drawdown' | 'trailing' | 'structural'
   label: string
   triggerPct: number
+  /** Where the level starts to act. For a drawdown tier this is only the ACTIVATION price. */
   triggerPrice?: number
+  /** Where it actually fills: peak × (1 ∓ callback) for drawdown, == triggerPrice for static. */
+  executionPrice?: number
+  executionPct?: number
   closeRatioPct?: number
   note?: string
 }

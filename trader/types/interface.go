@@ -117,9 +117,16 @@ type OpenOrder struct {
 	CallbackRate     float64 `json:"callback_rate"`
 	Quantity         float64 `json:"quantity"`
 	Status           string  `json:"status"` // NEW
-	ClientOrderID    string  `json:"client_order_id,omitempty"`
-	ProtectionRole   string  `json:"protection_role,omitempty"`
-	ActivationPrice  float64 `json:"activation_price,omitempty"`
+	ClientOrderID string `json:"client_order_id,omitempty"`
+	// ProtectionRole 是**细粒度**归因,优先来自适配器对 clientOrderID/algoClOrdId
+	// 的解码(break_even / ladder_tp / ladder_sl / fallback_maxloss / structural_sl /
+	// native_trailing …)。只有解不出来时才退回按订单类型粗推。
+	ProtectionRole string `json:"protection_role,omitempty"`
+	// ProtectionRoleCoarse 恒为四类粗粒度(trailing/take_profit/stop_loss/unknown),
+	// 给只需要"止损还是止盈"的消费者用。与 ProtectionRole 并存:早先粗分类会无条件
+	// 覆写细粒度归因,导致落库只剩"这是个止损",分不清保本/阶梯/兜底。
+	ProtectionRoleCoarse string  `json:"protection_role_coarse,omitempty"`
+	ActivationPrice      float64 `json:"activation_price,omitempty"`
 	ActivationStatus string  `json:"activation_status,omitempty"` // "activated" | "pending_activation"
 	CallbackRatePct  float64 `json:"callback_rate_pct,omitempty"`
 	ParentOrderID    string  `json:"parent_order_id,omitempty"`

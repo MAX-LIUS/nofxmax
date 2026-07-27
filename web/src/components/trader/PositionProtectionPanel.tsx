@@ -75,8 +75,12 @@ interface ScheduledTier {
   min_profit_pct: number
   max_drawdown_pct: number
   close_ratio_pct: number
+  /** Always a RATIO (0.018 = 1.8%) — the exchange's percent form never leaves the backend. */
   callback_rate: number
+  /** Where trailing STARTS tracking. Nothing fills here. */
   activation_price: number
+  /** Where this tier actually market-closes: peak × (1 ∓ callback). Sort key. */
+  execution_price?: number
   planned_quantity: number
   is_satisfied: boolean
   is_armed?: boolean
@@ -206,12 +210,12 @@ function buildTierReason(
   if (light === 'green') {
     if (isActivated) {
       return zh
-        ? `已激活跟踪：峰值利润 ${peakPnlPct.toFixed(1)}%，回撤 ${cb}% 触发平仓。`
-        : `Activated trailing: peak ${peakPnlPct.toFixed(1)}%, closes on ${cb}% giveback.`
+        ? `已激活跟踪：峰值利润 ${peakPnlPct.toFixed(1)}%，回撤 ${cb}% 触发平仓。表中价格是**成交价**（峰值回撤后），不是激活价。`
+        : `Activated trailing: peak ${peakPnlPct.toFixed(1)}%, closes on ${cb}% giveback. The listed price is the EXECUTION level, not the activation price.`
     }
     return zh
-      ? `已在交易所挂单，静待价格触及激活价（利润 ${min}%）后自动跟踪。`
-      : `Resting on exchange; auto-activates once price reaches the ${min}% profit trigger.`
+      ? `已在交易所挂单，静待价格触及激活价（利润 ${min}%）后自动跟踪。表中价格是**成交价** = 峰值 × (1∓${cb}%)，所以排序位置比激活价更靠前。`
+      : `Resting on exchange; auto-activates once price reaches the ${min}% profit trigger. The listed price is the EXECUTION level (peak × (1∓${cb}%)), which is why it sorts ahead of the activation price.`
   }
   if (light === 'yellow') {
     switch (tier.exchange_light_reason) {
@@ -265,12 +269,11 @@ function buildProtectionRows(
   for (const tier of scheduledTiers) {
     const tierIdx = tier.index || 0
     const zone = `DD-${tierIdx}`
-    // callback_rate arrives as a RATIO (e.g. 0.024) for OKX but as a PERCENT
-    // (e.g. 2.4) for Binance/Bitget (backend multiplies by 100 for the exchange
-    // API). Every consumer below expects a ratio, so normalize here: a value > 1
-    // can only be a percent (a >100% trailing callback is nonsensical), so /100.
-    const rawCallback = tier.callback_rate || 0
-    const callbackRate = rawCallback > 1 ? rawCallback / 100 : rawCallback
+    // callback_rate is always a RATIO (0.024 = 2.4%) — the backend keeps the
+    // exchange's percent form confined to the API call itself. The old ">1 means
+    // percent" guess was silently wrong by 100x whenever dd% < 1 (dd 0.54% →
+    // read as a 54% callback), so it is gone.
+    const callbackRate = tier.callback_rate || 0
     // Activation/armed are distinct: is_activated means the peak reached the
     // trigger so the trailing stop is live and tracking the peak; is_armed means
     // an order rests on the exchange but price has not yet reached activation.
@@ -278,22 +281,39 @@ function buildProtectionRows(
     const isActivated = tier.is_activated ?? tier.is_satisfied ?? false
     const isArmed = tier.is_armed ?? false
 
-    // Trigger price = peak * (1 - callback) ONLY once the stop is genuinely
-    // activated (tracking the peak). Before activation the meaningful number is
-    // the activation price, not a peak-derived level (which would otherwise
-    // render a misleading below-entry "trigger").
-    let triggerPrice = 0
-    if (isActivated && peakPnlPct > 0 && entryPrice > 0 && callbackRate > 0) {
-      const peakPrice =
-        side === 'LONG'
-          ? entryPrice * (1 + peakPnlPct / 100)
-          : entryPrice * (1 - peakPnlPct / 100)
+    // A drawdown tier has TWO prices and the table needs the second one:
+    //   activation = entry × (1 ± minProfit%) — where trailing STARTS tracking;
+    //                nothing fills here.
+    //   execution   = peak × (1 ∓ callback)   — where it actually market-closes.
+    // The table is ordered by "which level does price reach next", so sorting a
+    // DD tier by its activation price parks a "activate at 3ATR, give back
+    // 1.8ATR" tier at the 3ATR slot when it really fills around +1.2ATR —
+    // i.e. it belongs between the 1.1ATR and 1.7ATR ladder rungs.
+    // Peak anchor: before activation the earliest possible fill uses activation
+    // as the floor; after activation it ratchets with the realized peak. The
+    // backend sends the same number in execution_price (single definition in
+    // trader/drawdown_execution_price.go); recompute only as a fallback.
+    const activationPrice = tier.activation_price || 0
+    let triggerPrice = Number(tier.execution_price ?? 0)
+    if (!(triggerPrice > 0) && activationPrice > 0 && callbackRate > 0) {
+      const realizedPeak =
+        peakPnlPct > 0 && entryPrice > 0
+          ? side === 'LONG'
+            ? entryPrice * (1 + peakPnlPct / 100)
+            : entryPrice * (1 - peakPnlPct / 100)
+          : 0
+      let anchor = activationPrice
+      if (realizedPeak > 0) {
+        if (side === 'LONG' && realizedPeak > anchor) anchor = realizedPeak
+        if (side !== 'LONG' && realizedPeak < anchor) anchor = realizedPeak
+      }
       triggerPrice =
         side === 'LONG'
-          ? peakPrice * (1 - callbackRate)
-          : peakPrice * (1 + callbackRate)
-    } else if (tier.activation_price > 0) {
-      triggerPrice = tier.activation_price
+          ? anchor * (1 - callbackRate)
+          : anchor * (1 + callbackRate)
+    }
+    if (!(triggerPrice > 0)) {
+      triggerPrice = activationPrice
     }
 
     const rawDelta =
@@ -412,7 +432,12 @@ function buildProtectionRows(
     } else if (isActivated && peakPnlPct > 0) {
       detail = `peak${formatPct(peakPnlPct, 1)} cb${(callbackRate * 100).toFixed(1)}%`
     } else {
-      detail = `min${tier.min_profit_pct.toFixed(1)}% dd${tier.max_drawdown_pct.toFixed(1)}%`
+      // The price column shows the EXECUTION level, so spell out the activation
+      // price here — otherwise a tier whose execution price sits below its
+      // activation price looks like the activation number went missing.
+      const actNote =
+        activationPrice > 0 ? ` act${formatPrice(activationPrice)}` : ''
+      detail = `min${tier.min_profit_pct.toFixed(1)}% dd${tier.max_drawdown_pct.toFixed(1)}%${actNote}`
     }
 
     // reason: a full human-readable status explanation for the hover tooltip.
