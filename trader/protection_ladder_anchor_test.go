@@ -12,7 +12,9 @@ func TestAnchor_NoReduction(t *testing.T) {
 		NeedsTakeProfit:  true,
 		TakeProfitOrders: []ProtectionOrder{tp(0.422, 40), tp(0.409, 35)},
 	}
-	anchorLadderTakeProfitToEntry(plan, "open_short", 51, 51)
+	// nil live prices = every tier is gone from the exchange, so the decision falls
+	// through to the quantity arithmetic these three tests were written to pin.
+	anchorLadderTakeProfitToEntry(plan, "open_short", 51, 51, nil)
 	if len(plan.TakeProfitOrders) != 2 {
 		t.Fatalf("expected 2 tiers preserved, got %d", len(plan.TakeProfitOrders))
 	}
@@ -26,7 +28,7 @@ func TestAnchor_TP1FilledDropped(t *testing.T) {
 		NeedsTakeProfit:  true,
 		TakeProfitOrders: []ProtectionOrder{tp(0.422, 40), tp(0.409, 35)},
 	}
-	anchorLadderTakeProfitToEntry(plan, "open_short", 51, 31)
+	anchorLadderTakeProfitToEntry(plan, "open_short", 51, 31, nil)
 	if len(plan.TakeProfitOrders) != 1 {
 		t.Fatalf("expected TP1 dropped, 1 tier left, got %d", len(plan.TakeProfitOrders))
 	}
@@ -49,7 +51,7 @@ func TestAnchor_AllFilledDustTail(t *testing.T) {
 		NeedsTakeProfit:  true,
 		TakeProfitOrders: []ProtectionOrder{tp(0.422, 40), tp(0.409, 35)},
 	}
-	anchorLadderTakeProfitToEntry(plan, "open_short", 51, 2)
+	anchorLadderTakeProfitToEntry(plan, "open_short", 51, 2, nil)
 	if len(plan.TakeProfitOrders) != 0 {
 		t.Fatalf("expected all tiers dropped on dust tail, got %d", len(plan.TakeProfitOrders))
 	}

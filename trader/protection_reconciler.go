@@ -247,7 +247,8 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 	// the shrinking remainder every reconcile cycle (fix 2026-06-07).
 	if plan != nil && len(plan.TakeProfitOrders) > 0 && at.store != nil {
 		if dbPos, err := at.store.Position().GetOpenPositionBySymbol(at.id, symbol, positionSide); err == nil && dbPos != nil && dbPos.EntryQuantity > 0 {
-			anchorLadderTakeProfitToEntry(plan, actionFromPositionSide(side), dbPos.EntryQuantity, quantity)
+			anchorLadderTakeProfitToEntry(plan, actionFromPositionSide(side), dbPos.EntryQuantity, quantity,
+				liveLadderTakeProfitPrices(openOrders, positionSide))
 		}
 	}
 
