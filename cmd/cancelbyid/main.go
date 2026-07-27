@@ -32,7 +32,16 @@ import (
 	"nofx/crypto"
 	"nofx/proxyhook"
 	"nofx/trader/binance"
+	"nofx/trader/okx"
+	"nofx/trader/types"
 )
+
+// cancelClient is the read + targeted-cancel surface the tool needs. Both venue
+// adapters satisfy it, so every safety check below runs identically per venue.
+type cancelClient interface {
+	GetOpenOrders(symbol string) ([]types.OpenOrder, error)
+	CancelTrailingStopOrdersByIDs(symbol string, orderIDs []string) error
+}
 
 func main() {
 	dbPath := flag.String("db", "/opt/webstack/nofx/data/data.db", "sqlite path (read-only)")
@@ -69,15 +78,12 @@ func main() {
 	defer db.Close()
 
 	var apiKeyEnc, secretEnc, userID, exType string
-	err = db.QueryRow(`SELECT e.exchange_type, e.api_key, e.secret_key, t.user_id
+	var passEnc sql.NullString
+	err = db.QueryRow(`SELECT e.exchange_type, e.api_key, e.secret_key, e.passphrase, t.user_id
 		FROM traders t JOIN exchanges e ON e.id = t.exchange_id WHERE t.name = ?`, *traderName).
-		Scan(&exType, &apiKeyEnc, &secretEnc, &userID)
+		Scan(&exType, &apiKeyEnc, &secretEnc, &passEnc, &userID)
 	if err != nil {
 		fmt.Println("load trader:", err)
-		os.Exit(1)
-	}
-	if exType != "binance" {
-		fmt.Printf("trader %s is %s, this tool only handles binance\n", *traderName, exType)
 		os.Exit(1)
 	}
 
@@ -86,19 +92,31 @@ func main() {
 		fmt.Println("crypto:", err)
 		os.Exit(1)
 	}
-	apiKey, err := cs.DecryptFromStorage(apiKeyEnc)
-	if err != nil {
-		fmt.Println("decrypt api key:", err)
-		os.Exit(1)
-	}
-	secret, err := cs.DecryptFromStorage(secretEnc)
-	if err != nil {
-		fmt.Println("decrypt secret:", err)
-		os.Exit(1)
+	dec := func(label, s string) string {
+		if s == "" {
+			return ""
+		}
+		v, err := cs.DecryptFromStorage(s)
+		if err != nil {
+			fmt.Printf("decrypt %s: %v\n", label, err)
+			os.Exit(1)
+		}
+		return v
 	}
 
-	tr := binance.NewFuturesTrader(apiKey, secret, userID)
-	tr.SetExecutionPreferences(true, true)
+	var tr cancelClient
+	switch exType {
+	case "binance":
+		bt := binance.NewFuturesTrader(dec("api key", apiKeyEnc), dec("secret", secretEnc), userID)
+		bt.SetExecutionPreferences(true, true)
+		tr = bt
+	case "okx":
+		tr = okx.NewOKXTrader(dec("api key", apiKeyEnc), dec("secret", secretEnc), dec("passphrase", passEnc.String))
+	default:
+		fmt.Printf("trader %s is %s, unsupported\n", *traderName, exType)
+		os.Exit(1)
+	}
+	fmt.Printf("trader=%s exchange=%s\n", *traderName, exType)
 
 	orders, err := tr.GetOpenOrders(*symbol)
 	if err != nil {
