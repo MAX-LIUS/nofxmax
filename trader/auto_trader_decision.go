@@ -1892,7 +1892,11 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 			"orphan_inactive_count":         unexpectedSummary.OrphanForInactive,
 			"manual_or_foreign_count":       unexpectedSummary.ManualOrForeign,
 			"expected_dynamic_owner_count":  unexpectedSummary.ExpectedDynamicOwner,
-			"expected_static_owner_count":   unexpectedSummary.ExpectedStaticOwner,
+			// 成分拆分:trailing(回撤止盈)vs 已推保本的止损。总数混计两者,单看总数
+			// 读不出是哪种多了 —— 多一张 trailing 会真的多平仓,多一张保本止损是正常的。
+			"expected_dynamic_trailing_count": unexpectedSummary.ExpectedDynamicTrailing,
+			"expected_dynamic_stop_count":     unexpectedSummary.ExpectedDynamicStop,
+			"expected_static_owner_count":     unexpectedSummary.ExpectedStaticOwner,
 			"stale_bot_duplicate_order_ids": unexpectedSummary.StaleBotDuplicateIDs,
 			"orphan_inactive_order_ids":     unexpectedSummary.OrphanForInactiveIDs,
 			"manual_or_foreign_order_ids":   unexpectedSummary.ManualOrForeignIDs,

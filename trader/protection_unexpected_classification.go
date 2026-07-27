@@ -32,6 +32,13 @@ type unexpectedProtectionSummary struct {
 	// 单会被 detectUnexpectedProtectionOrders 归到 unexpectedStops 里 —— 多一张止损
 	// 只是多一层保险,多一张部分平仓 trailing 则会真的多平仓,两者不能同等容忍。
 	StaleTrailingDuplicate int
+	// ExpectedDynamicOwner 的**成分拆分**。这个总数把两类完全不同的单混在一个数字里:
+	// trailing(回撤止盈,归 drawdown 管)和已推到保本的止损(归 break-even 管)。
+	// 混计的后果是日志读不出信息 —— 同一个 symbol 上 dynamicOwner=2 和 =3 交替出现时,
+	// 无法判断是"多了一张 trailing"(真问题:会多平仓)还是"多了一张保本止损"
+	// (正常:BE 推过就有)。两者都要靠翻上下文猜。这里按 Kind 拆开,让日志自解释。
+	ExpectedDynamicTrailing int
+	ExpectedDynamicStop     int
 }
 
 func classifyUnexpectedProtectionOrders(openOrders []OpenOrder, positionSide string, plan *ProtectionPlan, breakEvenArmed bool, trailingOwnership nativeTrailingOwnership, positionActive bool) unexpectedProtectionSummary {
@@ -42,7 +49,11 @@ func classifyUnexpectedProtectionOrders(openOrders []OpenOrder, positionSide str
 			continue
 		}
 		classification := classifyProtectionOrder(order, &allowedStops, &allowedTPs, breakEvenArmed, trailingOwnership, positionActive)
-		if classification.Category == unexpectedCategoryExpectedDynamicOwner && looksLikeStopLoss(order) && breakEvenArmed {
+		// "保本止损额度只有一张"的消耗判定必须看**分类结果**,不能看 looksLikeStopLoss(order):
+		// 后者只做字符串匹配,而 TRAILING_STOP_MARKET 里含 "STOP" —— 于是第一张 trailing
+		// 就把保本额度吃掉了,真正的保本止损排在 trailing 之后时会掉到 manual_or_foreign,
+		// 被当成"外来单"污染 ownership(交易所返回挂单的顺序不做保证,所以这是概率性误判)。
+		if classification.Category == unexpectedCategoryExpectedDynamicOwner && classification.Kind == "stop_loss" && breakEvenArmed {
 			breakEvenArmed = false
 		}
 		switch classification.Category {
@@ -66,6 +77,12 @@ func classifyUnexpectedProtectionOrders(openOrders []OpenOrder, positionSide str
 			}
 		case unexpectedCategoryExpectedDynamicOwner:
 			summary.ExpectedDynamicOwner++
+			switch classification.Kind {
+			case "trailing":
+				summary.ExpectedDynamicTrailing++
+			case "stop_loss":
+				summary.ExpectedDynamicStop++
+			}
 		case unexpectedCategoryExpectedStaticOwner:
 			summary.ExpectedStaticOwner++
 		}

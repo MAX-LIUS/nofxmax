@@ -302,8 +302,11 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 		unexpectedStops, unexpectedTPs := detectUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership)
 		unexpectedSummary := classifyUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership, true)
 		ownership := evaluateProtectionOwnership(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership)
-		logger.Infof("🧭 Protection ownership: %s %s | state=%s verified=%t stopOwner=%s profitOwner=%s missingSL=%t missingTP=%t unexpectedSL=%d unexpectedTP=%d staleBot=%d staleTrail=%d manualForeign=%d dynamicOwner=%d claimedTrail=%d reasons=%s",
-			symbol, positionSide, ownership.State, ownership.Verified, ownership.StopOwner, ownership.ProfitOwner, ownership.MissingStop, ownership.MissingProfit, ownership.UnexpectedStops, ownership.UnexpectedProfits, unexpectedSummary.StaleBotDuplicate, unexpectedSummary.StaleTrailingDuplicate, unexpectedSummary.ManualOrForeign, unexpectedSummary.ExpectedDynamicOwner, len(trailingOwnership.Claimed), strings.Join(ownership.Reasons, "; "))
+		// dynamicOwner 后面跟成分拆分(trail=N be=N):这个总数混计了 trailing 和保本止损,
+		// 只看总数无法区分"多了一张 trailing(会多平仓,真问题)"和"BE 已推过所以多一张
+		// 止损(正常)"。详见 protection_unexpected_classification.go 里字段注释。
+		logger.Infof("🧭 Protection ownership: %s %s | state=%s verified=%t stopOwner=%s profitOwner=%s missingSL=%t missingTP=%t unexpectedSL=%d unexpectedTP=%d staleBot=%d staleTrail=%d manualForeign=%d dynamicOwner=%d(trail=%d be=%d) claimedTrail=%d reasons=%s",
+			symbol, positionSide, ownership.State, ownership.Verified, ownership.StopOwner, ownership.ProfitOwner, ownership.MissingStop, ownership.MissingProfit, ownership.UnexpectedStops, ownership.UnexpectedProfits, unexpectedSummary.StaleBotDuplicate, unexpectedSummary.StaleTrailingDuplicate, unexpectedSummary.ManualOrForeign, unexpectedSummary.ExpectedDynamicOwner, unexpectedSummary.ExpectedDynamicTrailing, unexpectedSummary.ExpectedDynamicStop, len(trailingOwnership.Claimed), strings.Join(ownership.Reasons, "; "))
 		if ownership.State == "unprotected" && ownership.Verified {
 			return result, fmt.Errorf("invalid protection ownership invariant: unprotected but verified")
 		}
