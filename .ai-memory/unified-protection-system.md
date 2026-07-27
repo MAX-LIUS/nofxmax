@@ -31,7 +31,7 @@
 >
 > **教训**:helper 的名字承诺了字段容量给不了的东西,就会长出静默 bug。**编码类 helper 必须让容量上限在调用点可见**;凡"按标签批量撤单",都要先问"这个标签真能区分实例吗" —— 这与 v1.16.17 缺陷 A(布尔量答不了"这张单是谁的")是同一个病:**用一个分辨不出实例的东西去做实例级决策**。
 >
-> **测试**:`trader/okx/cancel_by_reason_test.go` 4 例(只撤匹配 mechanism 那张 + 反向验证旧语义会命中 4 张 + 不可解码则一张不撤 + 未注册 reason 整体拒绝 + 动态变体折叠命中)。
+> **测试**:`trader/okx/cancel_by_reason_test.go` 4 例(只撤匹配 mechanism 那张 + 反向验证旧语义会命中 4 张 + 不可解码则一张不撤 + 未注册 reason 整体拒绝 + 动态变体折叠命中)。**挂单侧**另补 `trader/okx/trailing_client_id_test.go` 2 例(提交 `89d0ae5`,test-only 不需重新部署):`move_order_stop` 请求体里 `tag` 必须仍是裸 `okxTag`(这正是它装不下 reason 的证据)而 `algoClOrdId` 必须能解回 mechanism(含 `managed_drawdown_stage2`→`DD` 折叠);同 mechanism 的两个档位 client id 不得撞车(撞了 OKX 会以重复 client id 拒掉第二张)。补这一侧的原因:部署后线上一直没有 OKX 新开仓(00:02 周期三个 open_short 全被门禁拦下),挂单路径拿不到现场样本,不能靠等。
 
 > **🔥 v1.16.15 梯度身份里混进了会变的开仓均价 → 同一档挂两张单(2026-07-27,该 bug 类第 11 次实例,提交 `75854df`,已部署)**
 >
