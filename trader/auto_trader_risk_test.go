@@ -29,6 +29,7 @@ type fakeProtectionTrader struct {
 	trailingSide        string
 	trailingActivation  float64
 	trailingCallback    float64
+	cancelTrailingErr   error
 	openOrders          []tradertypes.OpenOrder
 	positions           []map[string]interface{}
 	closeLongCalls      int
@@ -202,6 +203,10 @@ func (f *fakeProtectionTrader) CancelTrailingStopOrdersByIDs(symbol string, orde
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cancelTrailingCalls += len(orderIDs)
+	if f.cancelTrailingErr != nil {
+		// Fail WITHOUT removing the orders — mirrors a venue rejecting the cancel.
+		return f.cancelTrailingErr
+	}
 	filtered := make([]tradertypes.OpenOrder, 0, len(f.openOrders))
 	set := make(map[string]struct{}, len(orderIDs))
 	for _, id := range orderIDs {

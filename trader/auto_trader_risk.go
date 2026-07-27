@@ -1124,6 +1124,19 @@ func (at *AutoTrader) claimedTrailingOrderIDsForPosition(symbol, side string, en
 		}
 		claimed[record.ExchangeOrderID] = struct{}{}
 	}
+	// The immediate trailing order placed at open is ALSO an owned trailing order, but
+	// it is not a drawdown tier so getArmedDrawdownRecordsForPosition (filtered by
+	// isDynamicNativeProtectionType) never returns it. Leaving it out let the tiers'
+	// positional fallback adopt a 50%-quantity order and report full coverage —
+	// v1.16.8/v1.16.10 all over again with one more unowned order.
+	//
+	// Adding it here fixes every consumer of the claimed set at once
+	// (findExistingFullTrailingOrder, hasMatchingNativeTrailingOrderForRule,
+	// findPartialTrailingReplacementCandidate, and the collapse/cancel claim logic)
+	// instead of patching each matcher separately.
+	for _, id := range at.immediateTrailingClaimedIDs(symbol, side) {
+		claimed[id] = struct{}{}
+	}
 	return claimed
 }
 
@@ -1731,6 +1744,24 @@ func (at *AutoTrader) findExistingFullTrailingOrder(symbol, side string, entryPr
 		}
 		if _, owned := claimed[order.OrderID]; owned {
 			continue
+		}
+		// A FULL-CLOSE tier may only adopt an order that can actually close the full
+		// position. Ownership alone is not enough here: this branch adopts an order we
+		// cannot prove is ours, so an unowned partial-sized order (older binary, manual
+		// order, or an arm whose persist failed) would otherwise be reported as full
+		// coverage while resting on a fraction of the position.
+		//
+		// Deliberately narrow: only the fallback is guarded, never the stored-ID path —
+		// so an add-on entry that grows the position keeps resolving its own order by ID
+		// and does not churn. Skipped entirely when either quantity is unknown (some
+		// venues report qty=0 on trailing orders), because "unknown" must not mean
+		// "inadequate".
+		if posQty, _ := at.getPositionDetailsForFingerprint(symbol, side); posQty > 0 && order.Quantity > 0 {
+			if order.Quantity/posQty < fullTrailingAdoptionMinCoverage {
+				logger.Warnf("🟠 Full-close tier refuses to adopt unowned trailing order %s (%s %s qty=%.6f vs position %.6f = %.1f%% coverage) — treating tier as missing so it arms its own order",
+					order.OrderID, symbol, side, order.Quantity, posQty, order.Quantity/posQty*100)
+				continue
+			}
 		}
 		return &nativeTrailingOrder{
 			PositionSide:     order.PositionSide,
@@ -2439,7 +2470,30 @@ func (at *AutoTrader) applyExchangeFailedLocalMonitor(symbol, side string, entry
 	return true
 }
 
+// applyNativeTrailingDrawdown 返回 true 表示"这一档此刻在交易所侧确有有效保护"
+// —— 无论是本次刚挂上的,还是本来就已覆盖。
+//
+// 这里是"档位已覆盖 ⇒ 撤掉开仓时那张 50% immediate trailing"这条规则的唯一落点。
+// 之前这条规则被写在六个地方(内部四条刚挂成功的分支 + 全平档末尾 + place-at-open
+// 循环外),而"已覆盖"的提前 return true 分支一个都没覆盖到:加仓时每档都已覆盖,
+// 于是每次加仓都新挂一张 50% 单又不撤旧的,一个仓位上摞出三张 trailing
+// (2026-07-27 生产实况:Binance BN CLUSDT 2.43 + 0.73 + 1.22;OKX ETHUSDT 0.239 中的 0.120)。
+//
+// 按返回值收口而不是按"走了哪条内部分支"收口,才能同时覆盖刚挂上和已覆盖两种情形;
+// 放在这一层而不是调用方,才能同时覆盖开仓路径和运行时 arm 轮询路径
+// (auto_trader_risk.go 的两处 + protection_reconciler.go 的两处),后者是重启后
+// 内存 hint 丢失、只剩持久化归属记录的那张漏单唯一还能被回收的地方。
+//
+// cancelImmediateTrailing 本身幂等:撤成功后内存 hint 与归属记录都清掉,再调用即空转。
 func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPrice, markPrice float64, rule store.DrawdownTakeProfitRule) bool {
+	covered := at.armNativeTrailingDrawdownTier(symbol, side, entryPrice, markPrice, rule)
+	if covered {
+		at.cancelImmediateTrailing(symbol, side)
+	}
+	return covered
+}
+
+func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPrice, markPrice float64, rule store.DrawdownTakeProfitRule) bool {
 	if !at.supportsNativeTrailingStop() {
 		return false
 	}
@@ -2707,7 +2761,6 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 							at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
 						}
 						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.4f(ratio) close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, priceBasedCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
-						at.cancelImmediateTrailing(symbol, side)
 						return true
 					} else {
 						// Bottom-line fallback: the adapter refuses to leave a
@@ -2745,7 +2798,6 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 							at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
 						}
 						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.4f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, bitgetCallbackPercent, cumulativeRatio, partialQty, rule.StageName)
-						at.cancelImmediateTrailing(symbol, side)
 						return true
 					} else {
 						logger.Infof("❌ Native partial trailing drawdown apply failed (%s %s, bitget): %v", symbol, side, err)
@@ -2840,7 +2892,6 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 									at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
 								}
 								logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.6f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, okxCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
-								at.cancelImmediateTrailing(symbol, side)
 								return true
 							}
 							logger.Infof("❌ Native partial trailing drawdown verify failed (%s %s, okx): new tier not visible after placement", symbol, side)
@@ -2859,7 +2910,6 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 							at.nativeTrailingArmTime[stableDrawdownRuleFingerprint(entryPrice, rule)] = time.Now()
 						}
 						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.6f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, okxCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
-						at.cancelImmediateTrailing(symbol, side)
 						return true
 					} else {
 						logger.Infof("❌ Native partial trailing drawdown apply failed (%s %s, okx): %v", symbol, side, err)
@@ -3026,7 +3076,6 @@ func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPric
 		}
 		logger.Infof("🟣 Native trailing drawdown armed: %s %s | activation=%.6f callbackRatio=%.6f", symbol, side, activationPrice, priceBasedCallbackRatio)
 	}
-	at.cancelImmediateTrailing(symbol, side)
 	return true
 }
 

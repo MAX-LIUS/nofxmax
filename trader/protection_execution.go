@@ -383,6 +383,11 @@ func (at *AutoTrader) applyNativeProtectionTargetsAfterOpen(req *protectionExecu
 	// and wipe the mandatory ladder SL stack. If native trailing is unavailable or
 	// below safety floor, runtime drawdown monitoring will handle the managed close
 	// path when drawdown is actually triggered.
+	//
+	// Retiring the step-0 immediate trailing is NOT done here. applyNativeTrailingDrawdown
+	// owns that: it cancels whenever it reports tier coverage, which covers both the
+	// freshly-armed and the already-covered (add-on) case, and covers the runtime arm
+	// polls too. See its doc comment.
 	for _, rule := range drawdownRules {
 		if rule.MinProfitPct <= 0 || rule.MaxDrawdownPct <= 0 || rule.CloseRatioPct <= 0 {
 			continue
@@ -477,6 +482,11 @@ func (at *AutoTrader) placeImmediateTrailing(symbol, side string, entryPrice, ca
 		return
 	}
 	at.setImmediateTrailingOrderID(symbol, side, orderID)
+	// Persist the owner too. The in-memory hint alone is lost on restart, which both
+	// leaked the order (nothing left to cancel it with) and left it unowned so a
+	// drawdown tier's positional fallback could adopt a 50% order as full coverage.
+	// See trader/immediate_trailing_owner.go for the failure cases this closes.
+	at.persistImmediateTrailingRecord(symbol, side, entryPrice, activationPrice, callbackRatio, partialQty, orderID)
 	logger.Infof("🛡 Immediate trailing armed: %s %s | activation=%.6f callback=%.6f qty=%.4f orderID=%s",
 		symbol, side, activationPrice, callbackRatio, partialQty, orderID)
 }
@@ -484,21 +494,48 @@ func (at *AutoTrader) placeImmediateTrailing(symbol, side string, entryPrice, ca
 func (at *AutoTrader) cancelImmediateTrailing(symbol, side string) {
 	orderID := at.getImmediateTrailingOrderID(symbol, side)
 	if orderID == "" {
+		// Restart-safe path: the in-memory hint is gone but the order may still be
+		// resting on the exchange. Without this the order leaked permanently — the
+		// old code returned here and no other mechanism knew the order existed.
+		orderID = at.persistedImmediateTrailingOrderID(symbol, side)
+	}
+	if orderID == "" {
 		return
 	}
 	canceler, ok := at.trader.(interface {
 		CancelTrailingStopOrdersByIDs(symbol string, orderIDs []string) error
 	})
 	if !ok {
+		// Defensive only: placeImmediateTrailing requires SetTrailingStopLossTaggedWithID,
+		// and the only two venues that implement it (binance, okx) both implement
+		// cancel-by-ID — so an order we placed always has a canceller. If that ever stops
+		// holding, clear only the in-memory hint and KEEP the owner record: the order is
+		// still resting, and the record is what stops a drawdown tier from adopting it as
+		// its own full-close protection.
 		at.clearImmediateTrailingOrderID(symbol, side)
 		return
 	}
 	if err := canceler.CancelTrailingStopOrdersByIDs(symbol, []string{orderID}); err != nil {
+		// A cancel can fail because the order is ALREADY gone (close-time blanket cancel,
+		// manual removal, exchange-side expiry). Retrying that forever would log a warning
+		// every poll and keep a dead ID in the claimed set. So only retry while the order
+		// can still be SEEN; positive evidence of absence retires the record instead.
+		// Error strings are not used for this — they differ per venue and per reason.
+		if at.immediateTrailingOrderAbsent(symbol, orderID) {
+			logger.Infof("🛡 Immediate trailing %s (%s %s) is no longer on the exchange — retiring owner record",
+				orderID, symbol, side)
+			at.clearImmediateTrailingOrderID(symbol, side)
+			at.markImmediateTrailingRecordCleared(symbol, side, orderID)
+			return
+		}
+		// Still visible, or visibility unknown: keep both the hint and the owner record so
+		// the next poll retries rather than losing track of a live order.
 		logger.Warnf("⚠️ Failed to cancel immediate trailing for %s %s (orderID=%s): %v", symbol, side, orderID, err)
-	} else {
-		logger.Infof("🛡 Immediate trailing canceled (replaced by tier trailing): %s %s orderID=%s", symbol, side, orderID)
+		return
 	}
+	logger.Infof("🛡 Immediate trailing canceled (replaced by tier trailing): %s %s orderID=%s", symbol, side, orderID)
 	at.clearImmediateTrailingOrderID(symbol, side)
+	at.markImmediateTrailingRecordCleared(symbol, side, orderID)
 }
 
 func (at *AutoTrader) canApplyManagedPartialDrawdownPlan(plan *ProtectionPlan) bool {

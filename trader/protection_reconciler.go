@@ -942,7 +942,12 @@ func (at *AutoTrader) supersedeOlderArmedRecords(current store.DynamicProtection
 	}
 }
 
+// getPositionDetailsForFingerprint 返回 (仓位数量, 开仓时间戳)。
+// 读不到时返回 (0, 0) —— 调用方必须把"读不到"当作"未知",而不是当作"数量为 0"。
 func (at *AutoTrader) getPositionDetailsForFingerprint(symbol, side string) (float64, int64) {
+	if at.trader == nil {
+		return 0, 0
+	}
 	positions, err := at.trader.GetPositions()
 	if err != nil {
 		return 0, 0

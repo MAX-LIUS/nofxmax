@@ -239,6 +239,9 @@ func newVenueAutoTrader(t *testing.T, venue string, fake *fakeVenueTrader) *Auto
 		config:                AutoTraderConfig{StrategyConfig: &store.StrategyConfig{}},
 		protectionState:       make(map[string]string),
 		nativeTrailingArmTime: make(map[string]time.Time),
+		// drawdownSource is written whenever a caller passes a plan carrying
+		// DrawdownRules; without it that path panics on a nil map.
+		drawdownSource: make(map[string]string),
 	}
 }
 
