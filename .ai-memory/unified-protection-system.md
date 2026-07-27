@@ -17,7 +17,21 @@
 >
 > **测试**:`trader/native_trailing_ownership_test.go` 5 例 + `trader/drawdown_tier_alloc_entry_anchor_test.go` 2 例,全部反向验证(旧语义下必失败:`legacy.ExpectedDynamicOwner==3`、分配表 0.33 vs 0.42)。`cmd/orderlist` 增打 `cid=` 便于人工核对 broker tag。另补 `trader/protection_stale_trailing_gate_test.go` 2 例:只测分类器不够,**撤单快路径的闸门本身没测过**(要求 `!missingSL && !missingTP && ManualOrForeign==0 && 可清理数==unexpected 总数`),按线上 BN/ETH 形状把每一项钉住,并反向验证"少一张档位止盈时 missingTP 会翻真",证明断言非空。顺带记录一处既有设计:plan 无 ladder SL 且 break-even armed 时,trailing 自身算 `looksLikeStopLoss`,所以 `missingSL=false` 不等于"真止损单在场",别误读成强断言。
 
-> **🔥 v1.16.18 OKX `tag` 装不下 reason,导致"定向撤单"实为"广撤"(2026-07-27,该 bug 类第 14 次实例,待部署)**
+> **🔥 v1.16.19 `GetOpenOrders` 把 broker tag 当成每张单的 client id(2026-07-28,该 bug 类第 15 次实例,提交 `17f8950`,待部署)**
+>
+> **发现路径**:v1.16.18 部署后线上首个 OKX 开仓(claude/CLUSDT SHORT,00:23)现场核对时,`cmd/orderlist` 打出的 `cid=` 列七张单**全是** `4c363c81edc5BCDE`(16 字符裸 tag),而挂单日志里明明是 `4c363c81edc5BCDELS07f4fdfe415a`。对照 BN 同一时刻:`x-KzrpZaP9LS…/LT…/NT…` 每张都不同。**同一个字段,两个交易所语义不一致 → 必有一方错**。
+>
+> **根因**:`GetOpenOrders` 四处 `ClientOrderID: order.Tag`,且三个 algo 查询的结构体**根本没声明 `algoClOrdId`**,所以交易所回了也读不到。又是"用一个分不清实例的字段做实例级判定"。
+>
+> **两个静默后果**:①**非空但零信息**。`enrichProtectionOrdersWithPlan` 只在 `ClientOrderID == ""` 时才跑基于价格的 plan 兜底推断 —— 一个没用的常量把一条**算得出正确答案**的路堵死了。②trailing 分支的 `ProtectionRole` 取自 `protectionReasonFromTag(order.Tag)`,在 tag 已被 okxTag 占满后**永远解不出**,trailing 单的 role 恒为空。
+>
+> **修法**:三处 algo 查询补 `algoClOrdId` 字段并作为 client id 上报;role 走新增的 `reasonFromAlgoIDs(algoClOrdID, tag)` —— 优先 coded client id,tag 仅为 pre-codec 老单兜底。**legacy 老单现在上报空值而不是回填 tag**,正是为了把 plan 推断那条路让出来(空 = "不知道",可推断;裸 tag = "知道了但没用",堵路)。与 Binance 适配器上报原始 coded client id 对齐,两个交易所的 `ClientOrderID` 从此指同一件事。
+>
+> **教训**:字段名说的是 id,若下游拿它做明文子串匹配(`Contains(cid,"break_even")`),那些匹配器对 coded id 和裸 tag **一样匹配不到** —— 它们本就只是启发式,精确匹配走价格。别为了迁就启发式而往 id 字段塞明文。
+>
+> **测试**:`trader/okx/open_orders_client_id_test.go` 2 例(三张单 cid 均可解码且不等于裸 tag + trailing 的 role 解码正确含动态折叠;legacy 无 client id 时必须留空以放行 plan 推断)。
+
+> **🔥 v1.16.18 OKX `tag` 装不下 reason,导致"定向撤单"实为"广撤"(2026-07-27,该 bug 类第 14 次实例,提交 `5f2163f`,已部署)**
 >
 > **根因(结构性)**:`okxTag` 恰好 16 字符,而 OKX `tag` 字段上限就是 16。`okxReasonTag(reason)` 拼 `"<okxTag>_<reason>"` 再截断到 16 —— **永远截回裸 broker tag**,所有 reason 塌缩成同一个常量。这不是写错一行,是**字段容量根本装不下**,却被一个"看起来在编码"的 helper 藏住了。
 >
