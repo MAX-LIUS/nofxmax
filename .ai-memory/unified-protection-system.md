@@ -1,11 +1,23 @@
 # 统一保护系统 - AI 记忆文档
 
-> **状态**: 生产运行 | **线上 = v1.16.13(2026-07-27 08:25 pid 2298513 md5 b92d92da,提交 `b18ff54`,回滚备份 `/opt/webstack/nofx/nofx.bak_v11611_20260727_082308` = md5 478e8ed8;上一版备份 `nofx.bak_v11610_20260727_055310`)**
+> **状态**: 生产运行 | **线上 = v1.16.16(2026-07-27 12:50 pid 2339558 md5 4820ddd8e09f238fdeaf25622d73dce6,含 v1.16.14+v1.16.15+v1.16.16,回滚备份 `/opt/webstack/nofx/nofx.bak_v11613_20260727_125039`)**;v1.16.17 已提交 `87490ba` 待部署
 > **部署后核对(v1.16.13)**:ETH/CL/WLD 从 `1 tiers` 变 `2 tiers` 且数量正确,`partial_profit_lock` 命名正常;KAITO 单档已确认是策略本身只配一档(GPT-ct50),非丢档。
 > **更新**: 2026-07-27 (v1.16.9 该 bug 类第 6 次实例:开仓即挂路径漏 ATR 换算,把 ATR 倍数当百分数挂单——用户从面板发现"两档配置显示三档 0.6/1.2/1.8";并订正"OKX 没问题"的判断:OKX 同样中招,只是它上报 callbackRate 把原始那条掩住了 | v1.16.8 构造交易所对等测试项目,挖出 HEAD 里既存的 OKX 局部档吃掉 dd1 全平单缺陷;并订正两处我自己的错误结论:Binance triggerPrice≠活动价、审计工具漏配 USDC 路由导致谎报无保护)
-> **版本**: v1.16.15 (待部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,md5 e37b0c83,提交 `75854df`) / v1.16.14 (待部署:immediate trailing 落库归属 + 撤单点按返回值收口,md5 ab4f4e81,提交 `b4f35e0`) / v1.16.13 (待部署:managed 全程陪跑双保险,取消账户级接管,md5 b92d92da,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
+> **版本**: v1.16.17 (待部署:trailing 归属按认领集合判定 + 档位分配锚定开仓量,提交 `87490ba`) / v1.16.16 (已部署:ATR→% 换算的除数锚定到冻结开仓价,提交 `80845a2`) / v1.16.15 (已部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,提交 `75854df`) / v1.16.14 (已部署:immediate trailing 落库归属 + 撤单点按返回值收口,提交 `b4f35e0`) / v1.16.13 (已部署:managed 全程陪跑双保险,取消账户级接管,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
 
-> **🔥 v1.16.15 梯度身份里混进了会变的开仓均价 → 同一档挂两张单(2026-07-27,该 bug 类第 11 次实例,提交 `75854df`,待部署 md5 e37b0c83)**
+> **🔥 v1.16.17 trailing 归属判定是布尔量 + 档位分配表按当前量重算(2026-07-27,该 bug 类第 12/13 次实例,提交 `87490ba`,待部署)**
+>
+> **缺陷 A —— 归属判定用布尔量,多余 trailing 单永远撤不掉**。`classifyProtectionOrder` 对 trailing 的判据是 `else if nativeTrailingArmed`,即"只要这个 symbol 有任意一档 armed,交易所上**所有** trailing 单都是我的、预期的"。这是"单侧只可能有一张 trailing"时代的写法。开仓即挂多档之后,一个仓位会同时躺着全平档 + 若干部分档,于是这个布尔量把任何**多出来**的 trailing 单也一并盖章,它们既进不了 `StaleBotDuplicateIDs`,也就进不了 reconciler 的撤单路径,会一直挂到仓位平掉。线上实证:BN/ETHUSDT long 记录只认领 2 张(0.040/0.134),交易所躺着 3 张,多出来的 0.067(半仓)止损价 1922.09 紧贴止损 1922.39 —— 触发即在止损位提前砍半仓;而 reconciler 每轮打的是 `dynamicOwner=3 unexpectedTP=0`,即"三张都是我的",从不报警。claude/SOXLUSDT long 则是全平档 1.42 两张、30% 档 0.43 两张(v1.16.15/16 身份分叉的存量),两张部分档同时触发会平掉 60% 而不是 30%(全平档那对靠 reduce-only 兜住,部分档没有这层保护)。
+>
+> **修法 A**:新增 `trader/native_trailing_ownership.go`,把 `nativeTrailingArmed bool` 换成 `nativeTrailingOwnership{Armed, Claimed}`,判据从布尔改为**该仓位的 armed 记录认领了哪些 exchange order ID**(直接复用 `claimedTrailingOrderIDsForPosition`,它已同时覆盖梯度档与开仓即时单)。三条容忍边界必须保留:认领视图为 nil(调用方给不出)、认领集合为空(记录还没落盘的窗口期)、交易所不回 order ID —— 一律容忍在场单,因为**撤错一张在场的保护单,后果远重于多留一张**。新增 `StaleTrailingDuplicate` 计数,并让"止损覆盖已满足就容忍多余止损单"那条分支(`protection_reconciler.go:313`)在它 >0 时不再生效:多一张止损只是多一层保险,多一张部分档 trailing 会真的多平仓,两者不能同等容忍。归属判定(`profitOwner`)仍只看 `Armed` 不看认领集合,否则记录落盘窗口期会瞬间判成 `missingProfit` 触发一轮无谓重挂。
+>
+> **缺陷 B —— 档位分配表按当前持仓量重算(即"CL 分配表 1.1/0.33 vs 交易所 1.4/0.4"的答案)**。`drawdownTierAllocs` 只存在内存,重启后由 `auto_trader_risk.go:250` 的 lazy-init 兜底重算,而它传进去的是**当前**持仓量。仓位被某一档部分止盈砍过(1.4 → 1.1)再重启,分配表就按 1.1 重算(30% = 0.33),而交易所上躺着的单是开仓时按 1.4 挂的(30% = 0.42)。arm 路径的数量匹配(`auto_trader_risk.go:2208`)早就按 `EntryQuantity` 锚定了,分配表却按当前量 —— **两边口径不一致 → 匹配不上 → 重挂 → 又一个重复单入口**。修法:新增 `entryQuantityAnchor`,`initDrawdownTiersForPosition` 一律向 DB 取原始开仓量,取不到(开仓瞬间 DB 行还没落地)退回调用方传的量。
+>
+> **教训**:v1.16.16 是"除数不能是会变的量",v1.16.17 缺陷 B 是同一条原则的另一半 —— **比例的分母在仓位生命周期内必须固定**;缺陷 A 则是"所有权判定不能用布尔量,只能用集合":布尔量回答不了"这张具体的单是谁的",而多档并存的系统里,这正是唯一需要回答的问题。
+>
+> **测试**:`trader/native_trailing_ownership_test.go` 5 例 + `trader/drawdown_tier_alloc_entry_anchor_test.go` 2 例,全部反向验证(旧语义下必失败:`legacy.ExpectedDynamicOwner==3`、分配表 0.33 vs 0.42)。`cmd/orderlist` 增打 `cid=` 便于人工核对 broker tag。
+
+> **🔥 v1.16.15 梯度身份里混进了会变的开仓均价 → 同一档挂两张单(2026-07-27,该 bug 类第 11 次实例,提交 `75854df`,已部署)**
 >
 > **现象**:线上 SOXLUSDT 两档策略,交易所 4 张挂单 / 库里 4 条 armed 记录,`dynamicOwner=4 verified=true`(系统自认为一切正常)。日志序列:`Native trailing state exists but no trailing order found on exchange (SOXLUSDT long), re-arming` → `Preserving 2 live sibling trailing tier(s) claimed by armed records during full-tier migration`。KAITOUSDT 另有两条 armed 全平档记录(v1.16.9 之前"裸 ATR vs 百分比"分裂的 07-26 残留)。
 >
