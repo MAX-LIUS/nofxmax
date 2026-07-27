@@ -1255,7 +1255,11 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 		fullTakeProfitPlanned = plan.NeedsTakeProfit && plan.TakeProfitPrice > 0
 		fallbackPlanned = plan.FallbackMaxLossPrice > 0
 		breakEvenArmed := at.getBreakEvenState(symbol, side) == "armed"
-		nativeTrailingArmed := at.getProtectionState(symbol, side) == "native_trailing_armed" || at.getProtectionState(symbol, side) == "native_partial_trailing_armed"
+		// 必须含 *_arming 两个状态,与 reconciler(protection_reconciler.go:175)保持
+		// 一致:nativeTrailingOwnership.Armed 的语义就是"armed 或 arming"(见该类型的
+		// 注释)。这里少两个状态会让面板在武装窗口内把在场的 trailing 单归成
+		// "非我认领",与 reconciler 同一时刻的判断相反。
+		nativeTrailingArmed := isNativeTrailingProtectionState(at.getProtectionState(symbol, side))
 		unexpectedSummary = classifyUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed,
 			at.nativeTrailingOwnershipForPosition(symbol, side, entryPrice, nativeTrailingArmed), true)
 	}
@@ -1416,9 +1420,12 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 			}
 			executionMode := at.getDrawdownExecutionMode(symbol, side)
 			source := executionMode
-			if executionMode == "native_partial_trailing" || executionMode == "native_trailing_full" {
+			// 归属判断统一走谓词,不再用字面量白名单 —— 详见 protection_reconciler.go
+			// 里 drawdownExecutionModeIsNative 的注释(白名单漏掉 *_tiers 曾让双档仓位
+			// 的 DD1/DD2 恒红灯)。
+			if drawdownExecutionModeIsNative(executionMode) {
 				source = "native"
-			} else if executionMode == "managed_partial_drawdown" || executionMode == "managed_drawdown_exchange_failed" {
+			} else if drawdownExecutionModeIsManaged(executionMode) {
 				source = "managed"
 			}
 			plannedActivationPrice := 0.0
@@ -1438,7 +1445,10 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 			matchedLive := false
 			matchedActivationStatus := ""
 			matchedActivationPrice := 0.0
-			if executionMode == "native_partial_trailing" || executionMode == "native_trailing_full" {
+			// 同上:任何 native_* 归属都必须走这段"找回交易所上那张单"的匹配。
+			// 漏掉任何一个 native 值的后果不是少一点信息,而是 matchedLive 恒 false →
+			// exchange_light 直接红灯,把健康的挂单报成缺单。
+			if drawdownExecutionModeIsNative(executionMode) {
 				activationSource = "request"
 				callbackSource = "request"
 				switch strings.ToLower(at.exchange) {

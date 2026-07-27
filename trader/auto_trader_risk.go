@@ -746,6 +746,29 @@ func isNativeTrailingProtectionState(state string) bool {
 	return state == "native_trailing_arming" || state == "native_trailing_armed" || state == "native_partial_trailing_arming" || state == "native_partial_trailing_armed"
 }
 
+// isManagedDrawdownProtectionState 是 isNativeTrailingProtectionState 的 managed 对偶:
+// 进程内 managed 回撤监控已武装的全部状态(含"交易所挂单失败、只剩本地监控"两种)。
+//
+// 之所以要有这个函数:setProtectionState 写入的 managed 状态一共 4 个,而调用方历史上
+// 都是手写字面量并集,**managed_drawdown_armed 在多处被漏掉**:
+//   - getDrawdownExecutionMode 漏它 → 归属被算成 native_trailing_pending(已修);
+//   - protection_reconciler.go:98 的"保留动态状态"白名单漏它 → 交易所校验通过那一轮
+//     把 managed_drawdown_armed 覆盖成 exchange_protection_verified,managed 武装记忆
+//     丢失,下一轮又重新武装一次。
+//
+// 同一份并集只在这里写一次,新增 managed 状态时只改这一处。
+func isManagedDrawdownProtectionState(state string) bool {
+	return state == "managed_drawdown_armed" || state == "managed_partial_drawdown_armed" ||
+		state == "managed_drawdown_exchange_failed_armed" || state == "managed_partial_drawdown_exchange_failed_armed"
+}
+
+// isDynamicDrawdownArmState 表示"这个仓位的动态保护(trailing / managed 回撤)已经武装
+// 或正在武装中",即 protectionState 这一格里存的是**动态保护的进度**,不能被别的
+// 语义(例如 exchange_protection_verified)覆盖掉。
+func isDynamicDrawdownArmState(state string) bool {
+	return isNativeTrailingProtectionState(state) || isManagedDrawdownProtectionState(state)
+}
+
 func (at *AutoTrader) isManagedDrawdownRecord(symbol, side, fingerprint string) bool {
 	if at.store == nil {
 		return false

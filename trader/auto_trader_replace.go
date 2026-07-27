@@ -174,7 +174,7 @@ func (at *AutoTrader) selectReplaceVictim(positions []map[string]interface{}, ne
 // positionHoldMinutes returns how long the symbol/side position has been held, in minutes.
 // Falls back to 0 when the open time is unknown (treated as fresh → protected by min-hold guard).
 func (at *AutoTrader) positionHoldMinutes(symbol, side string) float64 {
-	key := symbol + "_" + strings.ToLower(side)
+	key := positionKey(symbol, side)
 	openedMs, ok := at.positionFirstSeenTime[key]
 	if !ok || openedMs <= 0 {
 		// Best-effort fallback to the persisted entry time.

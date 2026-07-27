@@ -95,7 +95,10 @@ func (at *AutoTrader) reconcilePositionProtections() {
 
 		if result.ExchangeVerified {
 			currentState := at.getProtectionState(symbol, side)
-			if currentState == "native_trailing_armed" || currentState == "native_partial_trailing_armed" || currentState == "native_trailing_arming" || currentState == "native_partial_trailing_arming" || currentState == "managed_partial_drawdown_armed" || currentState == "managed_drawdown_exchange_failed_armed" || currentState == "managed_partial_drawdown_exchange_failed_armed" {
+			// 动态保护的武装进度不能被 exchange_protection_verified 覆盖:那一格是
+			// 唯一的进度记忆。并集统一由 isDynamicDrawdownArmState 定义(手写并集曾漏掉
+			// managed_drawdown_armed,见 auto_trader_risk.go 里的注释)。
+			if isDynamicDrawdownArmState(currentState) {
 				logger.Infof("✅ Protection reconciler: %s %s exchange protection verified (preserving dynamic state=%s)", symbol, side, currentState)
 			} else {
 				at.setProtectionState(symbol, side, "exchange_protection_verified")
@@ -159,7 +162,7 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 	}
 	at.reconcileLocalOpenOrderStatuses(symbol, openOrders)
 
-	if currentProtectionState == "native_trailing_armed" || currentProtectionState == "native_partial_trailing_armed" || currentProtectionState == "native_trailing_arming" || currentProtectionState == "native_partial_trailing_arming" {
+	if isNativeTrailingProtectionState(currentProtectionState) {
 		if len(at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, quantity, 0)) == 0 {
 			logger.Infof("🟣 Protection reconciler: %s %s native trailing state belongs to an old position fingerprint, re-arming current position", symbol, positionSide)
 			currentProtectionState = ""
@@ -169,7 +172,7 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 
 	// If native trailing drawdown is already armed/arming, generic take-profit plans should not be
 	// re-applied on top of it. But stop-loss protection must still be preserved and repaired.
-	nativeTrailingArmed := currentProtectionState == "native_trailing_armed" || currentProtectionState == "native_partial_trailing_armed" || currentProtectionState == "native_trailing_arming" || currentProtectionState == "native_partial_trailing_arming"
+	nativeTrailingArmed := isNativeTrailingProtectionState(currentProtectionState)
 
 	plan, err := at.BuildConfiguredProtectionPlanForSymbol(entryPrice, actionFromPositionSide(side), symbol)
 	if err != nil {
@@ -438,7 +441,7 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 		}
 		result.ExchangeVerified = ownership.Verified
 		result.Summary = strings.Join(ownership.Reasons, "; ")
-		if ownership.ProfitOwner == "drawdown" && (at.getProtectionState(symbol, side) == "native_trailing_armed" || at.getProtectionState(symbol, side) == "native_partial_trailing_armed" || at.getProtectionState(symbol, side) == "native_trailing_arming" || at.getProtectionState(symbol, side) == "native_partial_trailing_arming") {
+		if ownership.ProfitOwner == "drawdown" && isNativeTrailingProtectionState(at.getProtectionState(symbol, side)) {
 			result.Summary = "dynamic protection owner armed; exchange static ownership verified"
 		}
 	}
@@ -517,7 +520,9 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 
 	if !result.ExchangeVerified && hasMissingMandatoryLadderStops(openOrders, positionSide, plan) {
 		result.Summary = "mandatory ladder SL missing; dynamic protection cannot satisfy static ladder ownership"
-	} else if !result.ExchangeVerified && (at.getBreakEvenState(symbol, side) == "armed" || at.getProtectionState(symbol, side) == "native_trailing_armed" || at.getProtectionState(symbol, side) == "native_partial_trailing_armed" || at.getProtectionState(symbol, side) == "native_trailing_arming" || at.getProtectionState(symbol, side) == "native_partial_trailing_arming" || at.getProtectionState(symbol, side) == "managed_drawdown_armed" || at.getProtectionState(symbol, side) == "managed_drawdown_exchange_failed_armed" || at.getProtectionState(symbol, side) == "managed_partial_drawdown_exchange_failed_armed") {
+		// 这里的手写并集和 :98 那处方向相反地漏了一个(:98 漏 managed_drawdown_armed,
+		// 这里漏 managed_partial_drawdown_armed)—— 两处本该是同一个集合。统一走谓词。
+	} else if !result.ExchangeVerified && (at.getBreakEvenState(symbol, side) == "armed" || isDynamicDrawdownArmState(at.getProtectionState(symbol, side))) {
 		result.Summary = "dynamic protection owner armed; exchange static ownership not fully verified"
 	}
 	return result, nil
@@ -1132,7 +1137,7 @@ func (at *AutoTrader) claimProtectionArmingState(symbol, side, expectedCurrentSt
 	if at.protectionState == nil {
 		at.protectionState = make(map[string]string)
 	}
-	key := symbol + "_" + strings.ToLower(side)
+	key := positionKey(symbol, side)
 	actualState = at.protectionState[key]
 	if isNativeTrailingArmingState(actualState) {
 		return false, actualState, actualState
@@ -1147,7 +1152,7 @@ func (at *AutoTrader) claimProtectionArmingState(symbol, side, expectedCurrentSt
 func (at *AutoTrader) getProtectionState(symbol, side string) string {
 	at.protectionStateMutex.RLock()
 	defer at.protectionStateMutex.RUnlock()
-	return at.protectionState[symbol+"_"+strings.ToLower(side)]
+	return at.protectionState[positionKey(symbol, side)]
 }
 
 func (at *AutoTrader) setProtectionState(symbol, side, state string) {
@@ -1156,7 +1161,7 @@ func (at *AutoTrader) setProtectionState(symbol, side, state string) {
 	if at.protectionState == nil {
 		at.protectionState = make(map[string]string)
 	}
-	at.protectionState[symbol+"_"+strings.ToLower(side)] = state
+	at.protectionState[positionKey(symbol, side)] = state
 }
 
 func (at *AutoTrader) clearProtectionState(symbol, side string) {
@@ -1165,7 +1170,7 @@ func (at *AutoTrader) clearProtectionState(symbol, side string) {
 	if at.protectionState == nil {
 		return
 	}
-	delete(at.protectionState, symbol+"_"+strings.ToLower(side))
+	delete(at.protectionState, positionKey(symbol, side))
 }
 
 func (at *AutoTrader) setImmediateTrailingOrderID(symbol, side, orderID string) {
@@ -1174,7 +1179,7 @@ func (at *AutoTrader) setImmediateTrailingOrderID(symbol, side, orderID string) 
 	if at.immediateTrailingIDs == nil {
 		at.immediateTrailingIDs = make(map[string]string)
 	}
-	at.immediateTrailingIDs[symbol+"_"+strings.ToLower(side)] = orderID
+	at.immediateTrailingIDs[positionKey(symbol, side)] = orderID
 }
 
 func (at *AutoTrader) getImmediateTrailingOrderID(symbol, side string) string {
@@ -1183,7 +1188,7 @@ func (at *AutoTrader) getImmediateTrailingOrderID(symbol, side string) string {
 	if at.immediateTrailingIDs == nil {
 		return ""
 	}
-	return at.immediateTrailingIDs[symbol+"_"+strings.ToLower(side)]
+	return at.immediateTrailingIDs[positionKey(symbol, side)]
 }
 
 func (at *AutoTrader) clearImmediateTrailingOrderID(symbol, side string) {
@@ -1192,7 +1197,7 @@ func (at *AutoTrader) clearImmediateTrailingOrderID(symbol, side string) {
 	if at.immediateTrailingIDs == nil {
 		return
 	}
-	delete(at.immediateTrailingIDs, symbol+"_"+strings.ToLower(side))
+	delete(at.immediateTrailingIDs, positionKey(symbol, side))
 }
 
 func (at *AutoTrader) setBreakEvenState(symbol, side, state string) {
@@ -1220,7 +1225,7 @@ func (at *AutoTrader) refreshBreakEvenFingerprint(symbol, side string, entryPric
 func (at *AutoTrader) getBreakEvenState(symbol, side string) string {
 	at.breakEvenStateMutex.RLock()
 	defer at.breakEvenStateMutex.RUnlock()
-	return at.breakEvenState[symbol+"_"+strings.ToLower(side)]
+	return at.breakEvenState[positionKey(symbol, side)]
 }
 
 func (at *AutoTrader) clearBreakEvenState(symbol, side string) {
@@ -1240,6 +1245,13 @@ func (at *AutoTrader) getDrawdownExecutionMode(symbol, side string) string {
 	}
 	if state == "managed_partial_drawdown_armed" {
 		return "managed_partial_drawdown"
+	}
+	// managed_drawdown_armed(全量 managed 监控,auto_trader_risk.go:2453 写入)曾经
+	// 没有映射,于是掉到函数尾部按"能力"返回 native_trailing_pending —— 一个进程内
+	// managed 兜底的仓位被报成"native 待挂单"。面板据此去交易所找单,找不到就红灯。
+	// 归属错了,后面所有判断都错;这里补上它自己的归属。
+	if state == "managed_drawdown_armed" {
+		return "managed_drawdown"
 	}
 	if state == "native_trailing_arming" || state == "native_partial_trailing_arming" {
 		return "native_trailing_arming"
@@ -1276,6 +1288,38 @@ func (at *AutoTrader) getDrawdownExecutionMode(symbol, side string) string {
 		return "native_trailing_pending"
 	}
 	return "local_fallback"
+}
+
+// ── 为什么需要 drawdownExecutionModeIsNative / ...IsManaged ──────────────────────
+//
+// getDrawdownExecutionMode 会返回 8 个值,其中 6 个是 native 家族:
+//
+//	native_trailing_pending / native_trailing_arming / native_trailing_tiers /
+//	native_partial_trailing_tiers / native_trailing_full / native_partial_trailing
+//
+// 而消费方(auto_trader_decision.go 的面板 runtime)历史上写的是白名单式的字面量
+// 相等比较:`mode == "native_partial_trailing" || mode == "native_trailing_full"`。
+// 后来为了在面板上区分"多档"而新增了 *_tiers 两个值,消费方没有同步 —— 于是**只要
+// 一个仓位同时武装了 full 档(dd1)和 partial 档(partial_profit_lock)**,mode 就变成
+// native_trailing_tiers,两个字面量都不等,ID 匹配那一整段直接被跳过,matchedLive
+// 恒为 false,computeExchangeLight 走 `if !matchedLive { return "red" }` ——
+// **DD1 和 DD2 同时红灯,而交易所上两张 trailing 单都健康挂着。**
+// (2026-07-27 线上:CLUSDT/SKHYUSDT 两个仓位都是 dd1(100%)+partial(30%) 双档,
+// armed 记录里 algoId 齐全,reconciler 报 dynamicOwner=2 claimedTrail=2 一切正常,
+// 只有面板红。误报的方向最坏:它训练人忽略红灯。)
+//
+// 修法不是把新的两个字面量补进白名单 —— 那正是"哪漏补哪",下次再加一个 mode 还会漏。
+// mode 字符串同时编码了两件事:**归属**(native / managed / 本地兜底)和**形态**
+// (单档 / 多档 / full / partial)。消费方要问的只有归属这一件事,所以把"归属"这个
+// 判断收敛成唯一的谓词,任何 native_* 新值天然被涵盖。形态信息仍由原串透出给前端。
+func drawdownExecutionModeIsNative(mode string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(mode)), "native_")
+}
+
+// drawdownExecutionModeIsManaged 判断这一档由**进程内 managed 监控**兜底(交易所上
+// 可能没有对应挂单)。与 IsNative 互斥,同样只看归属前缀。
+func drawdownExecutionModeIsManaged(mode string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(mode)), "managed")
 }
 
 func (at *AutoTrader) getBreakEvenExecutionMode(symbol, side string) string {

@@ -466,6 +466,9 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 func (at *AutoTrader) positionHasArmedProtection(symbol, side string, entryPrice float64) bool {
 	// Fast in-memory check: trailing / managed-drawdown arming states.
 	state := at.getProtectionState(symbol, side)
+	// 注意这里刻意**不**用 isDynamicDrawdownArmState:那个谓词含两种
+	// *_exchange_failed_armed,而本函数下面几行专门对它们加了"必须有 tier alloc 才算
+	// 有保护"的更严格判断(交易所上没单,只有本地监控)。这里只认交易所侧成立的状态。
 	if isNativeTrailingProtectionState(state) ||
 		state == "managed_drawdown_armed" || state == "managed_partial_drawdown_armed" ||
 		state == "exchange_protection_verified" {
