@@ -1,6 +1,7 @@
 package trader
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -182,5 +183,164 @@ func TestCumulativeRatioStillInheritsWithinAGenuineLadder(t *testing.T) {
 	}
 	if got := at.getCumulativeCloseRatioByRule(symbol, side, normalizeDrawdownRule(rules[1])); math.Abs(got-85) > 0.01 {
 		t.Fatalf("T2 cumulative: want 85 (60+25, inheriting the superseded T1 slice), got %.2f", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bug class instance #9 (2026-07-27): the full-close tier ate the partial tier's
+// allocation budget, so the partial was dropped from the alloc table entirely.
+//
+// computeDrawdownTierAllocations sorts by MinProfitPct and clamps each tier against a
+// running allocatedPct. claude-ct30's dd1 (3 ATR peak, close 100) sorts BEFORE the partial
+// (4 ATR peak, close 30), fills allocatedPct to 100, and the partial gets
+// ratioPct = 100-100 = 0 → `continue`. Live log, pid 2282277:
+//
+//	📊 Drawdown tier allocations set for WLDUSDT long: 1 tiers
+//	  → dd1: qty=380.000000 (100.0%) | peak_trigger=4.20% | drawdown=2.52%
+//
+// The clamp assumes tiers are mutually exclusive slices of the position. Under place-at-open
+// they are not: the full tier and the partials rest on the exchange CONCURRENTLY, each with
+// its own callback.
+// ---------------------------------------------------------------------------
+
+// TestFullCloseTierDoesNotEatPartialTierAllocation pins the dropped tier.
+func TestFullCloseTierDoesNotEatPartialTierAllocation(t *testing.T) {
+	const (
+		symbol   = "WLDUSDT"
+		side     = "long"
+		entry    = 0.3562
+		posQty   = 380.0
+		atrValue = 0.0049866
+	)
+	at := atrTierFixture(t, symbol, side, entry, atrValue)
+	at.initDrawdownTiersFromResolvedRules(symbol, side, posQty, entry, ct30ATRRules())
+
+	allocs := at.getDrawdownTierAllocs(symbol, side)
+	if len(allocs) != 2 {
+		var got []string
+		for _, a := range allocs {
+			got = append(got, fmt.Sprintf("%s(close=%.1f%% qty=%.2f)", a.StageName, a.CloseRatioPct, a.Quantity))
+		}
+		t.Fatalf("want 2 tiers (dd1 + partial_profit_lock), got %d: %s — the full-close tier "+
+			"consumed the whole allocation budget and the 30%% partial was dropped. A dropped "+
+			"tier is invisible to updateDrawdownTierStates (no high-water-mark tracking), to "+
+			"evaluateDrawdownTiers (the managed fallback can never execute it), and to the "+
+			"dashboard tier panel.", len(allocs), strings.Join(got, " "))
+	}
+
+	var partial, full *store.DrawdownTierAllocation
+	for i := range allocs {
+		switch allocs[i].StageName {
+		case "dd1":
+			full = &allocs[i]
+		case "partial_profit_lock":
+			partial = &allocs[i]
+		}
+	}
+	if full == nil || partial == nil {
+		t.Fatalf("expected stages dd1 + partial_profit_lock, got %+v", allocs)
+	}
+	if math.Abs(full.Quantity-posQty) > 0.001 {
+		t.Fatalf("dd1 is a whole-position safety net: want qty=%.0f, got %.4f", posQty, full.Quantity)
+	}
+	wantPartialQty := posQty * 0.30
+	if math.Abs(partial.Quantity-wantPartialQty) > 0.001 {
+		t.Fatalf("partial tier qty: want %.2f (30%% of %.0f), got %.4f", wantPartialQty, posQty, partial.Quantity)
+	}
+}
+
+// TestPartialTierMatchesItsAllocAndDoesNotInheritTheFullTier is the trap this fix could
+// have walked into: restoring the dropped tier makes the identity match SUCCEED, so if the
+// cumulative sum still counted the concurrent full tier's 100, every partial would clamp to
+// 100 and instance #8 would return through the match path instead of the fallback.
+func TestPartialTierMatchesItsAllocAndDoesNotInheritTheFullTier(t *testing.T) {
+	const (
+		symbol   = "CLUSDT"
+		side     = "short"
+		entry    = 84.40
+		posQty   = 1.4
+		atrValue = 0.7605 // 1 ATR = 0.9011% of entry
+	)
+	at := atrTierFixture(t, symbol, side, entry, atrValue)
+	at.initDrawdownTiersFromResolvedRules(symbol, side, posQty, entry, ct30ATRRules())
+
+	resolved := at.resolveDrawdownRulesATR(ct30ATRRules(), symbol, side, entry)
+	for i := range resolved {
+		resolved[i] = normalizeDrawdownRule(resolved[i])
+	}
+
+	for _, rule := range resolved {
+		got := at.getCumulativeCloseRatioByRule(symbol, side, rule)
+		if isFullCloseTierRule(rule) {
+			if math.Abs(got-100) > 0.01 {
+				t.Fatalf("dd1 cumulative: want 100, got %.2f", got)
+			}
+			continue
+		}
+		if math.Abs(got-30) > 0.01 {
+			t.Fatalf("partial tier (stage=%s min=%.4f) cumulative=%.2f%% — want its own 30%%. "+
+				"Summing the concurrent full-close tier's 100 would arm %.2f units instead of %.2f "+
+				"(the live CLUSDT defect).", rule.StageName, rule.MinProfitPct, got,
+				posQty*got/100, posQty*0.30)
+		}
+	}
+}
+
+// TestPartialTrackingDoesNotSupersedeTheFullCloseTier: with both tiers in the table, the
+// supersede loop would mark dd1 "superseded" as soon as the partial starts tracking (dd1 has
+// the lower index). dd1 keeps its own live exchange order, so cancelling it in-memory would
+// silently disable the managed fallback for the whole-position exit.
+func TestPartialTrackingDoesNotSupersedeTheFullCloseTier(t *testing.T) {
+	const (
+		symbol   = "WLDUSDT"
+		side     = "long"
+		entry    = 0.3562
+		posQty   = 380.0
+		atrValue = 0.0049866
+	)
+	at := atrTierFixture(t, symbol, side, entry, atrValue)
+	at.initDrawdownTiersForPosition(symbol, side, posQty, entry, ct30ATRRules())
+
+	// Past the partial's 5.6016% trigger, so both tiers are satisfied.
+	at.updateDrawdownTierStates(symbol, side, 6.0, 6.0)
+
+	for _, a := range at.getDrawdownTierAllocs(symbol, side) {
+		if a.StageName == "dd1" && a.Status == "superseded" {
+			t.Fatalf("dd1 (whole-position, close=100) was superseded by the partial tier; "+
+				"its exchange order is still live, so the managed fallback must keep owning it. "+
+				"allocs=%+v", at.getDrawdownTierAllocs(symbol, side))
+		}
+		if a.StageName == "partial_profit_lock" && a.Status != "tracking" {
+			t.Fatalf("partial tier should be tracking at 6%% PnL (trigger 5.60%%), got %q", a.Status)
+		}
+	}
+}
+
+// TestFindRuleForTierMatchesByIdentityNotPosition: TierIndex indexes the SORTED slice built
+// inside computeDrawdownTierAllocations, but findRuleForTier is handed the caller's unsorted
+// slice. When config order and sorted order differ, the positional fallback names the wrong
+// tier — which in the managed path picks the wrong runner policy and the wrong
+// exchangeSideCoversDrawdownTier check.
+func TestFindRuleForTierMatchesByIdentityNotPosition(t *testing.T) {
+	// Config order deliberately reversed relative to MinProfitPct order.
+	rules := []store.DrawdownTakeProfitRule{
+		{MinProfitPct: 5.60, MaxDrawdownPct: 1.68, CloseRatioPct: 30, StageName: "partial_profit_lock"},
+		{MinProfitPct: 4.20, MaxDrawdownPct: 2.52, CloseRatioPct: 100, StageName: "dd1"},
+	}
+	allocs := computeDrawdownTierAllocations(380, rules)
+	if len(allocs) != 2 {
+		t.Fatalf("want 2 allocs, got %d", len(allocs))
+	}
+	for i := range allocs {
+		tier := &allocs[i]
+		got := findRuleForTier(rules, tier)
+		if got == nil {
+			t.Fatalf("no rule found for tier %s", tier.StageName)
+		}
+		if got.StageName != tier.StageName {
+			t.Fatalf("tier %s (index %d) matched rule %q — positional fallback crossed the "+
+				"tiers because TierIndex refers to the sorted slice, not the caller's",
+				tier.StageName, tier.TierIndex, got.StageName)
+		}
 	}
 }

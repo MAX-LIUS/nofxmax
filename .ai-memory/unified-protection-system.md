@@ -2,8 +2,30 @@
 
 > **状态**: 生产运行 | **线上 = v1.16.11(2026-07-27 05:53 UTC pid 2282277 md5 478e8ed8,提交 `4399b72`,回滚备份 `/opt/webstack/nofx/nofx.bak_v11610_20260727_055310`;上一版备份 `nofx.bak_v1169_20260727_041214`)**
 > **更新**: 2026-07-27 (v1.16.9 该 bug 类第 6 次实例:开仓即挂路径漏 ATR 换算,把 ATR 倍数当百分数挂单——用户从面板发现"两档配置显示三档 0.6/1.2/1.8";并订正"OKX 没问题"的判断:OKX 同样中招,只是它上报 callbackRate 把原始那条掩住了 | v1.16.8 构造交易所对等测试项目,挖出 HEAD 里既存的 OKX 局部档吃掉 dd1 全平单缺陷;并订正两处我自己的错误结论:Binance triggerPrice≠活动价、审计工具漏配 USDC 路由导致谎报无保护)
-> **版本**: v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
+> **版本**: v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
 
+> **🔥 v1.16.12 全平档吃光部分档预算 → 部分档被整条丢出分配表(2026-07-27,该 bug 类第 9 次实例,已编码待确认部署 md5 6d90f3c6)**
+>
+> **发现路径**:v1.16.11 上线后 WLD/CL 重挂虽然量对(114/0.4),但日志里同时出现 `⚠️ Drawdown cumulative ratio: ... no tier matches rule stage="partial_profit_lock" close=30.0% min=5.6016 — using the rule's own ratio`。既然 v1.16.11 已让分配表恒为百分比、身份匹配用 (StageName,CloseRatioPct),就不该匹配不到 → 追下去发现分配表里**只有 1 档**:
+> ```
+> 📊 Drawdown tier allocations set for WLDUSDT long: 1 tiers
+>   → dd1: qty=380.000000 (100.0%) | peak_trigger=4.20% | drawdown=2.52%
+> ```
+> 即"匹配不到"不是匹配器的问题,是被匹配的对象根本不存在。**教训:一条 ⚠️ 兜底日志即使结果正确,也要追它为什么会触发** —— 这次正确结果完全来自 v1.16.11 兜底的保守方向,而不是系统正常工作。
+>
+> **根因**:`computeDrawdownTierAllocations` 按 MinProfitPct 升序排序后,用一个 `allocatedPct` 累计预算逐档裁剪(`ratioPct = 100 - allocatedPct`,≤0 就 `continue`)。claude-ct30 的 dd1(3ATR 触发=4.20%,close 100)触发点**低于**部分档(4ATR=5.60%,close 30),排序在前 → 一档吃满 100 → 部分档得到 0 → 被 `continue` 丢弃。这个裁剪假设"各档是仓位的互斥切片",但 `a56f741` place-at-open 之后,全平档与部分档是**各带自己 callback、并存在交易所上的独立挂单**,不是替换关系 —— 又一次是"当年只有一张单"的旧前提被多档模型打破(与 #4/#5/#7/#8/#10 同源)。
+>
+> **丢档的四个后果**:①`getCumulativeCloseRatioByRule` 匹配不到(v1.16.11 之前会走危险兜底 → 正是 #8 的放大器) ②`updateDrawdownTierStates` 从不跟踪它的高水位 ③`evaluateDrawdownTiers` 在 native 不可用时的 managed 兜底路径**永远无法执行该档** ④面板两档策略只显示一档。
+>
+> **修法(四处必须一起改,只改任何一处都会制造新缺陷)**:
+> 1. `computeDrawdownTierAllocations`:`isFullCloseTierRule`(close≥99.999)的档直接拿整仓、**不占也不受部分档预算约束**;部分档之间仍按预算裁剪。
+> 2. `getCumulativeCloseRatioByRule`:全平档命中直接返回 100;部分档累加时**排除并存的全平档**。这一步是陷阱 —— 把档位加回来会让身份匹配"成功",若仍把全平档的 100 累进去,每个部分档都会 clamp 到 100,#8 会从匹配路径原样复活(反向验证实测报错就是线上原值 `cumulative=100.00% … 1.40 units instead of 0.42`)。
+> 3. `evaluateDrawdownTiers` + `updateDrawdownTierStates` 的 supersede 循环:部分档进入 tracking **不得** supersede 全平档(它自己的交易所挂单还在,内存里注销掉等于悄悄关掉整仓退出的 managed 兜底);全平档之间/全平档对部分档的 supersede 保持原样。
+> 4. `findRuleForTier`:先按 StageName 身份匹配,再退位置索引。原来只有"阈值全等 → `rules[tier.TierIndex]`"两步,而 TierIndex 指向 `computeDrawdownTierAllocations` **内部排序后**的切片,调用方传进来的却是未排序的 config 切片 → 顺序不一致时会取到另一档的规则(影响 managed 路径的 runner 策略与 exchangeSideCovers 判断)。
+> 5. 附带订正 `resolveDrawdownRulesWithModes`:空 StageName 原来盖成位置标签 `T2`,而 arm 路径走 `normalizeDrawdownRule → inferDrawdownStageName` 得到 `partial_profit_lock` → **同一个配置档在两条路径上叫不同名字**,身份匹配自然对不上。改为同样用 `inferDrawdownStageName` 语义推断。该函数唯一非测试调用方就是 init,不影响任何挂单指纹。
+>
+> **测试**:`trader/drawdown_tier_alloc_atr_test.go` 新增 4 例(全部用 claude-ct30 线上配置与真实数字),逐条反向验证过:去掉修法 1 → `got 1: dd1(close=100.0% qty=380.00)`;去掉修法 2 → `cumulative=100.00% … 1.40 units instead of 0.42`;去掉修法 3 → `⏭️ Drawdown dd1 superseded by partial_profit_lock`;修法 5 缺失 → 分配表出现 `StageName:T2` 而 DB 指纹是 `partial_profit_lock`。`go test ./trader/` 全绿(34.6s)。
+>
 > **🔥 v1.16.11 ATR 策略下档位分配存的是裸 ATR 倍数 → 30% 部分止盈档按整仓挂单(2026-07-27,该 bug 类第 8 次实例,已部署 pid 2282277 md5 478e8ed8)**
 >
 > **上线验证(pid 2282277)**:分配表日志恒为百分比且与 arm 指纹一致 —— KAITO `peak_trigger=8.60%` ↔ `8.5997`、SPCX `3.29%` ↔ `3.2933`、WLD `4.20%`(修前报裸 `3.00%`)、CL `2.71%`/`2.43%`。两张错量单(WLD `3778506109091213312` 380 张、CL `3778585660408365056` 1.4 张)已在部署后撤销,系统按修正逻辑自动重挂:WLD 局部档 `3779220406712827904` **114 张**(cb 1.68%)、CL 局部档 `3779222401456721920` **0.4 张**(cb 1.08%,0.42 按步长取整),dd1 全平档仍为 380 / 1.4(cb 2.52% / 1.62%)。撤单顺序遵守"先部署再清理",否则旧二进制会用坏逻辑立刻补回错量单。

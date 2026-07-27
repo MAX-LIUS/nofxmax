@@ -9,6 +9,25 @@ import (
 	"strings"
 )
 
+// isFullCloseTierRule reports whether a rule closes the whole position. Such tiers are
+// independent whole-position exits, not members of the partial ladder.
+func isFullCloseTierRule(rule store.DrawdownTakeProfitRule) bool {
+	return rule.CloseRatioPct >= 99.999
+}
+
+// isFullCloseTierAlloc is the alloc-side counterpart of isFullCloseTierRule.
+func isFullCloseTierAlloc(tier store.DrawdownTierAllocation) bool {
+	return tier.CloseRatioPct >= 99.999
+}
+
+// tierStageName returns the rule's stage name, falling back to a positional label.
+func tierStageName(rule store.DrawdownTakeProfitRule, i int) string {
+	if rule.StageName != "" {
+		return rule.StageName
+	}
+	return fmt.Sprintf("T%d", i+1)
+}
+
 // computeDrawdownTierAllocations computes the fixed position allocations for each drawdown tier
 // at position open time. Each tier gets a fixed quantity that never changes.
 // The allocation is based on the opening quantity and each tier's close_ratio_pct, which refers
@@ -30,6 +49,32 @@ func computeDrawdownTierAllocations(totalQuantity float64, rules []store.Drawdow
 			continue
 		}
 
+		// Full-close tiers (dd1 / outer_exit) are whole-position safety nets, NOT slices of
+		// a partial ladder. Under place-at-open they rest on the exchange CONCURRENTLY with
+		// the partial tiers, each with its own callback, so they must neither consume the
+		// partial budget nor be clamped by it.
+		//
+		// Live 2026-07-27 (bug class instance #9): claude-ct30 has dd1 (3 ATR peak, close 100)
+		// and a partial (4 ATR peak, close 30). Sorted by MinProfitPct, dd1 comes FIRST, filled
+		// allocatedPct to 100, and the partial got ratioPct = 100-100 = 0 → `continue` → dropped
+		// from the alloc table entirely. Consequences: getCumulativeCloseRatioByRule found no
+		// tier (only safe because v1.16.11 stopped inheriting), updateDrawdownTierStates never
+		// tracked its high-water mark, the managed fallback path could never execute it, and the
+		// dashboard showed one tier for a two-tier strategy.
+		if isFullCloseTierRule(rule) {
+			allocs = append(allocs, store.DrawdownTierAllocation{
+				TierIndex:      i,
+				StageName:      tierStageName(rule, i),
+				Quantity:       totalQuantity,
+				CloseRatioPct:  100,
+				MinProfitPct:   rule.MinProfitPct,
+				MaxDrawdownPct: rule.MaxDrawdownPct,
+				PeakPnLPct:     0,
+				Status:         "pending",
+			})
+			continue
+		}
+
 		ratioPct := rule.CloseRatioPct
 		if allocatedPct+ratioPct > 100 {
 			ratioPct = 100 - allocatedPct
@@ -40,14 +85,9 @@ func computeDrawdownTierAllocations(totalQuantity float64, rules []store.Drawdow
 
 		qty := totalQuantity * ratioPct / 100.0
 
-		stageName := rule.StageName
-		if stageName == "" {
-			stageName = fmt.Sprintf("T%d", i+1)
-		}
-
 		allocs = append(allocs, store.DrawdownTierAllocation{
 			TierIndex:      i,
-			StageName:      stageName,
+			StageName:      tierStageName(rule, i),
 			Quantity:       qty,
 			CloseRatioPct:  ratioPct,
 			MinProfitPct:   rule.MinProfitPct,
@@ -150,8 +190,14 @@ func (at *AutoTrader) evaluateDrawdownTiers(symbol, side string, currentPnLPct, 
 				}
 				logger.Infof("📈 Drawdown %s now tracking: %s %s | pnl=%.2f%% >= trigger=%.2f%% | peak=%.2f%%",
 					tier.StageName, symbol, side, currentPnLPct, tier.MinProfitPct, tier.PeakPnLPct)
-				// Single-direction upgrade: supersede all lower tiers
+				// Single-direction upgrade: supersede all lower tiers. A full-close tier is
+				// never superseded by a partial — it is a concurrent whole-position safety
+				// net (it keeps its own exchange order), so cancelling it in-memory would
+				// leave the runner unprotected in the managed fallback path.
 				for j := 0; j < i; j++ {
+					if isFullCloseTierAlloc(allocs[j]) && !isFullCloseTierAlloc(*tier) {
+						continue
+					}
 					if allocs[j].Status == "tracking" || allocs[j].Status == "pending" {
 						allocs[j].Status = "superseded"
 						logger.Infof("⏭️ Drawdown %s superseded by %s: %s %s",
@@ -222,6 +268,11 @@ func (at *AutoTrader) updateDrawdownTierStates(symbol, side string, currentPnLPc
 				logger.Infof("📈 Drawdown %s now tracking (native): %s %s | pnl=%.2f%% >= trigger=%.2f%%",
 					tier.StageName, symbol, side, currentPnLPct, tier.MinProfitPct)
 				for j := 0; j < i; j++ {
+					// Same rule as evaluateDrawdownTiers: a partial never supersedes the
+					// concurrent whole-position tier.
+					if isFullCloseTierAlloc(allocs[j]) && !isFullCloseTierAlloc(*tier) {
+						continue
+					}
 					if allocs[j].Status == "tracking" || allocs[j].Status == "pending" {
 						allocs[j].Status = "superseded"
 						logger.Infof("⏭️ Drawdown %s superseded by %s (native): %s %s",
@@ -320,9 +371,19 @@ func (at *AutoTrader) getCumulativeCloseRatioByRule(symbol, side string, rule st
 			symbol, side, rule.StageName, rule.CloseRatioPct, rule.MinProfitPct)
 		return rule.CloseRatioPct
 	}
+	// A full-close tier owns the whole position outright and inherits nothing.
+	for _, tier := range allocs {
+		if tier.TierIndex == tierIndex && isFullCloseTierAlloc(tier) {
+			return 100
+		}
+	}
+	// Partial tiers inherit only from LOWER PARTIAL tiers. A concurrent full-close tier is a
+	// separate whole-position safety net; summing its 100 in here would clamp every partial to
+	// 100 and re-create bug #8 (a close=30 tier arming the entire position) through the match
+	// path instead of the fallback.
 	var total float64
 	for _, tier := range allocs {
-		if tier.TierIndex <= tierIndex {
+		if tier.TierIndex <= tierIndex && !isFullCloseTierAlloc(tier) {
 			total += tier.CloseRatioPct
 		}
 	}
@@ -384,8 +445,14 @@ func resolveDrawdownRulesWithModes(strategyRules, aiRules []store.DrawdownTakePr
 		}
 
 		if result.MinProfitPct > 0 && result.MaxDrawdownPct > 0 && result.CloseRatioPct > 0 {
+			// Infer SEMANTICALLY, not positionally. The arm path names the same tier via
+			// normalizeDrawdownRule → inferDrawdownStageName ("partial_profit_lock",
+			// "outer_exit"), and StageName is the tier identity that survives ATR→percent
+			// resolution. Stamping "T2" here made the alloc table and the armed DB records
+			// disagree on the name for one configured tier, so identity matching in
+			// getCumulativeCloseRatioByRule / findRuleForTier could not line them up.
 			if result.StageName == "" {
-				result.StageName = fmt.Sprintf("T%d", i+1)
+				result.StageName = inferDrawdownStageName(result)
 			}
 			resolved = append(resolved, result)
 		}
@@ -526,6 +593,25 @@ func findRuleForTier(rules []store.DrawdownTakeProfitRule, tier *store.DrawdownT
 	for i := range rules {
 		if rules[i].MinProfitPct == tier.MinProfitPct && rules[i].MaxDrawdownPct == tier.MaxDrawdownPct {
 			return &rules[i]
+		}
+	}
+	// Threshold equality fails whenever the caller's rules and the alloc table were resolved
+	// from different entry prices (or one side is still in ATR units). Match on StageName,
+	// which survives resolution — full-close and partial tiers are distinguishable by it.
+	// Doing this BEFORE the positional fallback matters: TierIndex refers to the SORTED slice
+	// inside computeDrawdownTierAllocations, while `rules` here is the caller's unsorted slice,
+	// so rules[tier.TierIndex] can silently name a different tier.
+	if tier.StageName != "" {
+		var match *store.DrawdownTakeProfitRule
+		hits := 0
+		for i := range rules {
+			if inferDrawdownStageName(rules[i]) == tier.StageName {
+				match = &rules[i]
+				hits++
+			}
+		}
+		if hits == 1 {
+			return match
 		}
 	}
 	if tier.TierIndex < len(rules) {
