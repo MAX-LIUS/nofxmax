@@ -2,7 +2,25 @@
 
 > **状态**: 生产运行 | **线上 = v1.16.11(2026-07-27 05:53 UTC pid 2282277 md5 478e8ed8,提交 `4399b72`,回滚备份 `/opt/webstack/nofx/nofx.bak_v11610_20260727_055310`;上一版备份 `nofx.bak_v1169_20260727_041214`)**
 > **更新**: 2026-07-27 (v1.16.9 该 bug 类第 6 次实例:开仓即挂路径漏 ATR 换算,把 ATR 倍数当百分数挂单——用户从面板发现"两档配置显示三档 0.6/1.2/1.8";并订正"OKX 没问题"的判断:OKX 同样中招,只是它上报 callbackRate 把原始那条掩住了 | v1.16.8 构造交易所对等测试项目,挖出 HEAD 里既存的 OKX 局部档吃掉 dd1 全平单缺陷;并订正两处我自己的错误结论:Binance triggerPrice≠活动价、审计工具漏配 USDC 路由导致谎报无保护)
-> **版本**: v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
+> **版本**: v1.16.13 (待部署:managed 全程陪跑双保险,取消账户级接管,md5 b92d92da,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
+
+> **🔥 v1.16.13 managed 是"接管"而非"陪跑" → 熔断档位终身零保护(2026-07-27,提交 `b18ff54`,待部署 md5 b92d92da)**
+>
+> **设计定性**:用户明确要求"不行就 managed 一直陪跑,双保险,别搞接管"。原代码恰恰相反——主循环 `if nativeTrailingHandled { continue }` 是**账户级**接管:只要该账户某条交易所 trailing 看起来在,整个 managed 回撤监控当轮停摆,连别的档、别的仓位都不再评估。
+>
+> **零保护黑洞(最严重)**:`accountReArmBreaker` 的 tripped 分支 `continue` 时不清 `allCovered`,理由是"已交给 `applyExchangeFailedLocalMonitor`"。但该 helper 对 `close>=100` 的档位**不下任何单、也不注册任何执行器**,只写保护状态 + 落一条记录。合起来:交易所无单 + managed 无执行器 + 面板显示 armed + 回吐面板熔断器因 `positionHasArmedProtection=true` 放过回撤中的盈利仓。而 `resetReArmFail` 只在"验证到覆盖"时清零,覆盖又需要一张永不下单的单子 → **该仓位终身零保护**,只有换仓位身份(`clearReArmFailForPosition`)才解。`reArmBreakerLimit=3`。
+>
+> **改法(5 处 + 1 处回吐守卫)**:
+> 1. 主循环去掉账户级 `continue`,managed 始终评估;执行与否只由每档 `exchangeSideCoversDrawdownTier` 决定——它查**有效性**(已激活,或挂着且激活价未越过),读不到交易所状态时 **fail open**(放行 managed 平仓)。
+> 2. 门禁抑制分支回滚 `evaluateDrawdownTiers` 已写入的 `executed`。该函数是**先改状态再返回**,外层 `continue` 不回滚就等于该档被永久过滤,`hasAllTiersCompleted` 还会宣称仓位已全部退出。属既存缺陷,在陪跑模式下变成必然。
+> 3. tripped 档位在 `exchangeSideCoversDrawdownTierWithOrders` 里直接 `return false`,执行权交回 managed。
+> 4. `accountReArmBreaker` tripped 分支不再谎报 `allCovered`,且短路掉覆盖查询/计数递增/重复调 `applyExchangeFailedLocalMonitor`(后者对部分档会反复下单造成抖动)。
+> 5. 无 allocs 的老路径改查"交易所单是否有效",不再信 armed DB 记录(陈旧记录指向死单也能满足)。
+> 6. `positionHasArmedProtection` 对两个 `*_exchange_failed_armed` 状态要求存在档位分配(真正的 managed 执行器),否则明确记 warn 并视为未受保护。
+>
+> **防重复平仓的唯一闸门就是每档的 `exchangeSideCoversDrawdownTier`**,不再有账户级短路。测试锚点:E8 tripped→managed 必平且 `trailingCalls==0`;E9 门禁抑制后档位仍可被 `evaluateDrawdownTiers` 触发、`hasAllTiersCompleted` 不误判;E10 交易所单有效时跑 20 轮 0 平仓 0 撤单。既有 `TestActivatedTrailing_NotCancelled_ManagedYields` / `TestPhantomPresent_ManagedStillClosesOnGiveback` 仍通过,是陪跑不双开的独立证据。
+>
+> **教训**:"双保险"和"接管"在代码里的区别不是注释,是**闸门的粒度**——账户级/仓位级的 `continue` 一定是接管;只有把判定下沉到"这一档此刻交易所侧是否真的有效",并在读不到时 fail open,才是陪跑。
 
 > **🔥 v1.16.12 全平档吃光部分档预算 → 部分档被整条丢出分配表(2026-07-27,该 bug 类第 9 次实例,已编码待确认部署 md5 6d90f3c6)**
 >
