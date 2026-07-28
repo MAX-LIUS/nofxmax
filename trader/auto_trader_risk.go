@@ -283,7 +283,7 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			// arming so the arm loop can re-place a genuinely-missing tier this pass.
 			// Phantom orders (activePx>0, mark passed) are NOT touched here.
 			safeProfitFloor := lowestTierMinProfit(rules)
-			at.reconcileDangerousTrailingOrders(symbol, side, currentPnLPct, safeProfitFloor)
+			at.reconcileDangerousTrailingOrders(symbol, side, entryPrice, currentPnLPct, safeProfitFloor)
 			armRules := at.getDrawdownArmRulesForNativeExposure(currentPnLPct, entryPrice, quantity, symbol, side, rules)
 			for _, armRule := range armRules {
 				// If this tier's re-arm breaker has tripped (repeated place/verify
@@ -1177,6 +1177,40 @@ func (at *AutoTrader) claimedTrailingOrderIDsForPosition(symbol, side string, en
 	return claimed
 }
 
+// deliberateImmediateTrailIDsForPosition returns the exchange orderIDs of trailing
+// orders that WE placed on purpose as no-activePx immediate-trails (the "⚡ Trailing
+// activation passed → immediate (no-activePx) order" branch in
+// armNativeTrailingDrawdownTier). Such a record is written with ActivationPrice==0,
+// which is the durable fingerprint of that decision: every other arm path persists a
+// positive planned activation price.
+//
+// 为什么需要它(CLUSDT 门槛抖动的根因):挂这种单的前提是"当时 pnl>=档位 floor",
+// 挂上之后 OKX 立即激活、锚点就固定在那一刻的盈利价上,之后只会朝有利方向棘轮。
+// 但 trailingOrderIsDangerousNoActivation 用的是**之后某一刻**的 pnl 复判同一张单,
+// 两边同一个阈值、不同时刻、中间没有滞回带 —— 于是 pnl 在 floor 上下几个基点晃动时,
+// 同一张单反复被判"故意的安全立即跟踪"(挂)和"危险的立即成交单"(撤):
+// 2026-07-28 生产实况 CLUSDT short floor=3.1309%,挂单时 pnl=3.29%,之后漂到
+// 3.12/3.13% → 4 次 🔴 撤单 + 重挂。代价是真的:撤掉一张已在盈利处生效的跟踪单会把
+// 交易所侧的跟踪峰值**重置到更差的价格**,且撤到重挂之间有一段裸奔窗口。
+//
+// 正确的判别不是"现在在不在门上",而是"下单那刻在不在门上" —— 后者已经被持久化记录
+// 钉住了,所以这里读记录而不是重算 pnl。用持久化记录而不是内存注册表,是为了让判别
+// 在重启后依然成立(重启后本进程没挂过任何单,内存表必然为空,自己的单就会被当成
+// 遗留单撤掉 —— 正是这个缺陷最坏的形态)。
+//
+// 遗留/手工/交易所异常产生的无激活价单没有这样的记录,仍然走 pnl 门 —— 对它们我们
+// 确实不知道锚点在哪,保守当危险处理是对的。
+func (at *AutoTrader) deliberateImmediateTrailIDsForPosition(symbol, side string, entryPrice float64) map[string]struct{} {
+	deliberate := make(map[string]struct{})
+	for _, record := range at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, 0, 0) {
+		if record.ExchangeOrderID == "" || record.ActivationPrice != 0 {
+			continue
+		}
+		deliberate[record.ExchangeOrderID] = struct{}{}
+	}
+	return deliberate
+}
+
 // findTrailingOrderByID returns the live trailing order whose exchange OrderID equals
 // wantID (and matches side), or nil. This is the precise, collision-free identity
 // match that replaces fuzzy qty/activation/callback matching whenever we have a stored
@@ -2050,15 +2084,21 @@ func (at *AutoTrader) allSatisfiedNativeTiersEffective(symbol, side string, entr
 // native trailing orders (ActivationStatus "activated" with activePx<=0). Such an
 // order was placed without an activation anchor, so OKX activated it immediately
 // and it trails from the current price — a small retrace mis-closes the position
-// before the tier's profit anchor. It is never something WE place (place path
-// requires activePx>0), so it only arises from legacy/manual/exchange-anomaly
-// orders. We cancel it here; the normal arm loop then re-places the tier with the
+// before the tier's profit anchor.
+//
+// 注意:这里**不能**假设"这绝不会是我们挂的"。这条注释原先写的是 place path 一定带
+// activePx>0,但 armNativeTrailingDrawdownTier 的 `⚡ activation passed → immediate`
+// 分支正是故意挂 activePx=0 的(见那里的长注释)。我们自己挂的那些由
+// deliberateImmediateTrailIDsForPosition 按持久化记录识别并跳过,只有认不出归属的
+// (遗留/手工/交易所异常)才走下面的 pnl 门。
+//
+// We cancel it here; the normal arm loop then re-places the tier with the
 // correct anchor (when mark hasn't passed the planned activation) and the managed
 // backup covers the giveback in the meantime. PHANTOM orders (activePx>0, mark
 // already passed) are deliberately NOT touched here — they can't mis-close, and
 // re-placing them would just recreate a phantom (churn). Returns the number of
 // dangerous orders cancelled. Runs before the arm loop each drawdown poll.
-func (at *AutoTrader) reconcileDangerousTrailingOrders(symbol, side string, currentPnLPct, safeProfitFloor float64) int {
+func (at *AutoTrader) reconcileDangerousTrailingOrders(symbol, side string, entryPrice, currentPnLPct, safeProfitFloor float64) int {
 	if !at.supportsNativeTrailingStop() {
 		return 0
 	}
@@ -2067,7 +2107,12 @@ func (at *AutoTrader) reconcileDangerousTrailingOrders(symbol, side string, curr
 		logger.Warnf("⚠️ Dangerous-trailing reconcile: cannot fetch open orders (%s %s): %v — skipping this pass", symbol, side, err)
 		return 0
 	}
+	// 我们自己故意挂的无激活价单不参与危险判定 —— 它们的锚点在下单那刻就固定在
+	// 盈利处,用当前 pnl 复判会在 floor 上下抖动时把它们反复撤掉再重挂
+	// (见 deliberateImmediateTrailIDsForPosition 的说明)。
+	deliberate := at.deliberateImmediateTrailIDsForPosition(symbol, side, entryPrice)
 	var dangerousIDs []string
+	keptDeliberate := 0
 	for _, order := range openOrders {
 		if order.PositionSide != "" && !strings.EqualFold(order.PositionSide, strings.ToUpper(side)) {
 			continue
@@ -2085,8 +2130,16 @@ func (at *AutoTrader) reconcileDangerousTrailingOrders(symbol, side string, curr
 			ActivationPrice:  order.ActivationPrice,
 		}
 		if trailingOrderIsDangerousNoActivation(at.exchange, candidate, currentPnLPct, safeProfitFloor) && order.OrderID != "" {
+			if _, ours := deliberate[order.OrderID]; ours {
+				keptDeliberate++
+				continue
+			}
 			dangerousIDs = append(dangerousIDs, order.OrderID)
 		}
+	}
+	if keptDeliberate > 0 {
+		logger.Infof("🛡 Keeping %d deliberate no-activePx immediate-trail order(s) (%s %s pnl=%.2f%% floor=%.2f%%) — anchored in profit at placement time, current pnl does not re-judge them",
+			keptDeliberate, symbol, side, currentPnLPct, safeProfitFloor)
 	}
 	if len(dangerousIDs) == 0 {
 		return 0
@@ -2525,7 +2578,21 @@ func (at *AutoTrader) applyExchangeFailedLocalMonitor(symbol, side string, entry
 // 内存 hint 丢失、只剩持久化归属记录的那张漏单唯一还能被回收的地方。
 //
 // cancelImmediateTrailing 本身幂等:撤成功后内存 hint 与归属记录都清掉,再调用即空转。
+// 熔断门控放在这一层,和上面"按返回值收口"同一个理由:它必须是不变量,而不是各调用方
+// 自觉。原先只有 auto_trader_risk.go:293 那一处 arm loop 查 reArmBreakerTripped,
+// 另外四个调用点(同文件 triggered 分支、protection_reconciler 的 arm/triggered 两处、
+// protection_execution 的开仓路径)全都绕过它 —— 于是"跳闸后停止在交易所侧重挂、交给
+// managed 独占"这个承诺根本兑现不了:2026-07-28 生产实况 CLUSDT short close=100%
+// 14:44:31 跳闸,之后 14:46/14:49/15:04/15:10 仍由 reconciler 一路重挂。
+//
+// 返回 false 而不是 true 是对的:跳闸档位的交易所侧确实没在维护(与
+// exchangeSideCoversDrawdownTierWithOrders 对跳闸档的判定一致),managed monitor 是它
+// 唯一执行者。顺带也不会去撤开仓那张 immediate trailing —— 不挂新的就不该撤旧的。
 func (at *AutoTrader) applyNativeTrailingDrawdown(symbol, side string, entryPrice, markPrice float64, rule store.DrawdownTakeProfitRule) bool {
+	if at.reArmBreakerTripped(symbol, side, rule, entryPrice) {
+		logger.Infof("🟠 Native trailing arm suppressed by TRIPPED re-arm breaker (%s %s close=%.1f%%) — managed monitor owns this tier", symbol, side, rule.CloseRatioPct)
+		return false
+	}
 	covered := at.armNativeTrailingDrawdownTier(symbol, side, entryPrice, markPrice, rule)
 	if covered {
 		at.cancelImmediateTrailing(symbol, side)

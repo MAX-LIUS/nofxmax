@@ -511,7 +511,7 @@ func TestDangerousNoActivation_CancelledAndReplaced(t *testing.T) {
 	}
 	at := ddReliabilityShortSetup([]tradertypes.OpenOrder{danger})
 	// currentPnL 0 with no floor → structural danger stands (near-entry immediate-active)
-	n := at.reconcileDangerousTrailingOrders("WLDUSDT", "short", 0, 0)
+	n := at.reconcileDangerousTrailingOrders("WLDUSDT", "short", 0, 0, 0)
 	if n != 1 {
 		t.Fatalf("expected 1 dangerous order cancelled, got %d", n)
 	}
@@ -536,7 +536,7 @@ func TestPhantom_NotTreatedAsDangerous_NoCancel(t *testing.T) {
 		ActivationStatus: "pending_activation", Status: "NEW",
 	}
 	at := ddReliabilityShortSetup([]tradertypes.OpenOrder{phantom})
-	n := at.reconcileDangerousTrailingOrders("WLDUSDT", "short", 0, 0)
+	n := at.reconcileDangerousTrailingOrders("WLDUSDT", "short", 0, 0, 0)
 	if n != 0 {
 		t.Fatalf("phantom must NOT be treated as dangerous, got %d cancelled", n)
 	}
@@ -554,7 +554,7 @@ func TestGenuinelyActivated_activePxPositive_NotCancelled(t *testing.T) {
 		ActivationStatus: "activated", Status: "NEW",
 	}
 	at := ddReliabilityShortSetup([]tradertypes.OpenOrder{activated})
-	if n := at.reconcileDangerousTrailingOrders("WLDUSDT", "short", 0, 0); n != 0 {
+	if n := at.reconcileDangerousTrailingOrders("WLDUSDT", "short", 0, 0, 0); n != 0 {
 		t.Fatalf("genuinely activated (activePx>0) must NOT be cancelled, got %d", n)
 	}
 }
@@ -878,12 +878,12 @@ func TestReconcile_ProfitAware_KeepsDeliberateImmediateTrail(t *testing.T) {
 	}
 	// 利润 8% ≥ floor 6% → 故意立即跟踪, 不撤。
 	atKeep := ddReliabilityShortSetup([]tradertypes.OpenOrder{mk()})
-	if n := atKeep.reconcileDangerousTrailingOrders("WLDUSDT", "short", 8, 6); n != 0 {
+	if n := atKeep.reconcileDangerousTrailingOrders("WLDUSDT", "short", 0, 8, 6); n != 0 {
 		t.Fatalf("deliberate profit-locked immediate-trail (profit≥floor) must NOT be cancelled, got %d", n)
 	}
 	// 利润 2% < floor 6% → 近入场误平危险单, 要撤。
 	atCancel := ddReliabilityShortSetup([]tradertypes.OpenOrder{mk()})
-	if n := atCancel.reconcileDangerousTrailingOrders("WLDUSDT", "short", 2, 6); n != 1 {
+	if n := atCancel.reconcileDangerousTrailingOrders("WLDUSDT", "short", 0, 2, 6); n != 1 {
 		t.Fatalf("near-entry no-activePx (profit<floor) must be cancelled, got %d", n)
 	}
 }
