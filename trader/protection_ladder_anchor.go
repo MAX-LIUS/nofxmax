@@ -122,9 +122,30 @@ func anchorLadderTakeProfitToEntry(plan *ProtectionPlan, action string, entryQua
 
 		tierIsLive := ladderPriceIsLive(liveTakeProfitPrices, tier.Price)
 		if tierIsLive {
-			// Rule 2: provably not fired. Keep it at its ORIGINAL ratio — the live order
-			// on the exchange is already sized against the entry quantity, and the caller
-			// treats a price match as satisfied, so it will not be re-placed.
+			// Rule 2: provably not fired — keep the tier. But the RATIO must be
+			// re-expressed against the CURRENT quantity, exactly like the reduction
+			// path below does.
+			//
+			// 为什么(ZEC ping-pong 的根因):这里原本保留"开仓量口径的原始比例",注释
+			// 的理由是"在场单已按开仓量 sized,而调用方按价位判满足所以不会重挂"。
+			// 那个理由在 2026-06-22 加入可执行性门禁后失效了 ——
+			// validateProtectionPlanExecution 会在 missing/unexpected 判定**之前**
+			// 用 `当前量 × 比例` 过一遍交易所最小量,而原始比例配的是开仓量:
+			// ZEC 12% 档 → 0.08×12%=0.0096 → 0.96 张 < lotSz 1 → 整档被滤掉 →
+			// 不在 allowed 里 → 在场那张 455.40 被判 stale duplicate 撤掉;下一轮它
+			// 不在场了,走下面的 reduction 路径算出 0.012/0.08=15% → 1.2 张 → 门禁
+			// 通过 → 判 missing → 又挂回来。**在场就变得不可挂、不在场就变得可挂**,
+			// 于是每 ~2.5min 撤一张挂一张,无限循环。
+			// 换算到当前量口径后两条路径给出同一个比例,循环消失。
+			// 注意不会因此重挂在场单:missing 检测只比价位,而数量等价性(v1.16.24)
+			// 两边都过 FormatQuantity,0.012 与 0.0096 同为 1 张,交易所分辨不出。
+			if !noReduction && currentQuantity > 0 && tierQty > 0 {
+				anchoredRatio := tierQty / currentQuantity * 100.0
+				if anchoredRatio > 100 {
+					anchoredRatio = 100
+				}
+				tier.CloseRatioPct = anchoredRatio
+			}
 			kept = append(kept, tier)
 			continue
 		}
