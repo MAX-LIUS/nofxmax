@@ -2040,7 +2040,20 @@ func (at *AutoTrader) exchangeSideCoversDrawdownTierWithOrders(symbol, side stri
 	// coverage only when the position is at/above this tier's profit floor (its own
 	// MinProfitPct) — then it is a deliberate profit-lock. Below the floor it mis-
 	// closes and the managed backup must supplement.
+	//
+	// 例外与 reconcileDangerousTrailingOrders 同源:这一张单如果是我们自己按
+	// "下单那刻 pnl>=floor" 故意挂的(持久化记录 activationPrice==0 认得出),它的锚点
+	// 就固定在盈利处,当前 pnl 掉到 floor 之下并不会让它变成误平单 —— 它照样会在
+	// 回吐时按设计的保留利润平掉。用当前 pnl 复判会让这一档在 floor 上下抖动时被判
+	// "present but NOT effective",连续 3 轮就把 re-arm 熔断**误跳闸**;熔断一跳,
+	// 交易所侧这一档在本仓位余生都不再维护。两处必须同源判别,只修一处等于把撤单
+	// churn 换成误跳闸(2026-07-28 CLUSDT short 的实际链路)。
 	currentPnLPct := calculatePositionPnLPct(side, entryPrice, markPrice)
+	if _, ours := at.deliberateImmediateTrailIDsForPosition(symbol, side, entryPrice)[existing.OrderID]; ours && existing.OrderID != "" {
+		logger.Infof("🛡 Exchange side covers drawdown tier via deliberate immediate-trail (%s %s close=%.1f%% pnl=%.2f%% floor=%.2f%%) — anchored in profit at placement time",
+			symbol, side, rule.CloseRatioPct, currentPnLPct, rule.MinProfitPct)
+		return true
+	}
 	if !nativeTrailingEffective(at.exchange, existing, side, markPrice, currentPnLPct, rule.MinProfitPct) {
 		logger.Warnf("🟡 Exchange trailing tier present but NOT effective (%s %s close=%.1f%% status=%s activePx=%.6f mark=%.6f) — allowing managed code-side close to supplement",
 			symbol, side, rule.CloseRatioPct, existing.ActivationStatus, existing.ActivationPrice, markPrice)

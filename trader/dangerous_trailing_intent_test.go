@@ -119,6 +119,27 @@ func TestDeliberateImmediateTrailVerdictIsStableAcrossFloorOscillation(t *testin
 	}
 }
 
+// A4. 覆盖判定必须与撤单判定同源。只修撤单侧的话,同一次抖动会把这一档判成
+// "present but NOT effective",连续 3 轮误跳熔断 —— 而熔断一跳,配合 B 的门控就是
+// 本仓位余生不再在交易所侧维护这一档。这条钉住"两处同源"。
+func TestDeliberateImmediateTrailCountsAsCoverageBelowFloor(t *testing.T) {
+	rule := clDD1Rule()
+	// 覆盖匹配走 findEquivalentPartialTrailingOrder,单子形状要与该档的计划一致。
+	cb := calculateDrawdownRuleCallbackRatio(83.68, "short", normalizeDrawdownRule(rule))
+	order := clTrailingOrder("algo-cl-1")
+	order.CallbackRate = cb
+
+	at := clImmediateTrailTrader(t, "cl-coverage.db", []tradertypes.OpenOrder{order})
+	at.persistDynamicProtectionRecordWithDetails("CLUSDT", "short", "native_trailing",
+		stableDrawdownRuleFingerprint(83.68, rule), rule.CloseRatioPct, "armed",
+		"algo-cl-1", 0, cb, 1.2)
+
+	// mark=83.0 → pnl≈0.81% < floor 3.1309%:老逻辑在这里判"NOT effective"。
+	if !at.exchangeSideCoversDrawdownTierWithOrders("CLUSDT", "short", normalizeDrawdownRule(rule), 83.68, 83.0, []tradertypes.OpenOrder{order}) {
+		t.Fatal("自己故意挂的立即跟踪单在 pnl 掉到 floor 之下时仍是有效覆盖,否则会误跳熔断")
+	}
+}
+
 // B1. 熔断跳闸后,applyNativeTrailingDrawdown 自身必须拒绝重挂 ——
 // 门控是不变量,不能依赖调用方自觉。这条直接钉住 reconciler 绕过熔断的那个缺陷:
 // 它调的就是这个函数。
