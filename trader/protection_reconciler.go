@@ -302,27 +302,13 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 		unexpectedStops, unexpectedTPs := detectUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership)
 		unexpectedSummary := classifyUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership, true)
 		ownership := evaluateProtectionOwnership(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership)
-		// dynamicOwner 后面跟成分拆分(trail=N be=N):这个总数混计了 trailing 和保本止损,
-		// 只看总数无法区分"多了一张 trailing(会多平仓,真问题)"和"BE 已推过所以多一张
-		// 止损(正常)"。详见 protection_unexpected_classification.go 里字段注释。
-		//
-		// missingSL/missingTP 打的是**驱动下面重挂分支的那两个值**(detectMissingProtection
-		// 的原始判定),而不是 ownership 的同名字段 —— 两者会不一致,且这个不一致曾经是
-		// 排查 ZEC churn 时最大的误导源:evaluateProtectionOwnership 内部按
-		// `missingTP && !nativeTrailingArmed` 做了掩蔽,所以只要有 trailing armed,
-		// ownership.MissingProfit 恒为 false,日志会在**正在重挂的那一轮**读作
-		// missingTP=false。两个值都打出来,并在分歧时显式标注 ownershipMasked,
-		// 这样"日志说没缺、代码却在重挂"不再需要读源码才能看懂。
-		ownershipMasked := ""
-		if ownership.MissingStop != missingSL || ownership.MissingProfit != missingTP {
-			ownershipMasked = fmt.Sprintf(" ownershipMasked(missingSL=%t missingTP=%t)", ownership.MissingStop, ownership.MissingProfit)
-		}
-		logger.Infof("🧭 Protection ownership: %s %s | state=%s verified=%t stopOwner=%s profitOwner=%s missingSL=%t missingTP=%t%s unexpectedSL=%d unexpectedTP=%d staleBot=%d staleTrail=%d manualForeign=%d dynamicOwner=%d(trail=%d be=%d) claimedTrail=%d reasons=%s",
-			symbol, positionSide, ownership.State, ownership.Verified, ownership.StopOwner, ownership.ProfitOwner, missingSL, missingTP, ownershipMasked, ownership.UnexpectedStops, ownership.UnexpectedProfits, unexpectedSummary.StaleBotDuplicate, unexpectedSummary.StaleTrailingDuplicate, unexpectedSummary.ManualOrForeign, unexpectedSummary.ExpectedDynamicOwner, unexpectedSummary.ExpectedDynamicTrailing, unexpectedSummary.ExpectedDynamicStop, len(trailingOwnership.Claimed), strings.Join(ownership.Reasons, "; "))
-		if ownership.State == "unprotected" && ownership.Verified {
-			return result, fmt.Errorf("invalid protection ownership invariant: unprotected but verified")
-		}
-
+		// 容忍判决必须在 🧭 日志**之前**做完 —— 否则日志打的是中间态:
+		// 这条分支会把 state 从 degraded 翻回 protected/verified,而日志在它上游,
+		// 于是 SKHYNIXUSDT 连续 465 轮打出 `state=degraded verified=false`,紧接着
+		// 下一行却是 `✅ exchange protection verified` —— 两行都"对",只是分属容忍
+		// 前后两个时刻,读日志的人只看到自相矛盾。先判决再打印,并把被容忍掉的
+		// 原始值以 stopTolerated(N→0) 标出,这样"为什么 degraded 消失了"自证。
+		rawUnexpectedStops := unexpectedStops
 		// Detect duplicate/stale orders by explicit order-role mismatch, not only coarse order counts.
 		// This keeps valid break-even / trailing orders while removing old ladder/fallback debris.
 		// Exception: if stale bot duplicates exceed a threshold, clean them up to prevent accumulation.
@@ -340,6 +326,33 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 				ownership.Verified = true
 			}
 		}
+		// dynamicOwner 后面跟成分拆分(trail=N be=N):这个总数混计了 trailing 和保本止损,
+		// 只看总数无法区分"多了一张 trailing(会多平仓,真问题)"和"BE 已推过所以多一张
+		// 止损(正常)"。详见 protection_unexpected_classification.go 里字段注释。
+		//
+		// missingSL/missingTP 打的是**驱动下面重挂分支的那两个值**(detectMissingProtection
+		// 的原始判定),而不是 ownership 的同名字段 —— 两者会不一致,且这个不一致曾经是
+		// 排查 ZEC churn 时最大的误导源:evaluateProtectionOwnership 内部按
+		// `missingTP && !nativeTrailingArmed` 做了掩蔽,所以只要有 trailing armed,
+		// ownership.MissingProfit 恒为 false,日志会在**正在重挂的那一轮**读作
+		// missingTP=false。两个值都打出来,并在分歧时显式标注 ownershipMasked,
+		// 这样"日志说没缺、代码却在重挂"不再需要读源码才能看懂。
+		ownershipMasked := ""
+		if ownership.MissingStop != missingSL || ownership.MissingProfit != missingTP {
+			ownershipMasked = fmt.Sprintf(" ownershipMasked(missingSL=%t missingTP=%t)", ownership.MissingStop, ownership.MissingProfit)
+		}
+		// 被上面容忍分支归零的额外止损单:不标出来的话,日志里的 unexpectedSL=0 与
+		// 紧邻的 🛡 preserving 行(它打的是归零前的数)会读作互相矛盾。
+		stopTolerated := ""
+		if rawUnexpectedStops != unexpectedStops {
+			stopTolerated = fmt.Sprintf(" stopTolerated(%d→%d)", rawUnexpectedStops, unexpectedStops)
+		}
+		logger.Infof("🧭 Protection ownership: %s %s | state=%s verified=%t stopOwner=%s profitOwner=%s missingSL=%t missingTP=%t%s unexpectedSL=%d unexpectedTP=%d%s staleBot=%d staleTrail=%d manualForeign=%d dynamicOwner=%d(trail=%d be=%d) claimedTrail=%d reasons=%s",
+			symbol, positionSide, ownership.State, ownership.Verified, ownership.StopOwner, ownership.ProfitOwner, missingSL, missingTP, ownershipMasked, ownership.UnexpectedStops, ownership.UnexpectedProfits, stopTolerated, unexpectedSummary.StaleBotDuplicate, unexpectedSummary.StaleTrailingDuplicate, unexpectedSummary.ManualOrForeign, unexpectedSummary.ExpectedDynamicOwner, unexpectedSummary.ExpectedDynamicTrailing, unexpectedSummary.ExpectedDynamicStop, len(trailingOwnership.Claimed), strings.Join(ownership.Reasons, "; "))
+		if ownership.State == "unprotected" && ownership.Verified {
+			return result, fmt.Errorf("invalid protection ownership invariant: unprotected but verified")
+		}
+
 		if unexpectedStops > 0 || unexpectedTPs > 0 {
 			unexpectedIDs := collectUnexpectedProtectionOrderIDs(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership)
 			// Coverage-complete fast path (fix 2026-06-22 churn): when every required
