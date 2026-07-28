@@ -285,6 +285,74 @@ func extractCoTTrace(response string) string {
 	return strings.TrimSpace(response)
 }
 
+// decodeDecisionArray decodes the decision array element-by-element so that one
+// malformed decision cannot discard the others.
+//
+// Why this exists (production incident, cycle 3416, 2026-07-28):
+// a single `alignment_notes` came back as a bare string instead of an array, and
+// the whole cycle's decisions were dropped. Measured stdlib behaviour with a
+// custom Decision.UnmarshalJSON in play is worse than it first looks:
+//
+//	decoding []Decision ABORTS at the failing element — the element itself is
+//	zeroed (symbol/action lost, because Decision.UnmarshalJSON early-returns
+//	before assigning) AND every element after it is never decoded at all.
+//
+// So one cosmetic field could silently drop a later `close` decision. Missing a
+// close is more dangerous than missing an open, which is what makes whole-array
+// atomicity the wrong default here.
+//
+// Strategy: split the array into raw elements first (a cheap structural parse
+// that only fails on real syntax errors), then decode each element on its own.
+// Good decisions survive; a broken one costs only itself and is reported via
+// fallbackReason so the cycle is visibly degraded rather than silently thinned.
+//
+// Deliberately NOT done: salvaging symbol/action out of a failed element to
+// synthesize a partial decision. A decision whose numeric fields silently
+// zeroed could place a wrong order — dropping it is the safe direction.
+func decodeDecisionArray(jsonContent string) ([]Decision, string, error) {
+	var decisions []Decision
+	if err := json.Unmarshal([]byte(jsonContent), &decisions); err == nil {
+		return decisions, "", nil
+	} else {
+		// Structural split. Fails only on genuine syntax errors, in which case
+		// there is nothing trustworthy to recover and we surface the original error.
+		var elems []json.RawMessage
+		if splitErr := json.Unmarshal([]byte(jsonContent), &elems); splitErr != nil {
+			return nil, "", fmt.Errorf("JSON parsing failed: %w\nJSON content: %s", err, jsonContent)
+		}
+
+		kept := make([]Decision, 0, len(elems))
+		var failed []string
+		for i, el := range elems {
+			var d Decision
+			if elemErr := json.Unmarshal(el, &d); elemErr != nil {
+				// Identify it for the operator without trusting it for execution.
+				label := fmt.Sprintf("#%d", i)
+				var ident struct {
+					Symbol string `json:"symbol"`
+					Action string `json:"action"`
+				}
+				if json.Unmarshal(el, &ident) == nil && ident.Symbol != "" {
+					label = fmt.Sprintf("#%d %s/%s", i, ident.Symbol, ident.Action)
+				}
+				logger.Infof("⚠️  [PartialParse] Dropping malformed decision %s: %v", label, elemErr)
+				failed = append(failed, label)
+				continue
+			}
+			kept = append(kept, d)
+		}
+
+		if len(kept) == 0 {
+			return nil, "", fmt.Errorf("JSON parsing failed: %w\nJSON content: %s", err, jsonContent)
+		}
+
+		logger.Infof("⚠️  [PartialParse] Recovered %d of %d decisions; dropped: %s",
+			len(kept), len(elems), strings.Join(failed, ", "))
+		return kept, fmt.Sprintf("partial_parse_dropped_%d_of_%d(%s)",
+			len(failed), len(elems), strings.Join(failed, ", ")), nil
+	}
+}
+
 func extractDecisions(response string) ([]Decision, string, error) {
 	s := removeInvisibleRunes(response)
 	s = strings.TrimSpace(s)
@@ -310,11 +378,7 @@ func extractDecisions(response string) ([]Decision, string, error) {
 		if err := validateJSONFormat(jsonContent); err != nil {
 			return nil, "", fmt.Errorf("JSON format validation failed: %w\nJSON content: %s\nFull response:\n%s", err, jsonContent, response)
 		}
-		var decisions []Decision
-		if err := json.Unmarshal([]byte(jsonContent), &decisions); err != nil {
-			return nil, "", fmt.Errorf("JSON parsing failed: %w\nJSON content: %s", err, jsonContent)
-		}
-		return decisions, "", nil
+		return decodeDecisionArray(jsonContent)
 	}
 
 	jsonContent := strings.TrimSpace(extractTopLevelJSONArray(jsonPart))
@@ -344,12 +408,7 @@ func extractDecisions(response string) ([]Decision, string, error) {
 		return nil, "", fmt.Errorf("JSON format validation failed: %w\nJSON content: %s\nFull response:\n%s", err, jsonContent, response)
 	}
 
-	var decisions []Decision
-	if err := json.Unmarshal([]byte(jsonContent), &decisions); err != nil {
-		return nil, "", fmt.Errorf("JSON parsing failed: %w\nJSON content: %s", err, jsonContent)
-	}
-
-	return decisions, "", nil
+	return decodeDecisionArray(jsonContent)
 }
 
 // fixThousandSeparators removes thousand-separator commas from numeric values in JSON.
