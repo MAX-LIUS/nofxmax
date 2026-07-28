@@ -63,3 +63,53 @@ AIEntryProtectionRationale.alignment_notes of type []string
 这是"**用不该用的那个量做判断**"错误族在解析层的一个实例：
 用**字段形状**（不可控输入）去判断**整批决策是否可用**（业务结论）。
 与保护系统 v1.16.27 三缺陷同源 —— 见 [unified-protection-system.md](unified-protection-system.md)。
+
+---
+
+## 2026-07-28 结构性根因：整数组原子解码（提交 c21e3c3）
+
+上面那个修复只解决了"这次踩到的三个字段"。**逐个字段加容错是打地鼠，永远补不完**
+（这个文件里已经有 13 个容错解析器，说明形状漂移是反复发生的常态）。
+真正该问的是：*为什么一个字段的错误能杀掉整批*。
+
+`extractDecisions` 用 `json.Unmarshal(jsonContent, &decisions)` **整数组一次性解码**。
+
+### 实测行为（探针，3 元素数组，中间那个有一个坏字段）
+
+```
+len(decisions) = 2        ← 不是 3
+  [0] symbol="AAAUSDT" action="hold"
+  [1] symbol=""        action=""     ← 被清零：Decision.UnmarshalJSON 提前 return，
+                                        *d = Decision(a) 从没执行
+  [2] 根本没被解码                    ← 解码在这里整体中止
+```
+
+**比表面严重得多**：一个说明性字段不只丢掉自己那条决策，还丢掉**排在它后面所有**决策
+—— 包括 `close`。**漏平比漏开危险**，这就是"整数组原子性"在这里是错误默认值的原因。
+
+关键区分（当前代码没做，是根因）：
+- **类型错误**：结构完好、数据可信，只有个别字段形状不对 → 应逐元素隔离
+- **语法错误**：结构都拆不开（`len=0`）→ 没有可信数据，应整批失败
+
+### 修法
+
+`decodeDecisionArray`：先把数组拆成 `[]json.RawMessage`（廉价结构解析，只对真语法错误失败），
+再**逐元素**解码。好的存活，坏的只损失自己。
+
+刻意保留的行为（三条反向对照都有测试）：
+| 情形 | 行为 |
+|---|---|
+| 全部正常 | 与从前完全一致，不报降级 |
+| 真语法错误 | 仍整批失败（无可信数据） |
+| 一条都救不回 | 仍**报错**，绝不返回空集 —— 否则会被误当作"AI 决定什么都不做" |
+
+**刻意不做**：从失败元素里捞 symbol/action 拼一条部分决策。它的数值字段已经静默清零，
+可能下错单 —— **丢掉才是安全方向**。
+
+降级必须可见不可静默：丢弃行记日志（带 symbol/action），并经既有 `ParseFallbackReason`
+通道上报为 `partial_parse_dropped_N_of_M`（该通道已接到 `auto_trader_loop.go` 的周期复盘记录）。
+
+### 验证
+
+`kernel/decision_partial_parse_test.go` 4 用例，坏元素**故意排在 close 之前**（危险排布）。
+反向对照：把 `decodeDecisionArray` 改回原子解码，恰好是那条用例失败。
