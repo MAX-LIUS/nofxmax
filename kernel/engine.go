@@ -249,7 +249,55 @@ type AIEntryProtectionRationale struct {
 	Anchors              []AIEntryProtectionAnchor   `json:"anchors,omitempty"`
 	HigherAnchors        []AIEntryProtectionAnchor   `json:"higher_timeframe_anchors,omitempty"`
 	TimeframeStructures  AIEntryTimeframeStructures  `json:"timeframe_structures,omitempty"`
-	AlignmentNotes       []string                    `json:"alignment_notes,omitempty"`
+	AlignmentNotes       AIStringList                `json:"alignment_notes,omitempty"`
+}
+
+// AIStringList is a []string that also accepts a BARE STRING from the model.
+//
+// 为什么需要它:说明性字段的形状不合会**废掉整批决策**。2026-07-28 17:32 生产实况:
+// claude trader 把 `alignment_notes` 返回成一个字符串而不是数组,
+// `json: cannot unmarshal string into Go struct field
+// AIEntryProtectionRationale.entry_protection_rationale.alignment_notes of type
+// []string` → `failed to extract decisions` → 整个 cycle 3416 的决策全丢,
+// 包括同一批里那笔 ZECUSDT open_long。一个纯注释字段的形状,代价是一轮交易。
+//
+// 这里用宽容类型而不是只改 alignment_notes 一处:AI 对"单元素数组 vs 裸值"的选择
+// 是随机的,`lower`/`higher` 同样是它填的 []string,下次轮到它们炸。仓库里已有同一
+// 解法的先例(AIQualityScore 容忍对象/标量两形,注释写明"Without this, a bare number
+// crashed decision parsing and tripped SAFE MODE")—— 这是第 N 次同类实例。
+//
+// 空串归一为 nil(而不是 [""]),下游拿到的是"没填",与字段 omitempty 的语义一致。
+type AIStringList []string
+
+func (l *AIStringList) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		*l = nil
+		return nil
+	}
+	if data[0] == '[' {
+		var arr []string
+		if err := json.Unmarshal(data, &arr); err != nil {
+			return err
+		}
+		*l = arr
+		return nil
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		if strings.TrimSpace(s) == "" {
+			*l = nil
+			return nil
+		}
+		*l = AIStringList{s}
+		return nil
+	}
+	// 其它标量(数字/布尔)也不该炸掉整批决策:按原样收成一个元素。
+	*l = AIStringList{string(data)}
+	return nil
 }
 
 type AIEntryTimeframeStructures []AIEntryTimeframeStructure
@@ -337,9 +385,9 @@ type AISelectedLevel struct {
 }
 
 type AIEntryTimeframeContext struct {
-	Primary string   `json:"primary,omitempty"`
-	Lower   []string `json:"lower,omitempty"`
-	Higher  []string `json:"higher,omitempty"`
+	Primary string       `json:"primary,omitempty"`
+	Lower   AIStringList `json:"lower,omitempty"`
+	Higher  AIStringList `json:"higher,omitempty"`
 }
 
 type AIEntryKeyLevels struct {
