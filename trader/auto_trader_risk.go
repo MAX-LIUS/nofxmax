@@ -1980,10 +1980,24 @@ func nativeTrailingEffective(exchange string, order *nativeTrailingOrder, side s
 	// Resting order is effective ONLY while the activation price has NOT yet been
 	// passed (it will auto-activate when reached). Once mark passed activePx and
 	// the venue still reports it non-activated, it is phantom → NOT effective.
+	//
+	// 但"越过"必须带容差带。我们拿**自己的 mark** 去判**OKX 会不会触发**,而 OKX 用的是
+	// 它自己的触发价源(last/index),两者在边界上必然有几个基点的分歧。原先是严格不等号,
+	// 于是 mark 只要漂过 activePx 一跳,一张健康的挂单就被判幻影;连续 3 轮就把 re-arm
+	// 熔断跳掉(2026-07-28 16:47 生产实况:CLUSDT short close=30% 档 activePx=80.19
+	// mark=80.15,只越过 0.05%,交易所侧仍报 pending_activation —— 它根本没触发,是我们
+	// 判错了)。带上既有的 protectionPriceTolerancePct(0.2%)后,这类边界分歧不再误判,
+	// 真正的死单会漂出容差带照样被抓住。
+	//
+	// 容差为什么不会漏掉真幻影:要用到这一档的跟踪保护,价格得先回吐该档的
+	// maxDrawdown 量级(CLUSDT 这档 callback≈1.25%),比 0.2% 大一个数量级 ——
+	// 也就是说价格不可能"在容差带内"就需要这张单生效。等真需要它时,偏离早已超出容差带,
+	// 幻影判定照常触发,managed 侧照常补位。
+	tolerance := activePx * protectionPriceTolerancePct
 	if strings.EqualFold(side, "long") {
-		return markPrice < activePx
+		return markPrice < activePx+tolerance
 	}
-	return markPrice > activePx
+	return markPrice > activePx-tolerance
 }
 
 // exchangeSideCoversDrawdownTier reports whether the exchange already carries an

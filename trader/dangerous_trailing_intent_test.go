@@ -140,6 +140,36 @@ func TestDeliberateImmediateTrailCountsAsCoverageBelowFloor(t *testing.T) {
 	}
 }
 
+// C1. 幻影判定要带容差带:我们拿自己的 mark 判 OKX 会不会触发,而 OKX 用它自己的
+// 触发价源,边界上必然有几个基点分歧。严格不等号会把健康挂单判成幻影,3 轮误跳熔断。
+// 数据取 2026-07-28 16:47 生产实况:CLUSDT short activePx=80.19 mark=80.15(越过 0.05%),
+// 交易所仍报 pending_activation —— 它没触发,是我们判错了。
+func TestRestingTrailingNotPhantomWithinPriceTolerance(t *testing.T) {
+	order := &nativeTrailingOrder{
+		PositionSide: "SHORT", ActivationStatus: "pending_activation",
+		ActivationPrice: 80.19, StopPrice: 80.19, Quantity: 0.84, CallbackRate: 0.012524,
+	}
+	// 空头:mark 跌破 activePx 才算越过。80.15 只越过 0.05% —— 在 0.2% 容差带内。
+	if !nativeTrailingEffective("okx", order, "short", 80.15, 4.22, 4.1746) {
+		t.Fatal("越过量在容差带内(0.05% < 0.2%)的挂单不是幻影,判成幻影会误跳熔断")
+	}
+	// 真漂出容差带(越过 0.5%)才算幻影。
+	if nativeTrailingEffective("okx", order, "short", 79.79, 4.22, 4.1746) {
+		t.Fatal("越过量超出容差带(0.5% > 0.2%)应判幻影,否则真死单会伪装成覆盖")
+	}
+	// 多头对称。
+	longOrder := &nativeTrailingOrder{
+		PositionSide: "LONG", ActivationStatus: "pending_activation",
+		ActivationPrice: 100.0, StopPrice: 100.0, Quantity: 1, CallbackRate: 0.01,
+	}
+	if !nativeTrailingEffective("okx", longOrder, "long", 100.05, 5, 4) {
+		t.Fatal("多头越过 0.05% 在容差带内,不应判幻影")
+	}
+	if nativeTrailingEffective("okx", longOrder, "long", 100.5, 5, 4) {
+		t.Fatal("多头越过 0.5% 超出容差带,应判幻影")
+	}
+}
+
 // B1. 熔断跳闸后,applyNativeTrailingDrawdown 自身必须拒绝重挂 ——
 // 门控是不变量,不能依赖调用方自觉。这条直接钉住 reconciler 绕过熔断的那个缺陷:
 // 它调的就是这个函数。
