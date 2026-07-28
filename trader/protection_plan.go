@@ -189,6 +189,21 @@ type ProtectionPlan struct {
 	// registering its live price here keeps the reconciler from cancelling it as a stray
 	// order. Not part of missing-detection, so the reconciler never double-places it.
 	AllowedExtraStopPrices []float64
+	// AllowedExtraTakeProfitPrices are take-profit prices the reconciler must TOLERATE
+	// but must NOT place or require. Populated by anchorLadderTakeProfitToEntry with the
+	// tiers it inferred as already-executed and dropped from the plan.
+	//
+	// Why dropping a tier is not enough (2026-07-28, ZECUSDT SHORT): the anchor's
+	// "already executed" verdict is an INFERENCE from a liveness snapshot, not a fact.
+	// Once a tier leaves the plan, its resting order no longer consumes an allowed
+	// price, so the reconciler reclassifies it as a stale bot duplicate and cancels
+	// it — which makes the inference true retroactively and destroys a protection
+	// target that never fired. Worse, it feeds back: the cancel changes the liveness
+	// snapshot the NEXT anchor call reads, so the plan's tier set oscillates and every
+	// round looks like "a tier is missing", triggering a re-place of the whole ladder.
+	// Registering the dropped prices here breaks that loop: not placed, not required,
+	// but never canceled either.
+	AllowedExtraTakeProfitPrices []float64
 }
 
 // mergeProtectionPlans combines multiple protection plans into a single target exchange protection set.

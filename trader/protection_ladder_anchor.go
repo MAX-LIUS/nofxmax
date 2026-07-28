@@ -74,6 +74,10 @@ func anchorLadderTakeProfitToEntry(plan *ProtectionPlan, action string, entryQua
 	}
 	remainingClosed := closedQty
 	kept := make([]ProtectionOrder, 0, len(tiers))
+	// Prices of tiers this call decides are already executed. They leave the plan but
+	// must stay cancel-immune — see AllowedExtraTakeProfitPrices for why dropping
+	// without tolerating turns an inference into a self-fulfilling cancel loop.
+	dropped := make([]float64, 0, len(tiers))
 
 	// Rule 2 (applied while walking, below): a tier whose order is STILL LIVE on the
 	// exchange has provably not fired, whatever the quantity arithmetic says. It also
@@ -129,6 +133,7 @@ func anchorLadderTakeProfitToEntry(plan *ProtectionPlan, action string, entryQua
 			// Rule 1: gone from the exchange while a farther tier is still live ⇒ it fired.
 			logger.Infof("  🪜 Ladder TP tier already executed (outer tier still live ⇒ price was crossed): price=%.6f ratio=%.1f%% tierQty=%.6f — not re-placing",
 				tier.Price, tier.CloseRatioPct, tierQty)
+			dropped = append(dropped, tier.Price)
 			if remainingClosed > tierQty {
 				remainingClosed -= tierQty
 			} else {
@@ -152,6 +157,7 @@ func anchorLadderTakeProfitToEntry(plan *ProtectionPlan, action string, entryQua
 		if unfilled <= tierQty*0.5 {
 			logger.Infof("  🪜 Ladder TP tier already executed (anchored to entry): price=%.6f ratio=%.1f%% tierQty=%.6f filled=%.6f — not re-placing",
 				tier.Price, tier.CloseRatioPct, tierQty, filled)
+			dropped = append(dropped, tier.Price)
 			continue
 		}
 
@@ -172,6 +178,11 @@ func anchorLadderTakeProfitToEntry(plan *ProtectionPlan, action string, entryQua
 
 	plan.TakeProfitOrders = kept
 	plan.NeedsTakeProfit = len(kept) > 0
+	for _, p := range dropped {
+		if p > 0 {
+			plan.AllowedExtraTakeProfitPrices = append(plan.AllowedExtraTakeProfitPrices, p)
+		}
+	}
 	if len(kept) == 0 {
 		plan.TakeProfitPrice = 0
 		logger.Infof("  🪜 All ladder TP tiers already executed; no take-profit re-applied (entry=%.6f current=%.6f closed=%.6f)",

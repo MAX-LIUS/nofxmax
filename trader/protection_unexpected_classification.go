@@ -115,6 +115,15 @@ func allowedProtectionPricesForPlan(plan *ProtectionPlan) ([]float64, []float64)
 	for _, target := range plan.TakeProfitOrders {
 		allowedTPs = append(allowedTPs, target.Price)
 	}
+	// Anchor-dropped ladder tiers: tolerated so a tier the anchor merely INFERRED as
+	// executed is not canceled (which would make the inference true and oscillate the
+	// plan every cycle). Like AllowedExtraStopPrices, intentionally NOT part of
+	// missing-detection, so the reconciler never re-places them either.
+	for _, p := range plan.AllowedExtraTakeProfitPrices {
+		if p > 0 {
+			allowedTPs = append(allowedTPs, p)
+		}
+	}
 	if len(plan.TakeProfitOrders) == 0 && plan.NeedsTakeProfit && plan.TakeProfitPrice > 0 {
 		allowedTPs = append(allowedTPs, plan.TakeProfitPrice)
 	}

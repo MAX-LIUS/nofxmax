@@ -885,6 +885,7 @@ func (at *AutoTrader) placeAndVerifyLadderProtection(symbol, positionSide string
 	// aggregate error at the end so the retry wrapper re-runs; the placement is
 	// idempotent because hasExistingEquivalentProtection skips already-placed tiers.
 	var placeErrs []error
+	quantize := at.protectionQtyQuantizerFor()
 	slSetter, slTaggedOK := at.trader.(interface {
 		SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error
 		SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) (string, error)
@@ -899,7 +900,7 @@ func (at *AutoTrader) placeAndVerifyLadderProtection(symbol, positionSide string
 		if orderQty <= 0 {
 			continue
 		}
-		if hasExistingEquivalentProtection(existingOrders, positionSide, false, order.Price, orderQty) {
+		if hasExistingEquivalentProtection(existingOrders, positionSide, false, order.Price, orderQty, quantize, symbol) {
 			continue
 		}
 		if slTaggedOK {
@@ -919,7 +920,7 @@ func (at *AutoTrader) placeAndVerifyLadderProtection(symbol, positionSide string
 		if orderQty <= 0 {
 			continue
 		}
-		if hasExistingEquivalentProtection(existingOrders, positionSide, true, order.Price, orderQty) {
+		if hasExistingEquivalentProtection(existingOrders, positionSide, true, order.Price, orderQty, quantize, symbol) {
 			continue
 		}
 		if tpTaggedOK {
@@ -1003,9 +1004,13 @@ func verifyProtectionOrders(orders []tradertypes.OpenOrder, positionSide string,
 	return nil
 }
 
-func hasExistingEquivalentProtection(orders []tradertypes.OpenOrder, positionSide string, wantTakeProfit bool, targetPrice, targetQty float64) bool {
+// hasExistingEquivalentProtection reports whether an order equivalent to the
+// target is already resting. quantize is the venue's own granularity (see
+// protection_qty_equivalence.go); pass nil only where no adapter is reachable,
+// which degrades to the legacy relative tolerance.
+func hasExistingEquivalentProtection(orders []tradertypes.OpenOrder, positionSide string, wantTakeProfit bool, targetPrice, targetQty float64, quantize protectionQtyQuantizer, symbol string) bool {
 	for _, order := range orders {
-		if hasEquivalentProtectionOrder(order, positionSide, wantTakeProfit, targetPrice, targetQty) {
+		if hasEquivalentProtectionOrder(order, positionSide, wantTakeProfit, targetPrice, targetQty, quantize, symbol) {
 			return true
 		}
 	}
@@ -1195,7 +1200,7 @@ func countMatchingProtectionOrders(orders []tradertypes.OpenOrder, positionSide 
 	return count
 }
 
-func hasEquivalentProtectionOrder(order tradertypes.OpenOrder, positionSide string, wantTakeProfit bool, targetPrice, targetQty float64) bool {
+func hasEquivalentProtectionOrder(order tradertypes.OpenOrder, positionSide string, wantTakeProfit bool, targetPrice, targetQty float64, quantize protectionQtyQuantizer, symbol string) bool {
 	if positionSide != "" && !strings.EqualFold(order.PositionSide, positionSide) && order.PositionSide != "" {
 		return false
 	}
@@ -1215,10 +1220,12 @@ func hasEquivalentProtectionOrder(order tradertypes.OpenOrder, positionSide stri
 	if !approximatelyEqualPrice(price, targetPrice) {
 		return false
 	}
-	if targetQty > 0 && order.Quantity > 0 && math.Abs(order.Quantity-targetQty)/math.Max(order.Quantity, targetQty) > 0.05 {
-		return false
-	}
-	return true
+	// Quantity is compared at the VENUE's granularity, not at plan precision:
+	// the plan's tier quantity is a pre-quantization intent and the resting order
+	// is a post-quantization fact, so any fixed relative tolerance mislabels
+	// narrow tiers as different orders and churns. See
+	// protection_qty_equivalence.go for the ZECUSDT case this fixes.
+	return protectionQuantitiesEquivalent(quantize, symbol, targetQty, order.Quantity)
 }
 
 func looksLikeStopLoss(order tradertypes.OpenOrder) bool {
