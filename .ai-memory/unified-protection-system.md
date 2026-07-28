@@ -1,11 +1,12 @@
 # 统一保护系统 - AI 记忆文档
 
-> **状态**: 生产运行 | **线上后端 = v1.16.22(2026-07-28 pid 2454865 md5 7ef98667661a35f2ed13fc977557c5bf,提交 `de6a3a5`,回滚备份 `/opt/webstack/nofx/nofx.bak_ddsort_20260727_221941` = v1.16.21 md5 f4fe200a)** | **线上前端 = v1.16.23(提交 `f3ee04e`)**;部署后核对见下方 v1.16.22 / v1.16.23 条目
+> **状态**: 生产运行 | **线上后端 = v1.16.25(2026-07-28 13:38 pid 2479237 md5 1b5a608a2e3ad7f712e0e4cb8ef75be6,含 v1.16.24+v1.16.25,提交 `7efc6cf`,回滚备份 `/opt/webstack/nofx/nofx.bak_zecchurn_20260728_044300` = v1.16.22 md5 7ef98667)** | **线上前端 = v1.16.23(提交 `f3ee04e`)**;部署后核对见下方 v1.16.22 / v1.16.23 条目
+> **历史**: v1.16.22(2026-07-28 10:57 pid 2454865 md5 7ef98667661a35f2ed13fc977557c5bf,提交 `de6a3a5`)
 > **历史**: v1.16.21(2026-07-28 03:04 pid 2413205 md5 f4fe200aec65bc3900c5eb8c175dab52,含 v1.16.19+v1.16.20+v1.16.21,提交 `5cef90d`)
 > **历史**: v1.16.18(2026-07-27 23:40 pid 2381838 md5 e6abee6582e455b908b9efa32c37f51f,提交 `5f2163f`);部署后核对:4 trader 全部加载、API 200、无 panic、CL 持仓 `staleTrail=0 claimedTrail=2 dynamicOwner=2`(**claimedTrail=2 证明认领集合真的解析到了两张在场单,不是走 nil/空集合容忍兜底**)、交易所 7 张单与部署前逐一致(无误撤)
 > **部署后核对(v1.16.13)**:ETH/CL/WLD 从 `1 tiers` 变 `2 tiers` 且数量正确,`partial_profit_lock` 命名正常;KAITO 单档已确认是策略本身只配一档(GPT-ct50),非丢档。
 > **更新**: 2026-07-27 (v1.16.9 该 bug 类第 6 次实例:开仓即挂路径漏 ATR 换算,把 ATR 倍数当百分数挂单——用户从面板发现"两档配置显示三档 0.6/1.2/1.8";并订正"OKX 没问题"的判断:OKX 同样中招,只是它上报 callbackRate 把原始那条掩住了 | v1.16.8 构造交易所对等测试项目,挖出 HEAD 里既存的 OKX 局部档吃掉 dd1 全平单缺陷;并订正两处我自己的错误结论:Binance triggerPrice≠活动价、审计工具漏配 USDC 路由导致谎报无保护)
-> **版本**: v1.16.25 (待部署:所有权日志分歧+黄灯 unknown_mark+runner 迁移撤错档,提交 `7efc6cf`) / v1.16.24 (待部署:挂单等价性按交易所粒度判定 + 阶梯档被推断执行后免撤,提交 `9682f65`) / v1.16.23 (已部署:前端归因枚举补齐 5 处 + 契约测试锁住前后端对齐,提交 `f3ee04e`) / v1.16.22 (已部署:保护档按成交价排序 + callback 单位收口 + 细粒度归因保留 + 开仓竞态宽限期,提交 `de6a3a5`) / v1.16.18 (待部署:OKX tag 装不下 reason → 定向撤单实为广撤;reason 收口到 coded client id) / v1.16.17 (待部署:trailing 归属按认领集合判定 + 档位分配锚定开仓量,提交 `87490ba`) / v1.16.16 (已部署:ATR→% 换算的除数锚定到冻结开仓价,提交 `80845a2`) / v1.16.15 (已部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,提交 `75854df`) / v1.16.14 (已部署:immediate trailing 落库归属 + 撤单点按返回值收口,提交 `b4f35e0`) / v1.16.13 (已部署:managed 全程陪跑双保险,取消账户级接管,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
+> **版本**: v1.16.26 (在场档位比例锚定当前量,ZEC ping-pong 根因,提交 `b292774`) / v1.16.25 (已部署 2026-07-28 13:38 pid 2479237 md5 1b5a608a:所有权日志分歧+黄灯 unknown_mark+runner 迁移撤错档,提交 `7efc6cf`) / v1.16.24 (待部署:挂单等价性按交易所粒度判定 + 阶梯档被推断执行后免撤,提交 `9682f65`) / v1.16.23 (已部署:前端归因枚举补齐 5 处 + 契约测试锁住前后端对齐,提交 `f3ee04e`) / v1.16.22 (已部署:保护档按成交价排序 + callback 单位收口 + 细粒度归因保留 + 开仓竞态宽限期,提交 `de6a3a5`) / v1.16.18 (待部署:OKX tag 装不下 reason → 定向撤单实为广撤;reason 收口到 coded client id) / v1.16.17 (待部署:trailing 归属按认领集合判定 + 档位分配锚定开仓量,提交 `87490ba`) / v1.16.16 (已部署:ATR→% 换算的除数锚定到冻结开仓价,提交 `80845a2`) / v1.16.15 (已部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,提交 `75854df`) / v1.16.14 (已部署:immediate trailing 落库归属 + 撤单点按返回值收口,提交 `b4f35e0`) / v1.16.13 (已部署:managed 全程陪跑双保险,取消账户级接管,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
 
 > **🔥 v1.16.17 trailing 归属判定是布尔量 + 档位分配表按当前量重算(2026-07-27,该 bug 类第 12/13 次实例,提交 `87490ba`,待部署)**
 >
@@ -37,6 +38,22 @@
 >
 > **部署状态**:提交 `de6a3a5`;前端已重建镜像并验证(容器 healthy、`/`=200、`/api/health`=200、`execution_price` 出现在线上 `PositionHistory-*.js` chunk);后端二进制 md5 `7ef98667661a35f2ed13fc977557c5bf` **已部署**(2026-07-28 pid 2454865,回滚备份 `/opt/webstack/nofx/nofx.bak_ddsort_20260727_221941` = md5 `f4fe200aec65bc3900c5eb8c175dab52`)。部署后核对:4 trader 全部加载并自启、API 200、0 panic/0 ❌;**成交宽限期在生产实证生效**:SOLUSDT short 成交 3.5s 后交易所查不到持仓,打 🕓 延后本轮且**未做清理**(0 次 🧯),下一轮正常 armed 且 `claimedTrail` 匹配。重启同时激活了 NovaI GPT fallback —— 若 GPT trader 输出 token 暴增,先怀疑它(见 `project_api_provider_caching`)。
 
+> **🔥 v1.16.26 在场档位保留开仓量口径比例 → "在场就变得不可挂、不在场就变得可挂"（ZEC ping-pong 最后一张的根因，2026-07-28，提交 `b292774`，已部署）**
+>
+> **现象**。v1.16.25 上线后 ZEC 在场 TP 从 5 张收敛到 3 张、每轮撤单从 3 张降到 1 张（数量等价性那层确实修对了），但 churn 未停，节奏仍 ~2.5min。撤的和挂的是**同一档**（455.3987，每轮换新 algoId：...4154880 → ...1416704 → ...8594560），开仓单总数在 6↔7 之间摆。
+>
+> **根因**。`anchorLadderTakeProfitToEntry` 的 Rule 2 对"在场"档位保留**开仓量口径的原始比例**，注释理由是"在场单已按开仓量 sized，调用方按价位判满足所以不会被重挂"。该理由在 2026-06-22 加入可执行性门禁后失效 —— `validateProtectionPlanExecution` 在 **missing/unexpected 判定之前**用 `当前量 × 比例` 过交易所最小量，而原始比例配的是开仓量（entry 0.10 → current 0.08）：
+> - 455.40 **在场** → Rule 2 保留 12% → `0.08×12%=0.0096` → 0.96 张 < OKX `lotSz=1` → 整档被门禁滤掉 → 不在 allowed → 在场那张被判 `stale bot duplicate` → **撤掉**
+> - 455.40 **不在场** → 走 reduction 路径 → `0.012/0.08=15%` → 1.2 张 → 门禁通过 → 判 missing → **挂回来**
+>
+> 即**在场就变得不可挂、不在场就变得可挂**。两个改动（Rule 2 与可执行性门禁）各自都对，**组合起来才出错** —— 这类缺陷不在任何单个函数里，只在两者的时序关系里。
+>
+> **修法**。Rule 2 也把比例换算到当前量口径（`tierQty/currentQuantity*100`），两条路径给出同一比例。**只在真发生减仓时换算**（`noReduction` 时原样保留）。不会因此重挂在场单：missing 检测只比价位；数量等价性（v1.16.24）两边都过 `FormatQuantity`，0.012 与 0.0096 同为 1 张，交易所分辨不出。
+>
+> **测试**。`trader/protection_ladder_anchor_live_ratio_test.go` 4 例：两轮（在场/不在场）必须给出**同一比例且都要过交易所最小量**（只"一致"不够，一致地挂不上仍是 churn）；换算只改**分母**不改意图数量（`entryQty×原始比例`）；未减仓时原始比例原样保留（反向对照，防"一律换算"静默改所有健康仓位的档位大小）；复现生产症状（0.08×12% 必须低于 lot 底线、15% 必须通过）。**摘掉修复后前两例复现生产一字不差的 `absent=15% live=12%`**。
+>
+> **部署状态**：提交 `b292774`，二进制 md5 `e96205fd53552d345789fc3b5fc59cf7`，回滚备份 `/opt/webstack/nofx/nofx.bak_v11625_20260728_055900`（= v1.16.25 md5 `1b5a608a2e3ad7f712e0e4cb8ef75be6`）。验收点：ZEC `Protection plan materialized` 与 `stale duplicate` 双双停止复现、开仓单数稳定在 7 不再 6↔7 摆动。
+
 > **🔥 v1.16.25 三处已知诊断/判定缺陷收口:所有权日志打的不是驱动分支的值 + 黄灯把"判不了"说成"幻影单" + runner 迁移可能撤错档（2026-07-28，提交 `7efc6cf`）**
 >
 > **缺陷 1（诊断误导，v1.16.24 里点出的"双层分歧"）**。`evaluateProtectionOwnership` 内部按 `missingTP && !nativeTrailingArmed` 做了**掩蔽**，所以只要有 trailing armed，`ownership.MissingProfit` 恒为 false；而 🧭 日志打的正是这个被掩蔽的字段，驱动 `protection_reconciler.go` 重挂分支的却是 `detectMissingProtection` 的原始判定。两者的输入也不同（ownership 内部硬传 `breakEvenArmed=false`），**因此这两个视图不可互换**。结果：正在重挂的那一轮，日志读作 `protected verified=true missingTP=false` —— 排查 ZEC churn 时最大的误导源。**修法**：🧭 日志改打**驱动分支的那两个值**，并在与 ownership 分歧时追加显式标记 `ownershipMasked(missingSL=.. missingTP=..)`。不改判定逻辑，只让日志不再说谎。
@@ -47,7 +64,7 @@
 >
 > **测试**：`trader/exchange_light_reason_test.go` 3 例（`TestExchangeLightReasonPairsWithLight` 用**同一输入同时驱动灯色与归因两个函数**，让归因不可能描述一个灯色永远不产生的状态；含 markPrice=0 修前返回 `phantom` 的回归）、`trader/protection_ownership_divergence_test.go` 2 例（断言两个视图**确实分歧**，且无 armed trailing 时**必须一致**）、`trader/runner_migration_ambiguity_test.go` 6 例（含"修复不是一律拒绝"的**反向对照**、`trailingOrders[0]` 旧兜底的替身用例）、前端第 5 例 `unknown_mark` 不得渲染成幻影单。**一处被自己否掉的测试**：第一版测试走 `buildPositionProtectionRuntime`，因迁移需 `higher_timeframe_runner` 阶段+结构锚点而**整例 skip**，skip 不是覆盖 —— 遂把判定抽成独立函数直接驱动，6 例零 skip。
 >
-> **部署状态**：提交 `7efc6cf`（8 文件 +545/-37）。待部署二进制 `/root/.claude/jobs/5cbb3cf4/tmp/nofx-7efc6cf` md5 `1b5a608a2e3ad7f712e0e4cb8ef75be6`，**同时含 v1.16.24（`9682f65`，ZEC 治本）与本条三处修复**，取代 v1.16.24 条目里那个单独构建的 `6958a152`。备份 `/opt/webstack/nofx/nofx.bak_zecchurn_20260728_044300`（= v1.16.22 md5 `7ef98667661a35f2ed13fc977557c5bf`）。**尚未部署** —— `kill` 被权限分类器拦下，需用户自行执行重启。部署后验收点：v1.16.24 的三条 + 🧭 日志在分歧轮出现 `ownershipMasked(...)` + 无 `unknown_mark`/`absent_order_unexpected_yellow` 意外。
+> **部署状态**：提交 `7efc6cf`（8 文件 +545/-37）。待部署二进制 `/root/.claude/jobs/5cbb3cf4/tmp/nofx-7efc6cf` md5 `1b5a608a2e3ad7f712e0e4cb8ef75be6`，**同时含 v1.16.24（`9682f65`，ZEC 治本）与本条三处修复**，取代 v1.16.24 条目里那个单独构建的 `6958a152`。备份 `/opt/webstack/nofx/nofx.bak_zecchurn_20260728_044300`（= v1.16.22 md5 `7ef98667661a35f2ed13fc977557c5bf`）。**已部署**（2026-07-28 13:38 pid 2479237）。部署后核对：4 trader 全部自启、api/web=200、0 panic/0 ❌/0 ERROR/0 🔴；**🧭 新日志在生产第一轮就打出 `missingTP=true ownershipMasked(missingSL=false missingTP=false)`** —— 驱动重挂的值是 true、ownership 同名字段是 false，旧日志只打后者所以"正在重挂的那一轮"永远读作"没缺"，修复 1 的价值当场兑现；`unknown_mark`/`absent_order_unexpected_yellow`/`runner_migration` 均 0 次（符合预期，后者本就潜伏）。**v1.16.24 只修好一半**：ZEC 在场 TP 从 5 张收敛到 3 张、每轮撤单 3→1 张，但 churn 未停，剩下那一张的根因见 v1.16.26。
 
 > **🔥 v1.16.24 数量等价性拿量化前意图比量化后事实 + 被推断已执行的档位反被撤掉（致 ZECUSDT 每 2.5 分钟撤单重挂循环，2026-07-28，提交 `9682f65`）**
 >
@@ -61,7 +78,7 @@
 >
 > **测试**：`trader/protection_qty_equivalence_test.go` 7 例 + `trader/protection_ladder_anchor_drop_tolerance_test.go` 3 例，两文件都带**反向对照**（摘掉修复后同样输入必须复现生产症状）。**一处被测试拆穿的自我夸大**：最初断言四个档全中招，跑出来 `ratio 12%: legacy gap 0.0400 is within tolerance`—— 12% 档（0.0096 vs 0.01，0.96 lot）只差 4%，本就在旧阈值内、从未 churn；只有 18%（30%）与 15%（17%）两档中招。改成按档带 `churnedBefore` 断言，让测试记录真实影响面而不是夸大它。
 >
-> **部署状态**：提交 `9682f65`，二进制 md5 `6958a15227fe9ceeeeb31f91c869e645`（从已提交树重建），备份已就位 `/opt/webstack/nofx/nofx.bak_zecchurn_20260728_044300`（= v1.16.22 md5 `7ef98667661a35f2ed13fc977557c5bf`）。**尚未部署** —— `kill` 被权限分类器拦下，需用户自行执行重启。部署后验收点：`Protection plan materialized: symbol=ZECUSDT` 不再每 ~2.5min 复现、ZECUSDT 的 `canceling N stale duplicate protection orders` 降为 0、在场 TP 收敛到 3 张且无保护丢失。
+> **部署状态**：提交 `9682f65`，二进制 md5 `6958a15227fe9ceeeeb31f91c869e645`（从已提交树重建），备份已就位 `/opt/webstack/nofx/nofx.bak_zecchurn_20260728_044300`（= v1.16.22 md5 `7ef98667661a35f2ed13fc977557c5bf`）。**已部署**（随 v1.16.25 同一二进制，2026-07-28 13:38）。部署后核对：**在场 TP 收敛到 3 张（455.40/462.25/467.23，无重复，修复前是 5 张）✅**、每轮撤单 3 张 → 1 张 ✅、无保护丢失 ✅；但 `Protection plan materialized: symbol=ZECUSDT` **仍每 ~2.5min 复现**（未达标）—— 剩下那一张是另一个缺陷，见 v1.16.26。
 
 > **🔥 v1.16.23 后端归因落库正确、前端枚举三处各自维护 → 真实机制显示成"未知系统"(2026-07-28,提交 `f3ee04e`,已部署)**
 >
