@@ -1,10 +1,11 @@
 # 统一保护系统 - AI 记忆文档
 
-> **状态**: 生产运行 | **线上 = v1.16.21(2026-07-28 03:04 pid 2413205 md5 f4fe200aec65bc3900c5eb8c175dab52,含 v1.16.19+v1.16.20+v1.16.21,提交 `5cef90d`,回滚备份 `/opt/webstack/nofx/nofx.bak_v11621_20260727_185500` = v1.16.18 md5 e6abee65)**;部署后核对见下方 v1.16.21 条目
+> **状态**: 生产运行 | **线上后端 = v1.16.22(2026-07-28 pid 2454865 md5 7ef98667661a35f2ed13fc977557c5bf,提交 `de6a3a5`,回滚备份 `/opt/webstack/nofx/nofx.bak_ddsort_20260727_221941` = v1.16.21 md5 f4fe200a)** | **线上前端 = v1.16.23(提交 `f3ee04e`)**;部署后核对见下方 v1.16.22 / v1.16.23 条目
+> **历史**: v1.16.21(2026-07-28 03:04 pid 2413205 md5 f4fe200aec65bc3900c5eb8c175dab52,含 v1.16.19+v1.16.20+v1.16.21,提交 `5cef90d`)
 > **历史**: v1.16.18(2026-07-27 23:40 pid 2381838 md5 e6abee6582e455b908b9efa32c37f51f,提交 `5f2163f`);部署后核对:4 trader 全部加载、API 200、无 panic、CL 持仓 `staleTrail=0 claimedTrail=2 dynamicOwner=2`(**claimedTrail=2 证明认领集合真的解析到了两张在场单,不是走 nil/空集合容忍兜底**)、交易所 7 张单与部署前逐一致(无误撤)
 > **部署后核对(v1.16.13)**:ETH/CL/WLD 从 `1 tiers` 变 `2 tiers` 且数量正确,`partial_profit_lock` 命名正常;KAITO 单档已确认是策略本身只配一档(GPT-ct50),非丢档。
 > **更新**: 2026-07-27 (v1.16.9 该 bug 类第 6 次实例:开仓即挂路径漏 ATR 换算,把 ATR 倍数当百分数挂单——用户从面板发现"两档配置显示三档 0.6/1.2/1.8";并订正"OKX 没问题"的判断:OKX 同样中招,只是它上报 callbackRate 把原始那条掩住了 | v1.16.8 构造交易所对等测试项目,挖出 HEAD 里既存的 OKX 局部档吃掉 dd1 全平单缺陷;并订正两处我自己的错误结论:Binance triggerPrice≠活动价、审计工具漏配 USDC 路由导致谎报无保护)
-> **版本**: v1.16.18 (待部署:OKX tag 装不下 reason → 定向撤单实为广撤;reason 收口到 coded client id) / v1.16.17 (待部署:trailing 归属按认领集合判定 + 档位分配锚定开仓量,提交 `87490ba`) / v1.16.16 (已部署:ATR→% 换算的除数锚定到冻结开仓价,提交 `80845a2`) / v1.16.15 (已部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,提交 `75854df`) / v1.16.14 (已部署:immediate trailing 落库归属 + 撤单点按返回值收口,提交 `b4f35e0`) / v1.16.13 (已部署:managed 全程陪跑双保险,取消账户级接管,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
+> **版本**: v1.16.23 (已部署:前端归因枚举补齐 5 处 + 契约测试锁住前后端对齐,提交 `f3ee04e`) / v1.16.22 (已部署:保护档按成交价排序 + callback 单位收口 + 细粒度归因保留 + 开仓竞态宽限期,提交 `de6a3a5`) / v1.16.18 (待部署:OKX tag 装不下 reason → 定向撤单实为广撤;reason 收口到 coded client id) / v1.16.17 (待部署:trailing 归属按认领集合判定 + 档位分配锚定开仓量,提交 `87490ba`) / v1.16.16 (已部署:ATR→% 换算的除数锚定到冻结开仓价,提交 `80845a2`) / v1.16.15 (已部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,提交 `75854df`) / v1.16.14 (已部署:immediate trailing 落库归属 + 撤单点按返回值收口,提交 `b4f35e0`) / v1.16.13 (已部署:managed 全程陪跑双保险,取消账户级接管,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
 
 > **🔥 v1.16.17 trailing 归属判定是布尔量 + 档位分配表按当前量重算(2026-07-27,该 bug 类第 12/13 次实例,提交 `87490ba`,待部署)**
 >
@@ -17,6 +18,34 @@
 > **教训**:v1.16.16 是"除数不能是会变的量",v1.16.17 缺陷 B 是同一条原则的另一半 —— **比例的分母在仓位生命周期内必须固定**;缺陷 A 则是"所有权判定不能用布尔量,只能用集合":布尔量回答不了"这张具体的单是谁的",而多档并存的系统里,这正是唯一需要回答的问题。
 >
 > **测试**:`trader/native_trailing_ownership_test.go` 5 例 + `trader/drawdown_tier_alloc_entry_anchor_test.go` 2 例,全部反向验证(旧语义下必失败:`legacy.ExpectedDynamicOwner==3`、分配表 0.33 vs 0.42)。`cmd/orderlist` 增打 `cid=` 便于人工核对 broker tag。另补 `trader/protection_stale_trailing_gate_test.go` 2 例:只测分类器不够,**撤单快路径的闸门本身没测过**(要求 `!missingSL && !missingTP && ManualOrForeign==0 && 可清理数==unexpected 总数`),按线上 BN/ETH 形状把每一项钉住,并反向验证"少一张档位止盈时 missingTP 会翻真",证明断言非空。顺带记录一处既有设计:plan 无 ladder SL 且 break-even armed 时,trailing 自身算 `looksLikeStopLoss`,所以 `missingSL=false` 不等于"真止损单在场",别误读成强断言。
+
+> **🔥 v1.16.22 保护档排序用了"活动价"而不是"成交价" + callback 单位随交易所漂移 + 细粒度归因被粗分类覆写 + 开仓竞态误清理(2026-07-28,提交 `de6a3a5`,前端已部署 / 后端待重启)**
+>
+> **缺陷 A —— DD 档按活动价排序,排错位置(用户从 claude 面板发现)**。一个回撤档有**两个**价格:活动价 `entry × (1 ± minProfit%)`,是 trailing **开始跟踪**的位置,这里不成交任何东西;成交价 `peak × (1 ∓ callback)`,才是真正市价平仓的位置。保护阶梯的排序语义是"价格接下来先碰到哪一档",所以必须按**成交价**排。旧代码按活动价排,于是"3ATR 活动 / 1.8ATR 回撤"这一档被摆在 3ATR 的槽位,而它实际成交在 +1.2ATR —— 正确位置是 1.1ATR 与 1.7ATR 两根梯级**之间**,这正是用户描述的现象。修法:新增 `trader/drawdown_execution_price.go`,`drawdownTierExecutionPrice` 作为成交价的**唯一定义**(锚点规则 `peak = max(活动价, 已实现峰值)` 按方向取:活动前用活动价给"最早可能成交"兜底,活动后随真实峰值棘轮);快照 tier JSON 增发 `execution_price`/`execution_pct`,前端 `price`/`sortPrice`/`deltaPct`/`atrMult` 全部改读它。
+>
+> **缺陷 B —— BN 交易员排序错乱的根因是 callback 单位随交易所漂移**。binance/bitget 接口收**百分数**(`1.8` = 1.8%),okx 收**比率**(`0.018`)。旧代码就地把 `callbackRate *= 100`,导致落库 tier JSON 里 `callback_rate` 的单位**取决于交易所**,前端只能猜:`rawCallback > 1 ? /100 : raw`。这个猜法在 dd% < 1 时静默错 100 倍(dd 0.54% → 发 0.54 → 前端读成 54% 回撤)。线上取值恰好是 1.84/1.23 都 >1,所以是"潜伏但真实"的地雷。修法:**系统内部恒为比率**,百分数只存在于 `callbackRatioToExchangeUnit` / `callbackExchangeUnitToRatio` 这两个边界函数里,交易所读回值也过一遍归一化;前端那段猜测代码直接删掉。附带查清:Binance 的 `GetOpenOrders` **从来不回 CallbackRate**(经典单列表和 algo 列表两条路径都只填 `ActivationPrice` 并硬编 `ActivationStatus="activated"`),所以 `applyMatch` 里 `cbVal > 0` 的覆写分支在 BN 上永不触发、"数量+callback"模糊匹配在 BN 上永远匹配不上 —— 靠 ID 优先匹配救着。
+>
+> **缺陷 C —— 落库归因不准不全:细粒度角色被粗分类覆写**。OKX 适配器本来能从 algoClOrdId 解出细粒度角色(`reasonFromAlgoIDs`,`okx/trader_orders.go:1519`:break_even / ladder_tp / ladder_sl / fallback_maxloss / structural_sl),但 `enrichProtectionOrders` 无条件用四值粗分类**覆写** `ProtectionRole`,把这些信息全压成"这是个止损"。修法:细粒度优先保留,新增 `ProtectionRoleCoarse` 并存,面板 JSON 两个都发(前者展示、后者归类)。**关键连带修改**:唯一一个 `switch "stop_loss"/"take_profit"` 的消费方(`auto_trader_decision.go` 的阶梯/全平/兜底计数)必须改读粗粒度字段,否则它会**静默停止计数** —— 这类"改了产出方就得回头找齐所有消费方"是本轮最容易漏的一步。
+>
+> **缺陷 D —— 快照缺价、缺结构位、排序按机制分组**。`protection_plan_snapshots.tiers_json` 里回撤档没有任何价格(所以根本没法参与价格排序)、结构位止损**一行都没有**、顺序是按机制分组而非按价格、`Note: "giveback %.0f%%"` 把 1.4142% 打成 "1%"。修法:回撤档带上活动价/成交价及其百分比;结构位经 `resolveStructuralSLLevels` 发两行(`Struct` + `Backstop`);整表 `sortPlanSnapshotTiers` 按价格排;giveback 保留两位小数。**读路径也必须一起改**:新仓位读快照、老仓位回放 `close_intents`,两条路排序不一致会看起来像"其中一个面板有 bug",所以 API 侧 `sortPlacedProtection` 统一重排(存量快照也会跟着重排),前端补 `structural` kind 及其颜色 —— `PLAN_KIND_COLOR` 是 `Record<PlanItem['kind'], string>`,加了 kind 不给颜色,那些行会渲染成无色。
+>
+> **缺陷 E —— 开仓竞态里做了破坏性清理(本轮健康检查新发现的第 2 次实例)**。成交先在本地确认(maker 入场轮询),交易所持仓接口滞后 4~6 秒。这个窗口里存活性闸门查不到持仓,就判定"活仓已平"并执行**破坏性**的 `cleanupInactiveProtectionState`(撤掉刚挂上的 algo 单 + 清掉冻结的 ATR/结构位缓存)。线上实证 KAITOUSDT 05:24:成交 05:24:33 → `⚠️ Immediate trailing: no position found` → 闸门 05:24:37 → 红灯 05:24:38 → 05:24:43 才 armed。修法:30 秒成交宽限期(`protectionFillGraceWindow`)。**核心区分**:窗口内查不到持仓,含义是"**还不知道**",不是"已经平了" —— 所以宽限期内仍跳过本轮保护动作(下一轮 poll 会补,这是安全的),但**绝不做清理**。
+>
+> **教训**:(1) 一个量有两个价格时,排序必须问清"排的是哪一个语义" —— 活动价回答"何时开始跟踪",成交价回答"何时真的成交",阶梯排序问的是后者;(2) **单位换算只能发生在边界**,一旦让"内部值的单位取决于外部系统",下游就只能靠 `>1` 之类的启发式猜,而启发式在边界值上必然静默出错;(3) 改产出方(细粒度归因)时必须回头找齐所有消费方,`switch` 字面量不会报错、只会静默失效;(4) "查不到"≠"不存在",凡是拿"查不到"当依据去做破坏性动作的地方,都要先问"是不是只是还没看见"。
+>
+> **测试**:`trader/drawdown_execution_price_test.go`(成交价 9 例含反向峰值忽略/callback 钳制、`TestCallbackUnitRoundTrip` 用 `{"binance", 0.0054, 0.54}` 把 dd<1 的 100 倍陷阱钉死、`TestDrawdownTierSortsByExecutionNotActivation` 直接钉"3ATR/1.8ATR 落在 1.1 与 1.7 之间")、`trader/protection_role_attribution_test.go`(细粒度保留 + 幂等)、`trader/protection_fill_grace_test.go` 4 例(标记/大小写/不泄漏/过期、可见后清除、窗口时长边界、nil 安全)、快照与 API 侧排序各补例、前端 `PositionProtectionPanel.test.tsx` 加 DOM 顺序断言(`103.40 → 102.40 → 102.20`,且 `106.00` 不得出现)。**一处反向验证的坑**:第一次把 `tier.execution_price` 换成 `0` 做负对照,测试**照样通过** —— 因为前端本地的峰值锚点兜底会算出同一个数;换成 `tier.activation_price` 才复现出用户报的症状,这才是有效的负对照。
+>
+> **部署状态**:提交 `de6a3a5`;前端已重建镜像并验证(容器 healthy、`/`=200、`/api/health`=200、`execution_price` 出现在线上 `PositionHistory-*.js` chunk);后端二进制 md5 `7ef98667661a35f2ed13fc977557c5bf` **已部署**(2026-07-28 pid 2454865,回滚备份 `/opt/webstack/nofx/nofx.bak_ddsort_20260727_221941` = md5 `f4fe200aec65bc3900c5eb8c175dab52`)。部署后核对:4 trader 全部加载并自启、API 200、0 panic/0 ❌;**成交宽限期在生产实证生效**:SOLUSDT short 成交 3.5s 后交易所查不到持仓,打 🕓 延后本轮且**未做清理**(0 次 🧯),下一轮正常 armed 且 `claimedTrail` 匹配。重启同时激活了 NovaI GPT fallback —— 若 GPT trader 输出 token 暴增,先怀疑它(见 `project_api_provider_caching`)。
+
+> **🔥 v1.16.23 后端归因落库正确、前端枚举三处各自维护 → 真实机制显示成"未知系统"(2026-07-28,提交 `f3ee04e`,已部署)**
+>
+> **缺陷**。`store/attribution.go` 有 21 个平仓侧 `Mech*` 常量,后端落库完整(四列全有值,其中 `structural_sl` 已有 15 行真实数据)。但前端把这份枚举**重复维护了三份**:`protectionPlan.ts` 的 `classifyMechanism()` + `MECHANISM_META`、`CloseAttributionPanel.tsx` 的 `MECH_LABEL`、`PositionHistory.tsx` 的标签梯子 —— 且后端新增机制时**没有任何东西会报错**。结果用户面板上三笔真实的结构位止损显示为"未知系统 raw: structural_sl"。真正的源头是 `classifyMechanism()`(raw 落到 `unknown_close`),标签表只是第二层。
+>
+> **修法**:不只补用户报的那一个 —— 全量 diff 枚举,补齐 5 处缺口(`structural_sl`/`max_hold`/`breadth_breaker`/`trend_reversal_flip`/`legacy_unknown`)。**顺序依赖**:`structural_sl` 必须匹配在 `full_sl` **之前**(镜像 `store/attribution.go:100`),否则更具体的标签被粗标签抢先吃掉。
+>
+> **教训**:同一份枚举在前后端各自维护 = 一类必然复发的 bug。所以补的不是标签而是**契约测试** `web/src/components/trader/mechanismCoverage.test.ts`:`BACKEND_MECHANISMS` 钉住全部 21 个常量,断言每个都有中文标签、每个 raw 都能解析(不落 `unknown_close`)、structural 不被 full_sl 遮蔽(附反向断言:未配置的机制确实返回裸 key)、protection 类归到 `protection`。下次后端加机制,测试先红。
+>
+> **验证**:`tsc --noEmit` rc=0、`vitest run` 142/142(原 138)、build 成功、eslint 四个文件干净;负对照先摘掉映射复现出原症状再恢复。线上 chunk 已含 5 个新标签(`结构位止损`/`超时平仓`/`广度熔断`/`趋势反转`/`历史未记录`)。**部署踩坑**:后端是**裸进程占宿主 8080**,`docker compose up -d nofx-frontend` 会连带拉起依赖 `nofx-trading` 撞端口并整批中止(导致前端一度 3000=000);必须 `docker compose up -d --no-deps nofx-frontend`,且 compose 项目目录是 `/root/projects/nofxmax` 而非 `/opt/webstack/nofx`。
 
 > **🔥 v1.16.21 面板 DD1/DD2 恒红灯:归属判断的字面量白名单漏掉多档 mode(2026-07-28,该 bug 类第 17 次实例,提交 `81cf187`+`5cef90d`,已部署)**
 >
