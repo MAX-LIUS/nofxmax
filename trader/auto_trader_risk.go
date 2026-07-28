@@ -3492,11 +3492,32 @@ func (at *AutoTrader) applyBreakEvenStops(symbol, side string, quantity, entryPr
 			continue
 		}
 
-		// Check if this tier already has a matching exchange order
-		if hasMatchingBreakEvenOrder(openOrders, positionSide, newBEPrice) {
+		// Check if this tier already has a matching exchange order.
+		// Persist the live exchange order ID so ownership classification can claim
+		// this tier by handle. Writing "" here would erase the ID recorded when the
+		// order was first placed, which is what let sibling BE tiers be mistaken for
+		// stale duplicates and cancelled on every poll.
+		if liveID, found := matchingBreakEvenOrderID(openOrders, positionSide, newBEPrice); found {
 			// Ensure armed state is persisted
-			at.persistDynamicProtectionRecordWithDetails(symbol, side, "break_even_stop", fmt.Sprintf("%.8f|%.8f|%.4f|%.4f|%s", entryPrice, quantity, rule.TriggerValue, rule.OffsetPct, stage), 0, "armed", "", newBEPrice, 0, ruleQty)
+			at.persistDynamicProtectionRecordWithDetails(symbol, side, "break_even_stop", fmt.Sprintf("%.8f|%.8f|%.4f|%.4f|%s", entryPrice, quantity, rule.TriggerValue, rule.OffsetPct, stage), 0, "armed", liveID, newBEPrice, 0, ruleQty)
 			continue
+		}
+
+		// This tier has no order at the target price. Before placing one, retire this
+		// tier's own stale order if it still sits at an outdated price. Break-even price
+		// tracks the live position average on purpose (that is what "retreat to cost"
+		// means), but tracking it while only ever placing and never cancelling is what
+		// stacked 4 BE orders on WLDUSDT for a 2-tier config. Cancel is by persisted
+		// order ID, per tier — never by reason tag, since every tier's mechanism code
+		// is "BE" and a tag cancel would take the sibling tier down with it.
+		if cancelled := at.replaceStaleBreakEvenTierOrders(symbol, side, stage, newBEPrice, openOrders); cancelled > 0 {
+			openOrders, openOrdersErr = at.trader.GetOpenOrders(symbol)
+			if openOrdersErr != nil {
+				// Lost visibility after cancelling. Placing blind could double up, so
+				// stop here; the next monitor poll re-runs this tier from a clean read.
+				logger.Warnf("⚠️ BE tier %s: re-fetch open orders after replace failed (%s %s): %v", stage, symbol, side, openOrdersErr)
+				continue
+			}
 		}
 
 		// Place this tier's stop order
@@ -3540,9 +3561,9 @@ func (at *AutoTrader) applyBreakEvenStop(symbol, side string, quantity, entryPri
 	// placing another native stop. Only match orders tagged as BE, not ladder SL
 	// that happens to be at the same price.
 	if openOrders, err := at.trader.GetOpenOrders(symbol); err == nil {
-		if hasMatchingBreakEvenOrder(openOrders, positionSide, breakEvenPrice) {
-			logger.Infof("🟠 Break-even stop already live: %s %s | stop=%.6f", symbol, side, breakEvenPrice)
-			at.persistDynamicProtectionRecordWithDetails(symbol, side, "break_even_stop", fmt.Sprintf("%.8f|%.8f|%.4f|%.4f|%s", entryPrice, quantity, cfg.TriggerValue, cfg.OffsetPct, stage), 0, "armed", "", breakEvenPrice, 0, quantity)
+		if liveID, found := matchingBreakEvenOrderID(openOrders, positionSide, breakEvenPrice); found {
+			logger.Infof("🟠 Break-even stop already live: %s %s | stop=%.6f id=%s", symbol, side, breakEvenPrice, liveID)
+			at.persistDynamicProtectionRecordWithDetails(symbol, side, "break_even_stop", fmt.Sprintf("%.8f|%.8f|%.4f|%.4f|%s", entryPrice, quantity, cfg.TriggerValue, cfg.OffsetPct, stage), 0, "armed", liveID, breakEvenPrice, 0, quantity)
 			return nil
 		}
 	} else {
@@ -3553,6 +3574,10 @@ func (at *AutoTrader) applyBreakEvenStop(symbol, side string, quantity, entryPri
 	// orders here, otherwise we destroy the long-term stop-loss protection stack.
 	// If exchanges later support per-order tags / amend-by-id, we can target only prior
 	// break-even stops. For now, preserve existing SL orders and add break-even separately.
+	// placedOrderID:交易所回的这一档 BE 单句柄。必须持久化 —— 没有它,"按档替换旧 BE 单"
+	// 只能靠 reason tag,而所有档位共用同一个 mechanism code "BE"(store/reason_codec.go),
+	// 按 tag 撤单会连兄弟档一起撤掉(v1.16.5 那一族事故)。
+	var placedOrderID string
 	if okxTrader, ok := at.trader.(interface {
 		SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error
 		SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) (string, error)
@@ -3561,6 +3586,7 @@ func (at *AutoTrader) applyBreakEvenStop(symbol, side string, quantity, entryPri
 		if err != nil {
 			return fmt.Errorf("failed to set break-even stop loss: %w", err)
 		}
+		placedOrderID = algoID
 		at.recordProtectionIntent(symbol, positionSide, "break_even_stop", quantity, breakEvenPrice, algoID)
 	} else if err := at.trader.SetStopLoss(symbol, positionSide, quantity, breakEvenPrice); err != nil {
 		return fmt.Errorf("failed to set break-even stop loss: %w", err)
@@ -3575,8 +3601,16 @@ func (at *AutoTrader) applyBreakEvenStop(symbol, side string, quantity, entryPri
 		}
 		if hasMatchingProtectionOrder(openOrders, positionSide, false, breakEvenPrice) {
 			verified = true
-			logger.Infof("✅ Break-even stop verified: %s %s | stop=%.6f (attempt %d/%d)",
-				symbol, side, breakEvenPrice, attempt, protectionVerifyMaxAttempts)
+			// Venues whose SetStopLoss returns no handle (the non-OKX branch above): recover
+			// the id from the verification snapshot we already fetched, so this tier is still
+			// individually cancellable later.
+			if placedOrderID == "" {
+				if id, found := matchingBreakEvenOrderID(openOrders, positionSide, breakEvenPrice); found {
+					placedOrderID = id
+				}
+			}
+			logger.Infof("✅ Break-even stop verified: %s %s | stop=%.6f id=%s (attempt %d/%d)",
+				symbol, side, breakEvenPrice, placedOrderID, attempt, protectionVerifyMaxAttempts)
 			break
 		}
 		if attempt < protectionVerifyMaxAttempts {
@@ -3589,7 +3623,7 @@ func (at *AutoTrader) applyBreakEvenStop(symbol, side string, quantity, entryPri
 
 	logger.Infof("🟠 Break-even stop applied: %s %s | stage=%s trigger=%.2f%% current=%.2f%% qty=%.6f stop=%.6f",
 		symbol, side, stage, cfg.TriggerValue, currentPnLPct, quantity, breakEvenPrice)
-	at.persistDynamicProtectionRecordWithDetails(symbol, side, "break_even_stop", fmt.Sprintf("%.8f|%.8f|%.4f|%.4f|%s", entryPrice, quantity, cfg.TriggerValue, cfg.OffsetPct, stage), 0, "armed", "", breakEvenPrice, 0, quantity)
+	at.persistDynamicProtectionRecordWithDetails(symbol, side, "break_even_stop", fmt.Sprintf("%.8f|%.8f|%.4f|%.4f|%s", entryPrice, quantity, cfg.TriggerValue, cfg.OffsetPct, stage), 0, "armed", placedOrderID, breakEvenPrice, 0, quantity)
 	return nil
 }
 

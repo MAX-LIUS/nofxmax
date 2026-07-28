@@ -27,7 +27,7 @@ func TestOwnershipMissingProfitIsMaskedByArmedTrailing(t *testing.T) {
 
 	// 有 trailing armed 时,ownership 按 `missingTP && !nativeTrailingArmed` 掩蔽,
 	// 于是同一时刻 ownership.MissingProfit 为 false。
-	armed := evaluateProtectionOwnership(orders, "LONG", plan, false, nativeTrailingArmedOnly(true))
+	armed := evaluateProtectionOwnership(orders, "LONG", plan, breakEvenArmedOnly(false), nativeTrailingArmedOnly(true))
 	if armed.MissingProfit {
 		t.Fatalf("trailing armed 时 ownership.MissingProfit 应被掩蔽为 false,实得 %+v", armed)
 	}
@@ -41,7 +41,7 @@ func TestOwnershipMissingProfitIsMaskedByArmedTrailing(t *testing.T) {
 	}
 
 	// 没有 armed trailing 时两者应当一致 —— 掩蔽只发生在 armed 情况下。
-	notArmed := evaluateProtectionOwnership(orders, "LONG", plan, false, nativeTrailingArmedOnly(false))
+	notArmed := evaluateProtectionOwnership(orders, "LONG", plan, breakEvenArmedOnly(false), nativeTrailingArmedOnly(false))
 	if notArmed.MissingProfit != missingTP {
 		t.Fatalf("无 armed trailing 时两者应一致,实得 ownership=%t detect=%t", notArmed.MissingProfit, missingTP)
 	}
@@ -59,7 +59,7 @@ func TestOwnershipMissingStopMaskedByBreakEven(t *testing.T) {
 		t.Fatalf("止损单不在场时应报 missingSL=true")
 	}
 
-	state := evaluateProtectionOwnership(orders, "LONG", plan, true, nativeTrailingArmedOnly(false))
+	state := evaluateProtectionOwnership(orders, "LONG", plan, breakEvenArmedOnly(true), nativeTrailingArmedOnly(false))
 	if state.MissingStop {
 		t.Fatalf("breakEvenArmed 应掩蔽 MissingStop,实得 %+v", state)
 	}

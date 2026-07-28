@@ -41,21 +41,21 @@ type unexpectedProtectionSummary struct {
 	ExpectedDynamicStop     int
 }
 
-func classifyUnexpectedProtectionOrders(openOrders []OpenOrder, positionSide string, plan *ProtectionPlan, breakEvenArmed bool, trailingOwnership nativeTrailingOwnership, positionActive bool) unexpectedProtectionSummary {
+func classifyUnexpectedProtectionOrders(openOrders []OpenOrder, positionSide string, plan *ProtectionPlan, beOwnership breakEvenOwnership, trailingOwnership nativeTrailingOwnership, positionActive bool) unexpectedProtectionSummary {
 	allowedStops, allowedTPs := allowedProtectionPricesForPlan(plan)
 	summary := unexpectedProtectionSummary{}
+	// 保本止损额度:认领集合可用时为 0(按 order id 判,不需要额度),否则等于该仓位
+	// 的档位数(拿不到就是 1,即改造前行为)。额度在整个循环内共享 —— 消耗判定必须看
+	// **分类结果**,不能看 looksLikeStopLoss(order):后者只做字符串匹配,而
+	// TRAILING_STOP_MARKET 里含 "STOP" —— 于是第一张 trailing 就把保本额度吃掉了,
+	// 真正的保本止损排在 trailing 之后时会掉到 manual_or_foreign,被当成"外来单"污染
+	// ownership(交易所返回挂单的顺序不做保证,所以这是概率性误判)。
+	beQuota := beOwnership.breakEvenQuota()
 	for _, order := range openOrders {
 		if positionSide != "" && order.PositionSide != "" && !strings.EqualFold(order.PositionSide, positionSide) {
 			continue
 		}
-		classification := classifyProtectionOrder(order, &allowedStops, &allowedTPs, breakEvenArmed, trailingOwnership, positionActive)
-		// "保本止损额度只有一张"的消耗判定必须看**分类结果**,不能看 looksLikeStopLoss(order):
-		// 后者只做字符串匹配,而 TRAILING_STOP_MARKET 里含 "STOP" —— 于是第一张 trailing
-		// 就把保本额度吃掉了,真正的保本止损排在 trailing 之后时会掉到 manual_or_foreign,
-		// 被当成"外来单"污染 ownership(交易所返回挂单的顺序不做保证,所以这是概率性误判)。
-		if classification.Category == unexpectedCategoryExpectedDynamicOwner && classification.Kind == "stop_loss" && breakEvenArmed {
-			breakEvenArmed = false
-		}
+		classification := classifyProtectionOrder(order, &allowedStops, &allowedTPs, beOwnership, &beQuota, trailingOwnership, positionActive)
 		switch classification.Category {
 		case unexpectedCategoryStaleBotDuplicate:
 			summary.StaleBotDuplicate++
@@ -130,7 +130,7 @@ func allowedProtectionPricesForPlan(plan *ProtectionPlan) ([]float64, []float64)
 	return allowedStops, allowedTPs
 }
 
-func classifyProtectionOrder(order OpenOrder, allowedStops, allowedTPs *[]float64, breakEvenArmed bool, trailingOwnership nativeTrailingOwnership, positionActive bool) unexpectedProtectionOrderClassification {
+func classifyProtectionOrder(order OpenOrder, allowedStops, allowedTPs *[]float64, beOwnership breakEvenOwnership, beQuota *int, trailingOwnership nativeTrailingOwnership, positionActive bool) unexpectedProtectionOrderClassification {
 	classification := unexpectedProtectionOrderClassification{OrderID: order.OrderID}
 	upperType := strings.ToUpper(order.Type)
 	if strings.Contains(upperType, "TRAILING") {
@@ -170,7 +170,7 @@ func classifyProtectionOrder(order OpenOrder, allowedStops, allowedTPs *[]float6
 			classification.Category = unexpectedCategoryExpectedStaticOwner
 		} else if !positionActive {
 			classification.Category = unexpectedCategoryOrphanForInactive
-		} else if breakEvenArmed {
+		} else if beOwnership.classifyBreakEvenStop(order.OrderID, beQuota) {
 			classification.Category = unexpectedCategoryExpectedDynamicOwner
 		} else if isLikelyBotProtectionOrder(order) {
 			classification.Category = unexpectedCategoryStaleBotDuplicate

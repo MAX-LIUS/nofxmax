@@ -4,7 +4,7 @@ import "testing"
 
 func TestReconcilerOwnershipZeroOrdersCannotBeVerified(t *testing.T) {
 	plan := &ProtectionPlan{NeedsStopLoss: true, StopLossPrice: 98, NeedsTakeProfit: true, TakeProfitPrice: 110}
-	state := evaluateProtectionOwnership(nil, "SHORT", plan, false, nativeTrailingArmedOnly(false))
+	state := evaluateProtectionOwnership(nil, "SHORT", plan, breakEvenArmedOnly(false), nativeTrailingArmedOnly(false))
 	if state.Verified {
 		t.Fatalf("zero open orders must not verify protection ownership: %+v", state)
 	}
@@ -15,7 +15,7 @@ func TestReconcilerOwnershipZeroOrdersCannotBeVerified(t *testing.T) {
 
 func TestReconcilerOwnershipDrawdownDoesNotSatisfyStopOwner(t *testing.T) {
 	plan := &ProtectionPlan{NeedsStopLoss: true, StopLossPrice: 98, NeedsTakeProfit: true, TakeProfitPrice: 110}
-	state := evaluateProtectionOwnership(nil, "SHORT", plan, false, nativeTrailingArmedOnly(true))
+	state := evaluateProtectionOwnership(nil, "SHORT", plan, breakEvenArmedOnly(false), nativeTrailingArmedOnly(true))
 	if state.Verified {
 		t.Fatalf("drawdown profit owner must not verify missing stop owner: %+v", state)
 	}

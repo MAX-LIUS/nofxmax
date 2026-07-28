@@ -1253,7 +1253,8 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 		// 注释)。这里少两个状态会让面板在武装窗口内把在场的 trailing 单归成
 		// "非我认领",与 reconciler 同一时刻的判断相反。
 		nativeTrailingArmed := isNativeTrailingProtectionState(at.getProtectionState(symbol, side))
-		unexpectedSummary = classifyUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed,
+		unexpectedSummary = classifyUnexpectedProtectionOrders(openOrders, positionSide, plan,
+			at.breakEvenOwnershipForPosition(symbol, side, breakEvenArmed),
 			at.nativeTrailingOwnershipForPosition(symbol, side, entryPrice, nativeTrailingArmed), true)
 	}
 

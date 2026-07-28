@@ -62,11 +62,11 @@ func TestAnchorDroppedTierNotCountedAsUnexpected(t *testing.T) {
 		{Type: "TAKE_PROFIT_MARKET", PositionSide: "SHORT", StopPrice: 455.40, Quantity: 0.01, OrderID: "t4", ClientOrderID: "ladder_tp-x"},
 	}
 
-	summary := classifyUnexpectedProtectionOrders(orders, "SHORT", plan, false, nativeTrailingOwnership{}, true)
+	summary := classifyUnexpectedProtectionOrders(orders, "SHORT", plan, breakEvenArmedOnly(false), nativeTrailingOwnership{}, true)
 	if summary.StaleBotDuplicate != 0 {
 		t.Errorf("no resting ladder TP may be classified stale: got StaleBotDuplicate=%d (the dropped tier would be canceled)", summary.StaleBotDuplicate)
 	}
-	_, unexpectedTPs := detectUnexpectedProtectionOrders(orders, "SHORT", plan, false, nativeTrailingOwnership{})
+	_, unexpectedTPs := detectUnexpectedProtectionOrders(orders, "SHORT", plan, breakEvenArmedOnly(false), nativeTrailingOwnership{})
 	if unexpectedTPs != 0 {
 		t.Errorf("unexpectedTP must be 0, got %d — a nonzero count sends the reconciler into the cancel path", unexpectedTPs)
 	}
@@ -75,7 +75,7 @@ func TestAnchorDroppedTierNotCountedAsUnexpected(t *testing.T) {
 	// reproduce the production symptom, proving the assertions above are load-bearing.
 	legacy := *plan
 	legacy.AllowedExtraTakeProfitPrices = nil
-	legacySummary := classifyUnexpectedProtectionOrders(orders, "SHORT", &legacy, false, nativeTrailingOwnership{}, true)
+	legacySummary := classifyUnexpectedProtectionOrders(orders, "SHORT", &legacy, breakEvenArmedOnly(false), nativeTrailingOwnership{}, true)
 	if legacySummary.StaleBotDuplicate == 0 {
 		t.Error("expected the pre-fix plan to classify the dropped tier as stale; if it does not, this test no longer pins the bug")
 	}

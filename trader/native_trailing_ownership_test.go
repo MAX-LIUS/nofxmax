@@ -20,7 +20,7 @@ func TestUnclaimedTrailingIsStaleDuplicate(t *testing.T) {
 		},
 	}
 
-	summary := classifyUnexpectedProtectionOrders(orders, "LONG", nil, false, ownership, true)
+	summary := classifyUnexpectedProtectionOrders(orders, "LONG", nil, breakEvenArmedOnly(false), ownership, true)
 	if summary.ExpectedDynamicOwner != 2 {
 		t.Fatalf("认领的两张应判为 expected_dynamic_owner,got %d", summary.ExpectedDynamicOwner)
 	}
@@ -36,7 +36,7 @@ func TestUnclaimedTrailingIsStaleDuplicate(t *testing.T) {
 
 	// 反向验证:回到旧的布尔语义,这张就会被盖章成"我的",一张都撤不掉 ——
 	// 证明本测试测的是真实修复,而不是恒真断言。
-	legacy := classifyUnexpectedProtectionOrders(orders, "LONG", nil, false, nativeTrailingArmedOnly(true), true)
+	legacy := classifyUnexpectedProtectionOrders(orders, "LONG", nil, breakEvenArmedOnly(false), nativeTrailingArmedOnly(true), true)
 	if legacy.StaleTrailingDuplicate != 0 || legacy.ExpectedDynamicOwner != 3 {
 		t.Fatalf("旧布尔语义本应把 3 张全算预期,got expected=%d staleTrail=%d", legacy.ExpectedDynamicOwner, legacy.StaleTrailingDuplicate)
 	}
@@ -58,7 +58,7 @@ func TestForkedTierPairLeavesOnlyClaimedTrailing(t *testing.T) {
 			"3779671563633610752": {},
 		},
 	}
-	ids := collectUnexpectedProtectionOrderIDs(orders, "LONG", nil, false, ownership)
+	ids := collectUnexpectedProtectionOrderIDs(orders, "LONG", nil, breakEvenArmedOnly(false), ownership)
 	if len(ids) != 2 {
 		t.Fatalf("应撤掉未认领的那一对,got %v", ids)
 	}
@@ -80,14 +80,14 @@ func TestMissingClaimViewToleratesLiveTrailing(t *testing.T) {
 		"空认领集合(记录还没落盘)":      {Armed: true, Claimed: map[string]struct{}{}},
 	}
 	for name, ownership := range cases {
-		summary := classifyUnexpectedProtectionOrders(orders, "LONG", nil, false, ownership, true)
+		summary := classifyUnexpectedProtectionOrders(orders, "LONG", nil, breakEvenArmedOnly(false), ownership, true)
 		if summary.StaleTrailingDuplicate != 0 || summary.ExpectedDynamicOwner != 1 {
 			t.Fatalf("%s:应容忍在场单,got expected=%d staleTrail=%d", name, summary.ExpectedDynamicOwner, summary.StaleTrailingDuplicate)
 		}
 	}
 
 	// 没武装时行为不变:仍按 bot 标记走 stale/manual 分流。
-	summary := classifyUnexpectedProtectionOrders(orders, "LONG", nil, false,
+	summary := classifyUnexpectedProtectionOrders(orders, "LONG", nil, breakEvenArmedOnly(false),
 		nativeTrailingOwnership{Armed: false, Claimed: map[string]struct{}{"111": {}}}, true)
 	if summary.StaleBotDuplicate != 1 {
 		t.Fatalf("未武装时带 bot 标记的 trailing 应仍判 stale,got %d", summary.StaleBotDuplicate)
@@ -112,7 +112,7 @@ func TestOwnerJudgementUsesArmedNotClaimSet(t *testing.T) {
 	orders := []OpenOrder{
 		{OrderID: "999", Type: "TRAILING_STOP_MARKET", Side: "SELL", PositionSide: "LONG", Quantity: 1, ClientOrderID: "native_trailing"},
 	}
-	state := evaluateProtectionOwnership(orders, "LONG", nil, false,
+	state := evaluateProtectionOwnership(orders, "LONG", nil, breakEvenArmedOnly(false),
 		nativeTrailingOwnership{Armed: true, Claimed: map[string]struct{}{}})
 	if state.ProfitOwner != "drawdown" {
 		t.Fatalf("武装即有 profit owner(与认领集合无关),got %q", state.ProfitOwner)

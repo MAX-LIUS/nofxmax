@@ -10,7 +10,7 @@ func TestClassifyUnexpectedProtectionOrdersSeparatesManualForeignFromBotDuplicat
 		{OrderID: "manual-protective-stop", PositionSide: "SHORT", Type: "STOP_MARKET", StopPrice: 110},
 	}
 
-	summary := classifyUnexpectedProtectionOrders(orders, "SHORT", plan, false, nativeTrailingArmedOnly(false), true)
+	summary := classifyUnexpectedProtectionOrders(orders, "SHORT", plan, breakEvenArmedOnly(false), nativeTrailingArmedOnly(false), true)
 	if summary.ExpectedStaticOwner != 1 {
 		t.Fatalf("expected one static owner, got %+v", summary)
 	}
@@ -21,7 +21,7 @@ func TestClassifyUnexpectedProtectionOrdersSeparatesManualForeignFromBotDuplicat
 		t.Fatalf("expected one manual/foreign id, got %+v", summary)
 	}
 
-	ids := collectUnexpectedProtectionOrderIDs(orders, "SHORT", plan, false, nativeTrailingArmedOnly(false))
+	ids := collectUnexpectedProtectionOrderIDs(orders, "SHORT", plan, breakEvenArmedOnly(false), nativeTrailingArmedOnly(false))
 	if len(ids) != 1 || ids[0] != "4c363c81edc5bcde_ladder_sl_old" {
 		t.Fatalf("expected cleanup ids to include only stale bot duplicate, got %+v", ids)
 	}
@@ -29,7 +29,7 @@ func TestClassifyUnexpectedProtectionOrdersSeparatesManualForeignFromBotDuplicat
 
 func TestClassifyUnexpectedProtectionOrdersOrphanForInactivePosition(t *testing.T) {
 	orders := []OpenOrder{{OrderID: "native_trailing_old", PositionSide: "SHORT", Type: "TRAILING_STOP_MARKET", StopPrice: 99, CallbackRate: 0.02}}
-	summary := classifyUnexpectedProtectionOrders(orders, "SHORT", nil, false, nativeTrailingArmedOnly(false), false)
+	summary := classifyUnexpectedProtectionOrders(orders, "SHORT", nil, breakEvenArmedOnly(false), nativeTrailingArmedOnly(false), false)
 	if summary.OrphanForInactive != 1 || len(summary.OrphanForInactiveIDs) != 1 || summary.OrphanForInactiveIDs[0] != "native_trailing_old" {
 		t.Fatalf("expected inactive trailing order classified as orphan, got %+v", summary)
 	}
@@ -49,7 +49,7 @@ func TestClassifyUnexpectedProtectionOrdersSplitsDynamicOwnerByKind(t *testing.T
 	}
 
 	// 保本止损尚未推出:只有两张 trailing。
-	summary := classifyUnexpectedProtectionOrders(trailingOrders, "SHORT", nil, false, ownership, true)
+	summary := classifyUnexpectedProtectionOrders(trailingOrders, "SHORT", nil, breakEvenArmedOnly(false), ownership, true)
 	if summary.ExpectedDynamicOwner != 2 || summary.ExpectedDynamicTrailing != 2 || summary.ExpectedDynamicStop != 0 {
 		t.Fatalf("两张 trailing 应为 total=2 trail=2 be=0,got %+v", summary)
 	}
@@ -57,7 +57,7 @@ func TestClassifyUnexpectedProtectionOrdersSplitsDynamicOwnerByKind(t *testing.T
 	// 保本止损已推出:总数变 3,但多出来的那张必须归到 be,不能污染 trail 计数。
 	withBE := append(append([]OpenOrder{}, trailingOrders...),
 		OpenOrder{OrderID: "be_stop", PositionSide: "SHORT", Type: "STOP_MARKET", StopPrice: 83.68})
-	summary = classifyUnexpectedProtectionOrders(withBE, "SHORT", nil, true, ownership, true)
+	summary = classifyUnexpectedProtectionOrders(withBE, "SHORT", nil, breakEvenArmedOnly(true), ownership, true)
 	if summary.ExpectedDynamicOwner != 3 || summary.ExpectedDynamicTrailing != 2 || summary.ExpectedDynamicStop != 1 {
 		t.Fatalf("两张 trailing + 保本止损应为 total=3 trail=2 be=1,got %+v", summary)
 	}
@@ -68,7 +68,7 @@ func TestClassifyUnexpectedProtectionOrdersSplitsDynamicOwnerByKind(t *testing.T
 	// 真问题的形态:第三张 trailing 未被认领 → 必须落在 staleTrail,而不是被 be 吸收。
 	withExtraTrail := append(append([]OpenOrder{}, trailingOrders...),
 		OpenOrder{OrderID: "native_trailing_orphan", PositionSide: "SHORT", Type: "TRAILING_STOP_MARKET", StopPrice: 79.5, CallbackRate: 0.3})
-	summary = classifyUnexpectedProtectionOrders(withExtraTrail, "SHORT", nil, false, ownership, true)
+	summary = classifyUnexpectedProtectionOrders(withExtraTrail, "SHORT", nil, breakEvenArmedOnly(false), ownership, true)
 	if summary.ExpectedDynamicTrailing != 2 || summary.StaleTrailingDuplicate != 1 {
 		t.Fatalf("未认领的第三张 trailing 应记为 staleTrail=1,got %+v", summary)
 	}
@@ -90,7 +90,7 @@ func TestClassifyUnexpectedProtectionOrdersBreakEvenBudgetIsOrderIndependent(t *
 		"be_last":  {trailA, trailB, beStop},
 		"be_mid":   {trailA, beStop, trailB},
 	} {
-		summary := classifyUnexpectedProtectionOrders(orders, "SHORT", nil, true, ownership, true)
+		summary := classifyUnexpectedProtectionOrders(orders, "SHORT", nil, breakEvenArmedOnly(true), ownership, true)
 		if summary.ManualOrForeign != 0 {
 			t.Fatalf("%s:保本止损被误判为外来单,got %+v", name, summary)
 		}
@@ -101,7 +101,7 @@ func TestClassifyUnexpectedProtectionOrdersBreakEvenBudgetIsOrderIndependent(t *
 
 	// 额度确实只有一张:两张止损时第二张不能也蹭到保本额度。
 	secondStop := OpenOrder{OrderID: "extra_stop", PositionSide: "SHORT", Type: "STOP_MARKET", StopPrice: 85.5}
-	summary := classifyUnexpectedProtectionOrders([]OpenOrder{trailA, beStop, secondStop}, "SHORT", nil, true, ownership, true)
+	summary := classifyUnexpectedProtectionOrders([]OpenOrder{trailA, beStop, secondStop}, "SHORT", nil, breakEvenArmedOnly(true), ownership, true)
 	if summary.ExpectedDynamicStop != 1 {
 		t.Fatalf("保本额度应只够一张止损,got %+v", summary)
 	}
@@ -112,7 +112,7 @@ func TestClassifyUnexpectedProtectionOrdersExpectedDynamicOwners(t *testing.T) {
 		{OrderID: "be-stop", PositionSide: "LONG", Type: "STOP_MARKET", StopPrice: 100},
 		{OrderID: "native_trailing_1", PositionSide: "LONG", Type: "TRAILING_STOP_MARKET", StopPrice: 105, CallbackRate: 0.02},
 	}
-	summary := classifyUnexpectedProtectionOrders(orders, "LONG", nil, true, nativeTrailingArmedOnly(true), true)
+	summary := classifyUnexpectedProtectionOrders(orders, "LONG", nil, breakEvenArmedOnly(true), nativeTrailingArmedOnly(true), true)
 	if summary.ExpectedDynamicOwner != 2 {
 		t.Fatalf("expected break-even and trailing as dynamic owners, got %+v", summary)
 	}
@@ -135,7 +135,7 @@ func TestBinanceBrokerPrefixRecognizedAsBot(t *testing.T) {
 		// a genuine foreign/manual order (no broker prefix) must still be preserved
 		{OrderID: "manual-1", ClientOrderID: "someones-manual-stop", PositionSide: "LONG", Type: "STOP_MARKET", StopPrice: 90.0},
 	}
-	summary := classifyUnexpectedProtectionOrders(orders, "LONG", plan, false, nativeTrailingArmedOnly(false), true)
+	summary := classifyUnexpectedProtectionOrders(orders, "LONG", plan, breakEvenArmedOnly(false), nativeTrailingArmedOnly(false), true)
 	if summary.StaleBotDuplicate != 1 || len(summary.StaleBotDuplicateIDs) != 1 {
 		t.Fatalf("expected the Binance-prefixed stale stop to be a bot duplicate, got %+v", summary)
 	}

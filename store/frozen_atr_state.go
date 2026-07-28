@@ -23,6 +23,14 @@ type FrozenATRRecord struct {
 	EntryPrice float64 `json:"entry_price"`
 	ATR        float64 `json:"atr"`
 	UpdatedAt  int64   `json:"updated_at"`
+	// PositionCreatedTime is the exchange-reported position open time (cTime, ms) this
+	// record was frozen against. It is the AUTHORITATIVE position identity: unlike
+	// EntryPrice it does NOT move when the position is added to or partially closed,
+	// so a cache/record hit stays valid across 加减仓 (see frozenATRIdentityMatches).
+	// 0 means "unknown" — either a legacy record written before this field existed, or
+	// a venue that does not report cTime (Binance); those fall back to the EntryPrice
+	// tolerance so behaviour there is unchanged.
+	PositionCreatedTime int64 `json:"position_created_time,omitempty"`
 	// StructuralBoundary is the pre-entry range boundary price frozen at open (swing
 	// low for a long, swing high for a short) used by the structural stop-loss. 0 when
 	// the position does not use structural SL. Frozen because it cannot be recomputed

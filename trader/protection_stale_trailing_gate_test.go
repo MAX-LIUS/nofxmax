@@ -57,9 +57,9 @@ func TestStaleTrailingReachesCancelFastPath(t *testing.T) {
 		t.Fatal("缺一张档位止盈时 missingTP 必须为真,否则本测试对 TP 覆盖没有区分力")
 	}
 
-	unexpectedStops, unexpectedTPs := detectUnexpectedProtectionOrders(orders, "LONG", plan, true, ownership)
-	summary := classifyUnexpectedProtectionOrders(orders, "LONG", plan, true, ownership, true)
-	ids := collectUnexpectedProtectionOrderIDs(orders, "LONG", plan, true, ownership)
+	unexpectedStops, unexpectedTPs := detectUnexpectedProtectionOrders(orders, "LONG", plan, breakEvenArmedOnly(true), ownership)
+	summary := classifyUnexpectedProtectionOrders(orders, "LONG", plan, breakEvenArmedOnly(true), ownership, true)
+	ids := collectUnexpectedProtectionOrderIDs(orders, "LONG", plan, breakEvenArmedOnly(true), ownership)
 
 	if len(ids) != 1 || ids[0] != "2000001313524718" {
 		t.Fatalf("待撤列表应只含未认领的 0.067 那张,got %v", ids)
@@ -76,7 +76,7 @@ func TestStaleTrailingReachesCancelFastPath(t *testing.T) {
 
 	// 反向验证:旧布尔语义下 unexpected 数为 0,闸门根本不会被触发 ——
 	// 这正是这张单能在线上长期躺着的原因。
-	legacyStops, legacyTPs := detectUnexpectedProtectionOrders(orders, "LONG", plan, true, nativeTrailingArmedOnly(true))
+	legacyStops, legacyTPs := detectUnexpectedProtectionOrders(orders, "LONG", plan, breakEvenArmedOnly(true), nativeTrailingArmedOnly(true))
 	if legacyStops != 0 || legacyTPs != 0 {
 		t.Fatalf("旧语义本应一张都不判 unexpected,got SL=%d TP=%d", legacyStops, legacyTPs)
 	}
@@ -87,8 +87,8 @@ func TestStaleTrailingReachesCancelFastPath(t *testing.T) {
 // StaleTrailingDuplicate 把它挡在这条分支之外。
 func TestToleranceBranchDoesNotSwallowStaleTrailing(t *testing.T) {
 	orders, plan, ownership := bnEthShape()
-	unexpectedStops, unexpectedTPs := detectUnexpectedProtectionOrders(orders, "LONG", plan, true, ownership)
-	summary := classifyUnexpectedProtectionOrders(orders, "LONG", plan, true, ownership, true)
+	unexpectedStops, unexpectedTPs := detectUnexpectedProtectionOrders(orders, "LONG", plan, breakEvenArmedOnly(true), ownership)
+	summary := classifyUnexpectedProtectionOrders(orders, "LONG", plan, breakEvenArmedOnly(true), ownership, true)
 
 	// 这就是容忍分支的原始条件(不含新增那一项)。
 	legacyConditionWouldSwallow := unexpectedStops > 0 && unexpectedTPs == 0 &&

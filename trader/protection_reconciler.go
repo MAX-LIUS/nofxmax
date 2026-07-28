@@ -299,9 +299,12 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 		// 只有这样才能识别"我挂的但已无人认领"的重复 trailing 单(见
 		// native_trailing_ownership.go 的说明)。
 		trailingOwnership := at.nativeTrailingOwnershipForPosition(symbol, side, entryPrice, nativeTrailingArmed)
-		unexpectedStops, unexpectedTPs := detectUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership)
-		unexpectedSummary := classifyUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership, true)
-		ownership := evaluateProtectionOwnership(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership)
+		// 同理,保本止损也要认领视图:布尔额度只容一张,配两档时第二档每轮被判多余
+		// 撤掉、下轮又挂回来(见 break_even_ownership.go 的 WLDUSDT 实证)。
+		beOwnership := at.breakEvenOwnershipForPosition(symbol, side, breakEvenArmed)
+		unexpectedStops, unexpectedTPs := detectUnexpectedProtectionOrders(openOrders, positionSide, plan, beOwnership, trailingOwnership)
+		unexpectedSummary := classifyUnexpectedProtectionOrders(openOrders, positionSide, plan, beOwnership, trailingOwnership, true)
+		ownership := evaluateProtectionOwnership(openOrders, positionSide, plan, beOwnership, trailingOwnership)
 		// 容忍判决必须在 🧭 日志**之前**做完 —— 否则日志打的是中间态:
 		// 这条分支会把 state 从 degraded 翻回 protected/verified,而日志在它上游,
 		// 于是 SKHYNIXUSDT 连续 465 轮打出 `state=degraded verified=false`,紧接着
@@ -354,7 +357,7 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 		}
 
 		if unexpectedStops > 0 || unexpectedTPs > 0 {
-			unexpectedIDs := collectUnexpectedProtectionOrderIDs(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership)
+			unexpectedIDs := collectUnexpectedProtectionOrderIDs(openOrders, positionSide, plan, beOwnership, trailingOwnership)
 			// Coverage-complete fast path (fix 2026-06-22 churn): when every required
 			// protection tier is already visible (no missing SL/TP) and the unexpected
 			// orders are pure stale bot duplicates, the position is fully protected and
@@ -380,7 +383,7 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 				if cleanErr != nil {
 					return result, fmt.Errorf("verify stale duplicate cleanup open orders: %w", cleanErr)
 				}
-				remStops, remTPs := detectUnexpectedProtectionOrders(remainingOrders, positionSide, plan, breakEvenArmed,
+				remStops, remTPs := detectUnexpectedProtectionOrders(remainingOrders, positionSide, plan, beOwnership,
 					at.nativeTrailingOwnershipForPosition(symbol, side, entryPrice, nativeTrailingArmed))
 				if remStops > 0 || remTPs > 0 {
 					return result, fmt.Errorf("stale duplicate cleanup incomplete (unexpectedSL=%d unexpectedTP=%d)", remStops, remTPs)
@@ -405,7 +408,7 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 				at.setReconcileCooldown(positionKey(symbol, side))
 				return result, fmt.Errorf("verify unexpected cleanup open orders: %w", cleanErr)
 			}
-			remainingUnexpectedStops, remainingUnexpectedTPs := detectUnexpectedProtectionOrders(remainingOrders, positionSide, plan, breakEvenArmed,
+			remainingUnexpectedStops, remainingUnexpectedTPs := detectUnexpectedProtectionOrders(remainingOrders, positionSide, plan, beOwnership,
 				at.nativeTrailingOwnershipForPosition(symbol, side, entryPrice, nativeTrailingArmed))
 			if remainingUnexpectedStops > 0 || remainingUnexpectedTPs > 0 {
 				at.setReconcileCooldown(positionKey(symbol, side))
@@ -742,8 +745,8 @@ func protectionOrderCountForPlan(plan *ProtectionPlan) int {
 	return count
 }
 
-func detectUnexpectedProtectionOrders(openOrders []OpenOrder, positionSide string, plan *ProtectionPlan, breakEvenArmed bool, trailingOwnership nativeTrailingOwnership) (unexpectedStops int, unexpectedTPs int) {
-	summary := classifyUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership, true)
+func detectUnexpectedProtectionOrders(openOrders []OpenOrder, positionSide string, plan *ProtectionPlan, beOwnership breakEvenOwnership, trailingOwnership nativeTrailingOwnership) (unexpectedStops int, unexpectedTPs int) {
+	summary := classifyUnexpectedProtectionOrders(openOrders, positionSide, plan, beOwnership, trailingOwnership, true)
 	for _, order := range openOrders {
 		if positionSide != "" && order.PositionSide != "" && !strings.EqualFold(order.PositionSide, positionSide) {
 			continue

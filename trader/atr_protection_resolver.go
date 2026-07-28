@@ -1,6 +1,7 @@
 package trader
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,9 @@ import (
 type frozenATREntry struct {
 	entryPrice float64
 	atr        float64
+	// posCreatedTime 是冻结时那个仓位的交易所开仓时间(cTime, ms),仓位身份的**权威依据**。
+	// 0 = 未知(冻结发生在仓位存在之前,或交易所不报 cTime),此时退回 entryPrice 容差。
+	posCreatedTime int64
 }
 
 var (
@@ -30,6 +34,8 @@ var (
 type frozenStructEntry struct {
 	entryPrice float64
 	boundary   float64
+	// posCreatedTime: 同 frozenATREntry.posCreatedTime,仓位身份的权威依据。
+	posCreatedTime int64
 }
 
 // frozenStructBoundary caches a position's pre-entry range boundary frozen at open,
@@ -39,6 +45,50 @@ var (
 	frozenStructMu    sync.Mutex
 	frozenStructCache = map[string]frozenStructEntry{}
 )
+
+// currentPositionCreatedTime 读取本轮已知的仓位身份(交易所 cTime, ms)。
+//
+// 它复用 drawdownPosIdentity —— 这一格由 refreshDrawdownExecutionFingerprint 在每轮
+// monitor 的最前面写入(auto_trader_risk.go:220),而所有冻结值的读取都发生在那之后,
+// 所以这里不需要把 posCreatedTime 一路穿过 7 层函数签名。
+//
+// 返回 0 表示"本轮不知道"(交易所不报 cTime,如 Binance;或身份刚被
+// refreshDrawdownExecutionFingerprint 判定换仓而删除,下一轮才重填),调用方必须
+// 退回旧的 entryPrice 容差判据,绝不能因为拿不到 cTime 就当成"换了仓位"。
+func (at *AutoTrader) currentPositionCreatedTime(symbol, side string) int64 {
+	key := positionKey(symbol, side)
+	at.protectionStateMutex.RLock()
+	raw, ok := at.drawdownPosIdentity[key]
+	at.protectionStateMutex.RUnlock()
+	if !ok || raw == "" {
+		return 0
+	}
+	ct, err := strconv.ParseInt(strings.Split(raw, "|")[0], 10, 64)
+	if err != nil || ct <= 0 {
+		return 0
+	}
+	return ct
+}
+
+// frozenATRIdentityMatches 判定一条冻结记录是否属于**当前这个仓位**。
+//
+// 这是 WLD 事故的治本点。旧判据只有 entrySamePosition(入场价差 ≤ 0.05%):WLD 因加仓
+// 把交易所持仓均价从 0.3622 推到 0.3697(漂 1.9%,远超容差),于是每次读冻结值都 miss、
+// 用当下市场重新冻结 ATR(开仓时 1.54% → 几分钟后 0.99%),同一档 offset 在两个 ATR
+// 下算出两个 stop 价,2 档 × 2 个 ATR = 交易所上 4 条 break_even_stop 单。
+//
+// cTime 不随加减仓变化,所以两边都拿到 cTime 时它是唯一判据 —— 价格漂多少都无所谓,
+// 只要还是同一个仓位就命中。任一边拿不到 cTime(Binance 不报;旧记录没这个字段;
+// 开仓那一刻仓位还不存在)才退回容差,Binance 与历史记录的行为完全不变。
+//
+// recordCTime>0 && currentCTime==0 时保留命中:这条记录明确属于某个仓位,而本轮只是
+// "不知道当前是谁",按容差裁决即可 —— 否则 Binance 上每条带 cTime 的记录都会被误判。
+func frozenATRIdentityMatches(recordCTime, currentCTime int64, recordEntry, currentEntry float64) bool {
+	if recordCTime > 0 && currentCTime > 0 {
+		return recordCTime == currentCTime
+	}
+	return entrySamePosition(recordEntry, currentEntry)
+}
 
 // frozenATRForPosition returns a stable ATR for a position keyed by symbol.
 // First call (at open) computes fresh ATR and freezes it against the entry
@@ -66,15 +116,26 @@ func (at *AutoTrader) frozenATRForPosition(symbol, side string, entryPrice float
 // 是**算进数值里**的,不是单独一个字段。
 //
 // 所以规则是:**换算分母必须用 ATR 冻结时的那个 entry**,不是调用方当下的 entry。
-// 这样"这一档等于百分之几"就成了仓位的稳定属性,和 ATR 一样冻住。entrySamePosition
-// 的 0.05% 容差之内(线上 SOXL 漂了 0.0118%)缓存命中,两条路径拿到同一个分母;
-// 漂出容差才算换了仓位,重新冻结,那时重算百分比是正确行为。
+// 这样"这一档等于百分之几"就成了仓位的稳定属性,和 ATR 一样冻住。
+//
+// 命中判据见 frozenATRIdentityMatches:优先用交易所 cTime(加减仓不变),拿不到才退回
+// entrySamePosition 的 0.05% 容差。WLD 就是漂出容差被误判成新仓位、反复重新冻结,才在
+// 交易所堆出 4 条 BE 单。
 func (at *AutoTrader) frozenATRAndEntryForPosition(symbol, side string, entryPrice float64, cfg store.ATRProtectionConfig) (float64, float64, bool) {
 	key := frozenATRKey(at.id, symbol, cfg.WithDefaults().Timeframe, side)
+	curCTime := at.currentPositionCreatedTime(symbol, side)
+
 	frozenATRMu.Lock()
 	ent, ok := frozenATRCache[key]
 	frozenATRMu.Unlock()
-	if ok && entryPrice > 0 && entrySamePosition(ent.entryPrice, entryPrice) && ent.atr > 0 {
+	if ok && entryPrice > 0 && ent.atr > 0 &&
+		frozenATRIdentityMatches(ent.posCreatedTime, curCTime, ent.entryPrice, entryPrice) {
+		// 认领:开仓那一刻仓位还不存在(resolveATRProtection 先跑),记录里没有 cTime。
+		// 第一轮 monitor 拿到 cTime、且此时 entry 还在容差内,就把身份补写进去 —— 之后
+		// 加仓漂多少都认得出来。只补一次,不产生写入 churn。
+		if ent.posCreatedTime == 0 && curCTime > 0 {
+			at.adoptFrozenATRPositionIdentity(key, symbol, ent, curCTime)
+		}
 		return ent.atr, ent.entryPrice, true
 	}
 
@@ -82,10 +143,15 @@ func (at *AutoTrader) frozenATRAndEntryForPosition(symbol, side string, entryPri
 	// recomputing, so a restart does not re-freeze against today's ATR.
 	if entryPrice > 0 && at.store != nil {
 		if state, err := at.store.LoadFrozenATRState(); err == nil {
-			if rec, found := state.Records[key]; found && rec.ATR > 0 && entrySamePosition(rec.EntryPrice, entryPrice) {
+			if rec, found := state.Records[key]; found && rec.ATR > 0 &&
+				frozenATRIdentityMatches(rec.PositionCreatedTime, curCTime, rec.EntryPrice, entryPrice) {
+				restored := frozenATREntry{entryPrice: rec.EntryPrice, atr: rec.ATR, posCreatedTime: rec.PositionCreatedTime}
 				frozenATRMu.Lock()
-				frozenATRCache[key] = frozenATREntry{entryPrice: rec.EntryPrice, atr: rec.ATR}
+				frozenATRCache[key] = restored
 				frozenATRMu.Unlock()
+				if rec.PositionCreatedTime == 0 && curCTime > 0 {
+					at.adoptFrozenATRPositionIdentity(key, symbol, restored, curCTime)
+				}
 				return rec.ATR, rec.EntryPrice, true
 			}
 		}
@@ -96,16 +162,53 @@ func (at *AutoTrader) frozenATRAndEntryForPosition(symbol, side string, entryPri
 		return 0, 0, false
 	}
 	frozenATRMu.Lock()
-	frozenATRCache[key] = frozenATREntry{entryPrice: entryPrice, atr: atr}
+	frozenATRCache[key] = frozenATREntry{entryPrice: entryPrice, atr: atr, posCreatedTime: curCTime}
 	frozenATRMu.Unlock()
 	// Persist the freshly frozen ATR so it survives a restart.
 	if entryPrice > 0 && at.store != nil {
-		rec := store.FrozenATRRecord{TraderID: at.id, Symbol: symbol, EntryPrice: entryPrice, ATR: atr, UpdatedAt: time.Now().Unix()}
+		rec := store.FrozenATRRecord{TraderID: at.id, Symbol: symbol, EntryPrice: entryPrice, ATR: atr, PositionCreatedTime: curCTime, UpdatedAt: time.Now().Unix()}
 		if err := at.store.SaveFrozenATRRecord(key, rec); err != nil {
 			logger.Warnf("⚠️ Frozen ATR: failed to persist %s: %v", key, err)
 		}
 	}
 	return atr, entryPrice, true
+}
+
+// adoptFrozenATRPositionIdentity 给一条"冻结时还不知道 cTime"的记录补上仓位身份。
+// 内存缓存与持久化记录都补,后者用 read-modify-write 以免抹掉 structural/trail 字段。
+func (at *AutoTrader) adoptFrozenATRPositionIdentity(key, symbol string, ent frozenATREntry, cTime int64) {
+	if cTime <= 0 {
+		return
+	}
+	frozenATRMu.Lock()
+	cur, ok := frozenATRCache[key]
+	if ok && cur.posCreatedTime == 0 {
+		cur.posCreatedTime = cTime
+		frozenATRCache[key] = cur
+	}
+	frozenATRMu.Unlock()
+
+	if at.store == nil {
+		return
+	}
+	state, err := at.store.LoadFrozenATRState()
+	if err != nil {
+		return
+	}
+	rec, found := state.Records[key]
+	if !found {
+		rec = store.FrozenATRRecord{TraderID: at.id, Symbol: symbol, EntryPrice: ent.entryPrice, ATR: ent.atr}
+	}
+	if rec.PositionCreatedTime == cTime {
+		return
+	}
+	rec.PositionCreatedTime = cTime
+	rec.UpdatedAt = time.Now().Unix()
+	if err := at.store.SaveFrozenATRRecord(key, rec); err != nil {
+		logger.Warnf("⚠️ Frozen ATR: failed to persist position identity %s: %v", key, err)
+		return
+	}
+	logger.Infof("🔒 Frozen ATR: adopted position identity cTime=%d for %s (entry anchor %.8f, ATR %.6f)", cTime, key, rec.EntryPrice, rec.ATR)
 }
 
 // anchorOrCallerEntry 选换算分母:锚可用就用锚,否则退回调用方的 entry —— 也就是旧
@@ -264,23 +367,36 @@ func (at *AutoTrader) frozenStructBoundaryForPosition(symbol string, entryPrice 
 	}
 	key := frozenATRKey(at.id, symbol, tf, side)
 
+	curCTime := at.currentPositionCreatedTime(symbol, side)
+
 	frozenStructMu.Lock()
 	ent, ok := frozenStructCache[key]
 	frozenStructMu.Unlock()
-	// Cache hit only counts when it belongs to THIS position. Guarding on entry
-	// price stops a new position from inheriting a prior (not-yet-evicted) boundary
-	// on the same key. entryPrice<=0 (callers without price context) trusts the hit.
-	if ok && (entryPrice <= 0 || ent.entryPrice <= 0 || entrySamePosition(ent.entryPrice, entryPrice)) {
+	// Cache hit only counts when it belongs to THIS position — same identity rule as the
+	// frozen ATR (cTime first, entry-price tolerance as fallback). Without cTime, 加仓
+	// drift would drop the boundary here too, and on the reconcile path (allowCompute=false)
+	// a dropped boundary means the plan silently loses the structural stop.
+	// entryPrice<=0 (callers without price context) trusts the hit.
+	if ok && (entryPrice <= 0 || ent.entryPrice <= 0 ||
+		frozenATRIdentityMatches(ent.posCreatedTime, curCTime, ent.entryPrice, entryPrice)) {
+		if ent.posCreatedTime == 0 && curCTime > 0 && ent.entryPrice > 0 {
+			frozenStructMu.Lock()
+			if cur, found := frozenStructCache[key]; found && cur.posCreatedTime == 0 {
+				cur.posCreatedTime = curCTime
+				frozenStructCache[key] = cur
+			}
+			frozenStructMu.Unlock()
+		}
 		return ent.boundary, ent.boundary > 0
 	}
 
-	// Persisted record (survives restart), guarded by entry price to avoid stale reuse.
+	// Persisted record (survives restart), guarded by position identity to avoid stale reuse.
 	if entryPrice > 0 && at.store != nil {
 		if state, err := at.store.LoadFrozenATRState(); err == nil {
 			if rec, found := state.Records[key]; found && rec.StructuralBoundary > 0 &&
-				entrySamePosition(rec.EntryPrice, entryPrice) {
+				frozenATRIdentityMatches(rec.PositionCreatedTime, curCTime, rec.EntryPrice, entryPrice) {
 				frozenStructMu.Lock()
-				frozenStructCache[key] = frozenStructEntry{entryPrice: rec.EntryPrice, boundary: rec.StructuralBoundary}
+				frozenStructCache[key] = frozenStructEntry{entryPrice: rec.EntryPrice, boundary: rec.StructuralBoundary, posCreatedTime: rec.PositionCreatedTime}
 				frozenStructMu.Unlock()
 				return rec.StructuralBoundary, true
 			}
@@ -297,12 +413,12 @@ func (at *AutoTrader) frozenStructBoundaryForPosition(symbol string, entryPrice 
 	if !ok {
 		// Cache the "none" result so we don't re-fetch every reconcile cycle.
 		frozenStructMu.Lock()
-		frozenStructCache[key] = frozenStructEntry{entryPrice: entryPrice, boundary: 0}
+		frozenStructCache[key] = frozenStructEntry{entryPrice: entryPrice, boundary: 0, posCreatedTime: curCTime}
 		frozenStructMu.Unlock()
 		return 0, false
 	}
 	frozenStructMu.Lock()
-	frozenStructCache[key] = frozenStructEntry{entryPrice: entryPrice, boundary: boundary}
+	frozenStructCache[key] = frozenStructEntry{entryPrice: entryPrice, boundary: boundary, posCreatedTime: curCTime}
 	frozenStructMu.Unlock()
 
 	// Persist onto the existing frozen-ATR record (same key) so both survive restart.
@@ -311,6 +427,9 @@ func (at *AutoTrader) frozenStructBoundaryForPosition(symbol string, entryPrice 
 			rec := state.Records[key]
 			rec.TraderID, rec.Symbol, rec.EntryPrice = at.id, symbol, entryPrice
 			rec.StructuralBoundary = boundary
+			if curCTime > 0 {
+				rec.PositionCreatedTime = curCTime
+			}
 			rec.UpdatedAt = time.Now().Unix()
 			if err := at.store.SaveFrozenATRRecord(key, rec); err != nil {
 				logger.Warnf("⚠️ Structural SL: failed to persist boundary %s: %v", key, err)

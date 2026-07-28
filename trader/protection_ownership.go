@@ -24,13 +24,15 @@ type ProtectionOwnershipState struct {
 	Reasons           []string
 }
 
-func evaluateProtectionOwnership(openOrders []OpenOrder, positionSide string, plan *ProtectionPlan, breakEvenArmed bool, trailingOwnership nativeTrailingOwnership) ProtectionOwnershipState {
+func evaluateProtectionOwnership(openOrders []OpenOrder, positionSide string, plan *ProtectionPlan, beOwnership breakEvenOwnership, trailingOwnership nativeTrailingOwnership) ProtectionOwnershipState {
 	state := ProtectionOwnershipState{State: "unprotected"}
 	positionSide = strings.ToUpper(positionSide)
 	// 归属判断("盈利侧有没有主人")看的是"有没有武装",而不是"哪张单是我的"。
 	// 认领集合只用于区分多余单,不参与 owner 判定 —— 否则记录落盘窗口期会瞬间
 	// 判成 missingProfit 并触发一轮无谓的重挂。
 	nativeTrailingArmed := trailingOwnership.Armed
+	// owner 判定只看"有没有武装",与认领集合无关(同 trailing:落盘窗口期不能瞬间判缺)。
+	breakEvenArmed := beOwnership.Armed
 
 	if plan == nil {
 		if breakEvenArmed || nativeTrailingArmed {
@@ -50,7 +52,7 @@ func evaluateProtectionOwnership(openOrders []OpenOrder, positionSide string, pl
 	}
 
 	missingSL, missingTP := detectMissingProtection(openOrders, positionSide, plan, false)
-	unexpectedSL, unexpectedTP := detectUnexpectedProtectionOrders(openOrders, positionSide, plan, breakEvenArmed, trailingOwnership)
+	unexpectedSL, unexpectedTP := detectUnexpectedProtectionOrders(openOrders, positionSide, plan, beOwnership, trailingOwnership)
 	state.MissingStop = missingSL && !breakEvenArmed
 	state.MissingProfit = missingTP && !nativeTrailingArmed
 	state.UnexpectedStops = unexpectedSL

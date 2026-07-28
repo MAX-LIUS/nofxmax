@@ -1113,11 +1113,16 @@ func hasMatchingProtectionOrder(orders []tradertypes.OpenOrder, positionSide str
 }
 
 func hasMatchingBreakEvenOrder(orders []tradertypes.OpenOrder, positionSide string, targetPrice float64) bool {
+	_, found := matchingBreakEvenOrderID(orders, positionSide, targetPrice)
+	return found
+}
+
+// matchingBreakEvenOrderID 与 hasMatchingBreakEvenOrder 判据完全相同,但把命中那条单的
+// 交易所 order id 一起带出来 —— 之前"BE 已在场"分支只回一个 bool,持久化只能写空 id,
+// 于是全库 break_even_stop 记录的 exchange_order_id 都是空的,想按档撤单也无从下手。
+func matchingBreakEvenOrderID(orders []tradertypes.OpenOrder, positionSide string, targetPrice float64) (string, bool) {
 	for _, order := range orders {
-		if positionSide != "" && !strings.EqualFold(order.PositionSide, positionSide) && order.PositionSide != "" {
-			continue
-		}
-		if !looksLikeStopLoss(order) {
+		if !isBreakEvenTaggedOrder(order, positionSide) {
 			continue
 		}
 		price := order.StopPrice
@@ -1127,25 +1132,34 @@ func hasMatchingBreakEvenOrder(orders []tradertypes.OpenOrder, positionSide stri
 		if price <= 0 {
 			continue
 		}
-		// Match by tag if available
-		tag := strings.ToLower(order.ClientOrderID)
-		if strings.Contains(tag, "break_even") || strings.Contains(tag, "be-stop") {
-			if approximatelyEqualPrice(price, targetPrice) {
-				return true
-			}
-			continue
-		}
-		// For OKX where tag is truncated: match any conditional stop at the target price
-		// that is not a trailing stop and not identified as ladder/fallback
-		if !strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
-			if !strings.Contains(tag, "ladder") && !strings.Contains(tag, "fallback") && !strings.Contains(tag, "full_sl") {
-				if approximatelyEqualPrice(price, targetPrice) {
-					return true
-				}
-			}
+		if approximatelyEqualPrice(price, targetPrice) {
+			return order.OrderID, true
 		}
 	}
-	return false
+	return "", false
+}
+
+// isBreakEvenTaggedOrder 判断"这张单的形状是一张保本止损单"—— 只看方向与标签/类型,
+// 不看价格。从 matchingBreakEvenOrderID 里抽出来,是为了让逐档替换路径
+// (findStaleBreakEvenTierOrders)与"该档是否已在场"用**同一套判据**:
+// 两边判据一旦漂移,就会出现"匹配不上所以挂新单、但也不认它所以不撤旧单"的堆积。
+func isBreakEvenTaggedOrder(order tradertypes.OpenOrder, positionSide string) bool {
+	if positionSide != "" && !strings.EqualFold(order.PositionSide, positionSide) && order.PositionSide != "" {
+		return false
+	}
+	if !looksLikeStopLoss(order) {
+		return false
+	}
+	tag := strings.ToLower(order.ClientOrderID)
+	if strings.Contains(tag, "break_even") || strings.Contains(tag, "be-stop") {
+		return true
+	}
+	// For OKX where tag is truncated: any conditional stop that is not a trailing
+	// stop and not identified as ladder/fallback/full_sl is treated as BE-shaped.
+	if strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
+		return false
+	}
+	return !strings.Contains(tag, "ladder") && !strings.Contains(tag, "fallback") && !strings.Contains(tag, "full_sl")
 }
 
 func hasAnyBreakEvenOrderOnExchange(orders []tradertypes.OpenOrder, positionSide string) bool {
