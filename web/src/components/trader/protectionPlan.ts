@@ -72,6 +72,13 @@ export const MECHANISM_META: Record<
   ladder_sl: { zh: '阶梯止损', en: 'Ladder SL', category: 'protection' },
   full_tp: { zh: '全量止盈', en: 'Full TP', category: 'protection' },
   full_sl: { zh: '全量止损', en: 'Full SL', category: 'protection' },
+  // 结构位止损:close-confirm 收紧出场 或 挂在交易所的宽兜底网。后端 MechStructuralSL
+  // 从 2026-07 起会真实落库,这里缺了就会在面板上显示成"未知系统"。
+  structural_sl: {
+    zh: '结构位止损',
+    en: 'Structural SL',
+    category: 'protection',
+  },
   fallback_maxloss_sl: {
     zh: '兜底止损',
     en: 'Fallback SL',
@@ -135,6 +142,10 @@ export function classifyMechanism(rawReason?: string): string {
   if (r.includes('ladder_sl')) return 'ladder_sl'
   if (r.includes('fallback_maxloss')) return 'fallback_maxloss_sl'
   if (r.includes('full_tp')) return 'full_tp'
+  // 必须排在 full_sl 之前,镜像后端 store/attribution.go 的顺序:更具体的
+  // structural 标签不能被 full_sl 抢先吃掉。
+  if (r.includes('structural_sl') || r.includes('structural'))
+    return 'structural_sl'
   if (r.includes('full_sl')) return 'full_sl'
   if (r.includes('time_stop')) return 'time_stop'
   if (r.includes('max_hold')) return 'max_hold'

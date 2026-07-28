@@ -195,6 +195,13 @@ function summarizeCloseSource(
       confidence: 'high',
       group: 'protection',
     }
+  // 与 protectionPlan.ts / store/attribution.go 一致:structural 要排在 full_sl 之前。
+  if (merged.includes('structural'))
+    return {
+      label: 'Protection · Structural SL',
+      confidence: 'high',
+      group: 'protection',
+    }
   if (merged.includes('full_sl'))
     return {
       label: 'Protection · Full SL',
