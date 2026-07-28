@@ -1069,8 +1069,21 @@ func computeExchangeLightReason(
 		return "no_activation"
 	}
 	if !matchedLive {
-		// Order absent but tier not yet reached rendered yellow (needs attention).
-		return "not_placed"
+		// Unreachable via computeExchangeLight: every one of its yellow branches sits
+		// behind matchedLive==true, and !matchedLive returns RED (a missing order is a
+		// genuine gap under place-at-open, never a soft yellow). Kept as a defensive
+		// classification rather than a "not_placed" reason string the panel would have
+		// to render: an absent order should surface as red/missing, and inventing a
+		// yellow sub-reason for it would contradict the light itself.
+		return "absent_order_unexpected_yellow"
+	}
+	if markPrice <= 0 {
+		// computeExchangeLight also yellows when the mark is unusable ("cannot evaluate
+		// reachability; don't claim green"). That is NOT a phantom — a phantom is a
+		// positive finding that the venue skipped activation. Falling through to
+		// "phantom" here would tell the user an order is dead when the truth is only
+		// that we could not judge it.
+		return "unknown_mark"
 	}
 	// Matched order with a positive activation price that mark has passed → phantom.
 	return "phantom"
@@ -1248,6 +1261,10 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 	trailingOrders := make([]map[string]interface{}, 0)
 	liveTrailingTriggerPrice := 0.0
 	liveTrailingCallbackRate := 0.0
+	// 在场 trailing 单张数。多档 trailing 常驻多张,而 runner migration 只想比较
+	// "runner 那一档"的在场单;张数 >1 时 (trigger, callback) 这对标量无法确定
+	// 属于哪一档,migration 必须拒绝动作而不是猜。
+	liveTrailingCandidateCount := 0
 	liveBreakEvenStopPrice := 0.0
 	breakEvenOrderDetected := false
 	ladderStopCount := 0
@@ -1285,12 +1302,19 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 			}
 		}
 		if strings.Contains(strings.ToUpper(order.Type), "TRAILING") {
-			if triggerPrice > 0 {
+			// 激活价与 callback 必须**成对**取自同一张单。原来两个 if 各自独立赋值,
+			// 在多档 trailing(一个仓位现在常驻 2~4 张)下会拼出一对根本不属于同一张
+			// 单的 (trigger, callback):trigger 来自最后一张有 trigger 的单,callback
+			// 来自最后一张有 callback 的单。这对幻影参数随后驱动 runner migration 的
+			// 漂移计算和 would_loosen_protection 安全判定 —— 用不存在的单去判断
+			// "换单会不会放松保护",结论无意义。
+			// 仍是 last-wins(交易所返回顺序无保证),但至少是一张真实存在的单;
+			// 下面 runnerMigrationLiveTrailingCount 记录候选张数,供歧义时拒绝动作。
+			if triggerPrice > 0 && order.CallbackRate > 0 {
 				liveTrailingTriggerPrice = triggerPrice
-			}
-			if order.CallbackRate > 0 {
 				liveTrailingCallbackRate = order.CallbackRate
 			}
+			liveTrailingCandidateCount++
 			trailingOrders = append(trailingOrders, map[string]interface{}{
 				"order_id":          order.OrderID,
 				"type":              order.Type,
@@ -1717,35 +1741,31 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 			runnerMigrationActionableReason = "manual_replace_ready"
 		}
 		if runnerMigrationActionable {
-			cancelOrderID := ""
-			cancelClientOrderID := ""
-			cancelQuantity := 0.0
-			for _, order := range trailingOrders {
-				triggerVal, _ := order["trigger_price"].(float64)
-				callbackVal, _ := order["callback_rate"].(float64)
-				if math.Abs(triggerVal-runnerMigrationLiveActivation) <= math.Max(0.01, runnerMigrationLiveActivation*0.0001) && math.Abs(callbackVal-runnerMigrationLiveCallback) <= math.Max(0.000001, runnerMigrationLiveCallback*0.001) {
-					cancelOrderID, _ = order["order_id"].(string)
-					cancelClientOrderID, _ = order["client_order_id"].(string)
-					cancelQuantity, _ = order["quantity"].(float64)
-					break
+			// 判定"撤哪张"抽到 resolveRunnerMigrationTarget(见 runner_migration_target.go):
+			// 多张在场 trailing ⇒ 歧义拒绝;精确匹配不上 ⇒ 拒绝而不是随便挑一张。
+			target := resolveRunnerMigrationTarget(
+				trailingOrders, runnerMigrationLiveActivation, runnerMigrationLiveCallback,
+				liveTrailingCandidateCount,
+			)
+			if !target.Resolved {
+				runnerMigrationActionable = false
+				runnerMigrationActionableReason = target.Reason
+			} else {
+				cancelQuantity := target.Quantity
+				if cancelQuantity <= 0 {
+					cancelQuantity = quantity
 				}
-			}
-			if cancelOrderID == "" && len(trailingOrders) > 0 {
-				cancelOrderID, _ = trailingOrders[0]["order_id"].(string)
-				cancelClientOrderID, _ = trailingOrders[0]["client_order_id"].(string)
-				cancelQuantity, _ = trailingOrders[0]["quantity"].(float64)
-			}
-			if cancelQuantity <= 0 {
-				cancelQuantity = quantity
-			}
-			runnerMigrationPlan = map[string]interface{}{
-				"action":                 "replace_native_trailing",
-				"cancel_order_id":        cancelOrderID,
-				"cancel_client_order_id": cancelClientOrderID,
-				"new_activation":         runnerMigrationDesiredActivation,
-				"new_callback":           runnerMigrationDesiredCallback,
-				"quantity":               math.Min(cancelQuantity, quantity),
-				"requires_confirmation":  true,
+				// 只有确实认出了要撤的那张单才发计划:带空/错 cancel_order_id 的
+				// replace_native_trailing 计划比没有计划更危险 —— 它看起来是可执行的。
+				runnerMigrationPlan = map[string]interface{}{
+					"action":                 "replace_native_trailing",
+					"cancel_order_id":        target.OrderID,
+					"cancel_client_order_id": target.ClientOrderID,
+					"new_activation":         runnerMigrationDesiredActivation,
+					"new_callback":           runnerMigrationDesiredCallback,
+					"quantity":               math.Min(cancelQuantity, quantity),
+					"requires_confirmation":  true,
+				}
 			}
 		}
 	}

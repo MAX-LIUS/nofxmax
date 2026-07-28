@@ -305,8 +305,20 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 		// dynamicOwner 后面跟成分拆分(trail=N be=N):这个总数混计了 trailing 和保本止损,
 		// 只看总数无法区分"多了一张 trailing(会多平仓,真问题)"和"BE 已推过所以多一张
 		// 止损(正常)"。详见 protection_unexpected_classification.go 里字段注释。
-		logger.Infof("🧭 Protection ownership: %s %s | state=%s verified=%t stopOwner=%s profitOwner=%s missingSL=%t missingTP=%t unexpectedSL=%d unexpectedTP=%d staleBot=%d staleTrail=%d manualForeign=%d dynamicOwner=%d(trail=%d be=%d) claimedTrail=%d reasons=%s",
-			symbol, positionSide, ownership.State, ownership.Verified, ownership.StopOwner, ownership.ProfitOwner, ownership.MissingStop, ownership.MissingProfit, ownership.UnexpectedStops, ownership.UnexpectedProfits, unexpectedSummary.StaleBotDuplicate, unexpectedSummary.StaleTrailingDuplicate, unexpectedSummary.ManualOrForeign, unexpectedSummary.ExpectedDynamicOwner, unexpectedSummary.ExpectedDynamicTrailing, unexpectedSummary.ExpectedDynamicStop, len(trailingOwnership.Claimed), strings.Join(ownership.Reasons, "; "))
+		//
+		// missingSL/missingTP 打的是**驱动下面重挂分支的那两个值**(detectMissingProtection
+		// 的原始判定),而不是 ownership 的同名字段 —— 两者会不一致,且这个不一致曾经是
+		// 排查 ZEC churn 时最大的误导源:evaluateProtectionOwnership 内部按
+		// `missingTP && !nativeTrailingArmed` 做了掩蔽,所以只要有 trailing armed,
+		// ownership.MissingProfit 恒为 false,日志会在**正在重挂的那一轮**读作
+		// missingTP=false。两个值都打出来,并在分歧时显式标注 ownershipMasked,
+		// 这样"日志说没缺、代码却在重挂"不再需要读源码才能看懂。
+		ownershipMasked := ""
+		if ownership.MissingStop != missingSL || ownership.MissingProfit != missingTP {
+			ownershipMasked = fmt.Sprintf(" ownershipMasked(missingSL=%t missingTP=%t)", ownership.MissingStop, ownership.MissingProfit)
+		}
+		logger.Infof("🧭 Protection ownership: %s %s | state=%s verified=%t stopOwner=%s profitOwner=%s missingSL=%t missingTP=%t%s unexpectedSL=%d unexpectedTP=%d staleBot=%d staleTrail=%d manualForeign=%d dynamicOwner=%d(trail=%d be=%d) claimedTrail=%d reasons=%s",
+			symbol, positionSide, ownership.State, ownership.Verified, ownership.StopOwner, ownership.ProfitOwner, missingSL, missingTP, ownershipMasked, ownership.UnexpectedStops, ownership.UnexpectedProfits, unexpectedSummary.StaleBotDuplicate, unexpectedSummary.StaleTrailingDuplicate, unexpectedSummary.ManualOrForeign, unexpectedSummary.ExpectedDynamicOwner, unexpectedSummary.ExpectedDynamicTrailing, unexpectedSummary.ExpectedDynamicStop, len(trailingOwnership.Claimed), strings.Join(ownership.Reasons, "; "))
 		if ownership.State == "unprotected" && ownership.Verified {
 			return result, fmt.Errorf("invalid protection ownership invariant: unprotected but verified")
 		}

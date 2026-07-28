@@ -383,4 +383,72 @@ describe('PositionProtectionPanel price ladder', () => {
       screen.queryAllByTitle(/would mis-close on any retrace/i)
     ).toHaveLength(0)
   })
+
+  // "Mark price unusable" is a THIRD yellow cause, distinct from phantom. The backend
+  // yellows when it cannot judge reachability ("don't claim green"); labelling that
+  // phantom would tell the user an order is dead when the truth is only that this
+  // cycle could not judge it. Backend used to fall through to phantom here.
+  it('renders unknown_mark as unjudgeable, not as a phantom order', async () => {
+    const positions: Position[] = [
+      {
+        symbol: 'ZECUSDT',
+        side: 'short',
+        entry_price: 477.82,
+        mark_price: 470,
+        quantity: 0.08,
+        leverage: 5,
+        unrealized_pnl: 0.6,
+        unrealized_pnl_pct: 1.6,
+        liquidation_price: 600,
+        margin_used: 8,
+        protection_state: 'exchange_protection_verified',
+        break_even_state: 'idle',
+        drawdown_execution_mode: 'native_trailing_tiers',
+        protection_runtime: {
+          current_pnl_pct: 1.6,
+          drawdown_peak_pnl_pct: 1.6,
+          current_drawdown_pct: 0,
+          scheduled_tiers: [
+            {
+              index: 1,
+              min_profit_pct: 3,
+              max_drawdown_pct: 30,
+              close_ratio_pct: 100,
+              activation_price: 463,
+              callback_rate: 0.018,
+              planned_quantity: 0.08,
+              source: 'native',
+              execution_mode: 'native_trailing_tiers',
+              is_satisfied: false,
+              is_triggered: false,
+              exchange_light: 'yellow',
+              exchange_light_reason: 'unknown_mark',
+            },
+          ],
+        },
+      } as unknown as Position,
+    ]
+
+    render(
+      <PositionProtectionPanel
+        traderId="t-4"
+        positions={positions}
+        language="en"
+        exchange="okx"
+      />
+    )
+
+    expect(await screen.findByText('DD-1')).toBeInTheDocument()
+    const unjudged = await screen.findAllByTitle(
+      /reachability cannot be judged/i
+    )
+    expect(unjudged.length).toBeGreaterThanOrEqual(1)
+    // Must NOT be reported as a dead phantom order, nor as the mis-close danger.
+    expect(
+      screen.queryAllByTitle(/no protection, but cannot mis-close/i)
+    ).toHaveLength(0)
+    expect(
+      screen.queryAllByTitle(/would mis-close on any retrace/i)
+    ).toHaveLength(0)
+  })
 })

@@ -98,12 +98,16 @@ interface ScheduledTier {
   // (live order with no activation price while below profit floor → WILL mis-close,
   // most urgent), 'phantom' (activePx passed, venue never activated → dead but safe,
   // re-placed as immediate on next poll), 'exchange_failed' (breaker tripped /
-  // placement failed, local monitor active), 'not_placed'.
+  // placement failed, local monitor active), 'unknown_mark' (mark price unusable so
+  // reachability could not be judged — NOT a phantom finding).
+  // 'absent_order_unexpected_yellow' is defensive only: a missing order surfaces as
+  // RED, so a yellow light with no live order should never happen.
   exchange_light_reason?:
     | 'no_activation'
     | 'phantom'
     | 'exchange_failed'
-    | 'not_placed'
+    | 'unknown_mark'
+    | 'absent_order_unexpected_yellow'
     | ''
 }
 
@@ -231,6 +235,10 @@ function buildTierReason(
         return zh
           ? '交易所挂单失败，代码侧监控保护中。'
           : 'Exchange placement failed; code-side monitor is protecting.'
+      case 'unknown_mark':
+        return zh
+          ? '标记价暂不可用，无法判断该委托是否还能被触及（不是幻影单，只是这一轮判不了）。下一轮行情正常即恢复。'
+          : 'Mark price unavailable, so this order’s reachability cannot be judged (not a phantom — just unjudgeable this cycle). Resolves once the feed recovers.'
       default:
         return zh
           ? '委托存在瑕疵，系统正在处理。'
@@ -377,6 +385,10 @@ function buildProtectionRows(
                 language === 'zh'
                   ? '交易所挂单失败·本地保护'
                   : 'Exch. failed · local'
+              break
+            case 'unknown_mark':
+              status =
+                language === 'zh' ? '标记价缺失·本轮难判' : 'No mark · unjudged'
               break
             default:
               status =
