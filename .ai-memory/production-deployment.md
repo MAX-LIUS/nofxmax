@@ -1,5 +1,66 @@
 # Production Deployment - Critical Information
 
+## 2026-07-29 Deploy: 保本止损(BE)按仓位身份+档位收敛 (pid 2643455, commit 6ba8900)
+生产实况:claude/WLDUSDT SHORT 在交易所侧堆出 **4 张 break_even_stop**
+(0.3604/0.3594/0.3568/0.3539),而配置只有 2 档 BE(0.5×ATR / 1.5×ATR)。
+四层根因(全部修掉,不是补洞):
+  1. `checkPositionDrawdown` 的 entryPrice 取自实时 `GetPositions()`,加仓会推动均价
+     (0.3622→0.3691→0.3697,约 1.9%)→ `entrySamePosition` 的 0.05% 容差判成"新仓位"
+     → frozen-ATR 缓存未命中 → 按当时 ATR 重新冻结。
+     修法:`store/frozen_atr_state.go` 增 `PositionCreatedTime`(交易所 cTime,加仓不变)
+     作为权威身份,0=未知才退回 entry 容差。结构止损同一条规则——它的失效更糟:
+     reconcile 路径 `allowCompute=false`,未命中直接返回 (0,false),结构止损会从计划里
+     **静默消失**。
+  2. 分类器用 `breakEvenArmed bool` 做额度——布尔只容一张,配两档时第二档永远被判
+     `stale_bot_duplicate`。修法:新增 `trader/break_even_ownership.go`,照抄仓库已经
+     解决过同类问题的 `nativeTrailingOwnership`(认领单号集合 + Armed 单独留给归属判定)。
+     额度按**所有状态**的档位数算(扛重启窗口),单号只从 armed 认领。
+  3. `store/dynamic_protection_state.go` 把 `break_even_stop` 当只按 protectionType 的
+     单例组 → arm BE2 时把 BE1 降级成 `replaced`,而 BE1 的单还活着。修法:单例键
+     加 stage 维度(`group|stage`),并加 `SaveDynamicProtectionRecordByKey` 原地更新。
+  4. BE 价格跟着实时均价走,却**只挂不撤**。修法:新增
+     `trader/break_even_tier_replace.go`,挂新单前按**单号**撤同档旧单(三重 AND 门:
+     记录属本 trader/BE/armed/同档 → 有 ExchangeOrderID → 该 ID 仍在 openOrders 且
+     形状确认且偏离超 0.05%)。撤单失败只告警仍挂新单,保证该档不裸奔。
+     不做 by-reason 撤单:`store/reason_codec.go` 里所有档位的 mechanism code 都是 `BE`,
+     按 reason 撤会连坐兄弟档(v1.16.5 那一类)。
+自查又发现两个"我这次填了单号才可能出现"的新洞,一并修掉:
+  (a) 认领集合可能收进同 symbol/side **已平仓位**的单号(此前所有 BE 单号都是 ""
+      所以不可达)→ 加仓位身份过滤;
+  (b) 刚重启时每仓位只有一档有 armed 记录 → 额度会读成 1 而实际 2 张单在挂
+      → 档位数按所有状态计。
+反向验证(每个修法都先证明测试能抓住它):撤销 tier-aware 单例 → 2 个 store 测试红;
+去掉同档判断 → 会误撤兄弟 `be2_order`;强制 `isBreakEvenTaggedOrder` 返回 true →
+会误撤 ladder 单;**去掉 replace 调用 → 精确复现生产缺陷 `got [50149.99, 50300,
+51152.99, 51306]` = 2 档 4 单**;档位数退回只数 armed → 额度 1 而非 2。
+另加对抗场景:撤单失败仍挂新单(不裸奔)、无偏离时连轮 0 撤单(幂等)、单档语义不变。
+门禁:`go vet ./...` 干净,`go test ./...` 全绿,`go build -o` 成功,gofmt 与基线一致
+(28 files, +1895/-116)。无 web/ 改动,不需要前端重建。
+上线验证(部署前后同一指标对比):
+  - `be=` 分布 部署前 be=0×3519 / be=1×4961 / **be=2 一次都没有**(8480 行);
+    部署后 be=0×76 / **be=2×38** —— 第二档终于被正确认领。
+  - `stopTolerated` 部署前 1342 次(容差分支在掩盖撤单);部署后每轮 1 次,只对
+    SKHYNIXUSDT 那张**部署前遗留**的孤儿止损。
+  - 部署后 `Break-even stop applied` 0 次、`BE tier replaced` 0 次、cancel 0 次
+    → 挂撤循环消失(不是被掩盖)。
+  - 42 条 frozen-ATR 记录原本 `position_created_time=0`,部署后陆续打出
+    `🔒 Frozen ATR: adopted position identity cTime=...` 完成收养。
+  - 4 traders 全部加载,27 条保护记录恢复,api/web=200,0 ERROR / 0 panic,
+    全部持仓 `state=protected verified=true`(114/114)。
+已知边界(如实记录,不是遗漏):
+  - **Binance 不返回 createdTime**(恒为 0),所以 trader BN 上这条身份修法会退化回
+    旧的 entry 容差;WLD 那个缺陷本身在 OKX。
+  - 加仓后交易所侧保护单的**数量**不会跟着放大(GPT/SKHYNIXUSDT 实况:仓位 0.035,
+    亏损侧止损只 0.017 = 49%)。这是仓库**既有的、刻意的**取舍,不是这次引入的:
+    "按单号解析自己的单、不churn"正是 2026-07-27 那次单子摞叠事故
+    (BN CLUSDT 2.43+0.73+1.22)的修法,改成每次加仓都重挂就会把它请回来。
+    残余风险由 managed 陪跑兜住——managed 记录 `close_ratio_pct=100`、`quantity=None`,
+    按**执行时的实时仓位**平 100%,不吃这个陈旧量。未经用户决定不动这条。
+  - SKHYNIXUSDT 上那张 1109.99/0.013 孤儿止损是部署前残留:它的单号当年没落库,
+    所以新的按单号撤单逻辑看不见它。多一张止损=多一层保险,reconciler 的容差分支
+    (protection_reconciler.go:318-320 有注释)刻意放行;多一张**无人认领的 trailing**
+    才会真多平仓,那条必须落到撤单路径。
+
 ## 2026-07-23 Fix: positions/history perf — "Network error" toast root cause (pid 2035360)
 BN (and every) trader panel kept popping a "网络错误/Network error" toast because
 `GET /api/positions/history?limit=50` took 12-26s, past the frontend's 30s axios
@@ -244,7 +305,7 @@ native trailing triggering AT ENTRY (immediate stop-out → unresolved_exchange_
   BN trader restarted (was stopped for testing). Backend-only — no frontend rebuild.
 
 ## Last Updated
-2026-07-23 - positions/history perf fix (memoize + composite index) — killed "Network error" toast
+2026-07-29 - BE 保本止损按仓位身份+档位收敛（4 层根因全修，止住 BE 单堆积与挂撤循环）
 
 ## 2026-07-20 Deploy: unified SL band 1.5/2.5 + max-hold disabled + reward-ATR≥1.0 (pid 1556740)
 Backtest-driven risk tuning, ALL 4 traders identical:

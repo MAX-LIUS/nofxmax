@@ -31,7 +31,7 @@
 | `binance-native-trailing.md` | BN 原生 trailing 修复（go-binance v2.8.9→2.8.10 参数键名 bug、algo 端点、close 缓存裸仓修复、遗留 issue 1/2） | 活跃 |
 | `exit-timing-stop-research.md` | 退出侧研究(已逐K定论,未部署)：弱势/动量判据无增益(证伪)；快照仿真的2×ATR收紧止损被逐K回测证伪(claude上-45U最差)；**四trader逐K验证:无固定N×ATR能全正,系统现有swing结构close-confirm止损已是稳健最优,勿替换**；顺带发现Claude-R 15m止损偏紧可单独跟进 | 已定论 |
 | `ai-decision-parse-robustness.md` | AI 决策解析形状容错：模型填写的字段形状是不可控输入,不是契约；2026-07-28 一个裸字符串 `alignment_notes` 丢掉整周期 3416(含 ZECUSDT open_long)→ `AIStringList` 容错,三个 AI 填写字段一起换,币池填的 `Sources` 故意不换；带反向对照；**结构性根因(c21e3c3):整数组原子解码——实测一个坏字段会让解码在该元素处整体中止,该元素清零且其后所有决策根本不被解码(含 close,漏平比漏开危险)→ 改逐元素解码,类型错误隔离/语法错误仍整批失败/一条都救不回仍报错不返空集,降级经 ParseFallbackReason 可见** | 活跃 |
-| `production-deployment.md` | 生产部署全量记录（每次上线的 pid/配置备份路径/回测依据/回滚点；含 positions/history 性能修复、统一止损带、min-SL-distance 门禁等） | 活跃 |
+| `production-deployment.md` | 生产部署全量记录（每次上线的 pid/配置备份路径/回测依据/回滚点；含 BE 保本止损档位收敛、positions/history 性能修复、统一止损带、min-SL-distance 门禁等） | 活跃 |
 | `market-structure-map.md` | 市场结构地图升级（进行中）：结构统一为区间+来源+行为+新鲜度+强度+角色+失效条件；核心原则=结构是提升信心的证据不是硬门禁,与现有 10+ 处硬校验冲突待 Phase3 改 | 进行中 |
 | `loss-optimization-plan.md` | 亏损优化方案 A（风险预算定仓,已实现未部署）：size=(equity×pct)/止损距离,取 max(AI 声明,配置结构)止损；6 用例过,待用户定部署参数 | 未部署 |
 
