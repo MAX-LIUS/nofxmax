@@ -2880,6 +2880,17 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 				}); ok {
 					// Phase 1a: pass decimal ratio directly (adapter converts internally)
 					if placedOrderID, err := tagged.SetTrailingStopLossTaggedWithID(symbol, positionSide, activationPrice, priceBasedCallbackRatio, partialQty, "native_trailing"); err == nil {
+						// Caller-side invariant (2026-07-28, defense-in-depth): a successful
+						// placement that yields an EMPTY order ID is unrecoverable on any venue
+						// that cannot fuzzy-match tiers (ReportsTrailingCallbackRate=false, e.g.
+						// Binance) — the tier is judged missing every poll and re-armed without
+						// bound. The Binance adapter now returns an error in this case, but this
+						// guard is venue-agnostic: never persist an ID-less armed record where it
+						// can't be re-found. Drop to the LOCAL managed monitor instead.
+						if at.trailingRecordIsUnrecoverable(placedOrderID) {
+							logger.Warnf("❌ Native partial trailing placed but returned empty order ID on non-fuzzy-matchable venue (%s %s, %s) — falling back to LOCAL monitor to avoid unbounded re-arm", symbol, side, exchange)
+							return at.applyExchangeFailedLocalMonitor(symbol, side, entryPrice, rule, activationPrice, priceBasedCallbackRatio)
+						}
 						at.setProtectionState(symbol, side, "native_partial_trailing_armed")
 						// Persist the tier record + arm timestamp, symmetric with the OKX
 						// partial path. Without these two lines this branch armed the tier on
@@ -3198,6 +3209,19 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 		at.setProtectionState(symbol, side, "managed_partial_drawdown_armed")
 		logger.Infof("🟣 Managed partial drawdown armed: %s %s | activation=%.6f callbackRatio=%.6f close=%.1f%%", symbol, side, activationPrice, priceBasedCallbackRatio, rule.CloseRatioPct)
 	} else {
+		// Dormant-risk invariant (2026-07-28, global): a full-tier native trailing
+		// record with an empty ExchangeOrderID is only recoverable on venues that echo
+		// back callbackRate (ReportsTrailingCallbackRate) — the fuzzy matcher needs it.
+		// Where it does not (Binance), an ID-less armed record can never be re-found, so
+		// the tier is judged missing every poll and re-armed without bound. Binance's
+		// adapter now returns an error on AlgoId==0 (handled above → local fallback), so
+		// this should be unreachable for Binance; the guard stays as the caller-side
+		// safety net for any current/future venue that returns an empty ID yet cannot
+		// fuzzy-match. Drop to the LOCAL managed monitor (double cover, never takeover).
+		if at.trailingRecordIsUnrecoverable(placedOrderID) {
+			logger.Warnf("❌ Native trailing armed with empty exchange order ID on a non-fuzzy-matchable venue (%s %s, %s) — treating as placement failure, falling back to LOCAL monitor", symbol, side, exchange)
+			return at.applyExchangeFailedLocalMonitor(symbol, side, entryPrice, rule, activationPrice, priceBasedCallbackRatio)
+		}
 		at.setProtectionState(symbol, side, "native_trailing_armed")
 		at.persistDynamicProtectionRecordWithDetails(symbol, side, "native_trailing", stableDrawdownRuleFingerprint(entryPrice, rule), rule.CloseRatioPct, "armed", placedOrderID, activationPrice, priceBasedCallbackRatio, 0)
 		// Record the arm time so the 300s cooldown (getDrawdownArmRulesForSelectedRule) suppresses

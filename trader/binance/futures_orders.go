@@ -178,6 +178,23 @@ func (t *FuturesTrader) setTrailingStopLossCore(symbol string, positionSide stri
 			cbPercent, exchangeCallback, callbackDivergence, orderID, reasonTag)
 	}
 
+	// Dormant-risk guard (2026-07-28): an empty orderID here means the exchange
+	// accepted the order (no API error, activation read-back passed) but returned
+	// AlgoId==0, so we have NO handle to it. Binance trailing orders carry no
+	// callbackRate in the algo-order list (ReportsTrailingCallbackRate=false), so the
+	// fuzzy tier matcher cannot re-find an ID-less order either — it would be judged
+	// "missing" on every poll and re-armed without bound (the HYPEUSDT 174-order leak
+	// class). An unmanageable order is worse than none: cancel any just-placed
+	// trailing order for this symbol/side to avoid an orphan, then return an error so
+	// the caller drops to the LOCAL managed monitor (double cover, never takeover).
+	if orderID == "" {
+		logger.Warnf("⚠️  Trailing order placed but exchange returned AlgoId=0 (no handle) for %s %s reason=%q — cancelling to avoid an unmanageable orphan and falling back to local monitor", symbol, posSide, reasonTag)
+		if cErr := t.CancelTrailingStopOrders(symbol); cErr != nil {
+			logger.Warnf("⚠️  Failed to cancel ID-less trailing order for %s: %v", symbol, cErr)
+		}
+		return "", fmt.Errorf("exchange returned no algo id for trailing order (unmanageable); falling back to local monitor")
+	}
+
 	logger.Infof("  Trailing stop-loss set (Algo Order): activation=%.4f callback=%.1f%% (exchange confirmed) reason=%q algoId=%s",
 		activationPrice, cbPercent, reasonTag, orderID)
 	return orderID, nil
