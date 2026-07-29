@@ -7,7 +7,7 @@
 > **历史**: v1.16.18(2026-07-27 23:40 pid 2381838 md5 e6abee6582e455b908b9efa32c37f51f,提交 `5f2163f`);部署后核对:4 trader 全部加载、API 200、无 panic、CL 持仓 `staleTrail=0 claimedTrail=2 dynamicOwner=2`(**claimedTrail=2 证明认领集合真的解析到了两张在场单,不是走 nil/空集合容忍兜底**)、交易所 7 张单与部署前逐一致(无误撤)
 > **部署后核对(v1.16.13)**:ETH/CL/WLD 从 `1 tiers` 变 `2 tiers` 且数量正确,`partial_profit_lock` 命名正常;KAITO 单档已确认是策略本身只配一档(GPT-ct50),非丢档。
 > **更新**: 2026-07-27 (v1.16.9 该 bug 类第 6 次实例:开仓即挂路径漏 ATR 换算,把 ATR 倍数当百分数挂单——用户从面板发现"两档配置显示三档 0.6/1.2/1.8";并订正"OKX 没问题"的判断:OKX 同样中招,只是它上报 callbackRate 把原始那条掩住了 | v1.16.8 构造交易所对等测试项目,挖出 HEAD 里既存的 OKX 局部档吃掉 dd1 全平单缺陷;并订正两处我自己的错误结论:Binance triggerPrice≠活动价、审计工具漏配 USDC 路由导致谎报无保护)
-> **版本**: v1.17.0 (**已部署 2026-07-29 pid 2696350**:DD 不在交易所 + managed 陪跑形同虚设,6 根因 RC-1…RC-6 一次性收口 —— 假成交按归属判定/managed 不再压制补挂/熔断 30min 冷却衰减/活单拒撤改重写账本/覆盖判定要活单背书/武装门禁改 max(cur,peak);另注意 Go 文件名 `_arm` 会被当 GOARCH 静默跳过整个测试文件) / v1.16.28 (**已随 v1.17.0 部署**:加仓后保护单数量不跟涨 → 静态 SL/TP/兜底 + BE 逐档双路径的**量维度**收敛,只撤不挂/只管不足不管超出/量化后再比,两条路径用 BE 认领集合互斥防抢单;Binance 端核实 GetOpenOrders 两条命名空间都回 Quantity、CancelAlgoOrderByID 带 -2011 回退能撤两种单 → resize 在 BN 全链路可用,cTime=0 不影响) / v1.16.27 (休眠风险专项:能力表位置初始化→键名、venue callbackRate 能力从注释变数据、空 orderID 记录在不能模糊匹配的交易所上判为下单失败落本地 monitor,提交 `92a17f6`) / v1.16.26 (已部署:在场档位比例锚定当前量,ZEC ping-pong 根因,提交 `b292774`) / v1.16.25 (已部署 2026-07-28 13:38 pid 2479237 md5 1b5a608a:所有权日志分歧+黄灯 unknown_mark+runner 迁移撤错档,提交 `7efc6cf`) / v1.16.24 (待部署:挂单等价性按交易所粒度判定 + 阶梯档被推断执行后免撤,提交 `9682f65`) / v1.16.23 (已部署:前端归因枚举补齐 5 处 + 契约测试锁住前后端对齐,提交 `f3ee04e`) / v1.16.22 (已部署:保护档按成交价排序 + callback 单位收口 + 细粒度归因保留 + 开仓竞态宽限期,提交 `de6a3a5`) / v1.16.18 (待部署:OKX tag 装不下 reason → 定向撤单实为广撤;reason 收口到 coded client id) / v1.16.17 (待部署:trailing 归属按认领集合判定 + 档位分配锚定开仓量,提交 `87490ba`) / v1.16.16 (已部署:ATR→% 换算的除数锚定到冻结开仓价,提交 `80845a2`) / v1.16.15 (已部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,提交 `75854df`) / v1.16.14 (已部署:immediate trailing 落库归属 + 撤单点按返回值收口,提交 `b4f35e0`) / v1.16.13 (已部署:managed 全程陪跑双保险,取消账户级接管,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
+> **版本**: v1.17.1 (**待部署** 提交 `8133f80`:挂单 clientOrderID 自带档位标识 `<prefix><code2>T<1-9><nonce>` 作多档 DD 第二重身份,补 reclaim 把 dd2 单认给 dd1 的错认) / v1.17.0 (**已部署 2026-07-29 pid 2696350**:DD 不在交易所 + managed 陪跑形同虚设,6 根因 RC-1…RC-6 一次性收口 —— 假成交按归属判定/managed 不再压制补挂/熔断 30min 冷却衰减/活单拒撤改重写账本/覆盖判定要活单背书/武装门禁改 max(cur,peak);另注意 Go 文件名 `_arm` 会被当 GOARCH 静默跳过整个测试文件) / v1.16.28 (**已随 v1.17.0 部署**:加仓后保护单数量不跟涨 → 静态 SL/TP/兜底 + BE 逐档双路径的**量维度**收敛,只撤不挂/只管不足不管超出/量化后再比,两条路径用 BE 认领集合互斥防抢单;Binance 端核实 GetOpenOrders 两条命名空间都回 Quantity、CancelAlgoOrderByID 带 -2011 回退能撤两种单 → resize 在 BN 全链路可用,cTime=0 不影响) / v1.16.27 (休眠风险专项:能力表位置初始化→键名、venue callbackRate 能力从注释变数据、空 orderID 记录在不能模糊匹配的交易所上判为下单失败落本地 monitor,提交 `92a17f6`) / v1.16.26 (已部署:在场档位比例锚定当前量,ZEC ping-pong 根因,提交 `b292774`) / v1.16.25 (已部署 2026-07-28 13:38 pid 2479237 md5 1b5a608a:所有权日志分歧+黄灯 unknown_mark+runner 迁移撤错档,提交 `7efc6cf`) / v1.16.24 (待部署:挂单等价性按交易所粒度判定 + 阶梯档被推断执行后免撤,提交 `9682f65`) / v1.16.23 (已部署:前端归因枚举补齐 5 处 + 契约测试锁住前后端对齐,提交 `f3ee04e`) / v1.16.22 (已部署:保护档按成交价排序 + callback 单位收口 + 细粒度归因保留 + 开仓竞态宽限期,提交 `de6a3a5`) / v1.16.18 (待部署:OKX tag 装不下 reason → 定向撤单实为广撤;reason 收口到 coded client id) / v1.16.17 (待部署:trailing 归属按认领集合判定 + 档位分配锚定开仓量,提交 `87490ba`) / v1.16.16 (已部署:ATR→% 换算的除数锚定到冻结开仓价,提交 `80845a2`) / v1.16.15 (已部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,提交 `75854df`) / v1.16.14 (已部署:immediate trailing 落库归属 + 撤单点按返回值收口,提交 `b4f35e0`) / v1.16.13 (已部署:managed 全程陪跑双保险,取消账户级接管,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
 
 > **🔥 v1.16.27 休眠风险专项:三个"当前恰好成立但没有保证"的前提(2026-07-28,提交 `92a17f6`)**
 >
@@ -47,6 +47,25 @@
 > **部署后实证(pid 2696350, 13:35:49 起)**:4 trader 全载、0 error、0 熔断、0 churn(仅 1 次撤单,是 ZEC 全平后的正常孤儿清理)。Fix 6 在真实持仓上兜住:`📈 Drawdown dd1 now tracking (native): ZECUSDT short | armPnl=3.80% (cur=1.07% peak=3.80%) >= trigger=3.40%` —— 旧代码下 cur=1.07% < 3.40% 会永远 pending。Fix 1 同步生效:`🟡 ZECUSDT position shrank by 0.0600 but ALL of it is attributed to non-drawdown closes (dd=0) — no tier marked executed`。四仓 ownership 全 `verified=true` 且 `claimedTrail` 与 `trail` 数量相等(Fix 5 是真通过而非绕过)。
 >
 > **代价说明**:SKHYNIX 最终 07-29 07:01:05 由 `native_trailing` 平掉 +1.4 USDT —— 没爆,但保护是在远低于应有水平的位置才生效(峰值 8.11% 那段回撤没抓到)。"这一笔没亏钱"不能用来证明保护有效,这正是原澄清段被撤回的原因。
+>
+> **提交**:`6fd57e4`(6 个根因 + 25 个测试)。
+
+> **🔥 v1.17.1 挂单自带档位标识 —— 多档 DD 的第二重身份(2026-07-29,提交 `8133f80`,未部署)**
+>
+> **为什么还需要第二重**:第一重身份是持久化的 `DynamicProtectionRecord.ExchangeOrderID`,三个 matcher(`hasMatchingNativeTrailingOrderForRule` / `findExistingFullTrailingOrder` / `findPartialTrailingReplacementCandidate`)与面板都已 ID-first,这部分**早已完成**(任务 #53–#56 复核确认)。但它有一个共同单点:**记录必须写成功且还在**。挂单成功而 persist 失败、交易所不回 orderID(Bitget 分支写空串)、记录被清,都会让这张单在交易所侧变成"无主 trailing 单",只能按 qty/激活价/回调率去猜属于哪一档 —— place-at-open 之后多档并存,这个猜法必然碰撞(v1.16.8 系列事故的根因)。
+>
+> **做法**:档位序号编进 `clOrdId`/`algoClOrdId`(交易所在挂单列表和成交里回显),格式 `<brokerPrefix><code2>["T"<档位1-9>]<nonce>`,仍 ≤32 字符。**`"T"` 作分隔符是关键**:nonce 是 hex,T 不可能出现在其中 → 解码无歧义,且旧 id(该偏移处不是 T)照旧能解出机制。
+>
+> - 档位序号 = 按 `MinProfitPct` 升序(次级键 `MaxDrawdownPct`/`CloseRatioPct`)在配置里的位次。**只用于兜底识别,绝不用于判定档位语义** —— 语义仍由 fingerprint 三元组定义,因为位次会随配置改动而变。
+> - 档位走 **reason 字符串后缀**(`native_trailing#2`)而不是新增函数参数:reason 已经流经 10 个交易所适配器的 `Tagged*` 签名,而 `normalizeReason` 是所有机制比较的唯一收口点。在那里剥掉 `#N`,既有比较(OKX `cancelAlgoOrdersByReason` 的 `wantReason`、归因解码、`CodeForReason`)全部不动。**这条等价性必须有测试锁死**:一旦不等价,定向撤单会因"无注册机制码"整段跳过,或归因把 `native_trailing#2` 当未知机制而断链。
+> - broker 前缀私有于各适配器包,所以解码放在 `okx/reason_codec.go` 与 `binance/reason_codec.go`,结果通过新字段 `OpenOrder.ProtectionTier` 传出来。
+> - **顺手修掉 reclaim 的已知错认**:`drawdown_order_reclaim.go` 原本对 `activated` 单一律形状匹配为真,只能退回"取最低未用档",两档并存时会把 dd2 的单认给 dd1。现在改两级优先:先信单子自报的档位,旧单(`ProtectionTier=0`)才退回形状匹配。
+>
+> **反向验证**:禁用档位优先后 `TestReclaim_TieredOrderIsClaimedByItsOwnTierNotTheLowestUnused` 立刻红,实测把 dd2(close=100%)的单认成 dd1(close=30%),正是要修的错认。
+>
+> **测试** 13 例(store 6 / trader 7),含两条反向锁:① 旧单必须保留形状匹配认领能力 —— 否则线上现存挂单全变可撤,是**最坏退化**;② 两张单自报同一档时不得双重认领(第一张认领,第二张交回撤单名单)。
+>
+> **注意**:`trader/types/interface.go` 加字段会引起 struct tag 对齐漂移,该文件在 HEAD 是 gofmt 干净的,必须 `gofmt -w` 回去(仓库其它大量未格式化文件是基线,不要顺手动)。
 
 > **🔥 v1.16.28 加仓后保护单数量不跟涨(SKHYNIX 类"止损止不了血",2026-07-29,已随 v1.17.0 部署)**
 >
