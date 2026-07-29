@@ -568,6 +568,13 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 	// slightly different activation prices that each treat the other as a stale
 	// duplicate — an endless place/cancel churn (observed on SPCXUSDT).
 	rules = at.resolveDrawdownRulesATR(rules, symbol, side, entryPrice)
+	// 补挂之前先把归属账本的矛盾收敛掉:一张活单被两档同时认领时,档位→单的解析会按
+	// UpdatedAt 取最新,而错的那条完全可能更新(线上 BN WLDUSDT 就是如此)。带着矛盾去
+	// 判"缺不缺单"会把结论建在错的前提上。这里手里已经有 openOrders,交易所就是判据,
+	// 不发额外请求。详见 drawdown_claim_conflict.go。
+	if len(openOrders) > 0 {
+		at.resolveConflictingTrailingClaims(symbol, side, entryPrice, openOrders, canonicalDrawdownTierOrder(rules))
+	}
 	if len(rules) > 0 {
 		peakPnLPct := currentPnLPct
 		at.peakPnLCacheMutex.RLock()
@@ -1079,7 +1086,13 @@ func (at *AutoTrader) supersedeOlderArmedRecords(current store.DynamicProtection
 		if key == current.Key && current.Key != "" {
 			continue
 		}
-		if record.Status != "armed" || record.ExchangeOrderID == current.ExchangeOrderID {
+		if record.Status != "armed" {
+			continue
+		}
+		if record.ExchangeOrderID == current.ExchangeOrderID {
+			// 同一张交易所单被两条**不同档**的 armed 记录同时认领 —— 账本自相矛盾,
+			// 必须当场收敛。见 supersedeConflictingOrderClaim 的注释。
+			at.supersedeConflictingOrderClaim(record, current)
 			continue
 		}
 		if record.TraderID != current.TraderID || record.ProtectionType != current.ProtectionType {
@@ -1106,6 +1119,48 @@ func (at *AutoTrader) supersedeOlderArmedRecords(current store.DynamicProtection
 		}
 		logger.Infof("🗂 Superseded stale armed %s record: %s %s posFP=%s orderID=%s (newer arm orderID=%s)", record.ProtectionType, record.Symbol, record.Side, record.PositionFingerprint, record.ExchangeOrderID, current.ExchangeOrderID)
 	}
+}
+
+// supersedeConflictingOrderClaim 守住账本的核心不变量:
+//
+//	**一张活着的交易所保护单,在任一时刻只能有一条 armed 记录认领它。**
+//
+// 为什么需要它(2026-07-29 线上, BN WLDUSDT short):reclaim 路径用未解析的 ATR 规则
+// 算 fingerprint,写出的记录 min=2.5000,而 arm 路径写的是 min=3.6791 ——
+// drawdownRuleIdentity 判它们"不是同一档",于是 supersedeOlderArmedRecords 的窄匹配
+// 永远碰不到它们:4 条 armed 记录抢 2 张实物单,其中 2 个 orderID 各被双重认领,
+// 而且每 ~20s 被重写一次。ATR 解析已在 drawdown_order_reclaim.go 修掉了根因,这里是
+// 兜底 —— 任何将来让两档指向同一张单的新路径,都会在这里被立刻收敛,而不是攒成账本腐烂。
+//
+// 危害不是"多一条记录":档位→单的解析会因此依赖谁先被读到,而 30% 那一档成交后,
+// 100% 那一档可能把自己标成已执行,于是**全平档的回撤保护静默消失**。
+//
+// 收敛规则:新写入的这条(current)胜。它是刚刚发生的事实(挂单成功/认领成功),
+// 旧的那条只是对同一张单的陈旧解释。不比 UpdatedAt —— 不变量是绝对的,不是"看谁更新"。
+// 只在两条记录**档位身份不同**时动手:同档的陈旧分叉交给上面的窄匹配按时序处理。
+func (at *AutoTrader) supersedeConflictingOrderClaim(record, current store.DynamicProtectionRecord) {
+	if current.ExchangeOrderID == "" || record.ExchangeOrderID != current.ExchangeOrderID {
+		return
+	}
+	if record.TraderID != current.TraderID {
+		return
+	}
+	if !strings.EqualFold(record.Symbol, current.Symbol) || !strings.EqualFold(record.Side, current.Side) {
+		return
+	}
+	if drawdownRuleIdentity(record.RuleFingerprint) == drawdownRuleIdentity(current.RuleFingerprint) &&
+		record.ProtectionType == current.ProtectionType {
+		return
+	}
+	superseded := record
+	superseded.Status = "superseded"
+	if err := at.store.SaveDynamicProtectionRecord(superseded); err != nil {
+		logger.Warnf("⚠️ Dynamic protection state: failed to supersede conflicting claim on order %s (%s %s): %v", record.ExchangeOrderID, record.Symbol, record.Side, err)
+		return
+	}
+	logger.Warnf("🧾 Ownership conflict resolved: exchange order %s was claimed by TWO tiers (%s ruleID=%s superseded ← %s ruleID=%s kept) on %s %s — one live order must have exactly one owner",
+		record.ExchangeOrderID, record.ProtectionType, drawdownRuleIdentity(record.RuleFingerprint),
+		current.ProtectionType, drawdownRuleIdentity(current.RuleFingerprint), record.Symbol, record.Side)
 }
 
 // getPositionDetailsForFingerprint 返回 (仓位数量, 开仓时间戳)。

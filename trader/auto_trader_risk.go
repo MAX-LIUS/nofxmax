@@ -2900,7 +2900,7 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 					CancelTrailingStopOrders(symbol string) error
 				}); ok {
 					// Phase 1a: pass decimal ratio directly (adapter converts internally)
-					if placedOrderID, err := tagged.SetTrailingStopLossTaggedWithID(symbol, positionSide, activationPrice, priceBasedCallbackRatio, partialQty, at.drawdownTrailingReasonTag(rule)); err == nil {
+					if placedOrderID, err := tagged.SetTrailingStopLossTaggedWithID(symbol, positionSide, activationPrice, priceBasedCallbackRatio, partialQty, at.drawdownTrailingReasonTag(symbol, side, entryPrice, rule)); err == nil {
 						// Caller-side invariant (2026-07-28, defense-in-depth): a successful
 						// placement that yields an EMPTY order ID is unrecoverable on any venue
 						// that cannot fuzzy-match tiers (ReportsTrailingCallbackRate=false, e.g.
@@ -3006,7 +3006,7 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 						SetTrailingStopLossTaggedWithID(symbol string, positionSide string, activationPrice float64, callbackRate float64, quantity float64, reasonTag string) (string, error)
 						CancelTrailingStopOrdersByIDs(symbol string, orderIDs []string) error
 					}); ok {
-						placedOrderID, err := tagged.SetTrailingStopLossTaggedWithID(symbol, positionSide, activationPrice, okxCallbackRatio, partialQty, at.drawdownTrailingReasonTag(rule))
+						placedOrderID, err := tagged.SetTrailingStopLossTaggedWithID(symbol, positionSide, activationPrice, okxCallbackRatio, partialQty, at.drawdownTrailingReasonTag(symbol, side, entryPrice, rule))
 						if err == nil {
 							verified := false
 							for attempt := 1; !verified && attempt <= protectionVerifyMaxAttempts; attempt++ {
@@ -3154,7 +3154,7 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 			CancelTrailingStopOrders(symbol string) error
 		}); ok {
 			// Phase 1a: pass decimal ratio directly (adapter converts internally)
-			placedOrderID, err = tagged.SetTrailingStopLossTaggedWithID(symbol, positionSide, activationPrice, priceBasedCallbackRatio, 0, at.drawdownTrailingReasonTag(rule))
+			placedOrderID, err = tagged.SetTrailingStopLossTaggedWithID(symbol, positionSide, activationPrice, priceBasedCallbackRatio, 0, at.drawdownTrailingReasonTag(symbol, side, entryPrice, rule))
 			if err != nil {
 				// Product decision: the adapter refuses to leave a mis-registered
 				// (immediate-triggering) exchange order — it returns an error and
@@ -3208,7 +3208,7 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 			CancelTrailingStopOrdersByIDs(symbol string, orderIDs []string) error
 		}); ok {
 			var err error
-			placedOrderID, err = tagged.SetTrailingStopLossTaggedWithID(symbol, positionSide, activationPrice, okxCallbackRatio, 0, at.drawdownTrailingReasonTag(rule))
+			placedOrderID, err = tagged.SetTrailingStopLossTaggedWithID(symbol, positionSide, activationPrice, okxCallbackRatio, 0, at.drawdownTrailingReasonTag(symbol, side, entryPrice, rule))
 			if err != nil {
 				logger.Infof("❌ Native trailing drawdown apply failed (%s %s): %v", symbol, side, err)
 				return false

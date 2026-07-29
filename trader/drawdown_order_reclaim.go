@@ -89,21 +89,44 @@ func trailingOrderMatchesDrawdownRule(order OpenOrder, side string, entryPrice f
 // 取最低未用档",于是两档并存时可能认错档 —— 认错的后果是另一档被判缺单、多挂一张
 // (过度保护,方向安全,但不是真相)。
 //
-// 序号语义必须与挂单侧同源:两边都用 drawdownTierTagIndex 的排序(MinProfitPct 升序,
-// 次级键 MaxDrawdownPct / CloseRatioPct)。这里的 ordered 只按 MinProfitPct 排,所以
-// 不能直接用下标 —— 改为按 tag 序号先还原出那一档的规则身份,再在 ordered 里找它。
+// 序号语义必须与挂单侧同源:两边都经由 canonicalDrawdownTierRules 拿同一套"已 ATR 解析 +
+// 规范排序"的规则集,序号就是它在这个集合里的位次。ordered 现在就是这个集合(见
+// reclaimLiveDrawdownTrailingOrders),所以位次可以直接用下标换算,不需要再反查一遍。
 //
-// 返回 -1 表示这张单没带标识(旧单/非本策略单)或标识指向的档已不在当前配置里。
-func (at *AutoTrader) tierTaggedRuleIndex(order OpenOrder, ordered []store.DrawdownTakeProfitRule) int {
-	if order.ProtectionTier <= 0 {
+// 但序号是**挂单当时**编进 clientOrderID 的,而 ordered 是**此刻**的规则集。两者之间
+// 可能发生位次重排:
+//   - 策略被改(增删档、改 min_profit)—— 人工可达;
+//   - 混合单位配置(一档 pct、一档 atr)下 ATR 解析只缩放其中一档,可能把两档的先后
+//     倒过来。当前 5 个实盘策略都是纯 ATR 或纯 pct(解析对所有档同比例缩放,不改先后),
+//     但代码不能只对当前配置成立。
+//
+// 所以序号之外再做一道**能查就查**的形状交叉验证:单子还没激活且报了可用的 StopPrice
+// 时,它的形状必须仍然像它自报的那一档;不像就放弃标识、退回形状匹配。这一步只可能
+// 让结果更保守 —— 改动之前根本没有标识,一律走形状匹配 —— 却挡住了"认错档"这个唯一
+// 危险的失败模式(认错档 → 另一档被判缺单 → 多挂一张;或更糟,一档的单被当成另一档的
+// 而在部分成交后被判已执行)。
+//
+// 已激活的单查不了(StopPrice 变成移动跟踪价、Binance 干脆不报 callback),此时标识是
+// 唯一的信息来源,直接采信 —— 这正是引入标识要解决的场景。
+//
+// 返回 -1 表示这张单没带标识(旧单/非本策略单)、标识越界,或标识与形状矛盾。
+func (at *AutoTrader) tierTaggedRuleIndex(order OpenOrder, side string, entryPrice float64, ordered []store.DrawdownTakeProfitRule) int {
+	if order.ProtectionTier <= 0 || order.ProtectionTier > len(ordered) {
 		return -1
 	}
-	for idx := range ordered {
-		if at.drawdownTierTagIndex(ordered[idx]) == order.ProtectionTier {
-			return idx
+	idx := order.ProtectionTier - 1
+	// 形状可查时交叉验证。trailingOrderMatchesDrawdownRule 对已激活单一律返回 true,
+	// 所以这一层对已激活单自动是放行的。
+	if order.StopPrice > 0 && !strings.EqualFold(order.ActivationStatus, "activated") {
+		if !trailingOrderMatchesDrawdownRule(order, side, entryPrice, ordered[idx]) {
+			logger.Warnf("⚠️ Drawdown tier tag disagrees with order shape: order %s self-reports tier %d "+
+				"(min=%.4f%% close=%.1f%%) but its resting StopPrice %.8f does not match that tier — "+
+				"falling back to shape matching (the strategy's tier list likely changed after placement)",
+				order.OrderID, order.ProtectionTier, ordered[idx].MinProfitPct, ordered[idx].CloseRatioPct, order.StopPrice)
+			return -1
 		}
 	}
-	return -1
+	return idx
 }
 
 // reclaimLiveDrawdownTrailingOrders 从待撤名单里剔除仍然匹配某档 DD 规则的活 trailing 单,
@@ -120,8 +143,22 @@ func (at *AutoTrader) reclaimLiveDrawdownTrailingOrders(symbol, side string, ent
 	if len(candidateIDs) == 0 {
 		return candidateIDs, nil
 	}
-	rules := at.getActiveDrawdownRulesForPosition(symbol, side)
-	if len(rules) == 0 {
+	// 必须用 canonicalDrawdownTierRules —— 它做了 ATR 解析。
+	//
+	// 2026-07-29 线上(BN WLDUSDT short, entry 0.3036, ATR(1h) 单位策略):这里以前直接
+	// 用 getActiveDrawdownRulesForPosition 的**未解析**规则,于是 MinProfitPct=2.5 这个
+	// "2.5 个 ATR" 被当成 "2.5%" 去算 plannedActivation=0.296010,而交易所上那张单是按
+	// 解析后的 3.6791% 挂的 activation=0.292060 —— 形状匹配的 1% 容差刚好卡不住
+	// (漂 1.33%),于是:
+	//   1) 认领时走不了形状匹配,只能靠 ActivationStatus=="activated" 那条快速通道,
+	//      "第一个未占用档"把两张单认反了(…212→dd1, …192→partial);
+	//   2) 更糟的是 persistDynamicProtectionRecordWithDetails 用未解析规则算出的
+	//      fingerprint / ActivationPrice / CallbackRatio 落了库 —— 这些记录与任何真实
+	//      挂单都对不上,却每 ~20s 被重写一次,最终 4 条 armed 记录抢 2 张实物单,
+	//      其中 2 个 orderID 被双重认领。
+	// 解析之后两侧同基准,形状匹配自然对上,序号标识也能对上。
+	ordered := at.canonicalDrawdownTierRules(symbol, side, entryPrice)
+	if len(ordered) == 0 {
 		return candidateIDs, nil
 	}
 
@@ -129,22 +166,6 @@ func (at *AutoTrader) reclaimLiveDrawdownTrailingOrders(symbol, side string, ent
 	for _, o := range openOrders {
 		if o.OrderID != "" {
 			byID[o.OrderID] = o
-		}
-	}
-
-	// 规则按 MinProfitPct 升序,保证认领顺序稳定可预期。
-	ordered := make([]store.DrawdownTakeProfitRule, 0, len(rules))
-	for _, raw := range rules {
-		r := normalizeDrawdownRule(raw)
-		if r.MinProfitPct > 0 && r.MaxDrawdownPct > 0 && r.CloseRatioPct > 0 {
-			ordered = append(ordered, r)
-		}
-	}
-	for i := 0; i < len(ordered); i++ {
-		for j := i + 1; j < len(ordered); j++ {
-			if ordered[j].MinProfitPct < ordered[i].MinProfitPct {
-				ordered[i], ordered[j] = ordered[j], ordered[i]
-			}
 		}
 	}
 
@@ -167,7 +188,7 @@ func (at *AutoTrader) reclaimLiveDrawdownTrailingOrders(symbol, side string, ent
 		// 第一优先:单子自报的档位标识。带标识就直接认这一档,不再用形状去猜。
 		// 只在该档尚未被别的单占用时成立 —— 两张单自报同一档说明有重复挂单,第二张
 		// 仍然走形状匹配/被交回撤单名单,不能让它顶掉第一张的认领。
-		if taggedIdx := at.tierTaggedRuleIndex(order, ordered); taggedIdx >= 0 && !usedRule[taggedIdx] {
+		if taggedIdx := at.tierTaggedRuleIndex(order, side, entryPrice, ordered); taggedIdx >= 0 && !usedRule[taggedIdx] {
 			matchedIdx = taggedIdx
 		}
 		if matchedIdx < 0 {

@@ -26,13 +26,13 @@ func TestTierTagIndex_IsStableAndUniquePerTier(t *testing.T) {
 	dd2 := store.DrawdownTakeProfitRule{MinProfitPct: 4, MaxDrawdownPct: 25, CloseRatioPct: 40}
 	at := newTierTagTrader(t, []store.DrawdownTakeProfitRule{dd3, dd1, dd2})
 
-	if got := at.drawdownTierTagIndex(dd1); got != 1 {
+	if got := at.drawdownTierTagIndex("TIERUSDT", "long", 0, dd1); got != 1 {
 		t.Fatalf("dd1 (MinProfit=2) tag index = %d, want 1", got)
 	}
-	if got := at.drawdownTierTagIndex(dd2); got != 2 {
+	if got := at.drawdownTierTagIndex("TIERUSDT", "long", 0, dd2); got != 2 {
 		t.Fatalf("dd2 (MinProfit=4) tag index = %d, want 2", got)
 	}
-	if got := at.drawdownTierTagIndex(dd3); got != 3 {
+	if got := at.drawdownTierTagIndex("TIERUSDT", "long", 0, dd3); got != 3 {
 		t.Fatalf("dd3 (MinProfit=6) tag index = %d, want 3", got)
 	}
 
@@ -43,7 +43,7 @@ func TestTierTagIndex_IsStableAndUniquePerTier(t *testing.T) {
 		rule store.DrawdownTakeProfitRule
 		want int
 	}{{dd1, 1}, {dd2, 2}, {dd3, 3}} {
-		if got := at2.drawdownTierTagIndex(tc.rule); got != tc.want {
+		if got := at2.drawdownTierTagIndex("TIERUSDT", "long", 0, tc.rule); got != tc.want {
 			t.Fatalf("after reordering config: tag index = %d, want %d", got, tc.want)
 		}
 	}
@@ -56,7 +56,7 @@ func TestTierTagIndex_SameMinProfitTiersGetDistinctIndexes(t *testing.T) {
 	b := store.DrawdownTakeProfitRule{MinProfitPct: 3, MaxDrawdownPct: 30, CloseRatioPct: 100}
 	at := newTierTagTrader(t, []store.DrawdownTakeProfitRule{b, a})
 
-	ia, ib := at.drawdownTierTagIndex(a), at.drawdownTierTagIndex(b)
+	ia, ib := at.drawdownTierTagIndex("TIERUSDT", "long", 0, a), at.drawdownTierTagIndex("TIERUSDT", "long", 0, b)
 	if ia == 0 || ib == 0 {
 		t.Fatalf("both tiers must resolve to a tag index, got a=%d b=%d", ia, ib)
 	}
@@ -73,12 +73,12 @@ func TestTierTagIndex_UnknownRuleAndEmptyConfigDegradeToZero(t *testing.T) {
 	at := newTierTagTrader(t, []store.DrawdownTakeProfitRule{dd1})
 
 	foreign := store.DrawdownTakeProfitRule{MinProfitPct: 99, MaxDrawdownPct: 99, CloseRatioPct: 100}
-	if got := at.drawdownTierTagIndex(foreign); got != 0 {
+	if got := at.drawdownTierTagIndex("TIERUSDT", "long", 0, foreign); got != 0 {
 		t.Fatalf("rule absent from config got tag index %d, want 0 (must not guess)", got)
 	}
 
 	empty := newTierTagTrader(t, nil)
-	if got := empty.drawdownTierTagIndex(dd1); got != 0 {
+	if got := empty.drawdownTierTagIndex("TIERUSDT", "long", 0, dd1); got != 0 {
 		t.Fatalf("empty rule list got tag index %d, want 0", got)
 	}
 }
@@ -88,8 +88,8 @@ func TestTrailingReasonTag_CarriesTierAndStaysMechanismEquivalent(t *testing.T) 
 	dd2 := store.DrawdownTakeProfitRule{MinProfitPct: 4, MaxDrawdownPct: 25, CloseRatioPct: 100}
 	at := newTierTagTrader(t, []store.DrawdownTakeProfitRule{dd1, dd2})
 
-	tag1 := at.drawdownTrailingReasonTag(dd1)
-	tag2 := at.drawdownTrailingReasonTag(dd2)
+	tag1 := at.drawdownTrailingReasonTag("TIERUSDT", "long", 0, dd1)
+	tag2 := at.drawdownTrailingReasonTag("TIERUSDT", "long", 0, dd2)
 	if tag1 == tag2 {
 		t.Fatalf("both tiers produced the same reason tag %q", tag1)
 	}
@@ -104,7 +104,7 @@ func TestTrailingReasonTag_CarriesTierAndStaysMechanismEquivalent(t *testing.T) 
 	}
 	// 无法定档时必须退回裸 reason,而不是编出半个标识。
 	unknown := store.DrawdownTakeProfitRule{MinProfitPct: 77, MaxDrawdownPct: 77, CloseRatioPct: 100}
-	if got := at.drawdownTrailingReasonTag(unknown); got != "native_trailing" {
+	if got := at.drawdownTrailingReasonTag("TIERUSDT", "long", 0, unknown); got != "native_trailing" {
 		t.Fatalf("unresolvable tier produced %q, want bare native_trailing", got)
 	}
 }
@@ -118,7 +118,7 @@ func TestReclaim_TieredOrderIsClaimedByItsOwnTierNotTheLowestUnused(t *testing.T
 	at := newTierTagTrader(t, []store.DrawdownTakeProfitRule{dd1, dd2})
 
 	symbol, side, entry := "SKHYNIXUSDT", "short", 1000.0
-	wantTier := at.drawdownTierTagIndex(dd2)
+	wantTier := at.drawdownTierTagIndex(symbol, side, entry, dd2)
 	if wantTier != 2 {
 		t.Fatalf("fixture: dd2 tag index = %d, want 2", wantTier)
 	}
@@ -177,7 +177,7 @@ func TestReclaim_DuplicateSelfReportedTierDoesNotDoubleClaim(t *testing.T) {
 	at := newTierTagTrader(t, []store.DrawdownTakeProfitRule{dd1})
 
 	symbol, side, entry := "HYPEUSDT", "long", 40.0
-	tier := at.drawdownTierTagIndex(dd1)
+	tier := at.drawdownTierTagIndex(symbol, side, entry, dd1)
 	mk := func(id string) OpenOrder {
 		return OpenOrder{
 			OrderID: id, Symbol: symbol, PositionSide: "LONG",
