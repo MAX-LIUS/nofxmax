@@ -80,8 +80,38 @@ func trailingOrderMatchesDrawdownRule(order OpenOrder, side string, entryPrice f
 	return activationOK && callbackOK
 }
 
+// tierTaggedRuleIndex 在已排序的规则表里定位这张单**自报**的档位。
+//
+// order.ProtectionTier 是适配器从 clientOrderID 解出的档位序号(见
+// drawdown_tier_tag.go / store.EncodeReasonClientID),即挂单当时我们编进交易所侧
+// 的档位标识。它比形状匹配精确得多:形状匹配对"已激活"的单无能为力(激活后
+// StopPrice 变成移动跟踪价、Binance 干脆不报 callback),只能退回"按 MinProfitPct
+// 取最低未用档",于是两档并存时可能认错档 —— 认错的后果是另一档被判缺单、多挂一张
+// (过度保护,方向安全,但不是真相)。
+//
+// 序号语义必须与挂单侧同源:两边都用 drawdownTierTagIndex 的排序(MinProfitPct 升序,
+// 次级键 MaxDrawdownPct / CloseRatioPct)。这里的 ordered 只按 MinProfitPct 排,所以
+// 不能直接用下标 —— 改为按 tag 序号先还原出那一档的规则身份,再在 ordered 里找它。
+//
+// 返回 -1 表示这张单没带标识(旧单/非本策略单)或标识指向的档已不在当前配置里。
+func (at *AutoTrader) tierTaggedRuleIndex(order OpenOrder, ordered []store.DrawdownTakeProfitRule) int {
+	if order.ProtectionTier <= 0 {
+		return -1
+	}
+	for idx := range ordered {
+		if at.drawdownTierTagIndex(ordered[idx]) == order.ProtectionTier {
+			return idx
+		}
+	}
+	return -1
+}
+
 // reclaimLiveDrawdownTrailingOrders 从待撤名单里剔除仍然匹配某档 DD 规则的活 trailing 单,
 // 返回(过滤后的待撤名单, 被拦下并已补回认领记录的匹配)。
+//
+// 认领档位的优先级:
+//  1. 单子自报的档位标识(clientOrderID 里的 T<N>)—— 读出来的,不是猜的;
+//  2. 形状匹配(activation / callback / 方向)+ "最低未用档"兜底 —— 旧单没有标识时。
 //
 // 一张单最多认领给一档:多档同时匹配时按 MinProfitPct 从低到高取第一个未被占用的档,
 // 与 computeDrawdownTierAllocations 的排序一致。这样两档并存(place-at-open)时不会把
@@ -134,13 +164,21 @@ func (at *AutoTrader) reclaimLiveDrawdownTrailingOrders(symbol, side string, ent
 			continue
 		}
 		matchedIdx := -1
-		for idx, rule := range ordered {
-			if usedRule[idx] {
-				continue
-			}
-			if trailingOrderMatchesDrawdownRule(order, side, entryPrice, rule) {
-				matchedIdx = idx
-				break
+		// 第一优先:单子自报的档位标识。带标识就直接认这一档,不再用形状去猜。
+		// 只在该档尚未被别的单占用时成立 —— 两张单自报同一档说明有重复挂单,第二张
+		// 仍然走形状匹配/被交回撤单名单,不能让它顶掉第一张的认领。
+		if taggedIdx := at.tierTaggedRuleIndex(order, ordered); taggedIdx >= 0 && !usedRule[taggedIdx] {
+			matchedIdx = taggedIdx
+		}
+		if matchedIdx < 0 {
+			for idx, rule := range ordered {
+				if usedRule[idx] {
+					continue
+				}
+				if trailingOrderMatchesDrawdownRule(order, side, entryPrice, rule) {
+					matchedIdx = idx
+					break
+				}
 			}
 		}
 		if matchedIdx < 0 {

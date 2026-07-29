@@ -966,16 +966,17 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 		}
 
 		oo := types.OpenOrder{
-			OrderID:       fmt.Sprintf("%d", order.OrderID),
-			Symbol:        toInternalSymbol(order.Symbol),
-			Side:          string(order.Side),
-			PositionSide:  string(order.PositionSide),
-			Type:          reportType,
-			Price:         price,
-			StopPrice:     stopPrice,
-			Quantity:      quantity,
-			Status:        string(order.Status),
-			ClientOrderID: order.ClientOrderID,
+			OrderID:        fmt.Sprintf("%d", order.OrderID),
+			Symbol:         toInternalSymbol(order.Symbol),
+			Side:           string(order.Side),
+			PositionSide:   string(order.PositionSide),
+			Type:           reportType,
+			Price:          price,
+			StopPrice:      stopPrice,
+			Quantity:       quantity,
+			Status:         string(order.Status),
+			ClientOrderID:  order.ClientOrderID,
+			ProtectionTier: tierFromClientID(order.ClientOrderID),
 		}
 
 		// Phase 1c: classic TRAILING_STOP_MARKET orders (from the /fapi/v1/order
@@ -1026,7 +1027,8 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 				// stop looked manual/foreign to isLikelyBotProtectionOrder and was
 				// preserved forever — stale stops then accumulated across re-entries
 				// and eventually hit Binance's max stop-order limit (-4045).
-				ClientOrderID: algoOrder.ClientAlgoId,
+				ClientOrderID:  algoOrder.ClientAlgoId,
+				ProtectionTier: tierFromClientID(algoOrder.ClientAlgoId),
 			}
 
 			// Report native trailing orders as already activated so the shared

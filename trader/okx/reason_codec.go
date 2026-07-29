@@ -24,6 +24,14 @@ func decodeReasonFromClientID(clientID string) string {
 	return store.DecodeReasonFromClientID(okxTag, clientID)
 }
 
+// decodeTierFromClientID recovers the drawdown tier index (1..9) we encoded at
+// placement, or 0 when the id is not ours / carries no tier segment. The broker
+// prefix is private to this package, which is why the decode lives here and the
+// result travels on OpenOrder.ProtectionTier.
+func decodeTierFromClientID(clientID string) int {
+	return store.DecodeTierFromClientID(okxTag, clientID)
+}
+
 // reasonFromAlgoIDs resolves an order's mechanism from the two identity fields OKX
 // gives back, in order of information content: the client-controlled algo id (32
 // chars, carries a mechanism code we set at placement) first, then the tag.

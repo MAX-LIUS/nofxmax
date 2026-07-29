@@ -107,17 +107,17 @@ type Trader interface {
 
 // OpenOrder represents a pending order on the exchange
 type OpenOrder struct {
-	OrderID          string  `json:"order_id"`
-	Symbol           string  `json:"symbol"`
-	Side             string  `json:"side"`          // BUY/SELL
-	PositionSide     string  `json:"position_side"` // LONG/SHORT
-	Type             string  `json:"type"`          // LIMIT/STOP_MARKET/TAKE_PROFIT_MARKET
-	Price            float64 `json:"price"`         // Order price (for limit orders)
-	StopPrice        float64 `json:"stop_price"`    // Trigger price (for stop orders)
-	CallbackRate     float64 `json:"callback_rate"`
-	Quantity         float64 `json:"quantity"`
-	Status           string  `json:"status"` // NEW
-	ClientOrderID string `json:"client_order_id,omitempty"`
+	OrderID       string  `json:"order_id"`
+	Symbol        string  `json:"symbol"`
+	Side          string  `json:"side"`          // BUY/SELL
+	PositionSide  string  `json:"position_side"` // LONG/SHORT
+	Type          string  `json:"type"`          // LIMIT/STOP_MARKET/TAKE_PROFIT_MARKET
+	Price         float64 `json:"price"`         // Order price (for limit orders)
+	StopPrice     float64 `json:"stop_price"`    // Trigger price (for stop orders)
+	CallbackRate  float64 `json:"callback_rate"`
+	Quantity      float64 `json:"quantity"`
+	Status        string  `json:"status"` // NEW
+	ClientOrderID string  `json:"client_order_id,omitempty"`
 	// ProtectionRole 是**细粒度**归因,优先来自适配器对 clientOrderID/algoClOrdId
 	// 的解码(break_even / ladder_tp / ladder_sl / fallback_maxloss / structural_sl /
 	// native_trailing …)。只有解不出来时才退回按订单类型粗推。
@@ -125,8 +125,14 @@ type OpenOrder struct {
 	// ProtectionRoleCoarse 恒为四类粗粒度(trailing/take_profit/stop_loss/unknown),
 	// 给只需要"止损还是止盈"的消费者用。与 ProtectionRole 并存:早先粗分类会无条件
 	// 覆写细粒度归因,导致落库只剩"这是个止损",分不清保本/阶梯/兜底。
-	ProtectionRoleCoarse string  `json:"protection_role_coarse,omitempty"`
-	ActivationPrice      float64 `json:"activation_price,omitempty"`
+	ProtectionRoleCoarse string `json:"protection_role_coarse,omitempty"`
+	// ProtectionTier 是适配器从 clientOrderID 解出的**档位序号**(1..9),0 = 未知。
+	// 多档 DD 的第一重身份是我们持久化的 ExchangeOrderID;这个字段是第二重保险 ——
+	// 记录丢失/交易所不回 orderID 时,交易所侧自己仍能说出这张单属于哪一档,把
+	// "按 qty/激活价/回调率猜属于哪一档"降级成"读"。序号语义见
+	// trader/drawdown_tier_tag.go(按 MinProfitPct 升序的位次)。
+	ProtectionTier   int     `json:"protection_tier,omitempty"`
+	ActivationPrice  float64 `json:"activation_price,omitempty"`
 	ActivationStatus string  `json:"activation_status,omitempty"` // "activated" | "pending_activation"
 	CallbackRatePct  float64 `json:"callback_rate_pct,omitempty"`
 	ParentOrderID    string  `json:"parent_order_id,omitempty"`

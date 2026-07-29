@@ -1517,6 +1517,7 @@ func (t *OKXTrader) fetchOpenOrders(symbol string) ([]types.OpenOrder, error) {
 					Status:           "NEW",
 					ClientOrderID:    order.AlgoClOrdID,
 					ProtectionRole:   reasonFromAlgoIDs(order.AlgoClOrdID, order.Tag),
+					ProtectionTier:   decodeTierFromClientID(order.AlgoClOrdID),
 					ParentOrderID:    order.AlgoId,
 				})
 			}

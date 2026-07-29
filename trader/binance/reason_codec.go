@@ -22,3 +22,11 @@ func clientIDForReason(reason string) string {
 func decodeReasonFromClientID(clientID string) string {
 	return store.DecodeReasonFromClientID(brOrderIDPrefix, clientID)
 }
+
+// tierFromClientID recovers the drawdown tier index (1..9) encoded at placement, or
+// 0 when the id is not ours / carries no tier segment. The broker prefix is private
+// to this package, so the decode lives here and the result travels on
+// OpenOrder.ProtectionTier.
+func tierFromClientID(clientID string) int {
+	return store.DecodeTierFromClientID(brOrderIDPrefix, clientID)
+}

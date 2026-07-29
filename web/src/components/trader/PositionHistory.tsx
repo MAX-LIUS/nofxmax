@@ -1498,11 +1498,12 @@ function ProtectionDeviationBlock({
     typeof v === 'number' ? `${v >= 0 ? '+' : ''}${v}%` : '—'
   const rr = (v?: number) => (typeof v === 'number' ? `${v}R` : '—')
   const hasAI = typeof dev.ai_sl === 'number' || typeof dev.ai_tp === 'number'
-  // Planned-vs-actual entry: manual column = actual fill (entry_price), AI column
-  // = the AI's planned entry (ai_entry). The R multiples above are computed off
-  // these anchors, so showing entry makes the SL/TP distances and R legible.
-  const hasEntry =
-    typeof dev.entry_price === 'number' || typeof dev.ai_entry === 'number'
+  // Planned-vs-actual entry: the Manual row shows the actual fill (entry_price)
+  // with its drift %, and the "AI struct" row below already carries ai_entry in
+  // the same Entry column. So this standalone Planned row is only needed when the
+  // AI struct row will NOT render (ai_entry known but no ai_sl/ai_tp) — otherwise
+  // it duplicates ai_entry on two lines.
+  const showPlannedOnlyRow = !hasAI && typeof dev.ai_entry === 'number'
   return (
     <div className="mt-3">
       <div className="text-xs mb-2" style={{ color: '#848E9C' }}>
@@ -1523,19 +1524,17 @@ function ProtectionDeviationBlock({
           <span>SL</span>
           <span>TP</span>
         </div>
-        {hasEntry && (
+        {showPlannedOnlyRow && (
           <div
             className="grid px-3 py-1.5"
             style={{ gridTemplateColumns: '1fr 1fr 1fr 1fr', color: '#EAECEF' }}
           >
             <span style={{ color: '#848E9C' }}>
-              {zh ? '计划入场' : 'Planned'}
+              {zh ? '计划入场 (AI)' : 'Planned (AI)'}
             </span>
             <span className="font-mono">{fmt(dev.ai_entry)}</span>
-            <span className="font-mono" style={{ color: '#5E6673' }}>
-              {zh ? 'AI 结构' : 'AI struct'}
-            </span>
-            <span></span>
+            <span style={{ color: '#5E6673' }}>—</span>
+            <span style={{ color: '#5E6673' }}>—</span>
           </div>
         )}
         <div
