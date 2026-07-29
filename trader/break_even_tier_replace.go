@@ -44,16 +44,21 @@ type staleBreakEvenTierOrder struct {
 	Stage     string
 }
 
-// findStaleBreakEvenTierOrders 找出该仓位该档位下"记录认领的、但价格已不是目标价"的在场单。
+// findStaleBreakEvenTierOrders 找出该仓位该档位下"记录认领的、但已过期"的在场单。
+// 过期有两种:价格漂了(加减仓推动成本线),或数量不足了(加仓后仓位涨了单量没跟)。
 //
-// 判据三重与门,任一不满足都不撤 —— 撤错一张在场保护单的后果远重于多留一张:
+// 判据是三重与门 + 一个二选一的过期条件,任一与门不满足都不撤 —— 撤错一张在场保护
+// 单的后果远重于多留一张:
 //  1. 记录必须是本 trader、本仓位、break_even_stop、armed,且 fingerprint 的 stage 段等于目标档位;
 //  2. 记录必须带非空 ExchangeOrderID(历史空 id 记录一律跳过,交给 reconciler 的常规路径);
-//  3. 该 id 必须仍出现在 openOrders 里,且那张单确实是一张保本止损单(按 tag/类型判),
-//     价格与目标价的相对差超过容差。
+//  3. 该 id 必须仍出现在 openOrders 里,且那张单确实是一张保本止损单(按 tag/类型判),StopPrice>0;
+//  4. 过期条件(满足其一):价格相对差超过容差,**或**目标量已知且在场量实质不足
+//     (量化后仍 < 目标,复用 protectionQuantitiesEquivalent 避免量化噪音;targetQty<=0
+//     或在场量未知则不看量,沿用 "unknown ≠ inadequate")。
 //
-// 第 3 条是关键的安全阀:只撤"我确认此刻在场、确认是 BE、确认价格过期"的单。
-func findStaleBreakEvenTierOrders(records []store.DynamicProtectionRecord, traderID, symbol, side, stage string, targetPrice float64, openOrders []tradertypes.OpenOrder) []staleBreakEvenTierOrder {
+// 第 3 条是关键的安全阀:只撤"我确认此刻在场、确认是 BE"的单。
+// 加了量维度后仍然只撤不足、不撤超出:超出的 reduce-only BE 单无害。
+func findStaleBreakEvenTierOrders(records []store.DynamicProtectionRecord, traderID, symbol, side, stage string, targetPrice, targetQty float64, quantize protectionQtyQuantizer, openOrders []tradertypes.OpenOrder) []staleBreakEvenTierOrder {
 	if stage == "" || targetPrice <= 0 {
 		return nil
 	}
@@ -99,8 +104,12 @@ func findStaleBreakEvenTierOrders(records []store.DynamicProtectionRecord, trade
 		if order.StopPrice <= 0 {
 			continue
 		}
-		if math.Abs(order.StopPrice-targetPrice)/targetPrice*100 <= breakEvenTierReplaceTolerancePct {
-			// 价格实质未变,该档无需替换。
+		priceStale := math.Abs(order.StopPrice-targetPrice)/targetPrice*100 > breakEvenTierReplaceTolerancePct
+		qtyStale := targetQty > 0 && order.Quantity > 0 &&
+			!protectionQuantitiesEquivalent(quantize, symbol, targetQty, order.Quantity) &&
+			order.Quantity < targetQty
+		if !priceStale && !qtyStale {
+			// 价格和数量都没有实质变化,该档无需替换。
 			continue
 		}
 		seen[record.ExchangeOrderID] = struct{}{}
@@ -112,7 +121,7 @@ func findStaleBreakEvenTierOrders(records []store.DynamicProtectionRecord, trade
 // replaceStaleBreakEvenTierOrders 撤掉该档过期的在场单,并把对应记录标记为 replaced。
 // 返回实际撤掉的张数。撤单失败不返回错误:调用方随后仍会挂新单,多留一张旧单由
 // reconciler 的常规路径兜底,比"因为撤单失败就不挂保护单"安全。
-func (at *AutoTrader) replaceStaleBreakEvenTierOrders(symbol, side, stage string, targetPrice float64, openOrders []tradertypes.OpenOrder) int {
+func (at *AutoTrader) replaceStaleBreakEvenTierOrders(symbol, side, stage string, targetPrice, targetQty float64, openOrders []tradertypes.OpenOrder) int {
 	if at == nil || at.store == nil {
 		return 0
 	}
@@ -124,14 +133,15 @@ func (at *AutoTrader) replaceStaleBreakEvenTierOrders(symbol, side, stage string
 	for _, record := range state.Records {
 		records = append(records, record)
 	}
-	stale := findStaleBreakEvenTierOrders(records, at.id, symbol, side, stage, targetPrice, openOrders)
+	quantize := at.protectionQtyQuantizerFor()
+	stale := findStaleBreakEvenTierOrders(records, at.id, symbol, side, stage, targetPrice, targetQty, quantize, openOrders)
 	if len(stale) == 0 {
 		return 0
 	}
 
 	cancelled := 0
 	for _, victim := range stale {
-		if err := at.cancelBreakEvenOrderByID(symbol, victim.OrderID); err != nil {
+		if err := at.cancelProtectionOrderByID(symbol, victim.OrderID); err != nil {
 			logger.Warnf("⚠️ BE tier %s replace: cancel old order failed (%s %s id=%s stop=%.6f): %v", stage, symbol, side, victim.OrderID, victim.StopPrice, err)
 			continue
 		}
@@ -144,18 +154,18 @@ func (at *AutoTrader) replaceStaleBreakEvenTierOrders(symbol, side, stage string
 
 // orderIDCanceller 是"能按 order id 撤单"的可选能力(GridTrader 带这个方法,
 // 基础 Trader 接口没有)。按 id 撤是逐档替换的唯一安全撤法,所以拿不到这个能力时
-// 宁可不撤 —— 见 cancelBreakEvenOrderByID。
+// 宁可不撤 —— 见 cancelProtectionOrderByID。
 type orderIDCanceller interface {
 	CancelOrder(symbol, orderID string) error
 }
 
-// cancelBreakEvenOrderByID 按 order id 撤一张保本止损单。优先走 OKX 的 algo 撤单口,
-// 否则退回通用 CancelOrder。
+// cancelProtectionOrderByID 按 order id 撤一张保护单。优先走 OKX 的 algo 撤单口,
+// 否则退回通用 CancelOrder。BE 逐档替换和数量 resize 共用这一个口。
 //
 // 两个口都拿不到时返回错误而**不做任何降级**:唯一的降级手段是按 tag 撤,而 BE 所有
 // 档位的机制码都是 "BE",按 tag 撤必然连兄弟档一起撤掉。宁可让该档多留一张旧单
 // (reduce-only,无资金风险,由 reconciler 常规路径兜底),也不撤掉一张在场的保护单。
-func (at *AutoTrader) cancelBreakEvenOrderByID(symbol, orderID string) error {
+func (at *AutoTrader) cancelProtectionOrderByID(symbol, orderID string) error {
 	if orderID == "" {
 		return nil
 	}

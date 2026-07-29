@@ -197,17 +197,41 @@ func (at *AutoTrader) evaluateDrawdownTiers(symbol, side string, currentPnLPct, 
 			continue
 		}
 
-		// Tier becomes "tracking" once current P&L reaches the min_profit threshold
+		// Tier becomes "tracking" once profit has EVER reached the min_profit threshold.
+		//
+		// The gate is max(current, peak), not current alone. A drawdown tier is a
+		// trailing take-profit: the exchange-native equivalent latches the moment mark
+		// crosses activePx and stays armed while price retraces — that retracement is
+		// the entire point. Gating on the live PnL instead gave the managed monitor the
+		// opposite semantics: it could only arm during the up-move, and a tier that was
+		// never armed can neither hold a peak nor compute a retracement from one.
+		//
+		// The tier alloc table lives only in memory (see initDrawdownTiersForPosition),
+		// so every restart re-creates tiers as pending/peak=0 while peakPnLCache is
+		// restored from the excursion store. Under a current-only gate the two never
+		// reconcile: peak says 8.11%, tier says 0.00%, and the tier stays pending
+		// forever if profit has since retraced below the trigger.
+		//
+		// Live 2026-07-29, GPT SKHYNIXUSDT short: peak 8.11%, trigger 5.82%, retraced to
+		// 4.82%. dd1 sat `pending peak=0.00%` through 520 consecutive "managed monitor is
+		// co-running as second insurance" log lines while the retracement from peak
+		// (2.61%) had already passed the 2.327% threshold. The co-run promise was real
+		// but unreachable: the monitor never got past this gate. That is the mechanism
+		// behind "陪跑形同虚设".
 		if tier.Status == "pending" {
-			if currentPnLPct >= tier.MinProfitPct {
+			armPnLPct := currentPnLPct
+			if globalPeakPnL > armPnLPct {
+				armPnLPct = globalPeakPnL
+			}
+			if armPnLPct >= tier.MinProfitPct {
 				tier.Status = "tracking"
 				// Initialize peak from global peak to preserve history for late-initialized tiers
 				tier.PeakPnLPct = globalPeakPnL
 				if currentPnLPct > tier.PeakPnLPct {
 					tier.PeakPnLPct = currentPnLPct
 				}
-				logger.Infof("📈 Drawdown %s now tracking: %s %s | pnl=%.2f%% >= trigger=%.2f%% | peak=%.2f%%",
-					tier.StageName, symbol, side, currentPnLPct, tier.MinProfitPct, tier.PeakPnLPct)
+				logger.Infof("📈 Drawdown %s now tracking: %s %s | armPnl=%.2f%% (cur=%.2f%% peak=%.2f%%) >= trigger=%.2f%% | peak=%.2f%%",
+					tier.StageName, symbol, side, armPnLPct, currentPnLPct, globalPeakPnL, tier.MinProfitPct, tier.PeakPnLPct)
 				// Single-direction upgrade: supersede all lower tiers. A full-close tier is
 				// never superseded by a partial — it is a concurrent whole-position safety
 				// net (it keeps its own exchange order), so cancelling it in-memory would
@@ -277,14 +301,23 @@ func (at *AutoTrader) updateDrawdownTierStates(symbol, side string, currentPnLPc
 			continue
 		}
 		if tier.Status == "pending" {
-			if currentPnLPct >= tier.MinProfitPct {
+			// max(current, peak) — same latching semantics as evaluateDrawdownTiers.
+			// These two functions must agree on when a tier is armed: this one runs on
+			// the native path and evaluateDrawdownTiers on the managed path, over the
+			// SAME alloc table. If only one latched on peak, the tier's state would
+			// depend on which path happened to observe it first.
+			armPnLPct := currentPnLPct
+			if globalPeakPnL > armPnLPct {
+				armPnLPct = globalPeakPnL
+			}
+			if armPnLPct >= tier.MinProfitPct {
 				tier.Status = "tracking"
 				tier.PeakPnLPct = globalPeakPnL
 				if currentPnLPct > tier.PeakPnLPct {
 					tier.PeakPnLPct = currentPnLPct
 				}
-				logger.Infof("📈 Drawdown %s now tracking (native): %s %s | pnl=%.2f%% >= trigger=%.2f%%",
-					tier.StageName, symbol, side, currentPnLPct, tier.MinProfitPct)
+				logger.Infof("📈 Drawdown %s now tracking (native): %s %s | armPnl=%.2f%% (cur=%.2f%% peak=%.2f%%) >= trigger=%.2f%%",
+					tier.StageName, symbol, side, armPnLPct, currentPnLPct, globalPeakPnL, tier.MinProfitPct)
 				for j := 0; j < i; j++ {
 					// Same rule as evaluateDrawdownTiers: a partial never supersedes the
 					// concurrent whole-position tier.
@@ -820,10 +853,81 @@ func (at *AutoTrader) isDrawdownTierExecuted(symbol, side string, rule store.Dra
 	return false
 }
 
-// detectNativeTrailingFills detects when a native trailing order has been filled
-// by comparing current position quantity against expected remaining quantity from tier allocs.
-// If position is smaller than expected, mark the highest "tracking" tier as executed.
+// drawdownAttributedCloseQty returns how much of THIS position was closed by a
+// drawdown mechanism (exchange-native trailing or the code-side managed monitor),
+// and how much was closed by anything else (ladder TP, break-even, structural SL,
+// AI close, time/max-hold stops, manual...).
+//
+// Both numbers come from position_close_events, which the sync path fills with exact
+// 1:1 attribution (OKX coded client-id / order-detail algoClOrdId, Binance order id).
+// It is the authoritative answer to "did a DD tier actually fill", and it exists for
+// every close — so no tier state ever has to be *inferred* from position shrinkage.
+func (at *AutoTrader) drawdownAttributedCloseQty(symbol, side string) (ddQty, otherQty float64, ok bool) {
+	if at.store == nil {
+		return 0, 0, false
+	}
+	pos, err := at.store.Position().GetOpenPositionBySymbol(at.id, symbol, strings.ToUpper(side))
+	if err != nil || pos == nil || pos.ID == 0 {
+		return 0, 0, false
+	}
+	events, err := at.store.PositionClose().ListByPositionID(int64(pos.ID))
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, ev := range events {
+		if ev == nil || ev.CloseQuantity <= 0 {
+			continue
+		}
+		if isDrawdownAttribution(ev.CloseReason) || isDrawdownAttribution(ev.ExecutionSource) {
+			ddQty += ev.CloseQuantity
+			continue
+		}
+		otherQty += ev.CloseQuantity
+	}
+	return ddQty, otherQty, true
+}
+
+// isDrawdownAttribution reports whether an attribution string denotes a drawdown
+// take-profit execution. Exactly two mechanisms can fill a DD tier:
+//   - native_trailing      — the exchange trailing order we placed for the tier
+//   - managed_drawdown     — the in-process monitor closing the tier itself
+//
+// Anything else (ladder_tp / break_even_stop / structural_sl / full_tp / full_sl /
+// ai_close* / max_hold / time_stop / giveback_guard_* / manual_close*) is NOT a DD
+// fill, no matter how much quantity it removed.
+func isDrawdownAttribution(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "native_trailing", "managed_drawdown":
+		return true
+	}
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(s)), "managed_drawdown_")
+}
+
+// detectNativeTrailingFills marks a tier executed when its trailing order actually
+// filled.
+//
+// It used to INFER that from position shrinkage alone: expectedRemaining - currentQty
+// over a threshold ⇒ "the top tracking tier filled". That inference is wrong whenever
+// something else legitimately reduces the position, and for a full-close tier
+// (close_ratio=100, expectedRemaining = the WHOLE position) any other mechanism taking
+// >50% forges a fill. Live 2026-07-28/29: fired 8 times in two days.
+//
+// GPT SKHYNIXUSDT short is the worked example. Four ladder_tp fills took 0.035→0.017;
+// at 18:40:15 deficit 0.018 ≥ dd1's 0.0175 half-quantity ⇒ dd1 marked executed. dd1 had
+// never filled — position_close_events attributes all four closes to ladder_tp. The
+// consequence is not cosmetic: isDrawdownTierExecuted then permanently refuses to
+// re-arm the tier, so the strategy's configured DD protection stayed off the exchange
+// for the rest of the position's life.
+//
+// So the inference is replaced by attribution: subtract the quantity that verifiably
+// closed for non-DD reasons before comparing, and require a DD-attributed close event
+// to exist before marking anything executed. When attribution is unavailable (store
+// error, pre-attribution legacy position) we mark NOTHING — an un-marked tier stays
+// protected on the exchange, a wrongly-marked one is abandoned. Only one of those two
+// failure modes is safe.
 func (at *AutoTrader) detectNativeTrailingFills(symbol, side string, currentQuantity float64) {
+	ddClosed, otherClosed, haveAttribution := at.drawdownAttributedCloseQty(symbol, side)
+
 	key := positionKey(symbol, side)
 	at.drawdownTierAllocMu.Lock()
 	defer at.drawdownTierAllocMu.Unlock()
@@ -845,11 +949,30 @@ func (at *AutoTrader) detectNativeTrailingFills(symbol, side string, currentQuan
 		return
 	}
 
-	// If current quantity is significantly less than expected, a tier was filled
-	// Use 5% tolerance to account for rounding
-	deficit := expectedRemaining - currentQuantity
+	if !haveAttribution {
+		logger.Infof("🟡 Drawdown fill detection skipped (no close attribution available): %s %s position=%.4f expected=%.4f — leaving tiers armed",
+			symbol, side, currentQuantity, expectedRemaining)
+		return
+	}
+
+	// A DD tier can only have filled if a DD-attributed close exists. Without one,
+	// every unit that left the position left through some other mechanism.
+	if ddClosed <= 0 {
+		if otherClosed > 0 {
+			logger.Infof("🟡 Drawdown fill detection: %s %s position shrank by %.4f but ALL of it is attributed to non-drawdown closes (dd=0) — no tier marked executed",
+				symbol, side, otherClosed)
+		}
+		return
+	}
+
+	// Non-DD closes are not evidence of a DD fill: discount them before comparing.
+	deficit := expectedRemaining - currentQuantity - otherClosed
 	if deficit <= expectedRemaining*0.05 {
 		return
+	}
+	// Never credit a tier with more than the DD mechanism actually closed.
+	if deficit > ddClosed {
+		deficit = ddClosed
 	}
 
 	// Find the highest-index "tracking" tier and mark it as executed
@@ -858,8 +981,8 @@ func (at *AutoTrader) detectNativeTrailingFills(symbol, side string, currentQuan
 			tierQty := math.Abs(allocs[i].Quantity)
 			if deficit >= tierQty*0.5 {
 				allocs[i].Status = "executed"
-				logger.Infof("✅ Drawdown %s detected as filled (native trailing): %s %s | position=%.4f expected=%.4f deficit=%.4f",
-					allocs[i].StageName, symbol, side, currentQuantity, expectedRemaining, deficit)
+				logger.Infof("✅ Drawdown %s detected as filled (dd-attributed): %s %s | position=%.4f expected=%.4f ddClosed=%.4f otherClosed=%.4f deficit=%.4f",
+					allocs[i].StageName, symbol, side, currentQuantity, expectedRemaining, ddClosed, otherClosed, deficit)
 				return
 			}
 		}

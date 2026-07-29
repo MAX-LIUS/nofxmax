@@ -1148,3 +1148,77 @@ func TestCoRun_EffectiveExchangeSide_NoDoubleClose(t *testing.T) {
 		t.Fatalf("有效单不得被撤,got %d cancels", fake.cancelTrailingCalls)
 	}
 }
+
+// ============================================================================
+// E8. 断路器冷却衰减 (RC-3): 跳闸必须会过期,不能永久闩死。
+//
+// 2026-07-28 GPT/SKHYNIXUSDT 实证的死锁:resetReArmFail 的唯一调用方需要"已验证覆盖",
+// 而覆盖需要一张永远挂不出去的单 —— 无重挂 → 无单 → 无覆盖 → 永不复位。跳闸 19:13:46
+// 之后交易所侧再也没有补挂过任何 DD 单,峰值 8.11% 越过两档而零委托。
+//
+// 修复语义:跳闸只压制 reArmBreakerCooldown(30min),之后计数回落到 limit-1,放行
+// 一次重挂尝试;若再失败立即重新跳闸,再等一个冷却。坏路径的成本是"每 30 分钟一单",
+// 而不是"永远不挂"。
+// ============================================================================
+
+func TestReArmBreaker_CooldownExpiresAndAllowsRetry(t *testing.T) {
+	at := &AutoTrader{
+		exchange:       "okx",
+		reArmFailCache: make(map[string]int),
+		reArmTripTime:  make(map[string]time.Time),
+	}
+	rule := normalizeDrawdownRule(store.DrawdownTakeProfitRule{MinProfitPct: 6, MaxDrawdownPct: 30, CloseRatioPct: 100})
+	key := reArmFailKey("WLDUSDT", "short", rule, 100.0)
+
+	// 连续 3 次失败 → 跳闸。
+	for i := 0; i < reArmBreakerLimit; i++ {
+		at.bumpReArmFail(key)
+	}
+	if !at.expireReArmBreaker(key) {
+		t.Fatal("刚跳闸时必须仍处于压制状态(冷却未到)")
+	}
+
+	// 冷却未到期:必须继续压制,且不得放行。
+	at.reArmFailMutex.Lock()
+	at.reArmTripTime[key] = time.Now().Add(-reArmBreakerCooldown + time.Minute)
+	at.reArmFailMutex.Unlock()
+	if !at.expireReArmBreaker(key) {
+		t.Fatal("冷却剩 1 分钟时不得放行(否则又变成每轮 churn)")
+	}
+
+	// 冷却到期:必须放行一次尝试,且计数回落到 limit-1。
+	at.reArmFailMutex.Lock()
+	at.reArmTripTime[key] = time.Now().Add(-reArmBreakerCooldown - time.Minute)
+	at.reArmFailMutex.Unlock()
+	if at.expireReArmBreaker(key) {
+		t.Fatal("冷却到期后必须放行一次重挂尝试 —— 这是 RC-3 永久闩死的修复点")
+	}
+	if got := at.getReArmFail(key); got != reArmBreakerLimit-1 {
+		t.Fatalf("放行后计数应回落到 limit-1=%d,实得 %d", reArmBreakerLimit-1, got)
+	}
+
+	// 再失败一次 → 立即重新跳闸,并重新开始计时(不得因为放行过就永久放行)。
+	at.bumpReArmFail(key)
+	if !at.expireReArmBreaker(key) {
+		t.Fatal("放行后再次失败必须立即重新跳闸")
+	}
+}
+
+// 跳闸时间戳缺失(进程重启 / 升级前的旧状态)不得等于永久闩死:必须就地补盖时间戳,
+// 让冷却从此刻开始走,而不是因为查不到时间戳而无限压制。
+func TestReArmBreaker_MissingTripStampStartsCooldown(t *testing.T) {
+	at := &AutoTrader{
+		exchange:       "okx",
+		reArmFailCache: map[string]int{"k": reArmBreakerLimit},
+		reArmTripTime:  make(map[string]time.Time),
+	}
+	if !at.expireReArmBreaker("k") {
+		t.Fatal("计数已达上限时应压制")
+	}
+	at.reArmFailMutex.RLock()
+	_, stamped := at.reArmTripTime["k"]
+	at.reArmFailMutex.RUnlock()
+	if !stamped {
+		t.Fatal("时间戳缺失时必须就地补盖,否则冷却永不开始 = 永久闩死")
+	}
+}

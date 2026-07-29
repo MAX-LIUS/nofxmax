@@ -24,13 +24,47 @@ type ProtectionOwnershipState struct {
 	Reasons           []string
 }
 
+// hasLiveTrailingOrder 报告交易所此刻是否真的躺着至少一张本仓位方向的 trailing 单。
+//
+// 为什么归属判定必须要它:armed 是 DB 里的一个布尔量,它只说明"我们曾经武装过",
+// 不说明"单子现在还在"。单子被撤掉/被交易所拒掉/被熔断改写归属之后,armed 依然
+// 是 true —— 于是 missingProfit 被抹平,reconciler 每轮都报"盈利侧有主人",而交易所
+// 上一张 DD 单都没有。2026-07-28 GPT/SKHYNIXUSDT 就是这个形态:账本 claimedTrail=1、
+// 交易所 trail=0,峰值 8.11% 越过两档 DD 却无任何委托。
+//
+// 判据只用订单类型,不看激活状态:pending_activation 的单仍然是在场的保护(幻影单
+// 的有效性由 exchangeSideCoversDrawdownTier 单独判定,不属于"在不在场"的问题)。
+func hasLiveTrailingOrder(openOrders []OpenOrder, positionSide string) bool {
+	for _, o := range openOrders {
+		if !strings.Contains(strings.ToUpper(o.Type), "TRAILING") {
+			continue
+		}
+		if o.Quantity <= 0 {
+			continue
+		}
+		// PositionSide 为空表示交易所是单向持仓模式(不回该字段),此时不能按方向排除。
+		if o.PositionSide != "" && !strings.EqualFold(o.PositionSide, positionSide) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 func evaluateProtectionOwnership(openOrders []OpenOrder, positionSide string, plan *ProtectionPlan, beOwnership breakEvenOwnership, trailingOwnership nativeTrailingOwnership) ProtectionOwnershipState {
 	state := ProtectionOwnershipState{State: "unprotected"}
 	positionSide = strings.ToUpper(positionSide)
 	// 归属判断("盈利侧有没有主人")看的是"有没有武装",而不是"哪张单是我的"。
 	// 认领集合只用于区分多余单,不参与 owner 判定 —— 否则记录落盘窗口期会瞬间
 	// 判成 missingProfit 并触发一轮无谓的重挂。
-	nativeTrailingArmed := trailingOwnership.Armed
+	//
+	// 但 armed 必须被"交易所真有活单"背书(见 hasLiveTrailingOrder):没有活单的 armed
+	// 是幻影覆盖,它会抹掉 missingTP 让缺口永远不被上报。落盘窗口期不受影响 ——
+	// 那个窗口里单子已经在交易所了,只是记录还没落库,活单判据照样为真。
+	nativeTrailingArmed := trailingOwnership.Armed && hasLiveTrailingOrder(openOrders, positionSide)
+	if trailingOwnership.Armed && !nativeTrailingArmed {
+		state.Reasons = append(state.Reasons, "native trailing armed in ledger but no live trailing order on exchange (phantom coverage)")
+	}
 	// owner 判定只看"有没有武装",与认领集合无关(同 trailing:落盘窗口期不能瞬间判缺)。
 	breakEvenArmed := beOwnership.Armed
 

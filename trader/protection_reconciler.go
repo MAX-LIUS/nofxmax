@@ -289,6 +289,20 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 	}
 
 	if plan != nil {
+		// 加仓后保护单数量不跟涨:撤掉量不足的那张,让它对下面的 detectMissingProtection
+		// 变成"缺失",由既有修复路径按当前仓位量重挂。必须放在 missing 检测**之前**,
+		// 否则本轮撤完要等下一轮才补,中间有一轮该档位空着。
+		// 只撤不挂 + 只管不足不管超出,理由见 protection_qty_resize.go 文件头。
+		if resized := at.resizeUndercoveredProtectionOrders(symbol, side, positionSide, quantity, plan, openOrders); resized > 0 {
+			refreshed, refreshErr := at.trader.GetOpenOrders(symbol)
+			if refreshErr != nil {
+				// 重取失败就别往下走:拿撤单前的快照去判缺失会把刚撤掉的档位
+				// 当成还在场,这一轮不补,等下一轮重来。
+				return result, fmt.Errorf("re-fetch open orders after protection qty resize: %w", refreshErr)
+			}
+			openOrders = refreshed
+		}
+
 		breakEvenArmed := at.getBreakEvenState(symbol, side) == "armed"
 		if at.isBreakEvenSuppressedByRunner(symbol, side) {
 			breakEvenArmed = false
@@ -358,6 +372,41 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 
 		if unexpectedStops > 0 || unexpectedTPs > 0 {
 			unexpectedIDs := collectUnexpectedProtectionOrderIDs(openOrders, positionSide, plan, beOwnership, trailingOwnership)
+			// 撤单前的最后一道闸:任何仍然匹配某档 DD 规则形状的活 trailing 单都拦下来,
+			// 补回认领记录而不是撤掉它。归属账本翻转(例如熔断把 native_trailing 改成
+			// managed_drawdown)会让开仓时挂好的那张单突然"没人认领",于是落进这份
+			// stale-duplicate 名单 —— 2026-07-28 GPT SKHYNIXUSDT 就是这样在跳闸后 14 秒
+			// 被撤掉了自己唯一的 DD 保护。详见 drawdown_order_reclaim.go。
+			//
+			// 认领只做一次:reclaim 会写归属账本,重复调用会把同一张单写两遍记录。
+			if len(unexpectedIDs) > 0 {
+				if filtered, reclaimed := at.reclaimLiveDrawdownTrailingOrders(symbol, side, entryPrice, unexpectedIDs, openOrders); len(reclaimed) > 0 {
+					unexpectedIDs = filtered
+					// 认领回来的单从"多余"计数里扣除,否则下面的快速路径会因为
+					// 计数与名单不一致而判定"清理未完成"并反复重试。
+					for _, m := range reclaimed {
+						if m.Rule.CloseRatioPct >= 99.999 {
+							if unexpectedStops > 0 {
+								unexpectedStops--
+							}
+						} else if unexpectedTPs > 0 {
+							unexpectedTPs--
+						} else if unexpectedStops > 0 {
+							unexpectedStops--
+						}
+						if unexpectedSummary.StaleBotDuplicate > 0 {
+							unexpectedSummary.StaleBotDuplicate--
+						}
+						if unexpectedSummary.StaleTrailingDuplicate > 0 {
+							unexpectedSummary.StaleTrailingDuplicate--
+						}
+					}
+				}
+			}
+			if len(unexpectedIDs) == 0 {
+				logger.Infof("🛟 Protection reconciler: %s %s all 'unexpected' protection orders were reclaimed as live drawdown tiers — nothing to cancel", symbol, positionSide)
+				return result, nil
+			}
 			// Coverage-complete fast path (fix 2026-06-22 churn): when every required
 			// protection tier is already visible (no missing SL/TP) and the unexpected
 			// orders are pure stale bot duplicates, the position is fully protected and

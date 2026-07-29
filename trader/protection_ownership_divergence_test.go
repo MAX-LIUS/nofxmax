@@ -15,8 +15,12 @@ func TestOwnershipMissingProfitIsMaskedByArmedTrailing(t *testing.T) {
 		NeedsTakeProfit: true,
 		TakeProfitPrice: 110,
 	}
+	// TRAILING 单是 armed 的活单背书(没有它,armed 会被判为幻影覆盖而失去掩蔽权,
+	// 见 hasLiveTrailingOrder)。它的价位不等于计划 TP(110),所以
+	// detectMissingProtection 依旧报 missingTP=true —— 分歧前提保持不变。
 	orders := []OpenOrder{
 		{PositionSide: "LONG", Type: "STOP_MARKET", StopPrice: 98},
+		{PositionSide: "LONG", Type: "TRAILING_STOP_MARKET", Quantity: 1, ActivationPrice: 106, CallbackRate: 1.0},
 	}
 
 	// 原始判定:止盈价位确实不在场 —— 这是驱动重挂分支的那个值。

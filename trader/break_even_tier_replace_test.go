@@ -33,13 +33,72 @@ func beLiveOrder(orderID string, stop float64) tradertypes.OpenOrder {
 	}
 }
 
+func beLiveOrderQty(orderID string, stop, qty float64) tradertypes.OpenOrder {
+	o := beLiveOrder(orderID, stop)
+	o.Quantity = qty
+	return o
+}
+
+// 加仓后 BE 单量不跟涨:价格对得上但量只有一半,必须被判过期并撤("止损止不了血")。
+func TestFindStaleBreakEvenTierOrdersDetectsQtyShortfall(t *testing.T) {
+	records := []store.DynamicProtectionRecord{beRecord("BE1", "be1_small", "armed")}
+	orders := []tradertypes.OpenOrder{beLiveOrderQty("be1_small", 0.3568, 0.017)}
+
+	// 价格正好一致(容差内),只有量欠(目标 0.035)。
+	stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "BE1", 0.3568, 0.035, nil, orders)
+	if len(stale) != 1 || stale[0].OrderID != "be1_small" {
+		t.Fatalf("加仓后欠量的 BE 单应被判过期,got %+v", stale)
+	}
+}
+
+// 量达标就绝不动(即便 targetQty 已传入)。
+func TestFindStaleBreakEvenTierOrdersIgnoresAdequateQty(t *testing.T) {
+	records := []store.DynamicProtectionRecord{beRecord("BE1", "be1_ok", "armed")}
+	orders := []tradertypes.OpenOrder{beLiveOrderQty("be1_ok", 0.3568, 0.035)}
+
+	if stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "BE1", 0.3568, 0.035, nil, orders); len(stale) != 0 {
+		t.Fatalf("量达标不应撤单,got %+v", stale)
+	}
+}
+
+// 超量不动:reduce-only 下超量 BE 单无害。
+func TestFindStaleBreakEvenTierOrdersIgnoresOversizedQty(t *testing.T) {
+	records := []store.DynamicProtectionRecord{beRecord("BE1", "be1_big", "armed")}
+	orders := []tradertypes.OpenOrder{beLiveOrderQty("be1_big", 0.3568, 0.05)}
+
+	if stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "BE1", 0.3568, 0.035, nil, orders); len(stale) != 0 {
+		t.Fatalf("超量 BE 单不应撤,got %+v", stale)
+	}
+}
+
+// targetQty<=0(未知)一律不看量,沿用 unknown ≠ inadequate。
+func TestFindStaleBreakEvenTierOrdersUnknownTargetQtyIgnoresQty(t *testing.T) {
+	records := []store.DynamicProtectionRecord{beRecord("BE1", "be1_x", "armed")}
+	orders := []tradertypes.OpenOrder{beLiveOrderQty("be1_x", 0.3568, 0.017)}
+
+	// targetQty=0 且价格在容差内 → 不撤。
+	if stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "BE1", 0.3568, 0, nil, orders); len(stale) != 0 {
+		t.Fatalf("目标量未知不应因量撤单,got %+v", stale)
+	}
+}
+
+// 在场量未知(Quantity<=0)时也不看量。
+func TestFindStaleBreakEvenTierOrdersUnknownLiveQtyIgnoresQty(t *testing.T) {
+	records := []store.DynamicProtectionRecord{beRecord("BE1", "be1_y", "armed")}
+	orders := []tradertypes.OpenOrder{beLiveOrderQty("be1_y", 0.3568, 0)}
+
+	if stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "BE1", 0.3568, 0.035, nil, orders); len(stale) != 0 {
+		t.Fatalf("在场量未知不应因量撤单,got %+v", stale)
+	}
+}
+
 // 核心场景:均价漂移后同一档算出新价,旧单必须被认成过期并撤掉。
 // 这正是 WLDUSDT 四张 BE 单的成因(两档 × 漂移前后两组价格)。
 func TestFindStaleBreakEvenTierOrdersDetectsDriftedTierOrder(t *testing.T) {
 	records := []store.DynamicProtectionRecord{beRecord("BE1", "old_be1", "armed")}
 	orders := []tradertypes.OpenOrder{beLiveOrder("old_be1", 0.3604)}
 
-	stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "BE1", 0.3568, orders)
+	stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "BE1", 0.3568, 0, nil, orders)
 	if len(stale) != 1 || stale[0].OrderID != "old_be1" {
 		t.Fatalf("漂移后的同档旧单应被判过期,got %+v", stale)
 	}
@@ -61,7 +120,7 @@ func TestFindStaleBreakEvenTierOrdersNeverTouchesSiblingTier(t *testing.T) {
 		beLiveOrder("be2_order", 0.3539),
 	}
 
-	stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "BE1", 0.3568, orders)
+	stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "BE1", 0.3568, 0, nil, orders)
 	if len(stale) != 1 {
 		t.Fatalf("只该动 BE1 自己那张,got %+v", stale)
 	}
@@ -77,7 +136,7 @@ func TestFindStaleBreakEvenTierOrdersIgnoresPriceWithinTolerance(t *testing.T) {
 	// 0.36040 → 0.36045,相对差约 0.014%,在 0.05% 容差内。
 	orders := []tradertypes.OpenOrder{beLiveOrder("be1_order", 0.36040)}
 
-	stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "BE1", 0.36045, orders)
+	stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "BE1", 0.36045, 0, nil, orders)
 	if len(stale) != 0 {
 		t.Fatalf("容差内不应替换,got %+v", stale)
 	}
@@ -152,7 +211,7 @@ func TestFindStaleBreakEvenTierOrdersRequiresAllGuards(t *testing.T) {
 		if c.name == "别的 trader 的记录" {
 			traderID = "t2"
 		}
-		stale := findStaleBreakEvenTierOrders(c.records, traderID, "WLDUSDT", "short", c.stage, target, c.orders)
+		stale := findStaleBreakEvenTierOrders(c.records, traderID, "WLDUSDT", "short", c.stage, target, 0, nil, c.orders)
 		if len(stale) != 0 {
 			t.Fatalf("%s:不应撤单,got %+v", c.name, stale)
 		}
@@ -164,10 +223,10 @@ func TestFindStaleBreakEvenTierOrdersRefusesWithoutStageOrTarget(t *testing.T) {
 	records := []store.DynamicProtectionRecord{beRecord("BE1", "old_be1", "armed")}
 	orders := []tradertypes.OpenOrder{beLiveOrder("old_be1", 0.3604)}
 
-	if stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "", 0.3568, orders); len(stale) != 0 {
+	if stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "", 0.3568, 0, nil, orders); len(stale) != 0 {
 		t.Fatalf("档位为空不应撤单,got %+v", stale)
 	}
-	if stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "BE1", 0, orders); len(stale) != 0 {
+	if stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "BE1", 0, 0, nil, orders); len(stale) != 0 {
 		t.Fatalf("目标价无效不应撤单,got %+v", stale)
 	}
 }
@@ -177,10 +236,10 @@ func TestFindStaleBreakEvenTierOrdersScopedToPosition(t *testing.T) {
 	records := []store.DynamicProtectionRecord{beRecord("BE1", "old_be1", "armed")}
 	orders := []tradertypes.OpenOrder{beLiveOrder("old_be1", 0.3604)}
 
-	if stale := findStaleBreakEvenTierOrders(records, "t1", "ETHUSDT", "short", "BE1", 0.3568, orders); len(stale) != 0 {
+	if stale := findStaleBreakEvenTierOrders(records, "t1", "ETHUSDT", "short", "BE1", 0.3568, 0, nil, orders); len(stale) != 0 {
 		t.Fatalf("跨 symbol 不应撤单,got %+v", stale)
 	}
-	if stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "long", "BE1", 0.3568, orders); len(stale) != 0 {
+	if stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "long", "BE1", 0.3568, 0, nil, orders); len(stale) != 0 {
 		t.Fatalf("跨 side 不应撤单,got %+v", stale)
 	}
 }
@@ -193,7 +252,7 @@ func TestFindStaleBreakEvenTierOrdersDeduplicatesByOrderID(t *testing.T) {
 	}
 	orders := []tradertypes.OpenOrder{beLiveOrder("old_be1", 0.3604)}
 
-	stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "BE1", 0.3568, orders)
+	stale := findStaleBreakEvenTierOrders(records, "t1", "WLDUSDT", "short", "BE1", 0.3568, 0, nil, orders)
 	if len(stale) != 1 {
 		t.Fatalf("同一 id 只该撤一次,got %+v", stale)
 	}

@@ -186,8 +186,9 @@ type AutoTrader struct {
 	drawdownTierAllocs     map[string][]store.DrawdownTierAllocation // symbol_side -> fixed tier allocations computed at open
 	drawdownTierAllocMu    sync.RWMutex                              // Protects drawdownTierAllocs
 	nativeTrailingArmTime  map[string]time.Time                      // nativeTrailingArmKey(symbol|side|ruleIdentity) -> last successful arm time (prevents re-arm loop)
-	reArmFailCache         map[string]int                            // symbol_side_tierFingerprint -> consecutive re-arm/verify failures (breaker at 3 → managed)
-	reArmFailMutex         sync.RWMutex                              // Protects reArmFailCache
+	reArmFailCache         map[string]int                            // symbol_side_tierFingerprint -> consecutive re-arm/verify failures (breaker at 3 → managed co-runs, exchange backs off)
+	reArmTripTime          map[string]time.Time                      // same key -> when the breaker last tripped (drives reArmBreakerCooldown; a trip must decay, never latch)
+	reArmFailMutex         sync.RWMutex                              // Protects reArmFailCache + reArmTripTime
 	candidateATRCache      map[string]float64                        // frozenATRKey -> per-main-cycle recomputed ATR (scaffold; only used when StructuralSL.DynamicATR on)
 	candidateATRAtMs       map[string]int64                          // frozenATRKey -> ms of last candidate recompute (throttle to once per main cycle)
 	candidateATRMutex      sync.RWMutex                              // Protects candidateATRCache + candidateATRAtMs
@@ -434,6 +435,7 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		drawdownTierAllocs:    make(map[string][]store.DrawdownTierAllocation),
 		nativeTrailingArmTime: make(map[string]time.Time),
 		reArmFailCache:        make(map[string]int),
+		reArmTripTime:         make(map[string]time.Time),
 		candidateATRCache:     make(map[string]float64),
 		candidateATRAtMs:      make(map[string]int64),
 		immediateTrailingIDs:  make(map[string]string),

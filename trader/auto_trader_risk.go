@@ -1452,11 +1452,21 @@ func (at *AutoTrader) getDrawdownArmRulesForSelectedRule(entryPrice, quantity fl
 			logger.Infof("🟣 Drawdown native exposure skipped: %s %s already armed fingerprint=%s", symbol, side, fingerprint)
 			return nil
 		}
-		// Check if this is a managed drawdown record — managed mode doesn't place
-		// exchange trailing orders, so absence of a trailing order is expected.
+		// A managed_drawdown record does NOT mean "no exchange order expected".
+		//
+		// This branch used to `return nil` here, which made the code-side monitor a
+		// SUBSTITUTE for the exchange order: once any managed record existed for the
+		// tier, the exchange was never tried again for the life of the position. That
+		// inverts the product rule — managed co-runs as second insurance, it never takes
+		// over (see the CO-RUN, NEVER HAND OVER block at the top of this file).
+		//
+		// Live 2026-07-28/29, GPT SKHYNIXUSDT short: the breaker wrote a managed record
+		// at 19:13:46 and from then on this line logged "no exchange trailing expected"
+		// every poll while the strategy's only DD tier rested nowhere. Falling through
+		// instead re-places it. Runaway placement is not a risk here: the unconditional
+		// 300s arm cooldown above already bounds this to one attempt per tier per 300s.
 		if at.isManagedDrawdownRecord(symbol, side, fingerprint) {
-			logger.Infof("🟣 Drawdown managed mode already armed: %s %s fingerprint=%s (no exchange trailing expected)", symbol, side, fingerprint)
-			return nil
+			logger.Infof("🟣 Drawdown managed record present but exchange order missing: %s %s fingerprint=%s — re-arming exchange side (managed keeps co-running, never substitutes)", symbol, side, fingerprint)
 		}
 		// Check if this tier was already executed (order filled, position reduced).
 		// If the tier alloc shows executed/triggered, don't re-arm.
@@ -2216,7 +2226,10 @@ func (at *AutoTrader) accountReArmBreaker(symbol, side string, entryPrice, markP
 			continue
 		}
 		key := reArmFailKey(symbol, side, rule, entryPrice)
-		if at.getReArmFail(key) >= reArmBreakerLimit {
+		// 跳闸不是永久判决:expireReArmBreaker 在 reArmBreakerCooldown 之后自动放行一次
+		// 重挂尝试,所以"交易所侧永远不再补挂"这个洞由冷却衰减堵住,而每轮 churn 仍被压制。
+		// managed monitor 全程陪跑,不因跳闸而停。
+		if at.expireReArmBreaker(key) {
 			// Already tripped on an earlier poll. Do NOT query coverage (the gate now
 			// reports a tripped tier as uncovered by design) and do NOT re-arm the local
 			// monitor — for a partial tier that helper places exchange orders, so calling
@@ -2253,7 +2266,9 @@ func (at *AutoTrader) accountReArmBreaker(symbol, side string, entryPrice, markP
 // place attempts — the managed monitor owns it). Prevents the cancel→re-place churn
 // once we've decided the exchange side is unreliable for this tier.
 func (at *AutoTrader) reArmBreakerTripped(symbol, side string, rule store.DrawdownTakeProfitRule, entryPrice float64) bool {
-	return at.getReArmFail(reArmFailKey(symbol, side, normalizeDrawdownRule(rule), entryPrice)) >= reArmBreakerLimit
+	// Time-decaying, not a permanent latch — see expireReArmBreaker for why the latch
+	// was a protection-losing deadlock.
+	return at.expireReArmBreaker(reArmFailKey(symbol, side, normalizeDrawdownRule(rule), entryPrice))
 }
 
 func (at *AutoTrader) findEquivalentPartialTrailingOrder(symbol, side string, rule store.DrawdownTakeProfitRule, entryPrice float64, openOrders []OpenOrder) (*nativeTrailingOrder, float64, float64, float64) {
@@ -3492,7 +3507,34 @@ func (at *AutoTrader) applyBreakEvenStops(symbol, side string, quantity, entryPr
 			continue
 		}
 
-		// Check if this tier already has a matching exchange order.
+		// Retire this tier's own stale order before deciding whether a live order
+		// already covers it. "Stale" means either the price drifted (cost line moved)
+		// OR the quantity no longer covers the position (加仓 grew the position but the
+		// BE order stayed at its old size — the exact "止损止不了血" case). Running this
+		// BEFORE the price-match check is what lets an add-on-grown position get a
+		// correctly-sized BE order: an order at the right price but too-small qty is
+		// stale too, and must be replaced rather than accepted as adequate coverage.
+		//
+		// Break-even price tracks the live position average on purpose (that is what
+		// "retreat to cost" means), but tracking it while only ever placing and never
+		// cancelling is what stacked 4 BE orders on WLDUSDT for a 2-tier config. Cancel
+		// is by persisted order ID, per tier — never by reason tag, since every tier's
+		// mechanism code is "BE" and a tag cancel would take the sibling tier down with
+		// it. Only undersized/mispriced orders are cancelled; oversized reduce-only BE
+		// orders are harmless and left alone.
+		if cancelled := at.replaceStaleBreakEvenTierOrders(symbol, side, stage, newBEPrice, ruleQty, openOrders); cancelled > 0 {
+			openOrders, openOrdersErr = at.trader.GetOpenOrders(symbol)
+			if openOrdersErr != nil {
+				// Lost visibility after cancelling. Placing blind could double up, so
+				// stop here; the next monitor poll re-runs this tier from a clean read.
+				logger.Warnf("⚠️ BE tier %s: re-fetch open orders after replace failed (%s %s): %v", stage, symbol, side, openOrdersErr)
+				continue
+			}
+		}
+
+		// Check if this tier already has a matching exchange order (any stale undersized
+		// or mispriced order for this tier was just retired above, so a match here is a
+		// live order at the right price AND adequate size).
 		// Persist the live exchange order ID so ownership classification can claim
 		// this tier by handle. Writing "" here would erase the ID recorded when the
 		// order was first placed, which is what let sibling BE tiers be mistaken for
@@ -3501,23 +3543,6 @@ func (at *AutoTrader) applyBreakEvenStops(symbol, side string, quantity, entryPr
 			// Ensure armed state is persisted
 			at.persistDynamicProtectionRecordWithDetails(symbol, side, "break_even_stop", fmt.Sprintf("%.8f|%.8f|%.4f|%.4f|%s", entryPrice, quantity, rule.TriggerValue, rule.OffsetPct, stage), 0, "armed", liveID, newBEPrice, 0, ruleQty)
 			continue
-		}
-
-		// This tier has no order at the target price. Before placing one, retire this
-		// tier's own stale order if it still sits at an outdated price. Break-even price
-		// tracks the live position average on purpose (that is what "retreat to cost"
-		// means), but tracking it while only ever placing and never cancelling is what
-		// stacked 4 BE orders on WLDUSDT for a 2-tier config. Cancel is by persisted
-		// order ID, per tier — never by reason tag, since every tier's mechanism code
-		// is "BE" and a tag cancel would take the sibling tier down with it.
-		if cancelled := at.replaceStaleBreakEvenTierOrders(symbol, side, stage, newBEPrice, openOrders); cancelled > 0 {
-			openOrders, openOrdersErr = at.trader.GetOpenOrders(symbol)
-			if openOrdersErr != nil {
-				// Lost visibility after cancelling. Placing blind could double up, so
-				// stop here; the next monitor poll re-runs this tier from a clean read.
-				logger.Warnf("⚠️ BE tier %s: re-fetch open orders after replace failed (%s %s): %v", stage, symbol, side, openOrdersErr)
-				continue
-			}
 		}
 
 		// Place this tier's stop order
@@ -3949,6 +3974,14 @@ func (at *AutoTrader) bumpReArmFail(key string) int {
 		at.reArmFailCache = make(map[string]int)
 	}
 	at.reArmFailCache[key]++
+	if at.reArmTripTime == nil {
+		at.reArmTripTime = make(map[string]time.Time)
+	}
+	if at.reArmFailCache[key] >= reArmBreakerLimit {
+		// Stamp (or re-stamp) the trip so the cooldown below is measured from the most
+		// recent failure, not the first one.
+		at.reArmTripTime[key] = time.Now()
+	}
 	return at.reArmFailCache[key]
 }
 
@@ -3956,8 +3989,66 @@ func (at *AutoTrader) bumpReArmFail(key string) int {
 func (at *AutoTrader) resetReArmFail(key string) {
 	at.reArmFailMutex.Lock()
 	delete(at.reArmFailCache, key)
+	delete(at.reArmTripTime, key)
 	at.reArmFailMutex.Unlock()
 }
+
+// reArmBreakerCooldown is how long a tripped tier stays off the exchange before the
+// breaker allows one more attempt. It bounds the RATE of re-placement; it must never
+// bound the TOTAL. See expireReArmBreaker.
+const reArmBreakerCooldown = 30 * time.Minute
+
+// expireReArmBreaker lets a tripped breaker re-arm after reArmBreakerCooldown, and
+// reports whether the tier is still tripped.
+//
+// The breaker used to be a permanent latch, and that is a protection-losing bug rather
+// than a conservative choice. resetReArmFail has exactly one caller — the verified-
+// coverage branch of accountReArmBreaker — and verified coverage requires a live
+// exchange order. Once tripped, the arm loop stops placing that order, so coverage can
+// never be verified, so the counter can never reset: no arm → no order → no coverage →
+// no reset → no arm. The tier's exchange side is abandoned for the whole life of the
+// position, which is exactly what happened to GPT SKHYNIXUSDT dd1 after the 19:13:46
+// trip on 2026-07-28 (the deadlock was even described in the CO-RUN comment at the top
+// of this file, but only the managed-evaluation side was ever fixed).
+//
+// A trip means "the exchange is misbehaving for this tier right now" — a transient
+// condition (the trigger here was OKX reporting a phantom pending_activation). The
+// correct response is to back off and retry, not to give up permanently. After the
+// cooldown we drop the counter to reArmBreakerLimit-1 rather than 0: one attempt is
+// allowed, and a single further failure re-trips immediately for another cooldown. So
+// a genuinely broken exchange path costs one order per 30 minutes instead of the churn
+// the breaker was built to stop, while a recovered path heals on its own.
+func (at *AutoTrader) expireReArmBreaker(key string) bool {
+	at.reArmFailMutex.Lock()
+	defer at.reArmFailMutex.Unlock()
+	if at.reArmFailCache[key] < reArmBreakerLimit {
+		return false
+	}
+	trippedAt, ok := at.reArmTripTime[key]
+	if !ok {
+		// Counter at/over the limit with no timestamp: pre-upgrade state or a lost
+		// stamp. Stamp it now so the cooldown starts ticking instead of latching forever.
+		if at.reArmTripTime == nil {
+			at.reArmTripTime = make(map[string]time.Time)
+		}
+		at.reArmTripTime[key] = time.Now()
+		return true
+	}
+	if time.Since(trippedAt) < reArmBreakerCooldown {
+		return true
+	}
+	at.reArmFailCache[key] = reArmBreakerLimit - 1
+	delete(at.reArmTripTime, key)
+	logger.Warnf("🟢 Re-arm breaker cooldown elapsed (%s) after %.0fmin — allowing one more exchange arm attempt (managed monitor kept co-running throughout)", key, time.Since(trippedAt).Minutes())
+	return false
+}
+
+// 曾经这里有一个 clearReArmBreakerIfNoLiveOrder:"交易所无活单 → 归零计数"。它被删掉了,
+// 因为它每轮都归零,等于把断路器整体废掉 —— 而断路器存在的唯一理由就是止住
+// place→fail→place 的每轮重试(对交易所 API 的无限 churn)。"永久闩死"这个真问题
+// 已经由 expireReArmBreaker 的 reArmBreakerCooldown 冷却衰减解决:跳闸只压制
+// reArmBreakerCooldown 这么久,之后自动放行一次重挂尝试,managed 全程陪跑。
+// 两者叠加会互相抵消,只能留冷却这一条。
 
 // getReArmFail reads a tier's current consecutive-failure count.
 func (at *AutoTrader) getReArmFail(key string) int {
