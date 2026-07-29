@@ -135,6 +135,12 @@ func (at *AutoTrader) checkPositionDrawdown() {
 		return
 	}
 
+	// 顺手把面板用的仓位快照保持温热。监控循环走的是适配器缓存,不会更新 API 侧的
+	// 投影快照,所以切到一个久未查看的交易员时 /api/positions 必然走阻塞分支 ——
+	// 在 1 核机器上要和 4 个监控循环抢 CPU,实测出现过 16s。详见
+	// WarmPositionsSnapshotIfStale 的注释。异步、按年龄节流,不阻塞本轮监控。
+	at.WarmPositionsSnapshotIfStale(len(positions) > 0)
+
 	drawdownCfg := store.DrawdownTakeProfitConfig{}
 	if at.config.StrategyConfig != nil {
 		drawdownCfg = at.config.StrategyConfig.Protection.DrawdownTakeProfit

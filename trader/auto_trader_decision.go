@@ -268,7 +268,41 @@ func (at *AutoTrader) fetchAccountInfo() (map[string]interface{}, error) {
 const (
 	apiReadFreshWindow = 8 * time.Second // within this age, serve cache with no refresh
 	apiReadStaleWindow = 5 * time.Minute // older than this, block for a fresh fetch
+	// apiReadWarmAge:超过这个年龄就由**监控循环**在后台补一次投影,让快照永不走到
+	// apiReadStaleWindow 之外。取 stale 窗口的一半,保证在过期前至少有一次续期机会。
+	apiReadWarmAge = apiReadStaleWindow / 2
 )
+
+// WarmPositionsSnapshotIfStale 由持仓监控循环调用,把 API 侧的仓位快照保持温热。
+//
+// 为什么需要:apiPositionsSnap 只有"真的来了一次 API 请求"才会被填(见
+// fetchAndProjectPositions 末尾)。监控循环走的是 at.trader.GetPositions() 适配器缓存,
+// 从不更新这份投影。于是切到一个 5 分钟以上没看过的交易员,GetPositions 必然走
+// **阻塞分支**;而这台机器只有 1 核、4 个交易员的监控循环常驻(实测 load 1.70、
+// nofx 占 72% CPU),那次阻塞投影要和监控循环抢 CPU —— 线上实测
+// /api/positions 出现过 16.39s 和 10.22s,而同一时刻 OKX 接口本身不到 1 秒就返回了
+// (日志里 18:33:54→18:34:00 有 6 秒整段无输出的空档,是排队而非慢接口)。
+// 前端 PositionProtectionPanel 必须等 positions 拿到 symbol 列表才能并发拉 open-orders,
+// 所以这段阻塞会整段串到"切换交易员十几秒"。
+//
+// 做法:监控循环每轮(10s 一次)顺手看一眼年龄,超过 apiReadWarmAge 才异步续一次。
+// 单个交易员最多每 2.5 分钟付一次投影成本,不会加重 1 核的负担;换来的是切换交易员
+// 时几乎总能命中 stale-while-revalidate 的快速分支。
+//
+// 只在有仓位时预热:空仓交易员的投影是空数组,阻塞分支本身也很快,没必要花 CPU。
+func (at *AutoTrader) WarmPositionsSnapshotIfStale(hasPositions bool) {
+	if !hasPositions {
+		return
+	}
+	at.apiReadMu.RLock()
+	snap, at0 := at.apiPositionsSnap, at.apiPositionsAt
+	at.apiReadMu.RUnlock()
+	// 从没填过 → 也预热,这正是"第一次切过去"最慢的那一下。
+	if snap != nil && time.Since(at0) < apiReadWarmAge {
+		return
+	}
+	at.refreshPositionsAsync()
+}
 
 // PositionsSnapshotFresh reports whether the last API positions snapshot is recent
 // enough (< apiReadFreshWindow) to be safe for the write-side reconcile in the
@@ -311,8 +345,18 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 
 // refreshPositionsAsync triggers a background refresh of the API position cache,
 // deduped by singleflight so concurrent dashboards cause exactly one exchange call.
+//
+// recover 是必须的,不是防御性冗余:singleflight.Do **不吞 panic,它会 re-panic**
+// (已实测)。这里是裸 goroutine,任何逃出来的 panic 都会直接打死 nofx 进程 ——
+// 一个面板读缓存的后台刷新绝不该有能力中断交易。投影里已改成逗号-ok 断言,
+// 这层是最后一道闩。
 func (at *AutoTrader) refreshPositionsAsync() {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Errorf("🛑 Positions async refresh panicked (recovered, trading unaffected): %v", r)
+			}
+		}()
 		_, _, _ = at.apiReadGroup.Do("positions", func() (interface{}, error) {
 			return at.fetchAndProjectPositions()
 		})
@@ -329,16 +373,26 @@ func (at *AutoTrader) fetchAndProjectPositions() ([]map[string]interface{}, erro
 
 	var result []map[string]interface{}
 	for _, pos := range positions {
-		symbol := pos["symbol"].(string)
-		side := pos["side"].(string)
-		entryPrice := pos["entryPrice"].(float64)
-		markPrice := pos["markPrice"].(float64)
-		quantity := pos["positionAmt"].(float64)
+		// 逗号-ok 断言,不能用裸断言。适配器返回的 map 是**不可控输入**:任一字段缺失
+		// 或类型不符,裸断言就 panic;而这个函数跑在 refreshPositionsAsync 的裸 goroutine
+		// 里,singleflight.Do 是 **re-panic** 而非吞掉(已验证),panic 会一路逃出去
+		// 打死整个 nofx 进程 —— 一次交易所返回异常换一次交易中断,完全不能接受。
+		// 缺关键字段就跳过这一条,其余仓位照常投影(宁可少一行,不可停机)。
+		symbol, _ := pos["symbol"].(string)
+		side, _ := pos["side"].(string)
+		entryPrice, okEntry := pos["entryPrice"].(float64)
+		markPrice, _ := pos["markPrice"].(float64)
+		quantity, okQty := pos["positionAmt"].(float64)
+		if symbol == "" || side == "" || !okEntry || !okQty {
+			logger.Warnf("⚠️ Positions projection: skipping malformed position from exchange (symbol=%q side=%q entryPrice=%v positionAmt=%v)",
+				symbol, side, pos["entryPrice"], pos["positionAmt"])
+			continue
+		}
 		if quantity < 0 {
 			quantity = -quantity
 		}
-		unrealizedPnl := pos["unRealizedProfit"].(float64)
-		liquidationPrice := pos["liquidationPrice"].(float64)
+		unrealizedPnl, _ := pos["unRealizedProfit"].(float64)
+		liquidationPrice, _ := pos["liquidationPrice"].(float64)
 
 		leverage := 10
 		if lev, ok := pos["leverage"].(float64); ok {
@@ -1579,7 +1633,28 @@ func (at *AutoTrader) buildPositionProtectionRuntime(symbol, side string, quanti
 				// 排序必须用这个成交价,否则一个"3ATR 启动/1.8ATR 回吐"的档会被排到
 				// 3ATR 的位置,而它实际成交在 +1.2ATR(该排在 1.1/1.7 两个阶梯之间)。
 				// 详见 drawdown_execution_price.go。
-				"execution_price": drawdownTierExecutionPrice(side, activationPrice,
+				// 锚的下限必须用 **plannedActivationPrice**(= entry×(1±minProfit),
+				// 由规则算出),不能用 activationPrice —— 后者会被上面的 applyMatch
+				// 覆盖成交易所回读的 trigger_price,而各交易所对 trailing 单 StopPrice
+				// 的填法不同:
+				//   OKX  stopPrice := activePx(未激活时),只有 trailingState=="effective"
+				//        才换成 moveTriggerPx → 未激活时 trigger 恰好等于激活价,覆盖无害。
+				//   BN   算法单分支 StopPrice = algoOrder.TriggerPrice = **当前跟踪止损价**
+				//        (跟着峰值棘轮上移),根本不是激活门槛。拿它当锚,
+				//        execution = 跟踪价×(1-callback) 等于把 callback 减了第二次,
+				//        回撤档被画到入场价下方(亏损侧)。
+				// 实测 BN BTCUSDT LONG 峰值 +0.42%(两档 +1.33%/+2.13% 都未激活):
+				// 面板 DD-1 -0.38% / DD-2 -0.22%,而 protection_plan_snapshot 落库的是
+				// 正确的 +0.52% / +1.48%。DD 是保盈机制,永远不该出现在入场价下方。
+				// 三个 OKX 交易员看不到这个错,正是因为上面那条 stopPrice:=activePx。
+				//
+				// 为什么修在这里而不改 BN 适配器:BN 报 ActivationPrice=triggerPrice 是
+				// nativeTrailingEffective 和幻影激活守卫依赖的既定契约(见
+				// auto_trader_risk.go:1876 注释),动它会波及强平/撤单路径;而
+				// execution_price 只被 PositionProtectionPanel 消费(展示+排序),
+				// 没有任何风险路径读它。
+				"execution_price": drawdownTierExecutionPrice(side,
+					firstPositive(plannedActivationPrice, activationPrice),
 					peakPriceFromPnLPct(side, entryPrice, peakPnLPct), callbackRate),
 				"planned_quantity":            quantity * rule.CloseRatioPct / 100.0,
 				"source":                      source,
