@@ -2,6 +2,7 @@ package binance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"nofx/logger"
@@ -11,6 +12,19 @@ import (
 
 	"github.com/adshao/go-binance/v2/futures"
 )
+
+// ErrPositionGone 表示交易所侧已经没有这个方向的仓位了 —— 不是"挂单失败",而是
+// "无单可挂"。两者必须区分:仓位真的消失时,调用方若按"挂单失败"处理,就会给一个
+// 已平仓的仓位armed本地兜底监控并点亮"交易所保护失败"面板告警。
+//
+// 实盘 2026-07-30 WLDUSDC short:交易所 03:00:03 平仓,本地 order_sync 到 03:00:22
+// 才落账,19s 空窗里保护层按本地仍持仓去挂 trailing,连续两轮拿到本错误,于是写下
+// managed_drawdown_exchange_failed_armed 并报"position may be UNPROTECTED"。仓位
+// 早已不存在,该告警是假警报。
+//
+// 判定依据可信:execPositionAmt 直接 symbol-scoped 调 GetPositionRisk,不走缓存,
+// amt<=0 是交易所本人的回答。
+var ErrPositionGone = errors.New("no open position on exchange to attach protection")
 
 func (t *FuturesTrader) SetTrailingStopLoss(symbol string, positionSide string, activationPrice float64, callbackRate float64, quantity float64) error {
 	_, err := t.setTrailingStopLossCore(symbol, positionSide, activationPrice, callbackRate, quantity, "")
@@ -57,7 +71,8 @@ func (t *FuturesTrader) setTrailingStopLossCore(symbol string, positionSide stri
 			return "", fmt.Errorf("failed to resolve position size for trailing stop: %w", err)
 		}
 		if amt <= 0 {
-			return "", fmt.Errorf("no open %s position on %s to attach trailing stop", positionSide, symbol)
+			// 用 sentinel 包装,让调用方能 errors.Is 区分"无单可挂"与"挂单失败"。
+			return "", fmt.Errorf("%w: no open %s position on %s to attach trailing stop", ErrPositionGone, positionSide, symbol)
 		}
 		quantity = amt
 	}

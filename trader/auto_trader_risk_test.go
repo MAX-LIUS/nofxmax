@@ -30,6 +30,7 @@ type fakeProtectionTrader struct {
 	trailingActivation  float64
 	trailingCallback    float64
 	cancelTrailingErr   error
+	trailingPlaceErr    error // 注入挂单失败,用于区分"挂不上"与"无单可挂"
 	openOrders          []tradertypes.OpenOrder
 	positions           []map[string]interface{}
 	closeLongCalls      int
@@ -129,6 +130,10 @@ func (f *fakeProtectionTrader) SetTrailingStopLoss(symbol string, positionSide s
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.trailingPlaceErr != nil {
+		// 刻意在 trailingCalls++ 之前返回:失败的挂单不应计入成功挂单数。
+		return f.trailingPlaceErr
+	}
 	f.trailingCalls++
 	f.trailingSymbol = symbol
 	f.trailingSide = positionSide

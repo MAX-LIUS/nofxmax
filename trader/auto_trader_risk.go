@@ -9,6 +9,7 @@ import (
 	"nofx/logger"
 	"nofx/market"
 	"nofx/store"
+	"nofx/trader/binance"
 	"sort"
 	"strconv"
 	"strings"
@@ -2580,6 +2581,24 @@ func (at *AutoTrader) applyManagedDrawdownFallback(symbol, side string, entryPri
 	return true
 }
 
+// trailingFailureIsPositionGone 判断一次 native trailing 挂单失败是否其实是
+// "交易所侧仓位已经没了",而不是"挂单挂不上去"。
+//
+// 为什么必须区分:applyExchangeFailedLocalMonitor 的语义是"交易所保护失败,本地
+// 兜底顶上,面板点红告警"。对一个已经平掉的仓位走这条路是纯假警报 —— 它会
+//  1. 给不存在的仓位 arm 一个 managed-drawdown 监控;
+//  2. 把状态升级成 *_exchange_failed_armed,面板反色告警;
+//  3. 最坏情况下打出"position may be UNPROTECTED"。
+//
+// 平仓侧本来就存在同步空窗:交易所先成交,本地 order_sync 后落账(实盘实测 19s)。
+// 开仓侧已经有 protectionFillGraceWindow 对称保护("还不知道"≠"已经平了"),平仓侧
+// 此前没有对应闸门,这里补上。
+//
+// 判据只认 sentinel,不做字符串匹配 —— 交易所文案会变,sentinel 不会。
+func trailingFailureIsPositionGone(err error) bool {
+	return err != nil && errors.Is(err, binance.ErrPositionGone)
+}
+
 // applyExchangeFailedLocalMonitor is the bottom-line fallback when a native
 // trailing order could NOT be placed correctly on the exchange — either the
 // placement call failed, or the read-back showed the exchange dropped/misplaced
@@ -2934,6 +2953,11 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 						// failure here means NO exchange trailing order exists. Drop to
 						// the LOCAL managed-drawdown monitor and flag the panel that the
 						// exchange order failed, rather than leaving profit unprotected.
+						// 同上:仓位已消失走"无单可挂"分支,不产生假警报。
+						if trailingFailureIsPositionGone(err) {
+							logger.Infof("🧯 Native partial trailing skipped: %s %s no longer open on exchange (local view still stale) — no local monitor, no panel warning", symbol, side)
+							return false
+						}
 						logger.Warnf("❌ Native partial trailing drawdown apply failed (%s %s, binance): %v — falling back to LOCAL monitor", symbol, side, err)
 						return at.applyExchangeFailedLocalMonitor(symbol, side, entryPrice, rule, activationPrice, priceBasedCallbackRatio)
 					}
@@ -3163,6 +3187,13 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 				// to the LOCAL managed-drawdown monitor (which enforces the same
 				// peak+drawdown rule in-process) and flag the panel that the exchange
 				// order failed, so profit is never left unprotected.
+				// 平仓侧同步空窗闸门:交易所已经没有这个仓位了 —— "无单可挂",
+				// 不是"挂单失败"。不 arm 本地兜底、不点亮 exchange_failed 面板告警,
+				// 让常规的 inactive-symbol 清理去收尾。
+				if trailingFailureIsPositionGone(err) {
+					logger.Infof("🧯 Native trailing skipped: %s %s no longer open on exchange (local view still stale) — no local monitor, no panel warning", symbol, side)
+					return false
+				}
 				logger.Warnf("❌ Native trailing exchange placement failed (%s %s): %v — falling back to LOCAL monitor", symbol, side, err)
 				return at.applyExchangeFailedLocalMonitor(symbol, side, entryPrice, rule, activationPrice, priceBasedCallbackRatio)
 			}
