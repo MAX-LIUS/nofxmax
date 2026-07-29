@@ -1,5 +1,32 @@
 # Production Deployment - Critical Information
 
+## 2026-07-29 Deploy: 多档 DD 档位标识真正生效 v1.17.2 (pid 66117, commit a1114fc)
+备份 `/opt/webstack/nofx/nofx.bak-20260729-152541` (md5 7aceafce6e614d9fcd1766f3de270f81),
+新二进制 md5 `921f4a0b04e7bd96d824949719fe5430`。`systemctl stop` → 复制 → `systemctl start`
+(必须先 stop,否则 `cp` 报 `Text file busy`)。`MainPID=66117` == `pgrep -x nofx`,`NRestarts=0`,
+`is-enabled=enabled`。构建:`go build -o /tmp/nofx_v1172 .`(main 包在仓库根,**不是** cmd/nofx)。
+
+修的是 v1.17.1 档位标识**在生产上等于死代码**这件事(4 个根因 D-1…D-4,详见
+`.ai-memory/unified-protection-system.md` v1.17.2 段)。核心:`drawdownTierTagIndex` 拿
+ATR 换算后的规则去和原始配置倍数做浮点相等比较 → 永远返回 0;`reclaimLiveDrawdownTrailingOrders`
+是唯一漏掉 `resolveDrawdownRulesATR` 的消费者 → 档位↔委托反向映射 + `min=2.5000` 脏指纹,
+`supersedeOlderArmedRecords` 的窄匹配永远碰不到 → 4 条 armed 记录抢 2 个委托、每 ~20s 重写一次。
+生产 5 个策略里 **4 个是 ATR 单位**,而 v1.17.1 的 13 个测试全用百分比 fixture,测的是生产
+永远不走的分支。教训:测试 fixture 的单位必须对齐线上配置的单位。
+
+上线即刻效果(第一个 reconcile 周期 23:28:51,`basis: exchange order shape` 判主):
+- `…445192 → native_trailing close=100% act=0.292060`、`…445212 → native_partial_trailing
+  close=30% act=0.285137`,反向映射消失,两处冲突一次收敛。
+- 账本 PRE `orders=14 armed=16 conflicts=2` → POST `14/14/0`,**交易所 orderID 零丢零增**
+  (没有撤单重挂抖动)。11 分钟后含新开 SPCX 为 `armed=15 / 15 distinct / conflicts=0`。
+- `Reclaimed live drawdown trailing order` 从修复前 980 行 → 重启后 **0**;
+  `tier tag disagrees` 0;ERROR 0;WARN 0;panic 0;`unprotected/phantom` 0。
+  load 1.22,RSS 78MB,`/api/health` 200 @0.8ms。
+- 唯一的 trailing 撤单是正常语义:`Immediate trailing canceled (replaced by tier trailing)`。
+注意:OKX `SetTrailingStopLoss` 有传 `algoClOrdId`(带 `T<N>`),但日志行没打 clOrdId,
+所以线上 `T<N>` 只能靠单测 + reclaim 解码路径证明,日志里看不到——要查得读交易所侧委托。
+回滚:`cp nofx.bak-20260729-152541` 回去 + `git revert a1114fc`。
+
 ## 2026-07-29 Deploy: BN 回撤档修正 + 切换交易员去阻塞 (pid 27043, commit 90de970)
 备份 `/opt/webstack/nofx/nofx.bak-20260729-114912` (md5 62772c95…),新二进制 md5 7aceafce…。
 **这次同时把进程交给了 systemd**:此前 pid 5515 是 `./start.sh` 手起的,systemd 不持有它,
@@ -350,7 +377,7 @@ native trailing triggering AT ENTRY (immediate stop-out → unresolved_exchange_
   BN trader restarted (was stopped for testing). Backend-only — no frontend rebuild.
 
 ## Last Updated
-2026-07-29 - BE 保本止损按仓位身份+档位收敛（4 层根因全修，止住 BE 单堆积与挂撤循环）
+2026-07-29 - v1.17.2 多档 DD 档位标识真正生效（pid 66117, commit a1114fc；账本 16→14 条、冲突 2→0、reclaim churn 980→0）
 
 ## 2026-07-20 Deploy: unified SL band 1.5/2.5 + max-hold disabled + reward-ATR≥1.0 (pid 1556740)
 Backtest-driven risk tuning, ALL 4 traders identical:
