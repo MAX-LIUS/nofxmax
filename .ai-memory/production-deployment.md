@@ -1,5 +1,40 @@
 # Production Deployment - Critical Information
 
+## 2026-07-29 Deploy: 超额敞口收敛 v1.17.3 (pid 84853, commit ba2a2e9)
+备份 `/opt/webstack/nofx/nofx.bak-20260729-175747` (md5 921f4a0b04e7bd96d824949719fe5430),
+新二进制 md5 `17f3abfb83cd8ff7935b6d03a62d2721`。构建 `go build -o /tmp/nofx_v1173 .`。
+`MainPID=84853` == `pgrep -x nofx`,`NRestarts=0`,`ActiveState=active`。
+
+修的是**被账本屏蔽的委托泄漏**(详见 `unified-protection-system.md` v1.17.3 段)。
+部署前实测危害:ETHUSDT 空头 4 张活 trailing、**其中 3 张都是全平**,而协调器一直报
+`staleTrail=0` —— 泄漏的 armed 记录让 `classifyProtectionOrder` 标它们 `expectedDynamicOwner`,
+成了泄漏委托的**保护伞**。四张单同属 `dd1`,只是 ATR 倍数被重解析过
+(ATR(1h)=16.176366 anchor=1890.56 → 1 ATR=0.85564%):
+1.0268%=1.20ATR / **0.7701%=0.90ATR** / 1.5401%=1.80ATR(30%) / 1.2835%=1.50ATR(当前设计)。
+**谁先触发谁平掉整仓 → ETH 会在回撤 0.7701% 被整仓平掉而设计是 1.2835%,提前 40%。**
+
+上线即刻效果(第一个 reconcile 周期 01:58:15):
+- `🧾 Over-claimed trailing exposure on ETHUSDT short: 4 live claimed trailing orders for
+  2 configured tiers` ×2,retired `cb=0.007701` 与 `cb=0.010268` 两条;
+- 21 秒后 `✓ Canceled algo order by id for ETHUSDT: 3784966212015259648 / 3784785480328314880`
+  —— **端到端闭环**:退认领 → 交回既有 stale 清理路径 → 交易所真撤掉;
+- ETH `claimedTrail=4 dynamicOwner=4` → `2/2`,保留的正是 dd1 1.2835% + partial 1.5401%/30%;
+- 账本 12 armed → 10 armed + 2 superseded;5 个仓位全部 `armed=2 oids=2 ratios=[30,100]`;
+- ERROR 0,panic 0,WARN 6 = 我这 2 行有意告警 + 4 行无关的 MCP 端点 503 回退;
+- `/api/health` 200 @2.1ms,load 0.50,RSS 81MB。
+
+**日志文件会按日期滚动**:排查时先 `ls -t data/nofx_*.log | head -1`。我这次差点误判"修复没生效"
+—— 旧文件末尾是上一个进程的 `System shut down`,新进程写的是 `nofx_2026-07-30.log`。
+
+**订正我自己的一次误读(值得记,省下一轮的时间)**:我一度把 WLDUSDT
+`dynamicOwner=3 claimedTrail=2` 当成"有一张活单没人认领"的反向缺陷。**是我读错了** ——
+完整字段是 `dynamicOwner=3(trail=2 be=1)`,那个 3 含 1 张保本止损,而 `claimedTrail=2`
+恰好等于 `trail=2`。**`dynamicOwner` 与 `claimedTrail` 分母不同**,不能直接相减。
+WLD 是健康的。另注意 WLD 同时被两个交易员持有(OKX entry 0.3049 算法单 ID `37857509…`
+与 Binance entry 0.3036 ID `20000013…`),每个仓位各 2 条 armed、orderID 互不相同,也正常。
+
+回滚:`cp nofx.bak-20260729-175747 nofx` + `git revert 17e0f88`。
+
 ## 2026-07-29 Deploy: 多档 DD 档位标识真正生效 v1.17.2 (pid 66117, commit a1114fc)
 备份 `/opt/webstack/nofx/nofx.bak-20260729-152541` (md5 7aceafce6e614d9fcd1766f3de270f81),
 新二进制 md5 `921f4a0b04e7bd96d824949719fe5430`。`systemctl stop` → 复制 → `systemctl start`
