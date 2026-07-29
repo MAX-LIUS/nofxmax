@@ -573,7 +573,11 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 	// 判"缺不缺单"会把结论建在错的前提上。这里手里已经有 openOrders,交易所就是判据,
 	// 不发额外请求。详见 drawdown_claim_conflict.go。
 	if len(openOrders) > 0 {
-		at.resolveConflictingTrailingClaims(symbol, side, entryPrice, openOrders, canonicalDrawdownTierOrder(rules))
+		canonical := canonicalDrawdownTierOrder(rules)
+		at.resolveConflictingTrailingClaims(symbol, side, entryPrice, openOrders, canonical)
+		// 对偶不变量:多张活单分别被认领、加起来要平掉超过一个仓位。顺序有意放在后面 ——
+		// 先把"一张单多档"收敛掉,敞口统计才不会把同一张单重复计数。
+		at.resolveOverClaimedTrailingExposure(symbol, side, entryPrice, openOrders, canonical)
 	}
 	if len(rules) > 0 {
 		peakPnLPct := currentPnLPct

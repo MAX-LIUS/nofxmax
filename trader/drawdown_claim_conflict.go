@@ -183,6 +183,150 @@ func claimMatchesLiveOrderShape(c store.DynamicProtectionRecord, live OpenOrder)
 	return true
 }
 
+// ── 账本第二条不变量:活着的 trailing 单认领的平仓比例总和不能超过 100% ─────────────
+//
+// 上面那条不变量管的是"一张单被多档认领"。它的对偶同样会出事,而且更隐蔽:
+// **多张单被同一档(或已经不存在的档)分别认领**,加起来要平掉超过一个仓位。
+//
+// 2026-07-29 线上 (OKX / ETHUSDT short, entry 1890.56) 的实况 —— 4 张活的 trailing 单:
+//
+//	order 3784785480328314880  native_trailing         close=100  act=1842.030903  (min=2.5669 max=1.0268)
+//	order 3784966212015259648  native_trailing         close=100  act=1850.119086  (min=2.1391 max=0.7701)
+//	order 3784969143967977472  native_trailing         close=100  act=1850.119086  (min=2.1391 max=1.2835)  ← 当前档
+//	order 3784966244730830848  native_partial_trailing close=30   act=1825.854538
+//
+// 合计认领 330%。成因:档位身份里含**ATR 解析后**的 min/max 百分比(见
+// drawdown_rule_identity.go 的字段说明),而 ATR 会被重新冻结、maxDrawdown 倍数也会被
+// 改(这里 0.9→1.0→1.5 ATR)。于是同一档在解析值变化后分叉成新身份,
+// supersedeOlderArmedRecords 的"同档 + 更旧"窄匹配判它们不是同一档,旧记录永不退役。
+//
+// 危害不在账本,在**交易所**:旧记录还挂着 armed,就把它认领的那张旧单从
+// classifyProtectionOrder 的 stale_bot_duplicate 清理路径里**屏蔽**掉了
+// (classifyTrailing 认领即"预期"),于是 reconciler 每轮都报 staleTrail=0 一切正常。
+// 三张全平单同时在场,谁先触发谁平掉整个仓位 —— 而它们的 callback 各不相同,最紧的
+// 那张(来自被改掉的旧参数)会比当前策略意图**更早**把仓位平掉。用户看到的是
+// "交易所把我的仓位平了,但价格没到我设的档位"。
+//
+// 不变量的正确表述不是"比例总和 ≤ 100%" —— 100%(全平档)+ 30%(部分锁盈档)= 130%
+// 正是**正常**配置,先到的部分档只平 30%,全平档随后接管剩下的。把总和当上限会把
+// 每一个正常的多档仓位都判成越界。真正的不变量是**基数**:
+//
+//	当前生效的每一档,在交易所上最多只能有一张活的 trailing 单;
+//	并且不存在"活着、被账本认领、却不属于当前任何一档"的 trailing 单。
+//
+// 判据刻意不依赖存储的档位身份 —— 身份漂移正是根因,拿漂移的东西当判据会重复同一个错。
+// 只用两个事实来源:交易所上真实在场的单,和**当前**重新解析出来的规范档位集。
+// 一张活单能被当前某一档认下(优先看挂单时编进 clientOrderID 的档位标识,退回形状匹配),
+// 就保留;认不下的,退役其账本认领,让它回到 reconciler 既有的 stale trailing 清理路径。
+// 这里**不撤单** —— 撤单权仍然只在 reconciler 手里(它会先备好替代单再撤),本函数只
+// 负责摘掉那层不该有的屏蔽。
+//
+// 只在基数真的越界(活的被认领单数 > 当前档数)时动手。没越界说明账本即使有冗余记录
+// 也还没在交易所上多挂出单,交给既有的时序/冲突路径自愈,避免在正常的 ATR 重解析窗口里
+// 误摘在场保护单的屏蔽。
+
+// resolveOverClaimedTrailingExposure 收敛"活的被认领 trailing 单数 > 当前档数"的越界。
+// 返回被退役的记录条数。
+func (at *AutoTrader) resolveOverClaimedTrailingExposure(symbol, side string, entryPrice float64, openOrders []OpenOrder, ordered []store.DrawdownTakeProfitRule) int {
+	if at == nil || at.store == nil || len(openOrders) == 0 {
+		return 0
+	}
+	// 拿不到当前档位集就不做判断:没有事实来源时保留现状,永远比猜着摘掉保护单的屏蔽安全。
+	if len(ordered) == 0 {
+		return 0
+	}
+	records := at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, 0, 0)
+	if len(records) < 2 {
+		return 0
+	}
+
+	// 只统计**确实还在交易所上**的 trailing 单。已经消失的单不占基数,把它算进来会
+	// 误判越界,进而误退役在场的记录。
+	liveTrailing := make(map[string]OpenOrder, len(openOrders))
+	for _, o := range openOrders {
+		if o.OrderID == "" || !strings.Contains(strings.ToUpper(o.Type), "TRAILING") {
+			continue
+		}
+		if o.PositionSide != "" && !strings.EqualFold(o.PositionSide, strings.ToUpper(side)) {
+			continue
+		}
+		liveTrailing[o.OrderID] = o
+	}
+	if len(liveTrailing) <= len(ordered) {
+		return 0
+	}
+
+	// 每张活单只算一次(同一张单的多档冲突是上面那条不变量的职责,已在本轮先跑过)。
+	claimByOrder := make(map[string]store.DynamicProtectionRecord)
+	for _, r := range records {
+		if r.ExchangeOrderID == "" {
+			continue
+		}
+		if _, live := liveTrailing[r.ExchangeOrderID]; !live {
+			continue
+		}
+		if prev, seen := claimByOrder[r.ExchangeOrderID]; seen && r.UpdatedAt <= prev.UpdatedAt {
+			continue
+		}
+		claimByOrder[r.ExchangeOrderID] = r
+	}
+	if len(claimByOrder) <= len(ordered) {
+		return 0
+	}
+
+	retired := 0
+	kept := 0
+	for orderID, claim := range claimByOrder {
+		if liveTrailingOrderMatchesAnyTier(liveTrailing[orderID], side, entryPrice, ordered) {
+			kept++
+			continue
+		}
+		superseded := claim
+		superseded.Status = "superseded"
+		if err := at.store.SaveDynamicProtectionRecord(superseded); err != nil {
+			logger.Warnf("⚠️ Over-claimed trailing exposure: failed to supersede %s claim on order %s (%s %s): %v",
+				claim.ProtectionType, orderID, symbol, side, err)
+			continue
+		}
+		retired++
+		logger.Warnf("🧾 Over-claimed trailing exposure on %s %s: %d live claimed trailing orders for %d configured tiers; retired %s close=%.1f%% act=%.6f cb=%.6f on order %s — no current tier claims this order, so its ledger claim was shielding it from stale-order cleanup. Multiple full-close trails mean whichever triggers first closes the whole position, and the tightest stale callback fires EARLIER than the configured tier intends.",
+			symbol, side, len(claimByOrder), len(ordered),
+			claim.ProtectionType, claim.CloseRatioPct, claim.ActivationPrice, claim.CallbackRatio, orderID)
+	}
+	if retired == 0 {
+		// 每一张活单都对得上当前某一档,数量却仍然超过档数 —— 说明同一档被两张单认下
+		// (形状在容差内难分),那是"同档陈旧分叉"的职责范围。这里绝不擅自挑一张退役:
+		// 挑错会摘掉正在生效的那张单的屏蔽。只把事实喊出来。
+		logger.Errorf("🚨 Over-claimed trailing exposure on %s %s: %d live claimed trailing orders for only %d configured tiers, but EVERY one of them matches a current tier — two orders are answering to the same tier within matching tolerance. Leaving all claims intact on purpose (picking the wrong one would unshield the working order); this is the same-tier fork path's job.",
+			symbol, side, len(claimByOrder), len(ordered))
+	}
+	return retired
+}
+
+// liveTrailingOrderMatchesAnyTier 判断一张活的 trailing 单能否被**当前**任一档认下。
+//
+// 优先用挂单时编进 clientOrderID 的档位标识(见 drawdown_tier_tag.go):它对已激活的单
+// 依然成立,而形状匹配在激活后必然失配。没有标识时(旧单/未带标识的路径)才退回形状。
+func liveTrailingOrderMatchesAnyTier(order OpenOrder, side string, entryPrice float64, ordered []store.DrawdownTakeProfitRule) bool {
+	if len(ordered) == 0 {
+		// 拿不到当前档位集就不做判断:没有事实来源时保留现状,永远比猜着退役保护单安全。
+		return true
+	}
+	if order.OrderID == "" {
+		// 空活单(调用方没找到对应的在场单)不能当成"属于某一档"。
+		return false
+	}
+	if order.ProtectionTier > 0 {
+		return order.ProtectionTier <= len(ordered)
+	}
+	for _, rule := range ordered {
+		if trailingOrderMatchesDrawdownRule(order, side, entryPrice, rule) {
+			return true
+		}
+	}
+	return false
+}
+
 func newestClaim(claims []store.DynamicProtectionRecord) store.DynamicProtectionRecord {
 	best := claims[0]
 	for _, c := range claims[1:] {
