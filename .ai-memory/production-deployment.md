@@ -1,5 +1,50 @@
 # Production Deployment - Critical Information
 
+## 2026-07-29 Deploy: BN 回撤档修正 + 切换交易员去阻塞 (pid 27043, commit 90de970)
+备份 `/opt/webstack/nofx/nofx.bak-20260729-114912` (md5 62772c95…),新二进制 md5 7aceafce…。
+**这次同时把进程交给了 systemd**:此前 pid 5515 是 `./start.sh` 手起的,systemd 不持有它,
+`Restart=on-failure` 形同虚设。现在 `MainPID=27043` == `pgrep -x nofx`,自启+自愈才真生效。
+
+三个问题(用户报的两个 + 自查挖出的一个):
+  1. **BN 面板 DD 档被画到入场价下方**(用户截图:entry 64367.60,DD-1 -0.38% / DD-2 -0.22%)。
+     根因是**交易所语义不对称**,不是策略错、不是交易所单子错:
+     `applyMatch` 会用回读的 `trigger_price`(= `OpenOrder.StopPrice`)覆盖 `activationPrice`。
+     - OKX `trader_orders.go:1494` 未激活时 `stopPrice := activePx` → 覆盖成激活价本身,无害。
+     - BN 算法单分支 `stopPrice := algoOrder.TriggerPrice` = **当前跟踪止损价**(跟峰值棘轮上移),
+       根本不是激活门槛。拿它当锚,`execution = 跟踪价×(1-callback)` 等于把 callback 减第二次。
+     所以三个 OKX 交易员看不到,**只有 BN 有** —— 用户的观察是对的。
+     修法只落在展示口径:`execution_price` 改用 `firstPositive(plannedActivationPrice, activationPrice)`。
+     **刻意不改 BN 适配器**:`ActivationPrice=triggerPrice` 是 `nativeTrailingEffective` 和幻影激活
+     守卫依赖的既定契约(见 `auto_trader_risk.go:1876`),动它会波及强平/撤单;而 `execution_price`
+     只被 `PositionProtectionPanel` 消费,无风险路径读它。
+     反向验证:还原代码精确复现 64121.87(-0.38%)/64225.10(-0.22%);修后 +0.52%/+1.48%,
+     与 `protection_plan_snapshot` 早已落库的正确值一致(该路径传 peak=0 所以没中招)。
+  2. **切换交易员要十几秒**。`apiPositionsSnap` 只有真实 API 请求能写,监控循环走适配器缓存
+     从不刷它 → 切到 >5min 未看的交易员必走阻塞分支,在 1 核机上和 4 个监控循环抢 CPU,
+     实测 `/api/positions` 16.39s / 10.22s,而 OKX 调用本身 <1s(18:33:54→18:34:00 有 6s 死区
+     = 排队而非交易所慢)。前端必须先拿到 symbol 列表才能并行取挂单,于是串成用户可见延迟。
+     修法:监控循环里 `WarmPositionsSnapshotIfStale`,按年龄节流 `apiReadWarmAge=stale/2=2.5min`,
+     异步不阻塞。**没有放宽写侧新鲜度**(`apiReadFreshWindow` 仍 8s),否则平仓对账会误判新仓。
+  3. **自查挖出的停机级隐患**:`fetchAndProjectPositions` 对适配器返回的 map 用**裸类型断言**,
+     且跑在 `refreshPositionsAsync` 的裸 goroutine 里。实测(`/tmp/panic_probe.go`)
+     **`singleflight.Do` 会重新 panic 而不是吞掉** → 交易所返回一个畸形字段就能杀掉整个 nofx。
+     修法:逗号-ok 断言 + 跳过坏行告警 + `recover()`。这不是用户报的,但比那两个都严重。
+
+门禁:`go build ./...` / `go vet ./...` 干净,`go test ./...` 全绿(trader 46.1s),
+gofmt 与基线一致(未动仓库既有的 38 行基线差异),前端 `tsc --noEmit` 0、`vitest` 143/143。
+8 个新测试全部反向验证过(还原修法即变红)。
+上线验证:
+  - 优雅停机 54s 打出 `System shut down safely`(~5GB SQLite 完成 checkpoint)。
+  - **14 条 armed 保护记录 100% 原样收养,交易所单号 0 变化** → 没有撤单重挂 churn。
+  - 6 个持仓全部 `verified=true`、`staleTrail=0`、`unexpectedTP=0`/`unexpectedSL=0`(70/70 轮)。
+  - 4 traders 全载,0 ERROR / 0 panic / 0 WARN / 0 限频,畸形仓位守卫 0 触发,RSS 68MB。
+  - 负载 **1.70 → 0.60**:见下条 systemd 缺陷。
+**我自己引入又修掉的缺陷(务必记住)**:`nofx.service` 的 `ExecStartPre` 双启动守卫退出 1 会被
+`Restart=on-failure` 当成崩溃重试,而守卫在手起进程活着时**永远**拒绝 → 空转 **569 次重启**,
+每 10s 拉一个 shell,在 1 核机上白烧 CPU(正是我在查的那个延迟的帮凶)。
+已加 `StartLimitIntervalSec=300` / `StartLimitBurst=5` 封顶,并 `systemctl reset-failed` 归零计数。
+教训:给 unit 加 `ExecStartPre` 硬失败守卫时,必须同时设启动限速,否则守卫本身变成 CPU 泄漏。
+
 ## 2026-07-29 Deploy: 保本止损(BE)按仓位身份+档位收敛 (pid 2643455, commit 6ba8900)
 生产实况:claude/WLDUSDT SHORT 在交易所侧堆出 **4 张 break_even_stop**
 (0.3604/0.3594/0.3568/0.3539),而配置只有 2 档 BE(0.5×ATR / 1.5×ATR)。
