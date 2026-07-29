@@ -195,8 +195,11 @@ func (t *FuturesTrader) setTrailingStopLossCore(symbol string, positionSide stri
 		return "", fmt.Errorf("exchange returned no algo id for trailing order (unmanageable); falling back to local monitor")
 	}
 
-	logger.Infof("  Trailing stop-loss set (Algo Order): activation=%.4f callback=%.1f%% (exchange confirmed) reason=%q algoId=%s",
-		activationPrice, cbPercent, reasonTag, orderID)
+	// clientAlgoId is logged because it is the only place the protection tier tag
+	// (T<N>) is observable after placement — without it a live tier mapping can only
+	// be verified by querying the exchange.
+	logger.Infof("  Trailing stop-loss set (Algo Order): activation=%.4f callback=%.1f%% (exchange confirmed) reason=%q algoId=%s clientAlgoId=%s",
+		activationPrice, cbPercent, reasonTag, orderID, clientOrderID)
 	return orderID, nil
 }
 

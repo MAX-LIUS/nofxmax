@@ -566,8 +566,9 @@ func (t *OKXTrader) setTrailingStopLossWithTagReturningID(symbol string, positio
 	// Carry the mechanism in the client-controlled algo id. Without this the trailing
 	// order's reason is unrecoverable (tag is fully consumed by okxTag) and targeted
 	// cleanup cannot distinguish it from any other algo on the symbol.
-	if algoClOrdID := encodeReasonClientID(reasonTag); algoClOrdID != "" {
-		body["algoClOrdId"] = algoClOrdID
+	placedClOrdID := encodeReasonClientID(reasonTag)
+	if placedClOrdID != "" {
+		body["algoClOrdId"] = placedClOrdID
 	}
 	if activationPrice > 0 {
 		body["activePx"] = t.formatPrice(activationPrice, inst)
@@ -587,7 +588,10 @@ func (t *OKXTrader) setTrailingStopLossWithTagReturningID(symbol string, positio
 		if orders[0].SCode != "0" {
 			return "", fmt.Errorf("OKX trailing stop rejected: code=%s msg=%s", orders[0].SCode, orders[0].SMsg)
 		}
-		logger.Infof("  ✓ [OKX] Trailing stop set: %s activation=%.4f callback=%.4f qty=%.4f sz=%s algoId=%s", symbol, activationPrice, callbackRate, quantity, szStr, orders[0].AlgoId)
+		// algoClOrdId is logged because it is the only place the protection tier tag
+		// (T<N>) is observable after placement — without it a live tier mapping can
+		// only be verified by querying the exchange.
+		logger.Infof("  ✓ [OKX] Trailing stop set: %s activation=%.4f callback=%.4f qty=%.4f sz=%s algoId=%s algoClOrdId=%s reason=%s", symbol, activationPrice, callbackRate, quantity, szStr, orders[0].AlgoId, placedClOrdID, reasonTag)
 		// Safety: for full trailing, keep a single live trailing order per symbol.
 		// For partial trailing drawdown, multiple tiers must be allowed to coexist.
 		if orders[0].AlgoId != "" && quantity <= 0 {
