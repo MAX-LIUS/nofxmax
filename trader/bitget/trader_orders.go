@@ -2,12 +2,21 @@ package bitget
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"nofx/logger"
 	"nofx/trader/types"
 	"strconv"
 	"strings"
 )
+
+// ErrPositionGone 与 binance/okx 的同名 sentinel 同义:交易所侧已无该方向仓位,
+// 属于"无单可挂"而非"挂单失败"。
+//
+// Bitget 目前不在实盘交易员里,但 trader 侧已把它的挂单失败日志提级到 WARN,
+// 少这个 sentinel 就会在平仓同步空窗里冒假警报。三个适配器保持同一口径,
+// 避免下次启用 Bitget 时再补一遍。
+var ErrPositionGone = errors.New("no open position on exchange to attach protection")
 
 func (t *BitgetTrader) SetTrailingStopLoss(symbol string, positionSide string, activationPrice float64, callbackRate float64, quantity float64) error {
 	symbol = t.convertSymbol(symbol)
@@ -36,7 +45,8 @@ func (t *BitgetTrader) SetTrailingStopLoss(symbol string, positionSide string, a
 		}
 	}
 	if quantity <= 0 {
-		return fmt.Errorf("no active position found for trailing stop: %s %s", symbol, positionSide)
+		// 用 sentinel 包装,让调用方能 errors.Is 区分"无单可挂"与"挂单失败"。
+		return fmt.Errorf("%w: no active position found for trailing stop: %s %s", ErrPositionGone, symbol, positionSide)
 	}
 
 	qtyStr, _ := t.FormatQuantity(symbol, quantity)

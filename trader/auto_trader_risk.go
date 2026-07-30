@@ -10,6 +10,8 @@ import (
 	"nofx/market"
 	"nofx/store"
 	"nofx/trader/binance"
+	"nofx/trader/bitget"
+	"nofx/trader/okx"
 	"sort"
 	"strconv"
 	"strings"
@@ -2595,8 +2597,33 @@ func (at *AutoTrader) applyManagedDrawdownFallback(symbol, side string, entryPri
 // 此前没有对应闸门,这里补上。
 //
 // 判据只认 sentinel,不做字符串匹配 —— 交易所文案会变,sentinel 不会。
+// 各交易所适配器各有自己的 sentinel(值相同但类型独立),这里逐个认。
 func trailingFailureIsPositionGone(err error) bool {
-	return err != nil && errors.Is(err, binance.ErrPositionGone)
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, binance.ErrPositionGone) ||
+		errors.Is(err, okx.ErrPositionGone) ||
+		errors.Is(err, bitget.ErrPositionGone)
+}
+
+// logNativeTrailingPlacementFailure 统一记录 native trailing 挂单失败。
+//
+// 补的是一个**观测漏洞**:此前只有 Binance 分支用 Warnf,OKX/Bitget 全部用 Infof。
+// 健康巡检按 `[WARN]` 取样,于是 3 个 OKX 交易员的挂单失败在巡检里**完全不可见** ——
+// 我自己这一轮巡检就漏过去了,是先按交易所逐个读代码才发现的。
+//
+// 为什么必须先有 okx.ErrPositionGone 才能提级:平仓同步空窗里"仓位已消失"会稳定
+// 触发这条路径(Binance 侧实测 19s 空窗内两轮),不区分就等于把假警报批量塞进 WARN,
+// 把刚修好的噪音换个交易所再犯一次。position-gone 走 Infof 静默,其余一律 Warnf。
+func (at *AutoTrader) logNativeTrailingPlacementFailure(tierKind, exchange, symbol, side string, err error) {
+	if trailingFailureIsPositionGone(err) {
+		logger.Infof("🧯 Native %s trailing skipped (%s %s, %s): position no longer open on exchange (local view still stale) — not a placement failure",
+			tierKind, symbol, side, exchange)
+		return
+	}
+	logger.Warnf("❌ Native %s trailing drawdown apply failed (%s %s, %s): %v — exchange side NOT covered this poll, managed monitor supplements",
+		tierKind, symbol, side, exchange, err)
 }
 
 // applyExchangeFailedLocalMonitor is the bottom-line fallback when a native
@@ -2990,7 +3017,7 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.4f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, bitgetCallbackPercent, cumulativeRatio, partialQty, rule.StageName)
 						return true
 					} else {
-						logger.Infof("❌ Native partial trailing drawdown apply failed (%s %s, bitget): %v", symbol, side, err)
+						at.logNativeTrailingPlacementFailure("partial", "bitget", symbol, side, err)
 					}
 				}
 			case "okx":
@@ -3084,9 +3111,11 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 								logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.6f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, okxCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
 								return true
 							}
-							logger.Infof("❌ Native partial trailing drawdown verify failed (%s %s, okx): new tier not visible after placement", symbol, side)
+							// 读回验证失败:单可能挂上了但看不见,不是"无单可挂",一律 WARN。
+							at.logNativeTrailingPlacementFailure("partial", "okx", symbol, side,
+								errors.New("new tier not visible after placement"))
 						} else {
-							logger.Infof("❌ Native partial trailing drawdown apply failed (%s %s, okx): %v", symbol, side, err)
+							at.logNativeTrailingPlacementFailure("partial", "okx", symbol, side, err)
 						}
 					} else if err := okxTrader.SetTrailingStopLoss(symbol, positionSide, activationPrice, okxCallbackRatio, partialQty); err == nil {
 						at.setProtectionState(symbol, side, "native_partial_trailing_armed")
@@ -3102,7 +3131,7 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 						logger.Infof("🟣 Native partial trailing drawdown armed: %s %s | activation=%.6f callback=%.6f close=%.1f%%(cumul) qty=%.4f stage=%s", symbol, side, activationPrice, okxCallbackRatio, cumulativeRatio, partialQty, rule.StageName)
 						return true
 					} else {
-						logger.Infof("❌ Native partial trailing drawdown apply failed (%s %s, okx): %v", symbol, side, err)
+						at.logNativeTrailingPlacementFailure("partial", "okx", symbol, side, err)
 					}
 				}
 			}
@@ -3216,7 +3245,7 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 			bitgetCallbackPercent = 10
 		}
 		if err := bitgetTrader.SetTrailingStopLoss(symbol, positionSide, activationPrice, bitgetCallbackPercent, 0); err != nil {
-			logger.Infof("❌ Native trailing drawdown apply failed (%s %s): %v", symbol, side, err)
+			at.logNativeTrailingPlacementFailure("full", exchange, symbol, side, err)
 			return false
 		}
 	case "okx":
@@ -3241,7 +3270,7 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 			var err error
 			placedOrderID, err = tagged.SetTrailingStopLossTaggedWithID(symbol, positionSide, activationPrice, okxCallbackRatio, 0, at.drawdownTrailingReasonTag(symbol, side, entryPrice, rule))
 			if err != nil {
-				logger.Infof("❌ Native trailing drawdown apply failed (%s %s): %v", symbol, side, err)
+				at.logNativeTrailingPlacementFailure("full", exchange, symbol, side, err)
 				return false
 			}
 			if staleFullTrailing != nil && staleFullTrailing.OrderID != "" {
@@ -3250,7 +3279,7 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 				}
 			}
 		} else if err := okxTrader.SetTrailingStopLoss(symbol, positionSide, activationPrice, okxCallbackRatio, 0); err != nil {
-			logger.Infof("❌ Native trailing drawdown apply failed (%s %s): %v", symbol, side, err)
+			at.logNativeTrailingPlacementFailure("full", exchange, symbol, side, err)
 			return false
 		}
 	default:

@@ -2,6 +2,7 @@ package okx
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"nofx/logger"
@@ -11,6 +12,17 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrPositionGone 与 binance.ErrPositionGone 同义:交易所侧已经没有这个方向的仓位,
+// 属于"无单可挂"而非"挂单失败"。
+//
+// OKX 侧此前没有这个区分并不致命(失败分支只 return false,不像 Binance 那样会 arm
+// 本地兜底并点亮面板告警),但下面把失败日志从 INFO 提到 WARN 之后就必须有它:否则
+// 平仓同步空窗里每次"仓位已消失"都会在健康巡检里冒出一条假 WARN。
+//
+// 判定依据:调用方在 quantity<=0 时先 InvalidatePositionCache() 再 GetPositions(),
+// 拿到的是交易所实时快照,不是缓存。
+var ErrPositionGone = errors.New("no open position on exchange to attach protection")
 
 // OpenLong opens long position
 func (t *OKXTrader) OpenLong(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
@@ -537,7 +549,8 @@ func (t *OKXTrader) setTrailingStopLossWithTagReturningID(symbol string, positio
 		}
 	}
 	if quantity <= 0 {
-		return "", fmt.Errorf("no active position found for trailing stop: %s %s", symbol, positionSide)
+		// 用 sentinel 包装,让调用方能 errors.Is 区分"无单可挂"与"挂单失败"。
+		return "", fmt.Errorf("%w: no active position found for trailing stop: %s %s", ErrPositionGone, symbol, positionSide)
 	}
 
 	sz := quantity / inst.CtVal
