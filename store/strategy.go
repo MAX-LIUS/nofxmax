@@ -279,6 +279,78 @@ type EntryGateConfig struct {
 	// ThrottleLossRate is the loss-rate in the window at/above which new entries are
 	// blocked. Default 0.6 (i.e. ≥60% of recent closes were losers). Range (0,1].
 	ThrottleLossRate float64 `json:"throttle_loss_rate,omitempty"`
+
+	// --- Structural alignment gate (HH/HL + blocking-level distance) ---
+	//
+	// StructuralAlignment requires the PRIMARY timeframe to show a clean
+	// monotonic swing sequence in the trade's direction (HH+HL for LONG,
+	// LH+LL for SHORT) before an entry may open, and optionally that the
+	// nearest COMPUTED blocking pivot is at least StructuralMinBlockingPct away.
+	//
+	// DEFAULT OFF (opt-in). The evidence moved several times under different
+	// framings — record it here so the next reader does not re-derive it:
+	//   - 6-day live window (89 trades, 4.8% of history): looked strong, but that
+	//     sample contains ONLY trades that already passed the existing gates, so it
+	//     cannot answer "is this gate usable on its own".
+	//   - Comparing the gate's pass-set against live realized PnL over the full
+	//     3 months is invalid: the exit machinery differs per month (break_even_stop
+	//     0/105/332, structural_sl 0/0/97 across May/Jun/Jul) so it compares three
+	//     different systems.
+	//   - Proper control group: 1144 "Entry gate blocked" log lines that carry an
+	//     entry price (all from the structural_fit stage) + 1839 opened trades, every
+	//     one re-simulated under ONE neutral rule (hold 6h, no SL/TP) so the two
+	//     pass-sets are on the same scale. Protection-plan-defect blocks
+	//     (stop/fallback_inside_invalidation, target_before_first_target) are
+	//     excluded — a no-stop simulation cannot see those defects and they inflated
+	//     an earlier headline by ~65%.
+	//   - Result at the tuned parameters (lb=3/n=3/pct=0.05), n=2957 sample:
+	//     284 passed, 52.5% win, +0.323% mean vs -0.034% no-gate baseline;
+	//     p=0.0080; all 3 walk-forward folds positive, all 3 months positive, both
+	//     directions positive, still positive after removing the largest-contributing
+	//     coin, and all 4 traders improved.
+	//   - Independent check on REAL realized PnL (July only, exit machinery
+	//     comparable): all 876 opened trades total -78.16, while the 121 the gate
+	//     would have passed total +62.97 at 69.4% win, p=0.0084.
+	// Unresolved: winning parameters drift by window; TON alone contributes 35-66%
+	// of the gain depending on the cell; and market_state cannot be evaluated at all
+	// because every control trade already passed it. Frequency cost is real: ~3.3
+	// entries/day against ~21 today. That is why this ships OFF and is enabled per
+	// trader, exactly as CorrelatedAdverseThrottle did.
+	// Pointer distinguishes explicit true/false from unset (default off).
+	StructuralAlignment *bool `json:"structural_alignment,omitempty"`
+	// StructuralPivotLookback is the fractal half-width for pivot detection
+	// (a pivot must be the extreme of this many bars either side). Default 3.
+	// Tuned: lb=3 is decisive. lb=2 is noise (best cell p=0.08, folds disagree)
+	// and lb=4 is weaker (p>0.02 only at high thresholds). Every lb=3 cell from
+	// pct 0 to 0.35 is significant.
+	StructuralPivotLookback int `json:"structural_pivot_lookback,omitempty"`
+	// StructuralSwingCount is how many of the most recent swing highs/lows must
+	// form a clean monotonic sequence. Default 3.
+	// n=2 admits ~2.5× more entries (8.3 vs 3.3/day) at roughly half the edge
+	// (+0.233 vs +0.323 mean) and, on real July PnL, only +34.69 vs +62.97.
+	// n=4 collapses the sample below usable size. Raising n past 3 pushes the
+	// remaining gain into a single trader.
+	StructuralSwingCount int `json:"structural_swing_count,omitempty"`
+	// StructuralMinBlockingPct requires the nearest COMPUTED blocking pivot in
+	// the trade's path to be at least this far away (percent of entry). Default
+	// 0.05. Explicit 0 checks direction only.
+	// Tuned in 0.05 steps: the direction check carries almost all of the edge, and
+	// this sub-check adds little (pct 0 → 0.05 moves real July PnL +62.85 → +62.97).
+	// Higher thresholds LOOK better on mean (pct 0.6 reaches +0.923) but fail the
+	// robustness screens — monthly increments go negative and the gain concentrates
+	// in one trader — so they are not the default. Treat this as secondary.
+	//
+	// Pointer, NOT float64+omitempty: 0 is a legal user value ("direction only"),
+	// so a plain float64 would make "unset" and "explicit 0" indistinguishable
+	// and silently disable the sub-check while the UI advertised 0.5. That is
+	// exactly how TrailMinProfitATR shipped broken (v1.17.5). Read via
+	// StructuralMinBlockingPctValue().
+	StructuralMinBlockingPct *float64 `json:"structural_min_blocking_pct,omitempty"`
+	// StructuralAuditOnly logs what the gate WOULD block without blocking it.
+	// Useful to accumulate live evidence before enforcing. Note the strategy-level
+	// RegimeFilter.AuditOnly already downsizes to 50% when it converts a block;
+	// this flag is narrower — it silences only this check.
+	StructuralAuditOnly *bool `json:"structural_audit_only,omitempty"`
 }
 
 func (c EntryGateConfig) WithDefaults() EntryGateConfig {
@@ -375,7 +447,57 @@ func (c EntryGateConfig) WithDefaults() EntryGateConfig {
 	} else if c.ThrottleLossRate > 1 {
 		c.ThrottleLossRate = 1
 	}
+	// Structural alignment gate. Params are normalised even while the gate is
+	// off so the UI always renders concrete numbers instead of blanks, and so
+	// enabling it later cannot pick up a 0 that means "lb=0" (which would make
+	// every bar a pivot). StructuralMinBlockingPct keeps 0 as a legal explicit
+	// value (= direction check only), so it is only clamped when negative.
+	if c.StructuralPivotLookback <= 0 {
+		c.StructuralPivotLookback = 3
+	} else if c.StructuralPivotLookback > 10 {
+		c.StructuralPivotLookback = 10
+	}
+	if c.StructuralSwingCount < 2 {
+		c.StructuralSwingCount = 3
+	} else if c.StructuralSwingCount > 6 {
+		c.StructuralSwingCount = 6
+	}
+	if c.StructuralMinBlockingPct == nil {
+		v := structuralMinBlockingPctDefault
+		c.StructuralMinBlockingPct = &v
+	} else if *c.StructuralMinBlockingPct < 0 {
+		v := 0.0
+		c.StructuralMinBlockingPct = &v
+	}
 	return c
+}
+
+// structuralMinBlockingPctDefault is the tuned blocking-distance threshold.
+// Kept as a named constant so WithDefaults and StructuralMinBlockingPctValue
+// cannot drift apart — they previously carried the literal twice.
+const structuralMinBlockingPctDefault = 0.05
+
+// StructuralMinBlockingPctValue reads the blocking-distance threshold.
+// nil (unset) → 0.05; explicit 0 → 0 (direction check only); negative → 0.
+func (c EntryGateConfig) StructuralMinBlockingPctValue() float64 {
+	if c.StructuralMinBlockingPct == nil {
+		return structuralMinBlockingPctDefault
+	}
+	if *c.StructuralMinBlockingPct < 0 {
+		return 0
+	}
+	return *c.StructuralMinBlockingPct
+}
+
+// StructuralAlignmentEnabled reports whether the HH/HL structural gate is on.
+// Unset → false (ships off; see the field comment for the evidence trail).
+func (c EntryGateConfig) StructuralAlignmentEnabled() bool {
+	return c.StructuralAlignment != nil && *c.StructuralAlignment
+}
+
+// StructuralAuditOnlyEnabled reports whether the structural gate only logs.
+func (c EntryGateConfig) StructuralAuditOnlyEnabled() bool {
+	return c.StructuralAuditOnly != nil && *c.StructuralAuditOnly
 }
 
 // CorrelatedAdverseThrottleEnabled reports whether the throttle is active,

@@ -110,13 +110,51 @@ export interface EntryGateConfig {
   // targets rarely hit, ~52% win rate). Default 2.8, <0 disables.
   max_net_rr?: number
   // Correlated-adverse entry throttle: skip a NEW entry when the trader's own
-  // recent finished closes cluster into losses (toxic regime). Validated (1273
-  // closed positions) as the sole entry lever positive out-of-sample and after
-  // crash-day removal. Default on.
+  // recent finished closes cluster into losses (toxic regime). On the 63-day live
+  // set it was the sole entry lever positive out-of-sample, but a multi-year proxy
+  // backtest failed to confirm it (full-sample delta -72.7, positive in only 2/5
+  // years), so it ships DEFAULT OFF and is enabled per-trader.
+  // (Corrected 2026-07-30: this comment previously said "Default on", while
+  // CorrelatedAdverseThrottleEnabled() returns false when unset.)
   correlated_adverse_throttle?: boolean
   throttle_window_hours?: number
   throttle_min_closes?: number
   throttle_loss_rate?: number
+  // --- Structural alignment gate (HH/HL + blocking-level distance) ---
+  // Requires the PRIMARY timeframe to show a clean monotonic swing sequence in the
+  // trade direction (HH+HL for long, LH+LL for short) before an entry may open.
+  // Unlike every other check in this stage it reads swing structure off the candles
+  // instead of trusting the AI's self-reported key levels (the AI omitted blocking
+  // levels in 47% of the研究 sample).
+  //
+  // DEFAULT OFF, enabled per trader. Validated by re-simulating BOTH the 1839
+  // opened trades and the 1144 gate-blocked ones that carry an entry price under a
+  // single neutral rule (hold 6h, no SL/TP) so the two pass-sets are comparable,
+  // excluding protection-plan-defect blocks a no-stop simulation cannot see.
+  // At the defaults (lb=3/n=3/0.05): 284 passed, +0.323% mean vs -0.034% no-gate
+  // baseline, p=0.0080; 3/3 walk-forward folds, 3/3 months, both directions and all
+  // 4 traders positive, and still positive with the top-contributing coin removed.
+  // Real-PnL cross-check (July, comparable exit machinery): all 876 opened trades
+  // total -78.16 while the 121 this gate would pass total +62.97 at 69.4% win.
+  // Unresolved: parameters drift by window, TON alone is 35-66% of the gain,
+  // market_state is unevaluable (all controls passed it), and entry frequency drops
+  // from ~21/day to ~3.3/day.
+  structural_alignment?: boolean
+  // Fractal half-width for pivot detection. Default 3, and decisive: lb=2 is noise
+  // (best cell p=0.08), lb=4 is weaker, every lb=3 cell 0-0.35 is significant.
+  structural_pivot_lookback?: number
+  // How many recent swing highs/lows must form a clean monotonic sequence.
+  // Default 3. Setting 2 gives ~2.5× the entries at half the edge (+0.233 vs
+  // +0.323 mean); 4 collapses the sample. Range 2-6.
+  structural_swing_count?: number
+  // Minimum distance (% of entry) to the nearest COMPUTED blocking pivot ahead.
+  // Unset → 0.05. Explicit 0 → direction check only. Secondary: 0.05-step tuning
+  // showed the direction check carries nearly all the edge; higher thresholds score
+  // a better mean but fail the monthly and per-trader robustness screens.
+  structural_min_blocking_pct?: number
+  // Log what the gate WOULD block without blocking it. Deducts no score, so
+  // observation cannot quietly shrink position size.
+  structural_audit_only?: boolean
   // soft_regime_structure_fit (Market Structure Map): treat the regime↔structure
   // mismatch check as a SOFT confidence penalty (deducts from the gate score →
   // smaller position) instead of a HARD block. A high-conviction counter-structure

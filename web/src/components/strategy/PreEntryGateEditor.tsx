@@ -125,12 +125,19 @@ function EntryGateInput({
   label,
   value,
   step,
+  min = 0,
+  max,
   disabled,
   onChange,
 }: {
   label: string
   value: number
   step: number
+  // min/max are optional bounds surfaced to the browser's number input. min
+  // defaults to 0 (the prior hard-coded behaviour). Server-side WithDefaults
+  // clamps regardless — these only stop obviously invalid typing earlier.
+  min?: number
+  max?: number
   disabled: boolean
   onChange: (v: number) => void
 }) {
@@ -143,7 +150,8 @@ function EntryGateInput({
         type="number"
         value={value}
         step={step}
-        min={0}
+        min={min}
+        max={max}
         onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
         disabled={disabled}
         className="w-full px-3 py-2 rounded text-sm"
@@ -1193,6 +1201,106 @@ export function PreEntryGateEditor({
             }
             onChange={(v) => updateEntryGate('max_blocking_levels', v)}
           />
+        </EntryGateGroup>
+
+        <EntryGateGroup
+          enabled={
+            config.entry_structure?.entry_gate?.structural_alignment ?? false
+          }
+          onToggle={(v) => updateEntryGate('structural_alignment', v)}
+          masterDisabled={
+            disabled || !(config.entry_structure?.entry_gate?.enabled ?? false)
+          }
+          title={ts(preEntryGate.grpStructuralAlignment, language)}
+          description={ts(preEntryGate.structuralAlignmentDesc, language)}
+          example=""
+          color="#0ECB81"
+        >
+          <div>
+            <EntryGateInput
+              label={ts(preEntryGate.structuralPivotLookback, language)}
+              value={
+                config.entry_structure?.entry_gate?.structural_pivot_lookback ??
+                3
+              }
+              step={1}
+              min={1}
+              max={10}
+              disabled={
+                disabled ||
+                !(config.entry_structure?.entry_gate?.enabled ?? false)
+              }
+              onChange={(v) => updateEntryGate('structural_pivot_lookback', v)}
+            />
+            <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+              {ts(preEntryGate.structuralPivotLookbackDesc, language)}
+            </div>
+          </div>
+          <div>
+            <EntryGateInput
+              label={ts(preEntryGate.structuralSwingCount, language)}
+              value={
+                config.entry_structure?.entry_gate?.structural_swing_count ?? 3
+              }
+              step={1}
+              min={2}
+              max={6}
+              disabled={
+                disabled ||
+                !(config.entry_structure?.entry_gate?.enabled ?? false)
+              }
+              onChange={(v) => updateEntryGate('structural_swing_count', v)}
+            />
+            <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+              {ts(preEntryGate.structuralSwingCountDesc, language)}
+            </div>
+          </div>
+          <div>
+            <EntryGateInput
+              label={ts(preEntryGate.structuralMinBlockingPct, language)}
+              value={
+                config.entry_structure?.entry_gate
+                  ?.structural_min_blocking_pct ?? 0.05
+              }
+              // 0.05 步长: 精调就是按 0.05 走的, 0.1 步会跳过实测最优值
+              step={0.05}
+              min={0}
+              disabled={
+                disabled ||
+                !(config.entry_structure?.entry_gate?.enabled ?? false)
+              }
+              onChange={(v) =>
+                updateEntryGate('structural_min_blocking_pct', v)
+              }
+            />
+            <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+              {ts(preEntryGate.structuralMinBlockingPctDesc, language)}
+            </div>
+          </div>
+          <div>
+            <label className="flex items-center gap-2 text-xs cursor-pointer">
+              <input
+                type="checkbox"
+                checked={
+                  config.entry_structure?.entry_gate?.structural_audit_only ??
+                  false
+                }
+                disabled={
+                  disabled ||
+                  !(config.entry_structure?.entry_gate?.enabled ?? false)
+                }
+                onChange={(e) =>
+                  updateEntryGate('structural_audit_only', e.target.checked)
+                }
+              />
+              <span style={{ color: '#EAECEF' }}>
+                {ts(preEntryGate.structuralAuditOnly, language)}
+              </span>
+            </label>
+            <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+              {ts(preEntryGate.structuralAuditOnlyDesc, language)}
+            </div>
+          </div>
         </EntryGateGroup>
 
         <EntryStructureEditor

@@ -1354,6 +1354,46 @@ export const preEntryGate = {
     zh: '相关性逆境节流',
     en: 'Correlated-adverse throttle',
   },
+  grpStructuralAlignment: {
+    zh: '结构方向对齐 (HH/HL)',
+    en: 'Structural alignment (HH/HL)',
+  },
+  structuralAlignmentDesc: {
+    zh: '要求主周期已形成与开仓方向一致的摆动结构序列(做多需HH+HL递升,做空需LH+LL递降)才允许开仓。本阶段其他检查都读AI自报的关键位,而AI在研究样本中有47%的交易漏报了阻挡位;此检查直接从K线计算摆动点。默认关闭,需按trader单独开启。验证方式:把1839笔已开仓单与1144笔"被既有闸门拦下且日志留有入场价"的单子放进同一套中性规则(持有6小时、不设止损止盈)重新模拟,两个放行集才可比;并剔除保护方案缺陷类拦截(止损落在失效位内侧等),因为无止损模拟看不到这类缺陷。默认参数(lb=3/n=3/0.05)结果:放行284笔,均值+0.323% vs 无闸门基线-0.034%,p=0.0080;三折前向滚动全正、三个月全正、多空双向全正、剔除最大贡献币仍为正、4个trader全部改善。真实PnL独立复核(7月,离场机制一致):全部876笔实盘合计-78.16,而闸门会放行的121笔合计+62.97、胜率69.4%、p=0.0084。未消除疑点:最优参数随窗口漂移;TON一个币贡献35~66%的收益;market_state阶段无法评估(对照组全部已通过它);开仓频率从约21笔/天降到约3.3笔/天。',
+    en: 'Require the primary timeframe to already show a swing sequence agreeing with the trade direction (HH+HL for long, LH+LL for short). Every other check in this stage reads AI-self-reported key levels, and the AI omitted blocking levels in 47% of the research sample; this one computes pivots from candles. Default OFF, enable per trader. Validation: 1839 opened trades plus 1144 "entry gate blocked" log lines that carry an entry price, all re-simulated under ONE neutral rule (hold 6h, no SL/TP) so the two pass-sets are comparable; protection-plan-defect blocks (stop inside the invalidation level, etc.) excluded because a no-stop simulation cannot see them. At the default parameters (lb=3/n=3/0.05): 284 passed, +0.323% mean vs -0.034% no-gate baseline, p=0.0080; all 3 walk-forward folds positive, all 3 months positive, both directions positive, still positive after removing the largest-contributing coin, all 4 traders improved. Independent check on real PnL (July, comparable exit machinery): all 876 opened trades total -78.16 while the 121 the gate would pass total +62.97 at 69.4% win, p=0.0084. Unresolved: best parameters drift by window; TON alone contributes 35-66% of the gain; market_state cannot be evaluated (every control trade already passed it); entry frequency drops from ~21/day to ~3.3/day.',
+  },
+  structuralPivotLookback: {
+    zh: '摆动点分形半宽',
+    en: 'Pivot fractal half-width',
+  },
+  structuralPivotLookbackDesc: {
+    zh: '一个摆动点必须是左右各N根K线范围内的极值。默认3,这是实测最优且结论明确:lb=2是噪声(最好格点p=0.08且三折互相矛盾),lb=4偏弱(只在高阈值下勉强显著),而lb=3从0到0.35的每一个阈值都显著。范围1-10,不建议改动。',
+    en: 'A pivot must be the extreme of N bars either side. Default 3, and this one is decisive: lb=2 is noise (best cell p=0.08, folds disagree), lb=4 is weaker (only marginally significant at high thresholds), while every lb=3 cell from 0 to 0.35 is significant. Range 1-10; changing it is not recommended.',
+  },
+  structuralSwingCount: {
+    zh: '摆动序列长度',
+    en: 'Swing sequence length',
+  },
+  structuralSwingCountDesc: {
+    zh: '最近多少组高点/低点必须构成干净的单调序列。默认3。设2会放宽到约2.5倍开仓量(8.3笔/天 vs 3.3笔/天),但边际收益只剩一半(均值+0.233 vs +0.323),7月真实PnL也只有+34.69 vs +62.97——想提高开仓频率时才用。设4样本会塌到不可用,且剩下的收益集中在单个trader身上。范围2-6。',
+    en: 'How many recent swing highs/lows must form a clean monotonic sequence. Default 3. Setting 2 loosens to ~2.5× the entries (8.3/day vs 3.3/day) but keeps only half the edge (+0.233 vs +0.323 mean, and +34.69 vs +62.97 on real July PnL) — use it only if you need frequency. Setting 4 collapses the sample below usable size and pushes the remaining gain into a single trader. Range 2-6.',
+  },
+  structuralMinBlockingPct: {
+    zh: '前方阻挡位最小距离%',
+    en: 'Min blocking-level distance %',
+  },
+  structuralMinBlockingPctDesc: {
+    zh: '开仓方向前方最近的【实算】摆动阻挡位至少要有这么远(占入场价百分比)。默认0.05,填0表示只检查方向不检查距离。这是次要判据:按0.05步长精调后可以确认,收益几乎全部来自方向检查本身,此项只有微弱增量(0→0.05在7月真实PnL上是+62.85→+62.97)。调高会让均值看起来更好(0.6可达+0.923),但月度增量会转负、收益集中到单个trader,过不了稳健性筛查,所以不作为默认值。',
+    en: 'The nearest COMPUTED swing pivot ahead must be at least this far away (percent of entry). Default 0.05; set 0 to check direction only. Secondary criterion: after tuning in 0.05 steps it is clear the direction check carries nearly all of the edge and this adds little (0 → 0.05 moves real July PnL +62.85 → +62.97). Raising it makes the mean look better (0.6 reaches +0.923) but monthly increments turn negative and the gain concentrates in one trader, so it fails the robustness screens and is not the default.',
+  },
+  structuralAuditOnly: {
+    zh: '仅观察不拦截',
+    en: 'Audit only (log, do not block)',
+  },
+  structuralAuditOnlyDesc: {
+    zh: '只记录本会被拦截的开仓而不真正拦截,用于在实盘上积累证据。不扣减闸门评分,因此观察模式不会悄悄缩小仓位。',
+    en: 'Log entries that WOULD be blocked without blocking them, to accumulate live evidence. Deducts no gate score, so observation cannot quietly shrink position size.',
+  },
 }
 
 // ============================================================================

@@ -789,6 +789,74 @@ func evaluateStructuralFitGate(input entryGateInput) []EntryGateCheck {
 		}
 	}
 
+	// 2g. Structural alignment: PRIMARY-timeframe HH/HL sequence must agree with
+	// the trade direction, and (optionally) the nearest COMPUTED blocking pivot
+	// must be at least N% away.
+	//
+	// This is the only check in this stage that reads swing structure off the
+	// candles. Everything above trusts either the AI's self-declared setup_type
+	// or its self-reported anchors/key levels — and on the research sample the AI
+	// omitted blocking levels in 47% of trades. Ships OFF by default; see
+	// store.EntryGateConfig.StructuralAlignment for the full evidence trail and
+	// why the parameters are considered窗口-sensitive.
+	if input.StrategyConfig != nil {
+		gate := input.StrategyConfig.EntryStructure.EntryGate.WithDefaults()
+		if gate.StructuralAlignmentEnabled() {
+			bars, tf := primaryTFClosedBars(input.StrategyConfig, data)
+			lb := gate.StructuralPivotLookback
+			n := gate.StructuralSwingCount
+			// Need enough closed bars for pivots to exist at all; below this the
+			// check abstains rather than blocking on missing data.
+			if len(bars) >= 2*lb+2 {
+				isLong := strings.Contains(strings.ToLower(d.Action), "long")
+				want := 1
+				if !isLong {
+					want = -1
+				}
+				enforced := !gate.StructuralAuditOnlyEnabled()
+				dir := swingSeqDir(bars, lb, n)
+				if dir != want {
+					state := "no clean HH/HL sequence"
+					switch dir {
+					case 1:
+						state = "structure is HH+HL (up) but entry is SHORT"
+					case -1:
+						state = "structure is LH+LL (down) but entry is LONG"
+					}
+					checks = append(checks, EntryGateCheck{
+						Code:     "structural_alignment_missing",
+						Stage:    string(EntryGateStageStructuralFit),
+						Passed:   false,
+						Enforced: enforced,
+						Detail: fmt.Sprintf("%s on %s (%d closed bars, pivot_lb=%d swings=%d) — entry has no completed structural confirmation in its direction",
+							state, tf, len(bars), lb, n),
+						Values: fmt.Sprintf("tf=%s dir=%d want=%d bars=%d lb=%d n=%d", tf, dir, want, len(bars), lb, n),
+					})
+				} else if minPct := gate.StructuralMinBlockingPctValue(); minPct > 0 {
+					// Direction agrees; check the path only then, so the two
+					// sub-checks never both fire for one entry.
+					entry := d.EntryProtection.RiskReward.Entry
+					if entry <= 0 {
+						entry = data.CurrentPrice
+					}
+					if entry > 0 {
+						if distPct, found := nearestBlockingLevelPct(bars, entry, isLong, lb); found && distPct < minPct {
+							checks = append(checks, EntryGateCheck{
+								Code:     "structural_blocking_level_too_close",
+								Stage:    string(EntryGateStageStructuralFit),
+								Passed:   false,
+								Enforced: enforced,
+								Detail: fmt.Sprintf("nearest computed %s pivot is only %.2f%% ahead of entry %.6f on %s (min %.2f%%) — insufficient room before real structure",
+									map[bool]string{true: "resistance", false: "support"}[isLong], distPct, entry, tf, minPct),
+								Values: fmt.Sprintf("tf=%s dist_pct=%.4f min_pct=%.2f entry=%.8f lb=%d", tf, distPct, minPct, entry, lb),
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
 	return checks
 }
 
@@ -1394,6 +1462,13 @@ var gateCheckPenalties = map[string]int{
 	"trend_phase_continuation_conf":         15,
 	"trend_phase_extension_high_conf":       20,
 	"trend_phase_extension_ema_driven":      20,
+	// Structural alignment: only ever soft when StructuralAuditOnly is set, in
+	// which case the intent is pure observation — so the penalty is 0 and audit
+	// mode cannot silently shrink position size while we are still gathering
+	// live evidence. When the gate is enforced these checks hard-block and the
+	// penalty is not consulted.
+	"structural_alignment_missing":        0,
+	"structural_blocking_level_too_close": 0,
 }
 
 // computeGateScore calculates a weighted score from all checks.
