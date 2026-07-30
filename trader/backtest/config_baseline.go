@@ -80,11 +80,14 @@ func LiveConfigParams(cfg *store.StrategyConfig, tfHours float64) ProtectionPara
 			p.TrailStructTolATR = ss.TrailTolATR
 			p.TrailStructMode = ss.TrailMode
 			p.TrailStructHigherMult = ss.TrailHigherMult
-			p.TrailStructMinProfitATR = ss.TrailMinProfitATR
+			p.TrailStructMinProfitATR = ss.TrailMinProfitATRValue()
 			p.TrailStructMaxRatchets = ss.TrailMaxRatchets
-			// side gates default to true (ratchet in every state) when unset in JSON.
-			p.TrailStructOnProfit = ss.TrailOnProfit == nil || *ss.TrailOnProfit
-			p.TrailStructOnLoss = ss.TrailOnLoss == nil || *ss.TrailOnLoss
+			// Read the side gates through the store accessors instead of re-deriving
+			// the nil defaults here. Hand-inlining them is how this file silently
+			// drifted from live: it hard-coded "unset → true" for BOTH sides, so a
+			// backtest kept ratcheting in loss even after live defaulted that off.
+			p.TrailStructOnProfit = ss.TrailRatchetOnProfit()
+			p.TrailStructOnLoss = ss.TrailRatchetOnLoss()
 		}
 		// Keep StopLossATR as the flat fallback (used when range has no edge).
 		p.StopLossATR = ss.BackstopATRMul

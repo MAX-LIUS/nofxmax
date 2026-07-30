@@ -271,12 +271,15 @@ export interface StructuralSLConfig {
   trail_mode?: string
   // trail_higher_mult: higher-timeframe aggregation factor for higher/both modes. Default 4.
   trail_higher_mult?: number
-  // trail_min_profit_atr: favorable excursion (ATR mult) required before the trail arms. Default 1.
+  // trail_min_profit_atr: favorable excursion (ATR mult) required before the trail
+  // arms. Unset = 1. An explicit 0 disables the gate.
   trail_min_profit_atr?: number
   // trail_max_ratchets: cap on how many times the boundary may tighten. 0 = unlimited.
   trail_max_ratchets?: number
   // trail_on_profit / trail_on_loss: allow ratcheting while in profit / in loss. Both
-  // true = every state; only one = that side; both false = never. Default both true.
+  // true = every state; only one = that side; both false = never.
+  // Defaults: trail_on_profit true, trail_on_loss FALSE — an in-loss ratchet cannot
+  // lock profit by construction, it only pulls the invalidation level into the noise.
   trail_on_profit?: boolean
   trail_on_loss?: boolean
   // asset_adaptive_confirm_tf (Method 4): confirm the close-confirm breach on an

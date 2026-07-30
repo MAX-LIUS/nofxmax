@@ -136,10 +136,11 @@ func computeTrailBoundary(ss store.StructuralSLConfig, in trailRecomputeInput) (
 		return in.curBound, in.ratchets
 	}
 	// Min-profit activation: favorable excursion must exceed TrailMinProfitATR from
-	// entry. minProf<=0 DISABLES this gate (ratchet may arm immediately, subject only
-	// to the per-side on-profit/on-loss gates above). A positive value keeps the old
-	// "must be up N ATR before trailing" cushion.
-	minProf := ss.TrailMinProfitATR
+	// entry. Unset → 1.0, so the cushion is ON by default; an explicit 0 DISABLES the
+	// gate (ratchet may arm immediately, subject only to the per-side on-profit/on-loss
+	// gates above). Read through the accessor — the field is a pointer precisely so
+	// "unset" and "explicit 0" stay distinguishable.
+	minProf := ss.TrailMinProfitATRValue()
 	if minProf > 0 {
 		favMove := 0.0
 		if in.isLong {

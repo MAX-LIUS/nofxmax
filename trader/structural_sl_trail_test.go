@@ -10,6 +10,8 @@ import (
 // btebool returns a *bool for config side gates.
 func btebool(v bool) *bool { return &v }
 
+func btef64(v float64) *float64 { return &v }
+
 // mkBars builds a simple ascending window with the given lows/highs so a swing can
 // be detected. Each bar i has Low=lows[i], High=highs[i], Close=closes[i].
 func mkBars(lows, highs, closes []float64) []market.Kline {
@@ -31,7 +33,7 @@ func baseTrailCfg() store.StructuralSLConfig {
 	return store.StructuralSLConfig{
 		Enabled: true, CloseConfirm: true, TrailEnabled: true,
 		FloorATRMul: 1.5, BackstopATRMul: 4.5, LookbackBars: 24, PivotStrength: 2,
-		TrailTolATR: 0.0, TrailMode: "current", TrailMinProfitATR: 1.0,
+		TrailTolATR: 0.0, TrailMode: "current", TrailMinProfitATR: btef64(1.0),
 		TrailOnProfit: btebool(true), TrailOnLoss: btebool(true),
 	}.WithDefaults()
 }
@@ -111,7 +113,7 @@ func TestComputeTrailBoundary_MaxRatchetCap(t *testing.T) {
 // Min-profit activation: below the threshold the trail does not arm.
 func TestComputeTrailBoundary_MinProfitGate(t *testing.T) {
 	ss := baseTrailCfg()
-	ss.TrailMinProfitATR = 3.0 // need +6 (3*atr) from entry; price only +2
+	ss.TrailMinProfitATR = btef64(3.0) // need +6 (3*atr) from entry; price only +2
 	lows := []float64{105, 104, 103, 100, 101, 101, 102}
 	highs := []float64{107, 106, 105, 104, 103, 103, 104}
 	closes := []float64{106, 105, 104, 102, 102, 102, 102}
@@ -153,7 +155,7 @@ func TestComputeTrailBoundary_MinProfitZeroDisablesGate(t *testing.T) {
 	window := mkBars(lows, highs, closes)
 
 	gated := baseTrailCfg()
-	gated.TrailMinProfitATR = 1.0
+	gated.TrailMinProfitATR = btef64(1.0)
 	_, nrGated := computeTrailBoundary(gated, trailRecomputeInput{
 		window: window, curClose: 100.5, atr: 2, entry: 100, isLong: true,
 		curBound: 90, ratchets: 0,
@@ -163,7 +165,7 @@ func TestComputeTrailBoundary_MinProfitZeroDisablesGate(t *testing.T) {
 	}
 
 	open := baseTrailCfg()
-	open.TrailMinProfitATR = 0 // disabled
+	open.TrailMinProfitATR = btef64(0) // disabled
 	_, nrOpen := computeTrailBoundary(open, trailRecomputeInput{
 		window: window, curClose: 100.5, atr: 2, entry: 100, isLong: true,
 		curBound: 90, ratchets: 0,

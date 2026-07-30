@@ -1976,7 +1976,7 @@ export function ProtectionEditor({
                       >
                         <input
                           type="checkbox"
-                          checked={structuralSL.trail_on_loss ?? true}
+                          checked={structuralSL.trail_on_loss ?? false}
                           onChange={(e) =>
                             updateStructuralSL({
                               trail_on_loss: e.target.checked,
@@ -1989,8 +1989,8 @@ export function ProtectionEditor({
                     </div>
                     <div className="text-xs" style={{ color: '#848E9C' }}>
                       {isZh
-                        ? '两侧都开=全状态生效；仅开一侧=该侧生效；都关=不追。'
-                        : 'Both on = every state; one on = that side only; both off = never.'}
+                        ? '两侧都开=全状态生效；仅开一侧=该侧生效；都关=不追。默认只开盈利侧：亏损中锁紧无法锁住任何利润，只会把失效位拉进噪音区。'
+                        : 'Both on = every state; one on = that side only; both off = never. Profit side only by default: a ratchet fired while underwater cannot lock any profit, it only drags the invalidation level into the noise band.'}
                     </div>
                   </div>
                 )}

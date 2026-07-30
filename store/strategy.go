@@ -640,14 +640,34 @@ type StructuralSLConfig struct {
 	// TrailMinProfitATR gates activation: the trail only starts ratcheting once the
 	// position's favorable excursion exceeds this many ATR from entry, so a just-opened
 	// position is not immediately trailed into a tight noise stop. Default 1.0.
-	TrailMinProfitATR float64 `json:"trail_min_profit_atr,omitempty"`
+	//
+	// Pointer so that "unset" (nil → default 1.0) stays distinguishable from an
+	// explicit 0 ("no gate"). It was a plain float64 with `omitempty`, which collapsed
+	// those two cases: every live strategy left the field unset, JSON produced no key,
+	// and normalization read it back as 0 — i.e. the gate was OFF in production while
+	// both the doc comment and the UI (`?? 1.0`) advertised 1.0. Live consequence
+	// (2026-07-29): ETHUSDT LONG opened 00:23 and ratcheted at 00:24 with the position
+	// not yet in profit at all. Use TrailMinProfitATRValue() to read.
+	TrailMinProfitATR *float64 `json:"trail_min_profit_atr,omitempty"`
 	// TrailMaxRatchets caps how many times the boundary may tighten over the life of the
 	// position; once reached the boundary locks. 0 = unlimited (default, back-compatible).
 	TrailMaxRatchets int `json:"trail_max_ratchets,omitempty"`
 	// TrailOnProfit allows ratcheting while the position is in PROFIT (current price
 	// beyond entry in the favorable direction). TrailOnLoss allows it while in LOSS.
 	// Both true = ratchet in every state; only one = that side only; both false = the
-	// trail never ratchets (equivalent to TrailEnabled off). Default: both true.
+	// trail never ratchets (equivalent to TrailEnabled off).
+	//
+	// TrailOnProfit defaults TRUE, TrailOnLoss defaults FALSE. The asymmetry is
+	// deliberate: a ratchet fired while the position is UNDERWATER cannot lock in any
+	// profit by construction — all it does is drag the invalidation level from "the
+	// structure broke" in toward the noise band, so the exit fires on noise instead of
+	// on a thesis failure. Measured over the full live ratchet history: first ratchet
+	// in profit → 14 positions, 86% win, mean +1.14%; first ratchet in loss →
+	// 17 positions, 47% win, mean -0.38%. That split is confounded (a position that
+	// reached profit was already doing better), so it is not the reason for the
+	// default; the causal evidence is that on all 3 in-loss ratchets with bar coverage
+	// the un-ratcheted entry floor was NEVER breached — those stop-outs existed only
+	// because of the ratchet, and price then recovered +2.36%/+2.48%/+4.72%.
 	TrailOnProfit *bool `json:"trail_on_profit,omitempty"`
 	TrailOnLoss   *bool `json:"trail_on_loss,omitempty"`
 
@@ -723,22 +743,28 @@ func (c StructuralSLConfig) WithDefaults() StructuralSLConfig {
 	if c.TrailHigherMult < 2 {
 		c.TrailHigherMult = 4
 	}
-	// Default 0 = min-profit gate DISABLED (ratchet may arm as soon as structure
-	// permits, subject to the on-profit/on-loss side gates). Negatives clamp to 0.
-	// A positive value re-enables the "must be up N ATR before trailing" cushion.
-	if c.TrailMinProfitATR < 0 {
-		c.TrailMinProfitATR = 0
+	// Unset (nil) → 1.0: the ratchet must see a full ATR of favorable excursion before
+	// it arms. An explicit 0 still DISABLES the gate (the UI exposes 0 as a valid
+	// "no gate" value), and negatives clamp to 0.
+	if c.TrailMinProfitATR == nil {
+		v := 1.0
+		c.TrailMinProfitATR = &v
+	} else if *c.TrailMinProfitATR < 0 {
+		v := 0.0
+		c.TrailMinProfitATR = &v
 	}
 	if c.TrailMaxRatchets < 0 {
 		c.TrailMaxRatchets = 0
 	}
-	// Side gates default to true (ratchet in every state) when unset.
+	// Profit side defaults ON, loss side defaults OFF — see the field doc for why the
+	// in-loss ratchet is off by default (it can only tighten toward noise, never lock
+	// profit). Explicit true opts back in.
 	if c.TrailOnProfit == nil {
 		v := true
 		c.TrailOnProfit = &v
 	}
 	if c.TrailOnLoss == nil {
-		v := true
+		v := false
 		c.TrailOnLoss = &v
 	}
 	// PreferProvenLevels defaults ON: the order-block anchor is a strict
@@ -758,9 +784,22 @@ func (c StructuralSLConfig) TrailRatchetOnProfit() bool {
 }
 
 // TrailRatchetOnLoss reports whether the ratchet is allowed while in loss
-// (nil-safe; unset defaults to true).
+// (nil-safe; unset defaults to FALSE — see the TrailOnLoss field doc).
 func (c StructuralSLConfig) TrailRatchetOnLoss() bool {
-	return c.TrailOnLoss == nil || *c.TrailOnLoss
+	return c.TrailOnLoss != nil && *c.TrailOnLoss
+}
+
+// TrailMinProfitATRValue reads the min-profit activation gate nil-safely: unset
+// yields the 1.0 default, so a caller that skipped WithDefaults cannot silently
+// get the old "0 = gate disabled" behaviour.
+func (c StructuralSLConfig) TrailMinProfitATRValue() float64 {
+	if c.TrailMinProfitATR == nil {
+		return 1.0
+	}
+	if *c.TrailMinProfitATR < 0 {
+		return 0
+	}
+	return *c.TrailMinProfitATR
 }
 
 type ProtectionValueSource struct {
