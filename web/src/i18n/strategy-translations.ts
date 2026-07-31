@@ -1375,16 +1375,16 @@ export const preEntryGate = {
     en: 'Swing sequence length',
   },
   structuralSwingCountDesc: {
-    zh: '最近多少组高点/低点必须构成干净的单调序列。默认3。设2会放宽到约2.5倍开仓量(8.3笔/天 vs 3.3笔/天),但边际收益只剩一半(均值+0.233 vs +0.323),7月真实PnL也只有+34.69 vs +62.97——想提高开仓频率时才用。设4样本会塌到不可用,且剩下的收益集中在单个trader身上。范围2-6。',
-    en: 'How many recent swing highs/lows must form a clean monotonic sequence. Default 3. Setting 2 loosens to ~2.5× the entries (8.3/day vs 3.3/day) but keeps only half the edge (+0.233 vs +0.323 mean, and +34.69 vs +62.97 on real July PnL) — use it only if you need frequency. Setting 4 collapses the sample below usable size and pushes the remaining gain into a single trader. Range 2-6.',
+    zh: '最近多少组高点/低点必须构成干净的单调序列。默认2,这是验证过的推荐值:11.5笔/天、涉及28个币种(最大贡献币占27%)、逐币留一最不利+0.180(基线-0.034)、三个月增量全正、7月真实PnL四个trader全部改善,样本外增量+0.272(p=0.0012)。设3的取舍:7月真实PnL上它显著(p=0.0192,而n=2只有p=0.1442),但开仓频率降到4.5笔/天且单个币种(TON)贡献55%。设4样本会塌到不可用。范围2-6。',
+    en: 'How many recent swing highs/lows must form a clean monotonic sequence. Default 2, the validated recommendation: 11.5 entries/day across 28 coins (top contributor 27%), leave-one-coin-out worst case +0.180 against a -0.034 baseline, all 3 months positive, all 4 traders improved on real July PnL, out-of-sample increment +0.272 (p=0.0012). The trade-off for 3: it IS significant on real July PnL (p=0.0192, where 2 reaches only p=0.1442) but drops to 4.5 entries/day and leans 55% on one coin (TON). 4 collapses the sample. Range 2-6.',
   },
   structuralMinBlockingPct: {
     zh: '前方阻挡位最小距离%',
     en: 'Min blocking-level distance %',
   },
   structuralMinBlockingPctDesc: {
-    zh: '开仓方向前方最近的【实算】摆动阻挡位至少要有这么远(占入场价百分比)。默认0.05,填0表示只检查方向不检查距离。这是次要判据:按0.05步长精调后可以确认,收益几乎全部来自方向检查本身,此项只有微弱增量(0→0.05在7月真实PnL上是+62.85→+62.97)。调高会让均值看起来更好(0.6可达+0.923),但月度增量会转负、收益集中到单个trader,过不了稳健性筛查,所以不作为默认值。',
-    en: 'The nearest COMPUTED swing pivot ahead must be at least this far away (percent of entry). Default 0.05; set 0 to check direction only. Secondary criterion: after tuning in 0.05 steps it is clear the direction check carries nearly all of the edge and this adds little (0 → 0.05 moves real July PnL +62.85 → +62.97). Raising it makes the mean look better (0.6 reaches +0.923) but monthly increments turn negative and the gain concentrates in one trader, so it fails the robustness screens and is not the default.',
+    zh: '开仓方向前方最近的【实算】摆动阻挡位至少要有这么远(占入场价百分比)。【默认0,即只检查方向不检查距离,这是刻意的】。曾按0.05步长扫参选出0.05,复核后被否决:它比0好的那点(7月真实PnL +62.97 vs +62.85,121笔)是噪音,却换来「参数是调出来的」这个真实弱点;更关键的是样本外验证里调参格点会退化(0.05:样本内+0.392→样本外+0.323),而0不退化(+0.289→+0.321)。收益全部来自方向检查本身。调高会让均值看起来更好(0.6可达+0.923)但过不了月度与逐trader筛查。任何非0值都应视为未验证。',
+    en: 'The nearest COMPUTED swing pivot ahead must be at least this far away (percent of entry). DEFAULT 0 = direction check only, and that is deliberate. A 0.05-step sweep picked 0.05 and the pick was rejected on review: it beats 0 by +62.97 vs +62.85 on 121 trades of real July PnL, which is noise, while buying a real weakness — the value is tuned. More decisively, the tuned cells DEGRADE out-of-sample (0.05: in-sample +0.392 → out-of-sample +0.323) while 0 holds (+0.289 → +0.321). The direction check carries the whole effect. Higher values look better on mean (0.6 reaches +0.923) but fail the monthly and per-trader screens. Treat any non-zero value as unvalidated.',
   },
   structuralAuditOnly: {
     zh: '仅观察不拦截',

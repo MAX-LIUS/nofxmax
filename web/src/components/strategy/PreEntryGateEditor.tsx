@@ -1240,7 +1240,7 @@ export function PreEntryGateEditor({
             <EntryGateInput
               label={ts(preEntryGate.structuralSwingCount, language)}
               value={
-                config.entry_structure?.entry_gate?.structural_swing_count ?? 3
+                config.entry_structure?.entry_gate?.structural_swing_count ?? 2
               }
               step={1}
               min={2}
@@ -1260,7 +1260,7 @@ export function PreEntryGateEditor({
               label={ts(preEntryGate.structuralMinBlockingPct, language)}
               value={
                 config.entry_structure?.entry_gate
-                  ?.structural_min_blocking_pct ?? 0.05
+                  ?.structural_min_blocking_pct ?? 0
               }
               // 0.05 步长: 精调就是按 0.05 走的, 0.1 步会跳过实测最优值
               step={0.05}

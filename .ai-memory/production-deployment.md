@@ -1,5 +1,40 @@
 # Production Deployment - Critical Information
 
+## 2026-07-31 Deploy: HH/HL 结构闸门上线 + 窗口缺陷修复 (pid 345250)
+备份 `/opt/webstack/nofx/nofx.bak-20260731-030515` (md5 `abca7a86df493492d5082b67209980a4`),
+配置备份 `/tmp/cfg_backup_20260731-030515/`。新二进制 md5 `934a97bd357b2fccde92e14dbfa879e9`。
+`MainPID=345250`, `NRestarts=0`, `active`, 4 traders loaded, health 200 @9ms。
+
+**只对 claude-ct30 + GPT-ct50 开启**（`structural_alignment=true, lb=3, n=2, pct=0.0`，
+强制模式非审计）。Claude15 **必须排除**——结构效应在 15m 上**反向**；BN 未开。
+
+上线即刻验证（11:22:10 CST）：
+```
+🚫 Entry gate blocked UNIUSDT open_short: [structural_fit] ...
+   | also failed: structural_alignment_missing {tf=1h dir=0 want=-1 bars=21 lb=3 n=2}
+```
+11:22:37 第二条**只有** `✗ structural_alignment_missing` 一项失败，是最干净的证据。
+
+### ⚠️ 但 `bars=21` 暴露了一个真缺陷，当天即修
+闸门读的决策上下文 K 线是**按 `primary_count` 为 AI prompt 裁剪过的**。
+GPT-ct50 `primary_count=22` → 闸门只看到 21 根。按该窗口重跑回测：
+**放行率 7.7%、增量 +0.160、p=0.1522 —— 闸门在 GPT-ct50 上等于无效**，
+且 92.3% 的拦截是「凑不齐摆动点」而非「结构不对」。claude-ct30（29 根）反而正常
+（+0.309, p=0.0002）。详见 `entry-structure-gate-backtest.md`。
+
+修复：`structuralBars()` 在上下文 < 30 根时自取 120 根（60s 缓存）。
+**取数失败弃权放行，绝不当拦截**（执行路径）；**只取 primary timeframe**，
+不学 shadow gate 的跨周期兜底（15m 效应反向）。
+
+回滚：`systemctl stop nofx` → `cp nofx.bak-20260731-030515 nofx` → 恢复
+`/tmp/cfg_backup_20260731-030515/` 的策略配置 → `systemctl start nofx`。
+若只想关闸门而不回滚二进制，把两个策略的 `structural_alignment` 置 false 即可
+（配置项独立，`json_set` 直改 DB 有先例）。
+
+**未修的更大缺口**：`rr_below_min` 用 AI 自报失效位算 RR，而实际执行的止损有
+`floor_atr_mul=1.5` 硬地板，实测宽 2.9~4.3 倍。按真实止损重算，min_rr=1.5 通过率
+93.7% → 24.5%。影响面过大，**必须先回测**，见 `entry-gate-ai-selfreport-audit.md`。
+
 ## 2026-07-29 Deploy: 超额敞口收敛 v1.17.3 (pid 84853, commit ba2a2e9)
 备份 `/opt/webstack/nofx/nofx.bak-20260729-175747` (md5 921f4a0b04e7bd96d824949719fe5430),
 新二进制 md5 `17f3abfb83cd8ff7935b6d03a62d2721`。构建 `go build -o /tmp/nofx_v1173 .`。

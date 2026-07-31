@@ -32,38 +32,41 @@ type EntryGateCheck struct {
 
 // EntryGateResult is the consolidated outcome of the 3-stage gate pipeline.
 type EntryGateResult struct {
-	Allowed       bool             `json:"allowed"`
-	AuditOnly     bool             `json:"audit_only,omitempty"`
-	Stage         EntryGateStage   `json:"rejected_stage,omitempty"`
-	BlockedBy     string           `json:"blocked_by,omitempty"`
-	BlockReason   string           `json:"block_reason,omitempty"`
-	Checks        []EntryGateCheck `json:"checks"`
-	FailedCodes   []string         `json:"failed_codes,omitempty"`
-	EnforcedCodes []string         `json:"enforced_codes,omitempty"`
-	Regime        string           `json:"regime,omitempty"`
-	SystemRegime  string           `json:"system_regime,omitempty"`
-	ATR14Pct      float64          `json:"atr14_pct,omitempty"`
-	FundingRate   float64          `json:"funding_rate,omitempty"`
-	EffectiveRR   float64          `json:"effective_rr,omitempty"`
-	Score         int              `json:"score"`
-	SizeMultiplier float64         `json:"size_multiplier"`
+	Allowed        bool             `json:"allowed"`
+	AuditOnly      bool             `json:"audit_only,omitempty"`
+	Stage          EntryGateStage   `json:"rejected_stage,omitempty"`
+	BlockedBy      string           `json:"blocked_by,omitempty"`
+	BlockReason    string           `json:"block_reason,omitempty"`
+	Checks         []EntryGateCheck `json:"checks"`
+	FailedCodes    []string         `json:"failed_codes,omitempty"`
+	EnforcedCodes  []string         `json:"enforced_codes,omitempty"`
+	Regime         string           `json:"regime,omitempty"`
+	SystemRegime   string           `json:"system_regime,omitempty"`
+	ATR14Pct       float64          `json:"atr14_pct,omitempty"`
+	FundingRate    float64          `json:"funding_rate,omitempty"`
+	EffectiveRR    float64          `json:"effective_rr,omitempty"`
+	Score          int              `json:"score"`
+	SizeMultiplier float64          `json:"size_multiplier"`
 }
 
 // entryGateInput collects all inputs needed for gate evaluation.
 type entryGateInput struct {
-	Decision             *kernel.Decision
-	MarketData           *market.Data
-	StrategyConfig       *store.StrategyConfig
-	PolicyMode           store.StrategyControlPolicyMode
-	MinRR                float64
-	MinConfidence        int
-	ConstraintSnap       *ExecutionConstraintsSnapshot
-	ProtectionAlign      *store.DecisionActionProtectionAlignment
+	Decision               *kernel.Decision
+	MarketData             *market.Data
+	StrategyConfig         *store.StrategyConfig
+	PolicyMode             store.StrategyControlPolicyMode
+	MinRR                  float64
+	MinConfidence          int
+	ConstraintSnap         *ExecutionConstraintsSnapshot
+	ProtectionAlign        *store.DecisionActionProtectionAlignment
 	LastSameDirectionTrade *store.RecentTrade
 	// RecentCloseStats is the trader's own finished-close toxicity in the trailing
 	// throttle window (causal: only closes before this entry). nil when unavailable.
-	RecentCloseStats     *store.RecentCloseStats
-	ChainOfThought       string
+	RecentCloseStats *store.RecentCloseStats
+	ChainOfThought   string
+	// Exchange is the venue used to self-fetch klines when the decision context
+	// is too thin for the structural check. Empty falls back to okx.
+	Exchange string
 }
 
 // evaluateEntryGate runs the 3-stage entry gate pipeline.
@@ -802,12 +805,17 @@ func evaluateStructuralFitGate(input entryGateInput) []EntryGateCheck {
 	if input.StrategyConfig != nil {
 		gate := input.StrategyConfig.EntryStructure.EntryGate.WithDefaults()
 		if gate.StructuralAlignmentEnabled() {
-			bars, tf := primaryTFClosedBars(input.StrategyConfig, data)
+			// Self-fetches a longer series when the decision context is thinner
+			// than the window the rule was validated on. Do NOT swap this back to
+			// primaryTFClosedBars: the context is trimmed to PrimaryCount for the
+			// AI prompt, and at 21 closed bars this check measurably degrades to
+			// noise (see structuralMinBars for the measured numbers).
+			bars, tf := structuralBars(input.StrategyConfig, data, d.Symbol, input.Exchange)
 			lb := gate.StructuralPivotLookback
 			n := gate.StructuralSwingCount
-			// Need enough closed bars for pivots to exist at all; below this the
-			// check abstains rather than blocking on missing data.
-			if len(bars) >= 2*lb+2 {
+			// Abstain rather than block when the series is shorter than the
+			// validated window, or when the self-fetch failed.
+			if len(bars) >= structuralMinBars && len(bars) >= 2*lb+2 {
 				isLong := strings.Contains(strings.ToLower(d.Action), "long")
 				want := 1
 				if !isLong {
@@ -1569,9 +1577,9 @@ func evaluateCoinMomentumGate(action string, data *market.Data, cfg store.Regime
 		if scale > 1 {
 			scale = 1
 		}
-		staleChg1h *= scale + 0.25  // 1h: ×0.5, 4h: ×0.31
-		staleChg4h *= scale + 0.25  // same
-		counterChg1h *= 2 - scale   // 1h: ×1.75, 4h: ×1.94
+		staleChg1h *= scale + 0.25 // 1h: ×0.5, 4h: ×0.31
+		staleChg4h *= scale + 0.25 // same
+		counterChg1h *= 2 - scale  // 1h: ×1.75, 4h: ×1.94
 		// Exhausted: larger TF means 4h change covers fewer bars, normal
 		// trending moves look bigger. Widen proportionally.
 		if isMajor {
@@ -1703,7 +1711,7 @@ func computeChg1hFromLowerTF(data *market.Data) float64 {
 	// Try progressively coarser timeframes; pick the finest available
 	// that has enough bars to cover 1 hour.
 	type candidate struct {
-		tf       string
+		tf        string
 		barsFor1h int
 	}
 	candidates := []candidate{

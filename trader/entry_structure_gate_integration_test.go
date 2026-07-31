@@ -2,6 +2,7 @@ package trader
 
 import (
 	"testing"
+	"time"
 
 	"nofx/kernel"
 	"nofx/market"
@@ -156,6 +157,84 @@ func TestStructuralGate_InsufficientBarsAbstains(t *testing.T) {
 	checks := evaluateStructuralFitGate(in)
 	if c := findCheck(checks, "structural_alignment_missing"); c != nil {
 		t.Fatal("must abstain (not block) when there are too few closed bars")
+	}
+}
+
+// REGRESSION GUARD for the 2026-07-31 production defect: the gate read the
+// decision context, which is trimmed to PrimaryCount for the AI prompt. At
+// GPT-ct50's primary_count=22 (21 closed bars) the rule degrades to noise
+// (+0.160, p=0.15) and blocks 92% of entries for having too few VISIBLE pivots.
+// A context shorter than the validated window must abstain, not block.
+//
+// The cache is pre-seeded with an empty entry so the self-fetch is not attempted:
+// this asserts the abstain semantics without a network call.
+func TestStructuralGate_ThinContextAbstainsInsteadOfBlocking(t *testing.T) {
+	full := zigzag(6, 150, -5, 4) // downtrend
+	if len(full) < structuralMinBars {
+		t.Fatalf("fixture too short: %d", len(full))
+	}
+	// A counter-trend LONG into a downtrend: with the full window this BLOCKS.
+	in := mkStructInput("open_long", full[len(full)-1].Close, full, nil)
+	in.Decision.Symbol = "TESTTHINUSDT"
+	if c := findCheck(evaluateStructuralFitGate(in), "structural_alignment_missing"); c == nil {
+		t.Fatal("precondition failed: full window must block a counter-trend long")
+	}
+
+	// Same entry, but the context is trimmed the way PrimaryCount trims it.
+	thin := full[len(full)-21:]
+	in2 := mkStructInput("open_long", thin[len(thin)-1].Close, thin, nil)
+	in2.Decision.Symbol = "TESTTHINUSDT"
+	in2.Exchange = "okx"
+	key := "TESTTHINUSDT|1h|okx"
+	structuralBarsCache.Store(key, &structuralBarsCacheEntry{updatedAt: time.Now().UTC()})
+	defer structuralBarsCache.Delete(key)
+
+	if c := findCheck(evaluateStructuralFitGate(in2), "structural_alignment_missing"); c != nil {
+		t.Fatalf("thin context must abstain, not block; got %s", c.Values)
+	}
+}
+
+// A context that already carries enough closed bars must be used as-is, with no
+// self-fetch. Proven by using a symbol whose cache entry says "abstain": if the
+// code consulted the cache/fetch path at all, the check would not fire.
+func TestStructuralBars_SufficientContextSkipsFetch(t *testing.T) {
+	full := zigzag(6, 150, -5, 4)
+	in := mkStructInput("open_long", full[len(full)-1].Close, full, nil)
+	in.Decision.Symbol = "TESTSKIPUSDT"
+	in.Exchange = "okx"
+	key := "TESTSKIPUSDT|1h|okx"
+	structuralBarsCache.Store(key, &structuralBarsCacheEntry{updatedAt: time.Now().UTC()})
+	defer structuralBarsCache.Delete(key)
+
+	if c := findCheck(evaluateStructuralFitGate(in), "structural_alignment_missing"); c == nil {
+		t.Fatal("sufficient in-context bars must be used directly, without consulting the fetch path")
+	}
+}
+
+// The cached-abstain entry must not be mistaken for a usable series.
+func TestStructuralBars_CachedAbstainStaysAbstain(t *testing.T) {
+	sc := &store.StrategyConfig{}
+	sc.Indicators.Klines.PrimaryTimeframe = "1h"
+	key := "TESTCACHEUSDT|1h|okx"
+	structuralBarsCache.Store(key, &structuralBarsCacheEntry{updatedAt: time.Now().UTC()})
+	defer structuralBarsCache.Delete(key)
+
+	bars, tf := structuralBars(sc, &market.Data{}, "TESTCACHEUSDT", "okx")
+	if bars != nil {
+		t.Fatalf("cached abstain must return nil bars, got %d", len(bars))
+	}
+	if tf != "1h" {
+		t.Fatalf("timeframe must still resolve for logging, got %q", tf)
+	}
+}
+
+// No symbol → cannot self-fetch → abstain. Guards the execution path against a
+// failed fetch turning into a blocked trade.
+func TestStructuralBars_NoSymbolAbstains(t *testing.T) {
+	sc := &store.StrategyConfig{}
+	sc.Indicators.Klines.PrimaryTimeframe = "1h"
+	if bars, _ := structuralBars(sc, &market.Data{}, "", "okx"); bars != nil {
+		t.Fatalf("must abstain without a symbol, got %d bars", len(bars))
 	}
 }
 

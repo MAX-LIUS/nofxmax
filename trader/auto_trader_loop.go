@@ -511,6 +511,12 @@ func (at *AutoTrader) runCycle() error {
 				}
 			}
 		}
+		// Same venue-resolution order as the shadow gate below: the strategy's
+		// explicit coin-source exchange wins over the trader's own venue.
+		gateExchange := at.exchange
+		if at.config.StrategyConfig != nil && at.config.StrategyConfig.CoinSource.ExchangeSource != "" {
+			gateExchange = at.config.StrategyConfig.CoinSource.ExchangeSource
+		}
 		gateResult := evaluateEntryGate(entryGateInput{
 			Decision:               &d,
 			MarketData:             ctx.MarketDataMap[d.Symbol],
@@ -523,6 +529,7 @@ func (at *AutoTrader) runCycle() error {
 			LastSameDirectionTrade: lastSameDirTrade,
 			RecentCloseStats:       recentCloseStats,
 			ChainOfThought:         record.CoTTrace,
+			Exchange:               gateExchange,
 		})
 		gateResult.Regime = classifyProtectionRegime(ctx.MarketDataMap[d.Symbol])
 		if ctx.MarketDataMap[d.Symbol] != nil {

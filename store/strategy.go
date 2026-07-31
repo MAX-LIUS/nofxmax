@@ -325,24 +325,29 @@ type EntryGateConfig struct {
 	// pct 0 to 0.35 is significant.
 	StructuralPivotLookback int `json:"structural_pivot_lookback,omitempty"`
 	// StructuralSwingCount is how many of the most recent swing highs/lows must
-	// form a clean monotonic sequence. Default 3.
-	// n=2 admits ~2.5× more entries (8.3 vs 3.3/day) at roughly half the edge
-	// (+0.233 vs +0.323 mean) and, on real July PnL, only +34.69 vs +62.97.
-	// n=4 collapses the sample below usable size. Raising n past 3 pushes the
-	// remaining gain into a single trader.
+	// form a clean monotonic sequence. Default 2.
+	// n=2 is the recommendation: 11.5 entries/day (n=3 is 4.5), 28 coins with the
+	// top contributor at 27% (n=3 concentrates 55% in one coin), leave-one-coin-out
+	// worst case +0.180 against a -0.034 baseline, all 3 months positive, and all
+	// 4 traders improved on real July PnL. Out-of-sample increment +0.272, p=0.0012.
+	// n=3 is the alternative: it IS significant on real July PnL (p=0.0192, where
+	// n=2 reaches only p=0.1442) but costs 80% of entry frequency and leans on one
+	// coin. n=4 collapses the sample below usable size.
 	StructuralSwingCount int `json:"structural_swing_count,omitempty"`
 	// StructuralMinBlockingPct requires the nearest COMPUTED blocking pivot in
-	// the trade's path to be at least this far away (percent of entry). Default
-	// 0.05. Explicit 0 checks direction only.
-	// Tuned in 0.05 steps: the direction check carries almost all of the edge, and
-	// this sub-check adds little (pct 0 → 0.05 moves real July PnL +62.85 → +62.97).
-	// Higher thresholds LOOK better on mean (pct 0.6 reaches +0.923) but fail the
-	// robustness screens — monthly increments go negative and the gain concentrates
-	// in one trader — so they are not the default. Treat this as secondary.
+	// the trade's path to be at least this far away (percent of entry).
+	// DEFAULT 0 = direction check only, and that is deliberate.
 	//
-	// Pointer, NOT float64+omitempty: 0 is a legal user value ("direction only"),
-	// so a plain float64 would make "unset" and "explicit 0" indistinguishable
-	// and silently disable the sub-check while the UI advertised 0.5. That is
+	// A 0.05-step sweep picked 0.05, and that pick was REJECTED on review: it beats
+	// pct=0 by +62.97 vs +62.85 on 121 trades of real July PnL, which is noise, while
+	// buying a real weakness — the value is tuned. Worse, out-of-sample the tuned
+	// cells DEGRADE (pct=0.05: in-sample +0.392 → out-of-sample +0.323) whereas
+	// pct=0 holds (+0.289 → +0.321). The direction check carries the whole effect.
+	// Higher thresholds look better on mean (0.6 reaches +0.923) but fail the
+	// monthly and per-trader screens. Treat any non-zero value as unvalidated.
+	//
+	// Pointer, NOT float64+omitempty: kept even though the default is now 0, because
+	// the two must stay distinguishable if the default ever moves again — that is
 	// exactly how TrailMinProfitATR shipped broken (v1.17.5). Read via
 	// StructuralMinBlockingPctValue().
 	StructuralMinBlockingPct *float64 `json:"structural_min_blocking_pct,omitempty"`
@@ -458,7 +463,7 @@ func (c EntryGateConfig) WithDefaults() EntryGateConfig {
 		c.StructuralPivotLookback = 10
 	}
 	if c.StructuralSwingCount < 2 {
-		c.StructuralSwingCount = 3
+		c.StructuralSwingCount = structuralSwingCountDefault
 	} else if c.StructuralSwingCount > 6 {
 		c.StructuralSwingCount = 6
 	}
@@ -472,13 +477,19 @@ func (c EntryGateConfig) WithDefaults() EntryGateConfig {
 	return c
 }
 
-// structuralMinBlockingPctDefault is the tuned blocking-distance threshold.
-// Kept as a named constant so WithDefaults and StructuralMinBlockingPctValue
-// cannot drift apart — they previously carried the literal twice.
-const structuralMinBlockingPctDefault = 0.05
+// Structural gate defaults, as named constants so WithDefaults and the accessors
+// cannot drift apart — the blocking-pct literal was previously written twice.
+//
+// 0 for the blocking distance means "direction check only". That is the validated
+// configuration: it is a single hypothesis with no grid search behind it, and it is
+// the only variant whose out-of-sample increment does not degrade.
+const (
+	structuralSwingCountDefault     = 2
+	structuralMinBlockingPctDefault = 0.0
+)
 
 // StructuralMinBlockingPctValue reads the blocking-distance threshold.
-// nil (unset) → 0.05; explicit 0 → 0 (direction check only); negative → 0.
+// nil (unset) → 0 (direction check only); explicit 0 → 0; negative → 0.
 func (c EntryGateConfig) StructuralMinBlockingPctValue() float64 {
 	if c.StructuralMinBlockingPct == nil {
 		return structuralMinBlockingPctDefault
@@ -1518,8 +1529,8 @@ type RiskControlConfig struct {
 	// equity account with a wide stop = -24 USDT disaster" pattern. When the reverse-
 	// computed size falls below the executable floor, the open is SKIPPED (not forced).
 	// 0/unset or disabled = keep the AI-provided position_size_usd (legacy behavior).
-	RiskSizingEnabled          bool    `json:"risk_sizing_enabled,omitempty"`
-	RiskPerTradePctOfEquity    float64 `json:"risk_per_trade_pct_of_equity,omitempty"` // e.g. 3.0 = risk 3% of equity per trade
+	RiskSizingEnabled       bool    `json:"risk_sizing_enabled,omitempty"`
+	RiskPerTradePctOfEquity float64 `json:"risk_per_trade_pct_of_equity,omitempty"` // e.g. 3.0 = risk 3% of equity per trade
 
 	// SessionPreOpenBlockEnabled (session management): forbid OPENING new positions in
 	// tokenized stock/commodity symbols during the pre-open window before their

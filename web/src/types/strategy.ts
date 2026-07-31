@@ -144,13 +144,16 @@ export interface EntryGateConfig {
   // (best cell p=0.08), lb=4 is weaker, every lb=3 cell 0-0.35 is significant.
   structural_pivot_lookback?: number
   // How many recent swing highs/lows must form a clean monotonic sequence.
-  // Default 3. Setting 2 gives ~2.5× the entries at half the edge (+0.233 vs
-  // +0.323 mean); 4 collapses the sample. Range 2-6.
+  // Default 2, the validated recommendation: 11.5 entries/day, 28 coins, all 4
+  // traders improved on real July PnL, out-of-sample increment +0.272 (p=0.0012).
+  // 3 is significant on real July PnL (p=0.0192 vs 0.1442) but costs 80% of the
+  // frequency and leans 55% on one coin. 4 collapses the sample. Range 2-6.
   structural_swing_count?: number
   // Minimum distance (% of entry) to the nearest COMPUTED blocking pivot ahead.
-  // Unset → 0.05. Explicit 0 → direction check only. Secondary: 0.05-step tuning
-  // showed the direction check carries nearly all the edge; higher thresholds score
-  // a better mean but fail the monthly and per-trader robustness screens.
+  // DEFAULT 0 = direction check only, deliberately. A 0.05-step sweep picked 0.05
+  // and that pick was rejected: it beats 0 by noise on real PnL while being tuned,
+  // and the tuned cells DEGRADE out-of-sample (+0.392 → +0.323) while 0 holds
+  // (+0.289 → +0.321). Treat any non-zero value as unvalidated.
   structural_min_blocking_pct?: number
   // Log what the gate WOULD block without blocking it. Deducts no score, so
   // observation cannot quietly shrink position size.

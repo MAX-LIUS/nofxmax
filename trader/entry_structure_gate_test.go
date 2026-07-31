@@ -186,14 +186,16 @@ func TestStructuralGateDefaults_OffWithConcreteParams(t *testing.T) {
 	if c.StructuralPivotLookback != 3 {
 		t.Fatalf("pivot lookback default want 3, got %d", c.StructuralPivotLookback)
 	}
-	if c.StructuralSwingCount != 3 {
-		t.Fatalf("swing count default want 3, got %d", c.StructuralSwingCount)
+	// n=2 is the validated recommendation: 11.5 entries/day, 28 coins, all 4 traders
+	// improved on real July PnL, out-of-sample increment +0.272 (p=0.0012).
+	if c.StructuralSwingCount != 2 {
+		t.Fatalf("swing count default want 2, got %d", c.StructuralSwingCount)
 	}
-	// 0.05 is the tuned value: in 0.05-step sweeps the direction check carried
-	// nearly all of the edge and higher thresholds failed the monthly/per-trader
-	// robustness screens despite scoring a better mean.
-	if c.StructuralMinBlockingPctValue() != 0.05 {
-		t.Fatalf("min blocking pct default want 0.05, got %.3f", c.StructuralMinBlockingPctValue())
+	// 0 = direction check only, deliberately. A 0.05-step sweep picked 0.05 and that
+	// pick was rejected on review: it beats 0 by noise on real PnL while being a
+	// tuned value, and the tuned cells DEGRADE out-of-sample while pct=0 holds.
+	if c.StructuralMinBlockingPctValue() != 0 {
+		t.Fatalf("min blocking pct default want 0 (direction only), got %.3f", c.StructuralMinBlockingPctValue())
 	}
 	if c.StructuralAuditOnlyEnabled() {
 		t.Fatal("audit-only must default false")
@@ -204,16 +206,25 @@ func TestStructuralGateDefaults_OffWithConcreteParams(t *testing.T) {
 // survive normalisation — the same unset-vs-explicit-0 trap that made
 // TrailMinProfitATR silently disable itself in production (v1.17.5).
 func TestStructuralGateDefaults_ExplicitZeroBlockingPctSurvives(t *testing.T) {
-	// nil (field absent from JSON) must take the default.
+	// nil (field absent from JSON) takes the default, which is now 0 = direction only.
 	c := store.EntryGateConfig{}.WithDefaults()
-	if c.StructuralMinBlockingPctValue() != 0.05 {
-		t.Fatalf("unset must take the 0.05 default, got %.3f", c.StructuralMinBlockingPctValue())
+	if c.StructuralMinBlockingPctValue() != 0 {
+		t.Fatalf("unset must take the 0 default, got %.3f", c.StructuralMinBlockingPctValue())
 	}
-	// Explicit 0 means "direction only" and must NOT be rewritten to the default.
+	// Explicit 0 means "direction only" and must survive normalisation.
 	zero := 0.0
 	c0 := store.EntryGateConfig{StructuralMinBlockingPct: &zero}.WithDefaults()
 	if c0.StructuralMinBlockingPctValue() != 0 {
 		t.Fatalf("explicit 0 must survive as 0 (direction-only), got %.3f", c0.StructuralMinBlockingPctValue())
+	}
+	// An explicit positive value must NOT be reset to the default. With the default
+	// now 0, this is what still gives the pointer its purpose: if the default ever
+	// moves off 0 again, unset-vs-explicit must stay distinguishable (the
+	// TrailMinProfitATR v1.17.5 trap).
+	pos := 0.35
+	cp := store.EntryGateConfig{StructuralMinBlockingPct: &pos}.WithDefaults()
+	if cp.StructuralMinBlockingPctValue() != 0.35 {
+		t.Fatalf("explicit 0.35 must survive, got %.3f", cp.StructuralMinBlockingPctValue())
 	}
 	// Negative clamps to 0.
 	neg := -1.0
