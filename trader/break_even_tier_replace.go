@@ -213,3 +213,45 @@ func (at *AutoTrader) markBreakEvenRecordReplaced(symbol, side, stage, orderID s
 		return
 	}
 }
+
+// retireSuppressedBreakEvenTierRecord 退役"被抑制档位"遗留的 armed 记录。
+//
+// 为什么需要它:抑制逻辑上线**之前**,撞进容差带的两个档位都会把同一个 orderID 写成
+// armed(线上 ETHUSDT short 的 53 次翻转就是这么来的)。上线后被抑制的那一档不再写新
+// 记录,但它此前写下的那条 armed 记录还在账本里 —— 一张活着的单仍有两个主人,
+// supersedeConflictingOrderClaim 仍会被触发。所以抑制时必须顺手把它退役,让不变量
+// 在**存量状态**上也立刻成立,而不是等下一次挂单事件。
+//
+// 只动"本 trader、本仓位、break_even_stop、armed、且 fingerprint 的 stage 段等于被抑制
+// 档位"这一条记录。不撤任何交易所挂单 —— 被抑制档位从未挂出过属于自己的单,
+// 它认领的那张单是留存档位的,撤了就是撤掉在场保护。
+func (at *AutoTrader) retireSuppressedBreakEvenTierRecord(symbol, side, suppressedStage, winnerStage string) {
+	if at == nil || at.store == nil || suppressedStage == "" {
+		return
+	}
+	state, err := at.store.LoadDynamicProtectionState()
+	if err != nil || state == nil {
+		return
+	}
+	for key, record := range state.Records {
+		if record.TraderID != "" && record.TraderID != at.id {
+			continue
+		}
+		if record.ProtectionType != "break_even_stop" || record.Status != "armed" {
+			continue
+		}
+		if !strings.EqualFold(record.Symbol, symbol) || !strings.EqualFold(record.Side, side) {
+			continue
+		}
+		if breakEvenStageFromFingerprint(record.RuleFingerprint) != suppressedStage {
+			continue
+		}
+		record.Status = "superseded"
+		if err := at.store.SaveDynamicProtectionRecordByKey(key, record); err != nil {
+			logger.Warnf("⚠️ BE tier %s suppressed: retire stale armed record failed (%s %s): %v", suppressedStage, symbol, side, err)
+			continue
+		}
+		logger.Infof("🗂 Retired armed record of suppressed BE tier %s (%s %s) — order %s stays live and is owned by tier %s",
+			suppressedStage, symbol, side, record.ExchangeOrderID, winnerStage)
+	}
+}

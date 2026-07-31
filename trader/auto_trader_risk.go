@@ -3529,6 +3529,42 @@ func (at *AutoTrader) applyBreakEvenStops(symbol, side string, quantity, entryPr
 	var openOrdersErr error
 	openOrdersFetched := false
 
+	// 本轮已被某一档认领的 BE 挂单价 → 该档信息。用来守住"一张活着的保护单只能有
+	// 一个主人"这个不变量的**上游**:不是等两档都写进账本后再由 reconciler 去收敛,
+	// 而是根本不让第二档去认领同一张单。
+	//
+	// 为什么会有两档指向同一张单(2026-07-31 线上 ETHUSDT short 实况):
+	// matchingBreakEvenOrderID 只按价格匹配,容差 protectionPriceTolerancePct=0.2%。
+	// ATR 解析后 BE1 offset=0.3000、BE2 offset=0.4498,两档挂单价 1862.1467/1859.3489
+	// 相对间距只有 0.1503% < 0.2%,于是 BE2 匹配到了 BE1 那张单:
+	//   - BE2 认为"本档已在场",从不挂自己的单(这一点修复前后一致,见下);
+	//   - 但两档都把同一个 orderID 写成 armed,supersedeConflictingOrderClaim 每轮
+	//     把对方标 superseded,双方轮流成为"新写入的那条",规则不构成收敛 ——
+	//     22:06:49→22:11:09 翻转 53 次,只因仓位平掉才停。
+	//
+	// 危害不是"多一条记录":档位→单的解析会因此依赖谁先被读到,而 100% 全平档一旦
+	// 被误判成已执行,该档的保护就静默消失。
+	//
+	// 收敛规则:**先到者赢**。rules 已按 TriggerValue 升序排好,先到的就是低档位,
+	// 也正是交易所上那张单的真实挂单价所属档位 —— 账本因此与实物一致,而不是反过来
+	// 让账本记一个不存在的价格。被抑制的那一档不写记录、不挂单、不撤单,所以修复
+	// **不改变任何实物挂单行为**,只把账本从自相矛盾变成自洽。
+	//
+	// 只在"先到那档的数量确实覆盖得住本档"时才抑制。覆盖不住就不抑制 —— 那是真实的
+	// 覆盖不足,必须留在原路径上并打出来,而不是被这里悄悄吞掉。
+	claimedThisCycle := make([]claimedBETier, 0, len(rules))
+	// 返回 (先到档位, 是否应抑制本档)。判定本身是纯函数(findConflictingBETierClaim),
+	// 这里只负责把"撞价但覆盖不住"这一例外打出来 —— 它是真实的覆盖不足,不能静默。
+	findConflictingClaim := func(stage string, price, qty float64) (claimedBETier, bool) {
+		winner, decision := findConflictingBETierClaim(claimedThisCycle, price, qty)
+		if decision == beTierClaimUndercovered {
+			logger.Warnf("⚠️ BE tier %s (%s %s): price %.6f collides with tier %s @ %.6f (within %.2f%% tolerance) but that tier only covers %.8f of %.8f — NOT suppressing, this tier keeps its own path",
+				stage, symbol, side, price, winner.stage, winner.price, protectionPriceTolerancePct*100, winner.qty, qty)
+			return claimedBETier{}, false
+		}
+		return winner, decision == beTierClaimSuppress
+	}
+
 	for idx, rule := range rules {
 		if currentPnLPct < rule.TriggerValue {
 			continue
@@ -3561,6 +3597,17 @@ func (at *AutoTrader) applyBreakEvenStops(symbol, side string, quantity, entryPr
 
 		newBEPrice := calculateBreakEvenStopPrice(side, entryPrice, rule.OffsetPct)
 		if newBEPrice <= 0 {
+			continue
+		}
+
+		// 本档与已认领档位撞进价格容差带 → 不认领、不挂单、不撤单,直接跳过。
+		// 跳过的这一档在交易所上**本来也挂不出单**:matchingBreakEvenOrderID 会把兄弟档
+		// 那张单匹配成"本档已在场"。所以抑制不损失任何实物保护,只是不再往账本里写
+		// 第二个主人。价格拉开到容差带外后,本档下一轮会自然走回正常挂单路径(自愈)。
+		if winner, suppress := findConflictingClaim(stage, newBEPrice, ruleQty); suppress {
+			logger.Infof("🟠 BE tier %s suppressed (%s %s): its price %.6f is within %.2f%% of tier %s @ %.6f which already owns the live order — one live order must have exactly one owner; widen the tiers' offset_pct to give this tier its own order",
+				stage, symbol, side, newBEPrice, protectionPriceTolerancePct*100, winner.stage, winner.price)
+			at.retireSuppressedBreakEvenTierRecord(symbol, side, stage, winner.stage)
 			continue
 		}
 
@@ -3608,6 +3655,7 @@ func (at *AutoTrader) applyBreakEvenStops(symbol, side string, quantity, entryPr
 		if liveID, found := matchingBreakEvenOrderID(openOrders, positionSide, newBEPrice); found {
 			// Ensure armed state is persisted
 			at.persistDynamicProtectionRecordWithDetails(symbol, side, "break_even_stop", fmt.Sprintf("%.8f|%.8f|%.4f|%.4f|%s", entryPrice, quantity, rule.TriggerValue, rule.OffsetPct, stage), 0, "armed", liveID, newBEPrice, 0, ruleQty)
+			claimedThisCycle = append(claimedThisCycle, claimedBETier{stage: stage, price: newBEPrice, qty: ruleQty})
 			continue
 		}
 
@@ -3617,6 +3665,9 @@ func (at *AutoTrader) applyBreakEvenStops(symbol, side string, quantity, entryPr
 			logger.Warnf("❌ BE tier %s apply failed (%s %s): %v", stage, symbol, side, err)
 			continue
 		}
+		// 挂单成功(或 applyBreakEvenStop 内部认到了在场同价单)后本档已是这张单的主人,
+		// 登记进本轮认领表,后续更高档位撞进容差带时才知道该抑制谁。
+		claimedThisCycle = append(claimedThisCycle, claimedBETier{stage: stage, price: newBEPrice, qty: ruleQty})
 	}
 
 	// Set overall armed state if any tier was placed
@@ -3754,7 +3805,26 @@ func closeOrderSkipped(order map[string]interface{}) (bool, string) {
 	return false, ""
 }
 
+// closePositionByReason 关闭仓位。返回 nil 表示"没有出错",**不表示一定平掉了** ——
+// 交易所侧的 NO_POSITION/SKIPPED/POSITION_DUST 都被折叠成 nil(见 closeOrderSkipped)。
+// 需要区分"平掉了"和"跳过了"的调用方必须用 closePositionByReasonWithOutcome。
 func (at *AutoTrader) closePositionByReason(symbol, side string, quantity float64, closeReason string) error {
+	_, err := at.closePositionByReasonWithOutcome(symbol, side, quantity, closeReason)
+	return err
+}
+
+// closePositionByReasonWithOutcome 是 closePositionByReason 的可观测形式:除了 error,
+// 还回一个 executed 布尔 —— 交易所确实收下了平仓单才为 true。
+//
+// 为什么需要它(2026-07-30/31 线上):closeOrderSkipped 把 NO_POSITION 折叠成
+// (nil) 之后,调用方无法区分"平掉了"和"仓位早就没了、什么都没做"。于是 time-stop
+// 在 10 秒内触发两次,第二次撞上 NO_POSITION 却照样打出 `✅ Time-stop closed`
+// —— CLUSDT 与 ETHUSDT 各有一次。幂等性本身是好的(没有重复下单,2 条
+// NO_POSITION 警告与 2 次重复触发一一对应),坏的是日志在说一件没发生的事:
+// 事后按 `✅ Time-stop closed` 计数会把平仓次数数成 4 次而实际只有 2 次。
+//
+// 这个函数不改变任何下单行为,只把已有的 skip 事实回传给调用方。
+func (at *AutoTrader) closePositionByReasonWithOutcome(symbol, side string, quantity float64, closeReason string) (bool, error) {
 	type taggedCloser interface {
 		CloseLongTagged(symbol string, quantity float64, reasonTag string) (map[string]interface{}, error)
 		CloseShortTagged(symbol string, quantity float64, reasonTag string) (map[string]interface{}, error)
@@ -3772,11 +3842,11 @@ func (at *AutoTrader) closePositionByReason(symbol, side string, quantity float6
 			order, err = at.trader.CloseLong(symbol, quantity)
 		}
 		if err != nil {
-			return err
+			return false, err
 		}
 		if skipped, reason := closeOrderSkipped(order); skipped {
 			logger.Warnf("⚠️ Close long not executed (%s): %s — %v", symbol, reason, order["message"])
-			return nil
+			return false, nil
 		}
 		logger.Infof("✅ Close long position succeeded, order ID: %v", order["orderId"])
 		at.persistCloseReasonFromOrderResult(order, closeReason)
@@ -3792,20 +3862,20 @@ func (at *AutoTrader) closePositionByReason(symbol, side string, quantity float6
 			order, err = at.trader.CloseShort(symbol, quantity)
 		}
 		if err != nil {
-			return err
+			return false, err
 		}
 		if skipped, reason := closeOrderSkipped(order); skipped {
 			logger.Warnf("⚠️ Close short not executed (%s): %s — %v", symbol, reason, order["message"])
-			return nil
+			return false, nil
 		}
 		logger.Infof("✅ Close short position succeeded, order ID: %v", order["orderId"])
 		at.persistCloseReasonFromOrderResult(order, closeReason)
 		at.recordCloseIntentFromOrderResult(order, symbol, "SHORT", closeReason, quantity)
 	default:
-		return fmt.Errorf("unknown position direction: %s", side)
+		return false, fmt.Errorf("unknown position direction: %s", side)
 	}
 
-	return nil
+	return true, nil
 }
 
 func (at *AutoTrader) persistCloseReasonFromOrderResult(order map[string]interface{}, closeReason string) {

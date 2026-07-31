@@ -127,6 +127,32 @@ func evaluateProtectionOwnership(openOrders []OpenOrder, positionSide string, pl
 	return state
 }
 
+// protectionCoverageComplete 是"多余单已处理完之后,本仓位的保护覆盖是否完整"的**唯一**判据。
+//
+// 为什么必须收成一个函数:reconciler 里有两条分支会把 state 从 degraded 翻回
+// protected/verified —— 容忍分支(多一张止损单只是多一层保险)和 reclaim 分支
+// (多余单其实是本仓位的活 DD 档,已被认领回来)。两条分支原本各自内联了一份同样的
+// 布尔式,注释写着"同源"其实并不同源;任何一天有人只改一处,两条路就会对同一个仓位
+// 给出不同结论,而这类分歧在日志上表现为"verified 时有时无",极难查。
+//
+// 判据(四项全中才算完整):
+//   - 有止损主人,且止损不缺 —— 这是底线,缺止损绝不允许标 verified;
+//   - 没有多余止损单、没有多余止盈单 —— 还有没归属的单说明清理没做完;
+//   - 计划若要求止盈主人,则止盈主人必须在场 —— SKHYNIXUSDT 那 58 轮
+//     "missing profit owner" 不能因为止损单被认领就被标成已验证。
+func protectionCoverageComplete(ownership ProtectionOwnershipState, plan *ProtectionPlan, missingSL bool, unexpectedStops, unexpectedTPs int) bool {
+	if missingSL || ownership.StopOwner == "" {
+		return false
+	}
+	if unexpectedStops != 0 || unexpectedTPs != 0 {
+		return false
+	}
+	if planRequiresProfitOwner(plan) && ownership.ProfitOwner == "" {
+		return false
+	}
+	return true
+}
+
 func planRequiresProfitOwner(plan *ProtectionPlan) bool {
 	if plan == nil {
 		return false

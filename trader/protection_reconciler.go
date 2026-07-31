@@ -338,7 +338,9 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 			unexpectedStops = 0
 			ownership.UnexpectedStops = 0
 			ownership.Reasons = removeUnexpectedProtectionReason(ownership.Reasons)
-			if ownership.StopOwner != "" && (!planRequiresProfitOwner(plan) || ownership.ProfitOwner != "") && ownership.UnexpectedProfits == 0 {
+			// 与 reclaim 分支共用同一判据(protectionCoverageComplete),不再各自内联一份 ——
+			// 此处 unexpectedStops 刚被容忍归零,unexpectedTPs 由本分支入口保证为 0。
+			if protectionCoverageComplete(ownership, plan, missingSL, unexpectedStops, unexpectedTPs) {
 				ownership.State = "protected"
 				ownership.Verified = true
 			}
@@ -405,6 +407,39 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 			}
 			if len(unexpectedIDs) == 0 {
 				logger.Infof("🛟 Protection reconciler: %s %s all 'unexpected' protection orders were reclaimed as live drawdown tiers — nothing to cancel", symbol, positionSide)
+				// 认领完成后必须把归属结论一并修正,否则这条 return 会带着
+				// ExchangeVerified=false 和空 Summary 回到调用方,打出
+				// "exchange protection not verified: no exchange protection ownership
+				// verified" —— 而此刻这些"多余"单已被认领成本仓位的活 DD 档,
+				// 止损覆盖是完整的(missingSL=false)。
+				//
+				// 这与上面 335 行容忍分支要修的是同一个顺序问题:322 行的注释说
+				// "容忍判决必须在 🧭 日志之前做完",但那次只修了容忍分支;reclaim
+				// 分支在 🧭 日志**下游**,所以它的修正结论既进不了那行日志,也没写回
+				// result。线上后果:BTCUSDT LONG 连续 1900 轮 state=degraded /
+				// verified=false,而 missingSL 全程 false、2 张"意外"单每轮都被认领
+				// 成合法 DD 跟踪单、撤单数 0 —— 保护一直在,只有账本和日志在说谎。
+				//
+				// 判据与容忍分支完全一致(同源,避免两处漂移):有止损主人、止损不缺、
+				// 计划若要求止盈主人则止盈主人在场、且没有多余止盈单。任一不满足就
+				// 保持原样返回 —— 例如 SKHYNIXUSDT 那 58 轮 missing profit owner,
+				// 不能因为止损单被认领就把它标成已验证。
+				ownership.UnexpectedStops = unexpectedStops
+				ownership.UnexpectedProfits = unexpectedTPs
+				if unexpectedStops == 0 && unexpectedTPs == 0 {
+					ownership.Reasons = removeUnexpectedProtectionReason(ownership.Reasons)
+				}
+				if protectionCoverageComplete(ownership, plan, missingSL, unexpectedStops, unexpectedTPs) {
+					ownership.State = "protected"
+					ownership.Verified = true
+					result.ExchangeVerified = true
+					logger.Infof("🧭 Protection ownership (post-reclaim): %s %s | state=%s verified=%t stopOwner=%s profitOwner=%s — all extra stops were reclaimed as live drawdown tiers, coverage is complete",
+						symbol, positionSide, ownership.State, ownership.Verified, ownership.StopOwner, ownership.ProfitOwner)
+				}
+				result.Summary = strings.Join(ownership.Reasons, "; ")
+				if result.Summary == "" {
+					result.Summary = "all extra protection orders reclaimed as live drawdown tiers"
+				}
 				return result, nil
 			}
 			// Coverage-complete fast path (fix 2026-06-22 churn): when every required
@@ -531,7 +566,20 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 	}
 	currentPnLPct := calculatePositionPnLPct(side, entryPrice, markPrice)
 
-	beRules := at.getActiveBreakEvenRules()
+	// BE 规则必须与回撤监控那一路(auto_trader_risk.go 的 BE apply)走**同一条解析管道**:
+	// ATR 单位解析 + r_multiple→profit_pct 换算。否则同一个档位会有两套 TriggerValue/
+	// OffsetPct,写进账本就是两条 drawdownRuleIdentity 不同的 armed 记录指向同一张实物单,
+	// 而 supersedeConflictingOrderClaim 的"新写入者胜"在两个 writer 交替写入时不构成收敛。
+	//
+	// 2026-07-31 线上 ETHUSDT short 实况:本函数用未解析的 1.5000|0.3000|BE1,回撤监控用
+	// ATR 解析后的 0.9638|0.3000|BE1,再叠加 BE2 的 1.6064|0.4498 —— 三种身份轮流认领
+	// 同一张 3791769934100062208_sl,22:06:49→22:11:09 翻转 53 次,直到仓位平掉才停。
+	// 账本自相矛盾的直接危害:档位→单的解析依赖谁先被读到,100% 全平档一旦被误判成
+	// 已执行,该档保护就静默消失。
+	beRules := at.getActiveBreakEvenRulesATR(symbol, side, entryPrice)
+	if len(beRules) > 0 {
+		beRules = resolveBreakEvenRulesForPosition(beRules, entryPrice, symbol, side, at)
+	}
 	fingerprintChanged := at.refreshBreakEvenFingerprint(symbol, side, entryPrice, quantity)
 	prevBreakEvenArmed := at.getBreakEvenState(symbol, side) == "armed"
 	if at.isBreakEvenSuppressedByRunner(symbol, side) {
@@ -684,8 +732,9 @@ func (at *AutoTrader) getPositionMarkPrice(symbol, side string) (float64, bool) 
 // 持仓接口要再过几秒才返回这条仓位。在这个窗口里,liveness gate 去查持仓会查不到,
 // 于是把一个刚开的、活着的仓位判成"已平",然后走 cleanupInactiveProtectionState ——
 // 那是**破坏性**的:撤掉刚挂好的保护单、清掉冻结 ATR/结构位。实测两次:
-//   2026-07-28 04:44 ETHUSDT(撤了 5 张 algo 单,3 秒后重挂,面板红灯一轮)
-//   2026-07-28 05:24 KAITOUSDT(同样路径)
+//
+//	2026-07-28 04:44 ETHUSDT(撤了 5 张 algo 单,3 秒后重挂,面板红灯一轮)
+//	2026-07-28 05:24 KAITOUSDT(同样路径)
 //
 // 关键区分:窗口内查不到持仓,含义是"还不知道",不是"已经平了"。所以宽限期内
 // 仍然跳过这一轮保护动作(下一轮 poll 会补,这是安全的),但**绝不做清理**。
@@ -1155,6 +1204,54 @@ func (at *AutoTrader) supersedeConflictingOrderClaim(record, current store.Dynam
 	if drawdownRuleIdentity(record.RuleFingerprint) == drawdownRuleIdentity(current.RuleFingerprint) &&
 		record.ProtectionType == current.ProtectionType {
 		return
+	}
+	// 幂等闸:两条记录只要有一条已经不是 armed,冲突就已经收敛过了 —— 不变量
+	// "一张活单只有一个 armed 主人"已经成立,不需要再写库、也不该再打日志。
+	// 没有这道闸,已收敛的状态每轮仍会重复落盘 + 重复打 WARN,读日志的人会以为
+	// 还在翻转(线上那 53 行里有相当一部分就是这种"已经定局却仍在喊"的噪音)。
+	if record.Status != "armed" || current.Status != "armed" {
+		return
+	}
+	// 保本档之间的跨档冲突(BE1 与 BE2 抢同一张 _sl)必须用**与写入顺序无关**的规则收敛,
+	// 否则两个 writer 交替调用本函数时,"current 胜"会让双方轮流被标 superseded —— 每轮
+	// 都"解决"一次,永不收敛(2026-07-31 ETHUSDT short 翻转 53 次的直接机制)。
+	//
+	// 判据:身份串字典序小者留。它只依赖两条记录自身,不依赖谁先被写,所以第一轮就定局。
+	// 为什么这样选是安全的:身份串首段是 TriggerValue,档位按触发线升序排,字典序小者就是
+	// 低档位 —— 也正是这张实物单被挂出时所属的档位(rules 按 TriggerValue 升序遍历,
+	// 先到者才挂得出单)。账本因此指向实物单真实的挂单价,而不是一个交易所上不存在的价。
+	//
+	// 为什么只限 break_even_stop、且只限 stage 不同:
+	//   - 只有保本档存在两个 writer(monitor 的 applyBreakEvenStops 与 reconciler 的
+	//     所有权核对)交替写同一张单,才需要顺序无关的判据;
+	//   - stage 相同却身份串不同,说明是同一档的**重新解析**(ATR 口径变了),那是"刚发生
+	//     的事实",必须让 current 胜,否则账本会被钉死在旧口径上;
+	//   - 回撤/移动止损那一路(native_trailing、managed_drawdown)只有 arm 一个 writer,
+	//     reclaim 写的是未解析 ATR 的陈旧解释,arm 用已解析规则重新认领同一档才是正确结果
+	//     —— 那里必须保持原"current 胜"语义,字典序会留错人;
+	//   - 两侧 stage 必须都解析得出。指纹畸形时 stage 为空,空 != "BE1" 会被误判成"跨档",
+	//     而字典序在畸形串上毫无语义(实测 "garbage" > "*|*|0.9638|..." 会把畸形记录留下,
+	//     把真档位退役)。解析不出就退回"current 胜"这一保守语义。
+	recordStage := breakEvenStageFromFingerprint(record.RuleFingerprint)
+	currentStage := breakEvenStageFromFingerprint(current.RuleFingerprint)
+	if record.ProtectionType == current.ProtectionType &&
+		record.ProtectionType == "break_even_stop" &&
+		recordStage != "" && currentStage != "" && recordStage != currentStage {
+		recordID := drawdownRuleIdentity(record.RuleFingerprint)
+		currentID := drawdownRuleIdentity(current.RuleFingerprint)
+		if recordID < currentID {
+			// 留下 record(旧的那条),把 current 退役。
+			superseded := current
+			superseded.Status = "superseded"
+			if err := at.store.SaveDynamicProtectionRecord(superseded); err != nil {
+				logger.Warnf("⚠️ Dynamic protection state: failed to supersede conflicting claim on order %s (%s %s): %v", current.ExchangeOrderID, current.Symbol, current.Side, err)
+				return
+			}
+			logger.Warnf("🧾 Ownership conflict resolved: exchange order %s was claimed by TWO tiers (%s ruleID=%s superseded ← %s ruleID=%s kept, deterministic tier order) on %s %s — one live order must have exactly one owner",
+				current.ExchangeOrderID, current.ProtectionType, currentID,
+				record.ProtectionType, recordID, current.Symbol, current.Side)
+			return
+		}
 	}
 	superseded := record
 	superseded.Status = "superseded"

@@ -10,6 +10,7 @@ import (
 	"nofx/kernel"
 	"nofx/logger"
 	"nofx/store"
+	"nofx/trader/okx"
 	tradertypes "nofx/trader/types"
 )
 
@@ -926,11 +927,26 @@ func (at *AutoTrader) placeAndVerifyLadderProtection(symbol, positionSide string
 		if tpTaggedOK {
 			algoID, err := tpSetter.SetTakeProfitTagged(symbol, positionSide, orderQty, order.Price, "ladder_tp")
 			if err != nil {
+				if errors.Is(err, okx.ErrTriggerPriceAlreadyPassed) {
+					// 触发价已被市价越过:这一档不是"没挂上",而是市价已经穿过它 ——
+					// 它要么正在成交,要么这一轮本来就无单可挂。计入 tier 失败会让
+					// 整份保护计划连坐失败(线上 BTCUSDT SHORT: 其余 3 档 TP 与 SL
+					// 都挂上了,却因为这一档 2 次重试全败、标记不可重试、reconciler
+					// 打 ❌)。记为跳过,让其余档位正常收尾。
+					logger.Warnf("⏭ Ladder TP tier skipped for %s %s: trigger %.6f (ratio %.2f%%) already passed by market — this tier is filling or moot, not a placement failure: %v",
+						symbol, positionSide, order.Price, order.CloseRatioPct, err)
+					continue
+				}
 				placeErrs = append(placeErrs, fmt.Errorf("ladder take profit %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err))
 				continue
 			}
 			at.recordProtectionIntent(symbol, positionSide, "ladder_tp", orderQty, order.Price, algoID)
 		} else if err := at.trader.SetTakeProfit(symbol, positionSide, orderQty, order.Price); err != nil {
+			if errors.Is(err, okx.ErrTriggerPriceAlreadyPassed) {
+				logger.Warnf("⏭ Ladder TP tier skipped for %s %s: trigger %.6f (ratio %.2f%%) already passed by market — this tier is filling or moot, not a placement failure: %v",
+					symbol, positionSide, order.Price, order.CloseRatioPct, err)
+				continue
+			}
 			placeErrs = append(placeErrs, fmt.Errorf("ladder take profit %.6f (ratio %.2f%%): %w", order.Price, order.CloseRatioPct, err))
 			continue
 		}

@@ -48,9 +48,18 @@ func (at *AutoTrader) maybeTimeStopClose(symbol, side string, entryPrice, markPr
 
 	logger.Infof("⏱ Time-stop: %s %s held %.1fh (>= %.1fh) and still in loss %.2f%% (<= %.2f%%) — force closing",
 		symbol, side, heldHours, rc.TimeStopHours, pnlPct, rc.TimeStopLossPct)
-	if err := at.closePositionByReason(symbol, side, quantity, "time_stop"); err != nil {
+	executed, err := at.closePositionByReasonWithOutcome(symbol, side, quantity, "time_stop")
+	if err != nil {
 		logger.Warnf("⚠️ Time-stop close failed for %s %s: %v", symbol, side, err)
 		return false
+	}
+	if !executed {
+		// 交易所侧报 NO_POSITION/SKIPPED/POSITION_DUST:仓位早已不在,什么都没平。
+		// 打成 ✅ 会让事后按这行计数的平仓次数翻倍(线上 CLUSDT/ETHUSDT 各一次)。
+		// 仍回 true —— 对调用方而言"这个仓位不需要再处理"是成立的。
+		logger.Warnf("⏱ Time-stop skipped for %s %s: position already gone on exchange (held %.1fh, pnl %.2f%%) — nothing closed",
+			symbol, side, heldHours, pnlPct)
+		return true
 	}
 	logger.Infof("✅ Time-stop closed %s %s (held %.1fh, pnl %.2f%%)", symbol, side, heldHours, pnlPct)
 	return true
@@ -97,9 +106,16 @@ func (at *AutoTrader) maybeMaxHoldClose(symbol, side string, entryPrice, markPri
 
 	logger.Infof("⏳ Max-hold stop: %s %s held %.1fh (>= %.1fh) and pnl %.2f%% (< exempt %.2f%%) — force closing",
 		symbol, side, heldHours, rc.MaxHoldHours, pnlPct, rc.MaxHoldProfitExemptPct)
-	if err := at.closePositionByReason(symbol, side, quantity, "max_hold"); err != nil {
+	executed, err := at.closePositionByReasonWithOutcome(symbol, side, quantity, "max_hold")
+	if err != nil {
 		logger.Warnf("⚠️ Max-hold close failed for %s %s: %v", symbol, side, err)
 		return false
+	}
+	if !executed {
+		// 同 time-stop:仓位已不在场,没有下过单,不能打成功。
+		logger.Warnf("⏳ Max-hold skipped for %s %s: position already gone on exchange (held %.1fh, pnl %.2f%%) — nothing closed",
+			symbol, side, heldHours, pnlPct)
+		return true
 	}
 	logger.Infof("✅ Max-hold closed %s %s (held %.1fh, pnl %.2f%%)", symbol, side, heldHours, pnlPct)
 	return true

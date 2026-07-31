@@ -40,6 +40,12 @@ type fakeProtectionTrader struct {
 	taggedCloseLongs    []string
 	taggedCloseShorts   []string
 	trailingDelay       time.Duration
+	// closeStatus 非空时,平仓返回带该 status 的结果而不返回 orderId,用来复现交易所侧
+	// "什么都没做"(NO_POSITION / SKIPPED / POSITION_DUST)。空值保持原有"成交"语义。
+	closeStatus string
+	// setTakeProfitErr 注入止盈挂单失败,用于区分"触发价已被越过(应跳过)"与真实拒因。
+	setTakeProfitErr   error
+	setTakeProfitCalls int
 }
 
 func (f *fakeProtectionTrader) GetBalance() (map[string]interface{}, error) { return nil, nil }
@@ -60,11 +66,17 @@ func (f *fakeProtectionTrader) OpenShort(symbol string, quantity float64, levera
 func (f *fakeProtectionTrader) CloseLong(symbol string, quantity float64) (map[string]interface{}, error) {
 	f.closeLongCalls++
 	f.closeLongQtys = append(f.closeLongQtys, quantity)
+	if f.closeStatus != "" {
+		return map[string]interface{}{"status": f.closeStatus}, nil
+	}
 	return map[string]interface{}{"orderId": fmt.Sprintf("close-long-%d", f.closeLongCalls)}, nil
 }
 func (f *fakeProtectionTrader) CloseShort(symbol string, quantity float64) (map[string]interface{}, error) {
 	f.closeShortCalls++
 	f.closeShortQtys = append(f.closeShortQtys, quantity)
+	if f.closeStatus != "" {
+		return map[string]interface{}{"status": f.closeStatus}, nil
+	}
 	return map[string]interface{}{"orderId": fmt.Sprintf("close-short-%d", f.closeShortCalls)}, nil
 }
 func (f *fakeProtectionTrader) CloseLongTagged(symbol string, quantity float64, reasonTag string) (map[string]interface{}, error) {
@@ -97,7 +109,8 @@ func (f *fakeProtectionTrader) SetStopLoss(symbol string, positionSide string, q
 	return nil
 }
 func (f *fakeProtectionTrader) SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error {
-	return nil
+	f.setTakeProfitCalls++
+	return f.setTakeProfitErr
 }
 func (f *fakeProtectionTrader) CancelStopLossOrders(symbol string) error {
 	f.cancelStopLossCalls++

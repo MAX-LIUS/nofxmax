@@ -7,7 +7,91 @@
 > **历史**: v1.16.18(2026-07-27 23:40 pid 2381838 md5 e6abee6582e455b908b9efa32c37f51f,提交 `5f2163f`);部署后核对:4 trader 全部加载、API 200、无 panic、CL 持仓 `staleTrail=0 claimedTrail=2 dynamicOwner=2`(**claimedTrail=2 证明认领集合真的解析到了两张在场单,不是走 nil/空集合容忍兜底**)、交易所 7 张单与部署前逐一致(无误撤)
 > **部署后核对(v1.16.13)**:ETH/CL/WLD 从 `1 tiers` 变 `2 tiers` 且数量正确,`partial_profit_lock` 命名正常;KAITO 单档已确认是策略本身只配一档(GPT-ct50),非丢档。
 > **更新**: 2026-07-27 (v1.16.9 该 bug 类第 6 次实例:开仓即挂路径漏 ATR 换算,把 ATR 倍数当百分数挂单——用户从面板发现"两档配置显示三档 0.6/1.2/1.8";并订正"OKX 没问题"的判断:OKX 同样中招,只是它上报 callbackRate 把原始那条掩住了 | v1.16.8 构造交易所对等测试项目,挖出 HEAD 里既存的 OKX 局部档吃掉 dd1 全平单缺陷;并订正两处我自己的错误结论:Binance triggerPrice≠活动价、审计工具漏配 USDC 路由导致谎报无保护)
-> **版本**: v1.17.5 (**已部署 2026-07-30 13:34 pid 164364 md5 abca7a86df493492d5082b67209980a4,提交 `4918a8d`,回滚备份 `/opt/webstack/nofx/nofx.bak-v11744-20260730-053404` = v1.17.4b md5 e7ce2f20**:核对 health 200/单进程/NRestarts=0/ERROR+panic 0/部署后亏损中棘轮 0 次/XAU 已有边界 4039.49 未被放松;`staleTrail=1` 在 ETH/BTC/SOL 上是**既存**问题(今日 1729 次、绝大多数在部署前,同四个币重启前后一致,SPCX 反而自愈),表现为 reclaim 41 次 / "nothing to cancel" 41 次**完全配平、零撤零挂**=无 churn,但账本改写不落地导致每轮重认领、面板显示 degraded 而保护其实在位 —— 与本次改动无关,**待单独处理**:棘轮结构位默认值订正 —— `TrailMinProfitATR` 指针化 nil→1.0(显式 0 仍关闭)、`TrailOnLoss` 默认 false、回测手抄默认值收口到 store 访问器) / v1.17.2 (**待部署**:v1.17.1 的档位标识在 ATR 单位策略上恒返回 0 = 死代码,4 个实盘交易员全中;reclaim 是 `getActiveDrawdownRulesForPosition` 唯一漏 `resolveDrawdownRulesATR` 的消费者 → BN WLDUSDT 4 条 armed 记录抢 2 张单且映射反向;新增"一单一主"不变量,判据用交易所形状而**不是** UpdatedAt —— 线上错的那条恰恰更新) / v1.17.1 (**已部署 `90de970`,但档位标识在 ATR 策略上从未生效,见 v1.17.2** 提交 `8133f80`:挂单 clientOrderID 自带档位标识 `<prefix><code2>T<1-9><nonce>` 作多档 DD 第二重身份,补 reclaim 把 dd2 单认给 dd1 的错认) / v1.17.0 (**已部署 2026-07-29 pid 2696350**:DD 不在交易所 + managed 陪跑形同虚设,6 根因 RC-1…RC-6 一次性收口 —— 假成交按归属判定/managed 不再压制补挂/熔断 30min 冷却衰减/活单拒撤改重写账本/覆盖判定要活单背书/武装门禁改 max(cur,peak);另注意 Go 文件名 `_arm` 会被当 GOARCH 静默跳过整个测试文件) / v1.16.28 (**已随 v1.17.0 部署**:加仓后保护单数量不跟涨 → 静态 SL/TP/兜底 + BE 逐档双路径的**量维度**收敛,只撤不挂/只管不足不管超出/量化后再比,两条路径用 BE 认领集合互斥防抢单;Binance 端核实 GetOpenOrders 两条命名空间都回 Quantity、CancelAlgoOrderByID 带 -2011 回退能撤两种单 → resize 在 BN 全链路可用,cTime=0 不影响) / v1.16.27 (休眠风险专项:能力表位置初始化→键名、venue callbackRate 能力从注释变数据、空 orderID 记录在不能模糊匹配的交易所上判为下单失败落本地 monitor,提交 `92a17f6`) / v1.16.26 (已部署:在场档位比例锚定当前量,ZEC ping-pong 根因,提交 `b292774`) / v1.16.25 (已部署 2026-07-28 13:38 pid 2479237 md5 1b5a608a:所有权日志分歧+黄灯 unknown_mark+runner 迁移撤错档,提交 `7efc6cf`) / v1.16.24 (待部署:挂单等价性按交易所粒度判定 + 阶梯档被推断执行后免撤,提交 `9682f65`) / v1.16.23 (已部署:前端归因枚举补齐 5 处 + 契约测试锁住前后端对齐,提交 `f3ee04e`) / v1.16.22 (已部署:保护档按成交价排序 + callback 单位收口 + 细粒度归因保留 + 开仓竞态宽限期,提交 `de6a3a5`) / v1.16.18 (待部署:OKX tag 装不下 reason → 定向撤单实为广撤;reason 收口到 coded client id) / v1.16.17 (待部署:trailing 归属按认领集合判定 + 档位分配锚定开仓量,提交 `87490ba`) / v1.16.16 (已部署:ATR→% 换算的除数锚定到冻结开仓价,提交 `80845a2`) / v1.16.15 (已部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,提交 `75854df`) / v1.16.14 (已部署:immediate trailing 落库归属 + 撤单点按返回值收口,提交 `b4f35e0`) / v1.16.13 (已部署:managed 全程陪跑双保险,取消账户级接管,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
+> **版本**: v1.17.6 (**待部署**:全量日志合规审计(64 笔平仓全合规)顺带挖出 4 个缺陷 —— ①BE 两档抢同一张单(0.1503% 间距落在 0.2% 匹配容差内 + reconciler/monitor 两条规则管线不同源,账本翻转 53 次);②reclaim 分支裸 return 导致 7688 条 "not verified" 假警告、BTCUSDT LONG 连续 1900 轮假 degraded(保护其实在位),顺带把容忍/reclaim 两处内联布尔式收口成唯一判据 `protectionCoverageComplete`;③time-stop/max-hold 在 NO_POSITION 上打 ✅(纯可观测性,幂等未坏,但按日志计数会翻倍);④OKX 51277 触发价已被市价越过的 TP 档被计入 tier 失败 → 整份计划连坐,其余 3 档 TP+SL 其实都挂上了。**不撤任何交易所挂单,不改变实物挂单行为**) / v1.17.5 (**已部署 2026-07-30 13:34 pid 164364 md5 abca7a86df493492d5082b67209980a4,提交 `4918a8d`,回滚备份 `/opt/webstack/nofx/nofx.bak-v11744-20260730-053404` = v1.17.4b md5 e7ce2f20**:核对 health 200/单进程/NRestarts=0/ERROR+panic 0/部署后亏损中棘轮 0 次/XAU 已有边界 4039.49 未被放松;`staleTrail=1` 在 ETH/BTC/SOL 上是**既存**问题(今日 1729 次、绝大多数在部署前,同四个币重启前后一致,SPCX 反而自愈),表现为 reclaim 41 次 / "nothing to cancel" 41 次**完全配平、零撤零挂**=无 churn,但账本改写不落地导致每轮重认领、面板显示 degraded 而保护其实在位 —— 与本次改动无关,**待单独处理**:棘轮结构位默认值订正 —— `TrailMinProfitATR` 指针化 nil→1.0(显式 0 仍关闭)、`TrailOnLoss` 默认 false、回测手抄默认值收口到 store 访问器) / v1.17.2 (**待部署**:v1.17.1 的档位标识在 ATR 单位策略上恒返回 0 = 死代码,4 个实盘交易员全中;reclaim 是 `getActiveDrawdownRulesForPosition` 唯一漏 `resolveDrawdownRulesATR` 的消费者 → BN WLDUSDT 4 条 armed 记录抢 2 张单且映射反向;新增"一单一主"不变量,判据用交易所形状而**不是** UpdatedAt —— 线上错的那条恰恰更新) / v1.17.1 (**已部署 `90de970`,但档位标识在 ATR 策略上从未生效,见 v1.17.2** 提交 `8133f80`:挂单 clientOrderID 自带档位标识 `<prefix><code2>T<1-9><nonce>` 作多档 DD 第二重身份,补 reclaim 把 dd2 单认给 dd1 的错认) / v1.17.0 (**已部署 2026-07-29 pid 2696350**:DD 不在交易所 + managed 陪跑形同虚设,6 根因 RC-1…RC-6 一次性收口 —— 假成交按归属判定/managed 不再压制补挂/熔断 30min 冷却衰减/活单拒撤改重写账本/覆盖判定要活单背书/武装门禁改 max(cur,peak);另注意 Go 文件名 `_arm` 会被当 GOARCH 静默跳过整个测试文件) / v1.16.28 (**已随 v1.17.0 部署**:加仓后保护单数量不跟涨 → 静态 SL/TP/兜底 + BE 逐档双路径的**量维度**收敛,只撤不挂/只管不足不管超出/量化后再比,两条路径用 BE 认领集合互斥防抢单;Binance 端核实 GetOpenOrders 两条命名空间都回 Quantity、CancelAlgoOrderByID 带 -2011 回退能撤两种单 → resize 在 BN 全链路可用,cTime=0 不影响) / v1.16.27 (休眠风险专项:能力表位置初始化→键名、venue callbackRate 能力从注释变数据、空 orderID 记录在不能模糊匹配的交易所上判为下单失败落本地 monitor,提交 `92a17f6`) / v1.16.26 (已部署:在场档位比例锚定当前量,ZEC ping-pong 根因,提交 `b292774`) / v1.16.25 (已部署 2026-07-28 13:38 pid 2479237 md5 1b5a608a:所有权日志分歧+黄灯 unknown_mark+runner 迁移撤错档,提交 `7efc6cf`) / v1.16.24 (待部署:挂单等价性按交易所粒度判定 + 阶梯档被推断执行后免撤,提交 `9682f65`) / v1.16.23 (已部署:前端归因枚举补齐 5 处 + 契约测试锁住前后端对齐,提交 `f3ee04e`) / v1.16.22 (已部署:保护档按成交价排序 + callback 单位收口 + 细粒度归因保留 + 开仓竞态宽限期,提交 `de6a3a5`) / v1.16.18 (待部署:OKX tag 装不下 reason → 定向撤单实为广撤;reason 收口到 coded client id) / v1.16.17 (待部署:trailing 归属按认领集合判定 + 档位分配锚定开仓量,提交 `87490ba`) / v1.16.16 (已部署:ATR→% 换算的除数锚定到冻结开仓价,提交 `80845a2`) / v1.16.15 (已部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,提交 `75854df`) / v1.16.14 (已部署:immediate trailing 落库归属 + 撤单点按返回值收口,提交 `b4f35e0`) / v1.16.13 (已部署:managed 全程陪跑双保险,取消账户级接管,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
+
+> **🔥🔥🔥 v1.17.6 全量日志合规审计挖出的 4 个缺陷 —— 3 个是"账本/日志在说谎",1 个是真连坐(2026-07-31,待部署)**
+>
+> **起因**:用户要求「检查所有日志,梳理最近一天每一个币种所有保护措施的逻辑成交是否符合系统设定逻辑」。
+> 审计结论是**合规**:窗口 07-30 23:14 → 07-31 23:16 CST,949714 行日志,12 个 symbol/side 持仓,
+> 64 笔实际平仓全部归因成功、**零重复执行**(ladder_tp 21 / break_even_stop 13 / ladder_sl 6 /
+> structural_sl 4 / native_trailing 4 / giveback_guard 4 / time_stop 3)。time-stop 判定 4/4 精确
+> (24h/-1.5%);保本 14 次应用 = 14 次验证、0 违规,触发价全部落在各自 trader 的 ATR 夹紧区间内;
+> 回撤 TP 0 次触发,三例按算术全部正确(SKHYUSDT 峰值 4.05% < 武装线 7.27%;SKHYNIXUSDT 已武装但
+> 回撤 1.958% < 2.568%;UNIUSDT 峰值 2.50% < 4.39%)。
+> **但顺带挖出 4 个缺陷,其中 3 个的共同形态是:保护实际在位,是账本和日志在说谎。**
+>
+> **缺陷① 一张活单两个主人(ETHUSDT short,账本每 ~20s 翻转,实测 53 次)**
+> 两层根因叠加:
+> - ATR 解析后 BE1 offset=0.3000、BE2 offset=0.4498,挂单价 1862.1467/1859.3489,
+>   相对间距 **0.1503% < `protectionPriceTolerancePct`(0.2%)**;而 `matchingBreakEvenOrderID`
+>   **只按价格匹配** → BE2 匹配到了 BE1 那张单,于是 BE2 从未挂出属于自己的单,两档都把同一个
+>   orderID 写成 armed。
+> - reconciler 用 `getActiveBreakEvenRules()`(生配置)、monitor 用
+>   `getActiveBreakEvenRulesATR()` + `resolveBreakEvenRulesForPosition()`(ATR 解析后)
+>   → **同一张单被算出 3 个竞争身份**(`1.5000|0.3000|BE1`、`0.9638|0.3000|BE1`、`1.6064|0.4498|BE2`);
+>   而 `supersedeConflictingOrderClaim` 的 **"current 胜" 在两个 writer 交替调用时根本不收敛** ——
+>   每轮都"解决"一次,直到仓位平掉才停。
+>
+> 修法四件:①档位抑制(**先到者赢**,rules 按 TriggerValue 升序,先到的就是那张实物单的价格所属档位)
+> ②两条管线同源(reconciler 改用 ATR 解析后的规则)③确定性裁决(身份串字典序,**与写入顺序无关**)
+> ④被抑制档的存量 armed 记录退役。**不撤任何交易所挂单**(被抑制那档从未挂出自己的单),
+> 所以修复不改变任何实物挂单行为,只把账本从自相矛盾变成自洽。
+>
+> **抑制点必须放在 `replaceStaleBreakEvenTierOrders` 上游**:替换容差
+> `breakEvenTierReplaceTolerancePct`=**0.05%** 比匹配容差 **0.2%** 更紧,而 0.1503% 正好**落在两者之间**
+> —— 若先走替换路径,BE2 会认为那张单"价格不对"从而撤单重挂、BE1 下一轮再撤回来,形成挂撤循环。
+> 审计窗口内 24h **零次替换事件**,说明它一直是**潜伏**状态,不是已发生的故障。
+>
+> **② degraded 是账本/日志在说谎,不是保护缺失(BTCUSDT LONG 连续 1900 轮)**
+> reclaim 分支(多余单其实是本仓位的活 DD 档,已认领回来)原来是一句裸 `return result, nil`,
+> 带着 `ExchangeVerified=false` 和**空 Summary** 回到调用方 → 打出 "exchange protection not verified"
+> —— 全天 **7688 条**该警告都出自这里。而同期 `missingSL` 全程 false、撤单数 **0**,保护一直在。
+> 修法:reclaim 后重算归属结论。**这与容忍分支是同一个顺序问题**(判决必须在 🧭 日志之前做完),
+> 上一次只修了容忍分支,reclaim 分支在 🧭 日志**下游**,所以它的结论既进不了日志也没写回 result。
+>
+> **顺带收口(本次自查发现)**:两条分支原本各自**内联**了一份同样的布尔式,注释写着"同源"其实
+> **并不同源** —— 已抽成唯一判据 `protectionCoverageComplete()`(protection_ownership.go)。
+> 判据四项:有止损主人 && 止损不缺 && 无多余止损/止盈单 && 计划若要求止盈主人则其在场。
+> 错判方向**不对称**:该 true 判 false 只是账本说谎;该 false 判 true 是**真缺保护却标已验证**,
+> 后续修复流程不会介入 —— 所以 SKHYNIXUSDT 那 58 轮 "missing profit owner" 必须**继续**保持未验证。
+>
+> **③ time-stop / max-hold 在 `NO_POSITION` 上打 `✅ closed`(纯可观测性)**
+> `closeOrderSkipped` 把 NO_POSITION/SKIPPED/POSITION_DUST 折叠成 `nil`,调用方无法区分
+> "平掉了"和"仓位早就没了、什么都没做"。**幂等性本身没坏**(无重复下单,2 条 NO_POSITION 警告
+> 与 2 次重复触发一一对应),坏的是事后按 `✅ Time-stop closed` 计数会把平仓次数**数成 2 倍**。
+> 修法:新增 `closePositionByReasonWithOutcome`(回 executed 布尔),老签名
+> `closePositionByReason` 行为**一个字不变**(跳过仍是 nil)。
+>
+> **④ 一个已越过的 TP 档让整份计划连坐(BTCUSDT SHORT,OKX 51277)**
+> 加仓后 qty resize 撤掉一张覆盖不足的 ladder_tp,计划重新物化 4 档 TP,其中一档触发价
+> 62861.4135 已被市价 62860.10 越过(空头 TP 必须低于最新价)→ code=51277。**这一档 2 秒后就以
+> 62860.10 成交** —— 它本来就在成交。但它被计入 tier 失败 → 2 次重试全败 → 标不可重试 →
+> `❌ reconcile failed`,而其余 3 档 TP 和 SL **都挂上了**。
+> 修法:typed sentinel `okx.ErrTriggerPriceAlreadyPassed` + 该档记为跳过。
+> **用显式错误码白名单(51277/51278)而不是模糊字符串匹配** —— 把别的拒因误判成"可跳过"
+> 会让真实挂单失败被静默吞掉,那比连坐危险得多。SL 侧**永不**跳过。
+>
+> **我在这次审计里犯的两个错(必须记住怎么错的)**:
+> - **拿 claude 的 1h 配置去核对别人的持仓**:我把
+>   `🛑 [StructuralSL] XAUUSDT long closed 4082.300000 beyond boundary 4085.800000`
+>   标为"无法解释的缺陷",因为 4082.3 匹配不上任何 1h/30m 收盘价,只匹配 15m 10:30 那根。
+>   根因是那个仓位属于 **Claude-R(primary=15m)**,而 `AlignToPrimaryTimeframe` 会把
+>   `ATRProtection.Timeframe` 覆写成 primary → 确认周期**确实是 15m**。
+>   **静态配置显示 `atr_tf=1h` 是误导**,必须先查该 trader 的 primary。
+> - **把巧合当成因果**:我一度报告 51277 的根因是"BE 价与 TP 价撞进 0.2% 容差带"。
+>   实际是触发价已被市价越过;`63177.3 × 0.995 = 62861.4135` 与 BE1 价格相等**纯属巧合**。
+>
+> **验证**:`go build ./...` 干净;全仓库 `go test ./... -count=1` = **23 包 ok / 0 FAIL**;
+> 新增 4 个测试文件(档位冲突、边界/破坏性、平仓结果语义、ladder 跳过)+ okx 解析测试扩充。
+> `-race` 跑新测试无 DATA RACE。**边界锁**:nil 接收者/nil store/空 stage/无记录/跨 trader/跨币种/
+> 跨方向/跨类型/非 armed/畸形指纹/身份串相等/负 offset/orderID 为空 —— 一律"宁可不动手"。
+> **畸形指纹是自查中真被测出来的 bug**:stage 解析不出时为空串,`"" != "BE1"` 会被误判成"跨档",
+> 而字典序在畸形串上毫无语义(实测 `"garbage" > "*|*|0.9638|..."` 会把畸形记录留下、把真档位退役)
+> → 已加"两侧 stage 必须都解析得出"这一条,解析不出就退回保守的"current 胜"。
+> **确定性裁决只限 `break_even_stop` 且只限 stage 不同**:同 stage 不同身份是**同档重新解析**
+> (ATR 口径变了),必须 current 胜;native_trailing/managed_drawdown 那一路只有 arm 一个 writer,
+> 字典序会**留错人** —— 既存测试 `TestSupersede_OneLiveOrderCannotHaveTwoTierOwners` 就是这么被我
+> 第一版改动搞红的(它要求"新写入的claim必须胜"),这条既存不变量必须原样保留。
 
 > **🔥🔥🔥 v1.17.5 棘轮结构位"亏损中也锁紧" —— 文档与 UI 都写 1.0,线上实际是 0(2026-07-30)**
 >
