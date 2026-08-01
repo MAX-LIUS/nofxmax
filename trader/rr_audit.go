@@ -1,16 +1,29 @@
 package trader
 
-import "math"
+import (
+	"fmt"
+	"math"
+
+	"nofx/logger"
+)
 
 // rr_audit.go records the gap between the RR the AI DECLARED and the RR the
 // PLANNED protection ladder implies. Audit only: it computes, logs, and returns;
 // it never blocks an entry, resizes a position, or edits a plan.
 //
-// Scope limit, read before trusting the numbers. This measures the plan, not the
-// exchange. validateProtectionPlanExecution runs later and drops any tier whose
-// quantity is below the instrument minimum, so the placed ladder can be narrower
-// than the one audited here. Callers must therefore label these values planned_*
-// rather than placed_*.
+// Two plans are audited, not one (2026-08-01). auditPlanRiskReward itself is
+// pure and knows nothing about the exchange, so the CALLER runs it twice: once on
+// the planned ladder and once on the ladder validateProtectionPlanExecution says
+// is actually placeable. Reporting only the planned figure hid a real defect —
+// ZECUSDT placed 48.3% of a 65% ladder and the planned audit could not show it,
+// because dropping the FAR tier leaves the nearest RR unchanged. Hence
+// ProfitCoveragePct alongside the ratios, and hence placed_* is reported whenever
+// it differs from planned_*.
+//
+// The placed figure is a faithful prediction, not a guarantee: it is computed from
+// the mark price read microseconds before placement, so a fast move can still
+// change the outcome. It is labelled placed_* because it is the same function,
+// with the same inputs, that the placement path is about to use.
 //
 // Why this is not already covered. kernel/engine_analysis.go already rejects a
 // decision whose declared gross_estimated_rr disagrees with its OWN
@@ -46,8 +59,47 @@ type rrAuditResult struct {
 	NearestDiff float64 // NearestRR - DeclaredRR
 	StopTiers   int
 	ProfitTiers int
+	// ProfitCoveragePct is how much of the position the take-profit side closes:
+	// the sum of the ladder tiers' close ratios, or 100 for a single
+	// full-position order. RR alone cannot reveal a narrowed ladder, because
+	// dropping the FAR tier leaves the nearest RR untouched while cutting how
+	// much of the position is protected — exactly what went unnoticed on ZECUSDT
+	// (65% configured, 48.3% placed, nearest RR identical). See profitCoveragePct.
+	ProfitCoveragePct float64
 	// Reason explains an invalid result, for the log line.
 	Reason string
+}
+
+// totalCloseRatioPct sums the close ratios of a ladder leg.
+func totalCloseRatioPct(orders []ProtectionOrder) float64 {
+	total := 0.0
+	for _, o := range orders {
+		if o.CloseRatioPct > 0 && !math.IsNaN(o.CloseRatioPct) && !math.IsInf(o.CloseRatioPct, 0) {
+			total += o.CloseRatioPct
+		}
+	}
+	return total
+}
+
+// profitCoveragePct reports how much of the position the take-profit side closes.
+//
+// It must account for the collapsed shape, not just the ladder. When every ladder
+// tier falls below the contract minimum the plan is rewritten into a single
+// full-position TakeProfitPrice with no ladder at all, so summing the (now empty)
+// ladder would report 0% for what is really 100% coverage — reading as a total
+// loss of protection when it is the opposite. Mirrors protectionLegPrices, which
+// already falls back to the single-price field the same way.
+func profitCoveragePct(plan *ProtectionPlan) float64 {
+	if plan == nil {
+		return 0
+	}
+	if total := totalCloseRatioPct(plan.TakeProfitOrders); total > 0 {
+		return total
+	}
+	if plan.TakeProfitPrice > 0 && !math.IsNaN(plan.TakeProfitPrice) && !math.IsInf(plan.TakeProfitPrice, 0) {
+		return 100
+	}
+	return 0
 }
 
 // protectionLegPrices extracts the tier prices and close ratios for one side,
@@ -153,6 +205,7 @@ func auditPlanRiskReward(plan *ProtectionPlan, entry, declaredRR float64) rrAudi
 		return rrAuditResult{Reason: "non-finite recomputed rr"}
 	}
 	res.NearestDiff = res.NearestRR - res.DeclaredRR
+	res.ProfitCoveragePct = profitCoveragePct(plan)
 	res.Valid = true
 	return res
 }
@@ -161,3 +214,73 @@ func auditPlanRiskReward(plan *ProtectionPlan, entry, declaredRR float64) rrAudi
 // Set to the same 0.05 the kernel uses for its self-consistency check, so the two
 // thresholds cannot drift apart and produce contradictory verdicts.
 const rrAuditMaterialGap = 0.05
+
+// auditPlannedAndPlacedRiskReward logs the RR/coverage gap for one entry, for both
+// the planned ladder and the ladder that is actually placeable.
+//
+// Read-only by construction: validateProtectionPlanExecution copies the plan
+// before filtering, and is called here with quiet=true so its drop/collapse
+// warnings are not duplicated — the placement path logs those itself moments
+// later, with quiet=false.
+//
+// Silent unless something is worth reading: either the declared RR misses the
+// planned RR by more than rrAuditMaterialGap, or the placeable ladder differs from
+// the planned one. A healthy entry produces no line.
+func (at *AutoTrader) auditPlannedAndPlacedRiskReward(req *protectionExecutionRequest, plan *ProtectionPlan) {
+	if req == nil || plan == nil || req.Decision.EntryProtection == nil {
+		return
+	}
+	declaredRR := req.Decision.EntryProtection.RiskReward.GrossEstimatedRR
+	planned := auditPlanRiskReward(plan, req.EntryPrice, declaredRR)
+	if !planned.Valid {
+		if planned.Reason != "" {
+			logger.Debugf("  📐 RR audit skipped for %s %s: %s", req.Symbol, req.PositionSide, planned.Reason)
+		}
+		return
+	}
+
+	// What the exchange will actually accept. A failure here is not the audit's
+	// business to surface — the placement path will report it — so fall back to
+	// reporting the planned figures alone.
+	placedPlan, err := at.validateProtectionPlanExecution(req.Symbol, req.PositionSide, req.Quantity, plan, true)
+	placed := rrAuditResult{}
+	if err == nil && placedPlan != nil {
+		placed = auditPlanRiskReward(placedPlan, req.EntryPrice, declaredRR)
+	}
+
+	declaredGap := math.Abs(planned.NearestDiff) > rrAuditMaterialGap
+	narrowed := placed.Valid && (placed.ProfitTiers != planned.ProfitTiers ||
+		placed.StopTiers != planned.StopTiers ||
+		math.Abs(placed.ProfitCoveragePct-planned.ProfitCoveragePct) > 0.01 ||
+		math.Abs(placed.NearestRR-planned.NearestRR) > rrAuditMaterialGap)
+	// The whole ladder failing to survive is the loudest case of all, and it does
+	// not show up as "narrowed" because there is nothing left to compare.
+	dropped := !placed.Valid
+
+	if !declaredGap && !narrowed && !dropped {
+		return
+	}
+
+	msg := fmt.Sprintf("  📐 RR audit %s %s: declared=%.2f planned_nearest=%.2f (%+.2f) planned_weighted=%.2f planned_tiers=%dSL/%dTP planned_cover=%.0f%% mode=%s",
+		req.Symbol, req.PositionSide, planned.DeclaredRR, planned.NearestRR, planned.NearestDiff,
+		planned.WeightedRR, planned.StopTiers, planned.ProfitTiers, planned.ProfitCoveragePct, plan.Mode)
+	switch {
+	case dropped:
+		msg += fmt.Sprintf(" | placed=NONE (%s)", placedRRUnavailableReason(err, placed))
+	case narrowed:
+		msg += fmt.Sprintf(" | placed_nearest=%.2f placed_weighted=%.2f placed_tiers=%dSL/%dTP placed_cover=%.0f%%",
+			placed.NearestRR, placed.WeightedRR, placed.StopTiers, placed.ProfitTiers, placed.ProfitCoveragePct)
+	}
+	logger.Infof("%s", msg)
+}
+
+// placedRRUnavailableReason explains why no placeable ladder could be audited.
+func placedRRUnavailableReason(err error, placed rrAuditResult) string {
+	if err != nil {
+		return "validation error: " + err.Error()
+	}
+	if placed.Reason != "" {
+		return placed.Reason
+	}
+	return "no executable protection"
+}

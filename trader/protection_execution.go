@@ -123,28 +123,23 @@ func (at *AutoTrader) applyPostOpenProtection(req *protectionExecutionRequest) e
 		logger.Infof("  🛡 Applying %s protection plan: stop=%v tp=%v ladderSL=%d ladderTP=%d",
 			plan.Mode, plan.NeedsStopLoss, plan.NeedsTakeProfit, len(plan.StopLossOrders), len(plan.TakeProfitOrders))
 
-		// Audit only. The plan is final here in the sense that the AI/config merge,
-		// target clamping and the structural fallback have all run, and
-		// req.EntryPrice is the exchange-confirmed fill.
+		// Audit only — logs and nothing else. It must never change what gets placed.
 		//
-		// It is NOT what ends up on the exchange: validateProtectionPlanExecution
-		// (called downstream via placeAndVerifyProtectionPlanWithRetry) still drops
-		// tiers whose quantity falls below the instrument minimum, so the ladder
-		// measured here can be wider than the one actually placed. Measured on
-		// ZECUSDT 2026-08-01: audited weighted RR 0.66 against a 65% ladder while
-		// only 53% was placed (real 0.53) because the 12%/3.6-ATR tier was 0.993
-		// contracts against a 1-contract minimum. Hence planned_*, not placed_*.
-		// Logs a line and nothing else — it must never change what gets placed.
+		// The plan is final here in the sense that the AI/config merge, target
+		// clamping and the structural fallback have all run, and req.EntryPrice is
+		// the exchange-confirmed fill. But the plan is NOT yet what reaches the
+		// exchange, so auditing it alone was misleading: on ZECUSDT 2026-08-01 the
+		// planned audit reported a 65% ladder while 48.3% was placed, and no field
+		// in the line could reveal it because the dropped tier was the FAR one,
+		// which leaves the nearest RR identical.
+		//
+		// So audit both. auditPlannedAndPlacedRiskReward re-runs the very filter the
+		// placement path is about to run, read-only and quiet, and reports placed_*
+		// only when it diverges from planned_*. Doing it here rather than inside
+		// placeAndVerifyProtectionPlan keeps it out of the retry loop, which would
+		// otherwise emit one line per attempt.
 		if req.Decision.EntryProtection != nil {
-			if a := auditPlanRiskReward(plan, req.EntryPrice, req.Decision.EntryProtection.RiskReward.GrossEstimatedRR); a.Valid {
-				if math.Abs(a.NearestDiff) > rrAuditMaterialGap {
-					logger.Infof("  📐 RR audit %s %s: declared=%.2f planned_nearest=%.2f (%+.2f) planned_weighted=%.2f tiers=%dSL/%dTP mode=%s",
-						req.Symbol, req.PositionSide, a.DeclaredRR, a.NearestRR, a.NearestDiff, a.WeightedRR,
-						a.StopTiers, a.ProfitTiers, plan.Mode)
-				}
-			} else if a.Reason != "" {
-				logger.Debugf("  📐 RR audit skipped for %s %s: %s", req.Symbol, req.PositionSide, a.Reason)
-			}
+			at.auditPlannedAndPlacedRiskReward(req, plan)
 		}
 		if err := at.placeAndVerifyProtectionPlanWithRetry(req.Symbol, req.PositionSide, req.Quantity, plan); err != nil {
 			planErr = err
