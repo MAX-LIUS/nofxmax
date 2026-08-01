@@ -123,15 +123,22 @@ func (at *AutoTrader) applyPostOpenProtection(req *protectionExecutionRequest) e
 		logger.Infof("  🛡 Applying %s protection plan: stop=%v tp=%v ladderSL=%d ladderTP=%d",
 			plan.Mode, plan.NeedsStopLoss, plan.NeedsTakeProfit, len(plan.StopLossOrders), len(plan.TakeProfitOrders))
 
-		// Audit only. The plan is final here (AI/config merge, target clamping and
-		// the structural fallback have all run) and req.EntryPrice is the
-		// exchange-confirmed fill, so this is the one point where the DECLARED RR
-		// and the RR actually being placed are both known. Logs a line and nothing
-		// else — it must never change what gets placed.
+		// Audit only. The plan is final here in the sense that the AI/config merge,
+		// target clamping and the structural fallback have all run, and
+		// req.EntryPrice is the exchange-confirmed fill.
+		//
+		// It is NOT what ends up on the exchange: validateProtectionPlanExecution
+		// (called downstream via placeAndVerifyProtectionPlanWithRetry) still drops
+		// tiers whose quantity falls below the instrument minimum, so the ladder
+		// measured here can be wider than the one actually placed. Measured on
+		// ZECUSDT 2026-08-01: audited weighted RR 0.66 against a 65% ladder while
+		// only 53% was placed (real 0.53) because the 12%/3.6-ATR tier was 0.993
+		// contracts against a 1-contract minimum. Hence planned_*, not placed_*.
+		// Logs a line and nothing else — it must never change what gets placed.
 		if req.Decision.EntryProtection != nil {
 			if a := auditPlanRiskReward(plan, req.EntryPrice, req.Decision.EntryProtection.RiskReward.GrossEstimatedRR); a.Valid {
 				if math.Abs(a.NearestDiff) > rrAuditMaterialGap {
-					logger.Infof("  📐 RR audit %s %s: declared=%.2f placed_nearest=%.2f (%+.2f) placed_weighted=%.2f tiers=%dSL/%dTP mode=%s",
+					logger.Infof("  📐 RR audit %s %s: declared=%.2f planned_nearest=%.2f (%+.2f) planned_weighted=%.2f tiers=%dSL/%dTP mode=%s",
 						req.Symbol, req.PositionSide, a.DeclaredRR, a.NearestRR, a.NearestDiff, a.WeightedRR,
 						a.StopTiers, a.ProfitTiers, plan.Mode)
 				}

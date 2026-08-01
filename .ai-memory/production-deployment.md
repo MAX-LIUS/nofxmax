@@ -481,7 +481,10 @@ All four changes observed live in the 13:16 CST cycle:
 `[chop_reject] blocked ETHUSDT open_long: consensusChop=true`;
 `[counter_trend] blocked SOLUSDT open_long: slope96=TREND_DN side=LONG`;
 `⚠ structural_alignment_missing` (⚠ not ✗ — confirms audit-only);
-`📐 RR audit ZECUSDT LONG: declared=2.32 placed_nearest=0.35 (-1.97) placed_weighted=0.66 tiers=1SL/4TP mode=manual`;
+`📐 RR audit ZECUSDT LONG: declared=2.32 planned_nearest=0.35 (-1.97) planned_weighted=0.66 tiers=1SL/4TP mode=manual`
+(字段原名 placed_*，2026-08-01 更正为 planned_* —— 审计跑在 protection_execution.go:132，
+而 below-minimum 档位丢弃在 :809，故审计测的是计划而非交易所实际挂单。同一笔 ZEC 计划 65% 阶梯
+加权 RR 0.66，实际只挂上 53%、真实 0.53。);
 chart_trend count 0 (deliberately not enabled — 100/100 grid cells negative on 15m).
 
 **Reading the RR audit gap correctly (mode=manual):** the ZEC line is arithmetically right —

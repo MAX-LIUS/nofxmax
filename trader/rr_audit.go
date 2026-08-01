@@ -3,9 +3,14 @@ package trader
 import "math"
 
 // rr_audit.go records the gap between the RR the AI DECLARED and the RR the
-// protection orders actually about to be placed IMPLY. Audit only: it computes,
-// logs, and returns; it never blocks an entry, resizes a position, or edits a
-// plan.
+// PLANNED protection ladder implies. Audit only: it computes, logs, and returns;
+// it never blocks an entry, resizes a position, or edits a plan.
+//
+// Scope limit, read before trusting the numbers. This measures the plan, not the
+// exchange. validateProtectionPlanExecution runs later and drops any tier whose
+// quantity is below the instrument minimum, so the placed ladder can be narrower
+// than the one audited here. Callers must therefore label these values planned_*
+// rather than placed_*.
 //
 // Why this is not already covered. kernel/engine_analysis.go already rejects a
 // decision whose declared gross_estimated_rr disagrees with its OWN
@@ -23,7 +28,10 @@ import "math"
 //     is the direct analogue of the declared number, which is built from
 //     "first_target", so it is the one comparable to declaredRR.
 //   - weightedRR uses the close-ratio-weighted average of each side. This is the
-//     economically real ratio when every tier fills as placed.
+//     economically real ratio if every PLANNED tier both survives the
+//     below-minimum filter and fills at its target. On instruments with a coarse
+//     minimum size the surviving ladder is narrower, so treat this as the
+//     configured intent rather than the realised ratio.
 //
 // Neither is "the" RR: a ladder does not have a single RR. Reporting both, and
 // naming which is which, is the honest form.
