@@ -500,7 +500,50 @@ verified no half-deploy state each time (md5 unchanged, pid alive, health 200) a
 manual commands rather than working around the denial.
 
 ## Last Updated
-2026-08-01 - Claude-R 15m gate parameterization + RR audit (pid 494713, md5 ab68255b, commits 9d1c269/fac0f1e/d3add9f/5035861)
+2026-08-01 - 保护档位向上取整 + 塌缩改最远档 (pid 524730, md5 48edc644, commit a7ff9e3)
+
+## 2026-08-01 Deploy: 挂不上的档位向上取整到最小张数 + 塌缩改向最远档 (pid 524730, commit a7ff9e3)
+md5 48edc6446cb4c2f5aea340bed169ae0e ← 上一版 ab68255bd0398512b319af67a015b405
+回滚二进制: /root/.claude/jobs/5cbb3cf4/tmp/nofx.rollback_ab68255b_20260801_110517
+
+问题。线上 ZECUSDT 配置 65% 的止盈梯度实际只挂上 48.3%。12%/3.6-ATR 档算出
+0.99305275 张,差 0.007 张不到 MinSz 1,被 ValidateProtectionQuantity 在取整前
+判死。日志原文: `qty=0.009931 err=quantity 0.99305275 below min contracts`。
+历史 1690 笔 OKX 仓位中 181 笔(10.7%)少挂至少一档,平均实际覆盖率仅 34.4%。
+
+根因是两套量化规则打架。四条挂单路径(SetStopLoss/SetStopLossTagged/
+SetTakeProfit/SetTakeProfitTagged)都是"向上夹到 MinSz 再 formatSize",而校验器
+拿未夹取的原始张数比 MinSz。同一个量两种口径,与 2026-07-28 ZEC 挂撤循环同类根因。
+
+四项改动:
+1. protectionSizeForQuantity 成为唯一量化入口,校验器与四条挂单路径共用。
+2. ValidateProtectionQuantity 改判"解析后"张数;LotSz 同样改判解析后
+   (421/421 个 OKX USDT 永续 LotSz==MinSz,此项属潜在防御)。
+3. ladderWouldOversell 守卫(trader/protection_oversell.go)。部分跌破安全:
+   最大档存活 ⇒ 持仓 >= 1/maxRatio 张,N 档各夹 1 张最多挂 N 张,在用梯度均满足
+   N < 1/maxRatio。全档跌破会超发(1 张持仓 4 档 → 4 张),继续走塌缩。
+   等号也拦:部分梯度(intendedPct<100)若吃满全仓则丢弃,否则 runner 没了;
+   单档 100% 止损 intendedPct==100,等于全仓是设计意图,放行。不确定一律放行。
+4. 塌缩方向最近档 → 最远档 farthestLadderTakeProfitPrice。整仓单价离场时选最近档
+   等于把全仓封在第一个减仓位,ZEC 量级加权 RR 比不挂还差 -0.035。下行由不依赖
+   止盈梯度的机制承担:BE1 1.3 ATR、BE2 2.5 ATR、dd1 2.5 ATR+1.5 回吐、
+   giveback_guard 1.15 ATR,全在 3.6 ATR 远端之下先武装。最远档离 mark 更远,
+   更不易触发 OKX 51279。
+
+离线回放 1690 笔:181 笔部分跌破修复,覆盖率 34.4%→67.9%(+33.4pp),最大 80%,
+无一超 100%;76 笔走塌缩,其中 34 笔若无守卫会真超发,已被拦下。
+
+部署教训(重要)。`cp` 覆盖运行中的二进制会 `Text file busy`,restart 后仍跑旧码
+且 md5 不变——必须 `systemctl stop` → `cp` → `systemctl start`,并用 md5 确认。
+第一次尝试就踩了这个,pid 524618 跑的还是 ab68255b。
+
+部署后核查(锚点 = 日志行 407009,即 19:06:25 CST = systemd ActiveEnterTimestamp
+11:06:25 UTC;注意日志 CST 而 shell UTC,且不能用 awk 字符串比时间戳切分——非
+时间戳开头的行里任何字母都 > '0' 会误匹配)。3096 行内:0 ERROR/panic/FATAL、
+0 WARN、77 条 state=protected verified=true 且无一 false、0 次撤单。
+207 条 `Ladder TP tier already executed ... not re-placing` 证明防挂撤循环仍生效。
+新分支尚未触发:存量仓位已武装且 verified,reconciler 不会重挂,改动在下一次
+梯度挂单时生效。
 
 ## 2026-07-20 Deploy: unified SL band 1.5/2.5 + max-hold disabled + reward-ATR≥1.0 (pid 1556740)
 Backtest-driven risk tuning, ALL 4 traders identical:
