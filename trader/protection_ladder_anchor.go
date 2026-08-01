@@ -254,10 +254,31 @@ func liveLadderTakeProfitPrices(openOrders []OpenOrder, positionSide string) []f
 	return prices
 }
 
-// nearestLadderTakeProfitPrice returns the take-profit tier that fills first
-// (closest to entry): the lowest price for longs, the highest for shorts.
+// farthestLadderTakeProfitPrice returns the take-profit tier that fills last
+// (furthest from entry): the highest price for longs, the lowest for shorts.
 // Used to collapse an all-below-minimum ladder into a single full-position TP.
-func nearestLadderTakeProfitPrice(orders []ProtectionOrder, side string) float64 {
+//
+// Why the FURTHEST tier and not the nearest (2026-08-01). Collapsing an
+// all-below-minimum ladder means the whole position now exits at one price, so
+// the choice is "where does the runner end", not "where is the first scale-out".
+// Picking the nearest tier caps the entire position at the first target, which
+// on a ZEC-class position (8.276 contracts, 20/18/15/12% ladder) moved the
+// dropped share's exit from 3.6 ATR to 1.1 ATR and made the weighted RR WORSE
+// than leaving the tier off entirely (-0.035).
+//
+// This is only safe because the downside is owned by mechanisms that do not
+// depend on the TP ladder at all, and they arm well below the furthest target:
+// break_even_stop BE1 at 1.3 ATR profit (offset 0.3, close 100%), BE2 at 2.5 ATR,
+// drawdown_take_profit dd1 at 2.5 ATR profit with a 1.5 ATR giveback, plus
+// giveback_guard breadth at 1.15 ATR. A position that reaches 3.0 ATR and turns
+// does not lose the move — dd1 takes it. So reaching for the far target costs
+// nothing that is not already protected, while the nearest-tier choice
+// permanently forfeits the tail.
+//
+// Secondary benefit: for a long the far tier sits further ABOVE mark, so it is
+// less likely to be already-passed and rejected by the venue (OKX 51279), which
+// is the failure the 2026-06-09 executability guard exists to catch.
+func farthestLadderTakeProfitPrice(orders []ProtectionOrder, side string) float64 {
 	best := 0.0
 	for _, o := range orders {
 		if o.Price <= 0 {
@@ -268,11 +289,11 @@ func nearestLadderTakeProfitPrice(orders []ProtectionOrder, side string) float64
 			continue
 		}
 		if side == "long" {
-			if o.Price < best {
+			if o.Price > best {
 				best = o.Price
 			}
 		} else {
-			if o.Price > best {
+			if o.Price < best {
 				best = o.Price
 			}
 		}

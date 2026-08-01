@@ -30,6 +30,12 @@ func TestValidateProtectionPlanExecutionDoesNotCollapseTPPastMark(t *testing.T) 
 
 // Sanity: when the ladder TP target is still ahead of mark, collapse still works
 // (e.g. a long TP above current price after min-contract filtering).
+//
+// Direction changed 2026-08-01: collapse now targets the FURTHEST tier, not the
+// nearest. Capping the whole position at the first scale-out made the weighted
+// RR worse than dropping the tier outright, and the downside is already owned by
+// break-even and drawdown protection, which arm independently of this ladder.
+// See farthestLadderTakeProfitPrice.
 func TestValidateProtectionPlanExecutionCollapsesTPAheadOfMark(t *testing.T) {
 	fakeTrader := &fakeOrderProtectionTrader{
 		positions: []map[string]interface{}{
@@ -49,7 +55,7 @@ func TestValidateProtectionPlanExecutionCollapsesTPAheadOfMark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if validated == nil || validated.TakeProfitPrice != 60.86 {
-		t.Fatalf("expected collapse to nearest TP 60.86 (ahead of mark), got %+v", validated)
+	if validated == nil || validated.TakeProfitPrice != 62.63 {
+		t.Fatalf("expected collapse to furthest TP 62.63 (ahead of mark), got %+v", validated)
 	}
 }

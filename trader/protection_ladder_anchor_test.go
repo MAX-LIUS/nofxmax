@@ -60,15 +60,31 @@ func TestAnchor_AllFilledDustTail(t *testing.T) {
 	}
 }
 
-// TestNearestLadderTakeProfitPrice picks the first-to-fill tier per side.
-func TestNearestLadderTakeProfitPrice(t *testing.T) {
+// TestFarthestLadderTakeProfitPrice picks the last-to-fill tier per side, which
+// is the direction a collapse must take: the whole position exits at one price,
+// so it keeps the runner instead of capping at the first scale-out. The downside
+// in between is owned by BE1/BE2/dd1/giveback, none of which read this ladder.
+func TestFarthestLadderTakeProfitPrice(t *testing.T) {
+	// Short: profit is DOWN, so the last tier to fill is the lowest price.
 	short := []ProtectionOrder{tp(0.422, 40), tp(0.409, 35)}
-	if got := nearestLadderTakeProfitPrice(short, "short"); got != 0.422 {
-		t.Fatalf("short nearest expected 0.422, got %.3f", got)
+	if got := farthestLadderTakeProfitPrice(short, "short"); got != 0.409 {
+		t.Fatalf("short farthest expected 0.409, got %.3f", got)
 	}
+	// Long: profit is UP, so the last tier to fill is the highest price.
 	long := []ProtectionOrder{tp(105, 40), tp(110, 35)}
-	if got := nearestLadderTakeProfitPrice(long, "long"); got != 105 {
-		t.Fatalf("long nearest expected 105, got %.3f", got)
+	if got := farthestLadderTakeProfitPrice(long, "long"); got != 110 {
+		t.Fatalf("long farthest expected 110, got %.3f", got)
+	}
+	// Order of the slice must not matter.
+	if got := farthestLadderTakeProfitPrice([]ProtectionOrder{tp(110, 35), tp(105, 40)}, "long"); got != 110 {
+		t.Fatalf("long farthest (reversed input) expected 110, got %.3f", got)
+	}
+	// Non-positive prices are ignored, not treated as the extreme.
+	if got := farthestLadderTakeProfitPrice([]ProtectionOrder{tp(0, 40), tp(105, 35)}, "long"); got != 105 {
+		t.Fatalf("long farthest with zero price expected 105, got %.3f", got)
+	}
+	if got := farthestLadderTakeProfitPrice(nil, "long"); got != 0 {
+		t.Fatalf("empty ladder expected 0, got %.3f", got)
 	}
 }
 

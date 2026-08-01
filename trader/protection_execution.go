@@ -683,9 +683,17 @@ func (at *AutoTrader) validateProtectionPlanExecution(symbol, positionSide strin
 	if okxTrader, ok := at.trader.(interface {
 		ValidateProtectionQuantity(symbol string, quantity float64) error
 	}); ok {
+		// Oversell guard, see protection_oversell.go for why per-tier MinSz
+		// clamping is safe in the partial-drop case but not the all-drop one.
+		// nil sizer is handled inside: the guard fails open.
+		sizer, _ := at.trader.(protectionContractSizer)
 		filterExecutable := func(orders []ProtectionOrder) []ProtectionOrder {
 			if len(orders) == 0 {
 				return orders
+			}
+			if ladderWouldOversell(sizer, symbol, quantity, orders) {
+				warnf("  ⚠️ Ladder would oversell after min-size clamping (%d tiers vs position); dropping tiers so the collapse fallback owns it: symbol=%s side=%s", len(orders), symbol, positionSide)
+				return nil
 			}
 			filtered := make([]ProtectionOrder, 0, len(orders))
 			for _, order := range orders {
@@ -728,12 +736,14 @@ func (at *AutoTrader) validateProtectionPlanExecution(symbol, positionSide strin
 		if len(plan.TakeProfitOrders) > 0 && len(adjusted.TakeProfitOrders) == 0 && plan.NeedsTakeProfit {
 			// All ladder TP tiers fell below the exchange minimum (dust remainder).
 			// Honor a pre-set full TP price if present; otherwise collapse to the
-			// nearest (first-to-fill) tier so the dust is still taken at the earliest
-			// configured target instead of leaving the position with no TP and looping
-			// forever (fix 2026-06-07).
+			// FURTHEST tier so the whole position keeps its runner instead of being
+			// capped at the first scale-out (fix 2026-06-07, direction corrected
+			// 2026-08-01 — see farthestLadderTakeProfitPrice for why the nearest
+			// tier made the weighted RR worse than dropping the tier outright, and
+			// why BE1/dd1/giveback own the downside independently of this ladder).
 			if adjusted.TakeProfitPrice > 0 {
 				warnf("  ⚠️ Ladder take-profit tiers all below exchange minimum; using full TP @%.6f for %s %s", adjusted.TakeProfitPrice, symbol, positionSide)
-			} else if collapsePrice := nearestLadderTakeProfitPrice(plan.TakeProfitOrders, strings.ToLower(positionSide)); collapsePrice > 0 {
+			} else if collapsePrice := farthestLadderTakeProfitPrice(plan.TakeProfitOrders, strings.ToLower(positionSide)); collapsePrice > 0 {
 				// Only collapse to a TP that is still executable against current mark.
 				// When price has already moved past the TP target (e.g. long TP below
 				// mark), the exchange rejects it (OKX 51279) and the reconciler loops

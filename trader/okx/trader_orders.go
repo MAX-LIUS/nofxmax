@@ -457,9 +457,65 @@ func (t *OKXTrader) closeShortWithTag(symbol string, quantity float64, reasonTag
 	}, nil
 }
 
-// ValidateProtectionQuantity checks whether a base-asset quantity can produce a valid
-// OKX contract size after lot-size rounding. It is intentionally stricter than
-// FormatQuantity so protection planning can degrade before sending impossible orders.
+// protectionSizeForQuantity resolves a base-asset quantity to the contract-size
+// string this venue would actually put on the wire for a protection order.
+//
+// It exists so ValidateProtectionQuantity and the four placement paths cannot
+// disagree: SetStopLoss, SetStopLossTagged, SetTakeProfit and SetTakeProfitTagged
+// all clamp sz up to MinSz and then formatSize it, so validating with any other
+// rule (e.g. formatSize alone, which ROUNDS: 0.4 → "0") produces a verdict the
+// placement path contradicts. Comparing a value produced by one quantization rule
+// against a value produced by a different one is exactly the root cause of the
+// 2026-07-28 ZEC place/cancel churn; see protection_qty_equivalence.go.
+func (t *OKXTrader) protectionSizeForQuantity(inst *OKXInstrument, quantity float64) (float64, string, error) {
+	sz := quantity / inst.CtVal
+	if inst.MinSz > 0 && sz < inst.MinSz {
+		sz = inst.MinSz
+	}
+	formatted := t.formatSize(sz, inst)
+	parsed, err := strconv.ParseFloat(formatted, 64)
+	if err != nil {
+		return 0, formatted, fmt.Errorf("contract size %q unparseable: %w", formatted, err)
+	}
+	return parsed, formatted, nil
+}
+
+// ProtectionContractsForQuantity reports how many contracts a protection order
+// for `quantity` would actually carry, after MinSz clamping and lot formatting.
+// Callers need this to reason about a whole ladder at once — notably to detect
+// that clamping every tier up would close more than the position holds.
+func (t *OKXTrader) ProtectionContractsForQuantity(symbol string, quantity float64) (float64, error) {
+	inst, err := t.getInstrument(symbol)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get instrument info: %w", err)
+	}
+	if inst.CtVal <= 0 {
+		return 0, fmt.Errorf("invalid instrument contract value")
+	}
+	resolved, _, err := t.protectionSizeForQuantity(inst, quantity)
+	return resolved, err
+}
+
+// ValidateProtectionQuantity checks whether a base-asset quantity can produce a
+// valid OKX contract size for a protection order, using the SAME resolution the
+// placement path uses.
+//
+// It deliberately does NOT reject a tier merely for being below MinSz before
+// clamping. The placement path clamps up, so such a tier is executable, and
+// rejecting it here silently narrowed live ladders: 2026-08-01 ZECUSDT, the
+// 12%/3.6-ATR tier resolved to 0.99305 contracts against MinSz 1 — short by
+// 0.007 — and was dropped, leaving 4 of 8.276 contracts on the exchange (48.3%)
+// against a configured 65%. Across history 14.5% of positions lost at least one
+// tier this way.
+//
+// Not overselling is the CALLER's responsibility, not this function's, because
+// only the caller knows the whole ladder. The caller must keep the
+// all-tiers-below-minimum case on the collapse path: clamping every tier up there
+// does oversell (1-contract position, 4 tiers → 4 contracts). The partial case is
+// safe by construction — a partial drop means the largest tier survived, so the
+// position is >= 1/maxRatio contracts while N tiers clamped to 1 place at most N,
+// and N < 1/maxRatio for every configured ladder (checked over 1167 position
+// points on 20/18/15/12, 20/15/15/15 and 10/30/25).
 func (t *OKXTrader) ValidateProtectionQuantity(symbol string, quantity float64) error {
 	inst, err := t.getInstrument(symbol)
 	if err != nil {
@@ -468,20 +524,25 @@ func (t *OKXTrader) ValidateProtectionQuantity(symbol string, quantity float64) 
 	if inst.CtVal <= 0 {
 		return fmt.Errorf("invalid instrument contract value")
 	}
-	contracts := quantity / inst.CtVal
-	if inst.MinSz > 0 && contracts < inst.MinSz {
-		return fmt.Errorf("quantity %.8f below min contracts %.8f", contracts, inst.MinSz)
+	if quantity <= 0 {
+		return fmt.Errorf("quantity %.8f is not positive", quantity)
 	}
-	if inst.LotSz > 0 && contracts < inst.LotSz {
-		return fmt.Errorf("quantity %.8f below lot size %.8f", contracts, inst.LotSz)
+	resolved, formatted, err := t.protectionSizeForQuantity(inst, quantity)
+	if err != nil {
+		return err
 	}
-	formatted := t.formatSize(contracts, inst)
-	formattedContracts, err := strconv.ParseFloat(formatted, 64)
-	if err != nil || formattedContracts <= 0 {
-		return fmt.Errorf("quantity %.8f rounds to invalid contract size %q", contracts, formatted)
+	if resolved <= 0 {
+		return fmt.Errorf("quantity %.8f resolves to invalid contract size %q", quantity/inst.CtVal, formatted)
 	}
-	if inst.MinSz > 0 && formattedContracts < inst.MinSz {
-		return fmt.Errorf("quantity %.8f rounds below min contracts %.8f", formattedContracts, inst.MinSz)
+	if inst.MinSz > 0 && resolved < inst.MinSz {
+		return fmt.Errorf("quantity %.8f resolves to %.8f contracts, below min %.8f", quantity/inst.CtVal, resolved, inst.MinSz)
+	}
+	// LotSz is checked against the RESOLVED size because the placement path only
+	// clamps to MinSz. Every OKX USDT swap currently has LotSz == MinSz (421/421
+	// on 2026-08-01), so this is latent today, but a venue listing LotSz > MinSz
+	// would otherwise pass validation here and be rejected on the wire.
+	if inst.LotSz > 0 && resolved < inst.LotSz {
+		return fmt.Errorf("quantity %.8f resolves to %.8f contracts, below lot size %.8f", quantity/inst.CtVal, resolved, inst.LotSz)
 	}
 	return nil
 }
@@ -815,12 +876,12 @@ func (t *OKXTrader) setStopLossWithTag(symbol string, positionSide string, quant
 		return "", fmt.Errorf("failed to get instrument info: %w", err)
 	}
 
-	// Calculate contract size: quantity (in base asset) / ctVal (asset per contract)
-	sz := quantity / inst.CtVal
-	if inst.MinSz > 0 && sz < inst.MinSz {
-		sz = inst.MinSz
+	// Contract size via the shared resolver so this cannot drift from
+	// ValidateProtectionQuantity (see protectionSizeForQuantity).
+	_, szStr, err := t.protectionSizeForQuantity(inst, quantity)
+	if err != nil {
+		return "", err
 	}
-	szStr := t.formatSize(sz, inst)
 
 	// Determine direction
 	side := "sell"
@@ -883,12 +944,12 @@ func (t *OKXTrader) setTakeProfitWithTag(symbol string, positionSide string, qua
 		return "", fmt.Errorf("failed to get instrument info: %w", err)
 	}
 
-	// Calculate contract size: quantity (in base asset) / ctVal (asset per contract)
-	sz := quantity / inst.CtVal
-	if inst.MinSz > 0 && sz < inst.MinSz {
-		sz = inst.MinSz
+	// Contract size via the shared resolver so this cannot drift from
+	// ValidateProtectionQuantity (see protectionSizeForQuantity).
+	_, szStr, err := t.protectionSizeForQuantity(inst, quantity)
+	if err != nil {
+		return "", err
 	}
-	szStr := t.formatSize(sz, inst)
 
 	// Determine direction
 	side := "sell"
