@@ -403,6 +403,11 @@ func formatStructuralZones(mdata *market.Data, zh bool) string {
 	// rejections here are meaningful, but they are evidence, not a hard rule.
 	sb.WriteString(formatPeriodLevels(mdata, currentPrice, zh))
 
+	// Session opening range + how much of the daily ATR it already consumed.
+	// A large expansion means the day's normal range is largely spent, so
+	// continuation entries are chasing exhausted volatility. Evidence only.
+	sb.WriteString(formatSessionRange(mdata, currentPrice, zh))
+
 	// FVG imbalances (unfilled gaps act as magnets) + equal-high/low liquidity
 	// pools (stop-run targets). Evidence for target/entry timing, not gates.
 	sb.WriteString(formatFVGAndLiquidity(mdata, currentPrice, zh))
@@ -968,4 +973,100 @@ func translateSource(source string, zh bool) string {
 	default:
 		return source
 	}
+}
+
+// sessionRangeGradeZH maps an expansion grade to a short Chinese label.
+func sessionRangeGradeZH(grade string) string {
+	switch grade {
+	case "compressed":
+		return "压缩"
+	case "normal":
+		return "正常"
+	case "expanded":
+		return "已扩张"
+	case "exhausted":
+		return "扩张耗尽"
+	default:
+		return grade
+	}
+}
+
+// sessionRangeLocationLabel describes where price sits vs the opening range.
+func sessionRangeLocationLabel(loc string, zh bool) string {
+	switch loc {
+	case "above_or":
+		if zh {
+			return "在开盘区间上方"
+		}
+		return "above the opening range"
+	case "below_or":
+		if zh {
+			return "在开盘区间下方"
+		}
+		return "below the opening range"
+	case "inside_or":
+		if zh {
+			return "在开盘区间内"
+		}
+		return "inside the opening range"
+	}
+	return loc
+}
+
+// formatSessionRange renders the most recent session's opening range and the
+// share of the daily ATR it has consumed. Purpose: make "how much of today's
+// normal range is already spent" visible at decision time, so a continuation
+// entry into an exhausted range is a conscious choice rather than a blind one.
+// Evidence only — no gate consumes these fields.
+func formatSessionRange(mdata *market.Data, currentPrice float64, zh bool) string {
+	sr := mdata.SessionRange
+	if sr == nil || sr.ORHigh <= 0 || sr.ORLow <= 0 {
+		return ""
+	}
+	var sb strings.Builder
+	if zh {
+		sb.WriteString("\n**时段开盘区间** (最近时段开盘 N 分钟高低 + 日ATR消耗度, 参考证据):\n")
+	} else {
+		sb.WriteString("\n**Session Opening Range** (opening window high-low + daily-ATR consumption — evidence):\n")
+	}
+	status := ""
+	if !sr.Complete {
+		if zh {
+			status = " [未完成/发展中]"
+		} else {
+			status = " [developing]"
+		}
+	}
+	if zh {
+		sb.WriteString(fmt.Sprintf("- 时段=%s, 开盘区间(%d分钟)=%s~%s%s\n",
+			sr.Session, sr.ORWindowMinutes, formatAIFloat(sr.ORLow), formatAIFloat(sr.ORHigh), status))
+	} else {
+		sb.WriteString(fmt.Sprintf("- session=%s, opening_range(%dm)=%s~%s%s\n",
+			sr.Session, sr.ORWindowMinutes, formatAIFloat(sr.ORLow), formatAIFloat(sr.ORHigh), status))
+	}
+	if sr.ExpansionGrade != "" {
+		// The ratio is the meaningful figure (1.0 = as wide as the window's
+		// duration implies). The raw %-of-ATR is shown alongside for reference.
+		if zh {
+			sb.WriteString(fmt.Sprintf("- 扩张=%.1f倍常态 (占日ATR %.0f%%, %s)\n",
+				sr.ExpansionRatio, sr.ExpansionPct, sessionRangeGradeZH(sr.ExpansionGrade)))
+			if sr.ExpansionGrade == "exhausted" {
+				sb.WriteString("  注: 开盘区间已吃掉远超常态的日内波动, 此处顺势追单等于追已耗尽的波动\n")
+			}
+		} else {
+			sb.WriteString(fmt.Sprintf("- expansion=%.1fx normal (%.0f%% of daily ATR, %s)\n",
+				sr.ExpansionRatio, sr.ExpansionPct, sr.ExpansionGrade))
+			if sr.ExpansionGrade == "exhausted" {
+				sb.WriteString("  note: the opening window already consumed far more than a normal share of daily range; continuation entries here chase spent volatility\n")
+			}
+		}
+	}
+	if sr.Location != "" {
+		if zh {
+			sb.WriteString(fmt.Sprintf("- 当前价%s\n", sessionRangeLocationLabel(sr.Location, true)))
+		} else {
+			sb.WriteString(fmt.Sprintf("- price is %s\n", sessionRangeLocationLabel(sr.Location, false)))
+		}
+	}
+	return sb.String()
 }

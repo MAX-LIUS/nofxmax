@@ -199,6 +199,10 @@ func GetWithTimeframesExchange(symbol string, timeframes []string, primaryTimefr
 	// for period-level aggregation (prev day/week need the deepest history).
 	var widestKlines []Kline
 	var widestSpan int64
+	// finestKlines tracks the series with the smallest bar size, used for the
+	// session opening range (which needs intraday resolution).
+	var finestKlines []Kline
+	finestBarMin := 0
 
 	// Check if this is an xyz dex asset (use Hyperliquid API)
 	isXyzAsset := IsXyzDexAsset(symbol)
@@ -245,6 +249,12 @@ func GetWithTimeframesExchange(symbol string, timeframes []string, primaryTimefr
 				widestSpan = span
 				widestKlines = klines
 			}
+		}
+
+		// Track the finest-granularity series for the session opening range.
+		if bm := parseTimeframeToMinutes(tf); bm > 0 && (finestBarMin == 0 || bm < finestBarMin) {
+			finestBarMin = bm
+			finestKlines = klines
 		}
 
 		// Calculate series data for this timeframe (use count from config)
@@ -446,6 +456,15 @@ func GetWithTimeframesExchange(symbol string, timeframes []string, primaryTimefr
 		periodSrc = primaryKlines
 	}
 	data.PeriodLevels = CalculatePeriodLevels(periodSrc)
+
+	// Session opening range + expansion grade. Needs intraday resolution for the
+	// opening window and the deepest series for the daily-ATR baseline. Returns
+	// nil when the configured timeframes are all too coarse.
+	orSrc := finestKlines
+	if len(orSrc) == 0 {
+		orSrc = primaryKlines
+	}
+	data.SessionRange = CalculateSessionRange(orSrc, periodSrc, time.Now().UnixMilli())
 
 	// FVG imbalances and equal-high/low liquidity pools from primary timeframe.
 	var primaryATR14 float64

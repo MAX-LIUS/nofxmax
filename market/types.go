@@ -30,6 +30,7 @@ type Data struct {
 	VolumeProfile      *VolumeProfile    `json:"volume_profile,omitempty"`
 	AnchoredVWAPs      []AnchoredVWAP    `json:"anchored_vwaps,omitempty"`
 	PeriodLevels       *PeriodLevels     `json:"period_levels,omitempty"`
+	SessionRange       *SessionRange     `json:"session_range,omitempty"`
 	FairValueGaps      []FairValueGap    `json:"fair_value_gaps,omitempty"`
 	LiquidityPools     []LiquidityPool   `json:"liquidity_pools,omitempty"`
 	StructureBreaks    []StructureBreak   `json:"structure_breaks,omitempty"`
