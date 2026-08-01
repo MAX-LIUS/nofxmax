@@ -500,7 +500,68 @@ verified no half-deploy state each time (md5 unchanged, pid alive, health 200) a
 manual commands rather than working around the denial.
 
 ## Last Updated
-2026-08-01 - RR 审计双 plan + 覆盖率维度 (pid 532689, md5 37dfd393, commit 7e27aff)
+2026-08-01 - 复盘 ATR 上下文 + 屏蔽低波动独立开关 (pid 579360, md5 69a26400, commit 9a48070)
+
+## 2026-08-01 Deploy: 复盘面板 ATR/BE/分页 + 屏蔽低波动独立开关 (pid 579360, commit 9a48070)
+md5 69a264009fcd69074dce330453d84321 ← 上一版 37dfd393
+回滚二进制: /root/.claude/jobs/5cbb3cf4/tmp/nofx.rollback_7e27aff_20260801_1930
+两个 commit 一起上: a8284e1(复盘面板) + 9a48070(低波动门禁)
+**前端也重建了**(Docker 容器 nofx-frontend,不是静态目录):
+`docker compose build nofx-frontend` → `up -d --no-deps nofx-frontend`,
+bundle hash index-BON6paYF.js 与本地构建一致,api_proxy=200。
+
+### BE 档位显示:是显示缺陷,不是逻辑错
+`triggerPct` 是**激活阈值**,`triggerPrice` 是按 **offset** 停放的止损价 ——
+两个不同价位被并排渲染成 `BE1+1.3%@1856.69`,读起来像"1.3% 对应该价"。
+按 entry 1862.28 逐一核对:BE1 offset 0.3% → 1856.693,BE2 offset 1.0% →
+1843.657,与面板一致。解析后单位确实是百分比。改成「激活+1.3% → 止损@…」。
+潜在真 bug 仍在:若解析被跳过(`no ATR for %s; falling back to configured
+percents`),会把**原始 ATR 倍数**当百分比打印。
+查不到 BE 配置何时改的:`trader_protection_config_history` **0 行**。
+
+### ATR 必须落快照,否则复盘拿不回分母
+`DeleteFrozenATRRecord` 在平仓时删掉 frozen-ATR 记录,所以
+`protection_plan_snapshots` 加了 `atr_value`/`atr_timeframe`。没有它面板只能
+用 `peak_pnl_pct / peak_atr_mult` 反算,行程≈0 时会炸(MFE +0.00%/+0.01×)。
+读取用**新增的 `frozenATRForPositionReadOnly`**,不能复用 get-or-freeze 变体:
+后者未命中时会实地取值并写入记录 = **让上报路径铸造交易状态**,可能把持仓
+绑到开仓数小时后测得的 ATR。生产库已确认加列成功,319 行保留,旧行 ATR=0。
+postgres 侧 `InitTables` 表已存在时提前返回,故必须补显式 ADD COLUMN。
+
+### 我自己犯的错:把 floor 放在了父开关的早返回之后
+`evaluateMarketStateGate` 开头有 `if !regimeCfg.Enabled { return }`,而生产库
+`regime_filter.enabled` 在 **4 个实盘策略里 3 个为 0**(仅 BN-chart+ 开)。
+第一版把 floor 放在其后 = 重犯 `entry_gate.min_atr14_pct` 的老问题(挂在
+`entry_structure.enabled` 下,四策略全关,可设置永不执行),正好违反用户要的
+"不依赖父开关"。已提到早返回**之前**。
+**8/8 测试全绿没抓到**,因为所有测试都用 `Enabled: true` → 补
+`TestVolatilityFloorIndependentOfRegimeFilterSwitch` 钉住,并断言天花板
+**仍**留在早返回后(防止把 floor 上移时把整个门禁漏出来)。
+同一处不一致另有两份:`entryPipeline.ts` 的 `active` 跟着父开关(会把正在
+拦单的门显示成未生效);`api/strategy.go` 校验包在 `if regime.Enabled` 里,
+恰好在"父开关关+floor 开+阈值留 0"这个最需要提示的组合下静默。均已修。
+字段仍挂 `RegimeFilterConfig` 只为**分组**(与 `BlockHighVolatility` 是同一
+测量上的一个窗口),不是依赖。
+
+### 默认关闭是数据决定的,不是保守
+519 笔已平仓按**品种各自** ATR 中位数切半:低波动半 234 笔 63% 胜率 **+20.01**,
+高波动半 239 笔 52% **-132.69**,11 个品种 8 个同向。**低波动是当前系统赚钱的
+那一半**,默认开启会砍掉盈利来源。该开关只针对被手续费吃掉的尾部(ATR% ~0.1
+时 0.9-ATR 目标 0.106% vs 往返成本 0.12% = 手续费占毛利 113%,打中止盈也亏)。
+实测数字已写入代码注释,防止后人"顺手打开"。
+上线零行为变化已确认:5 个策略 `block_low_volatility`/`min_atr14_pct` 键全
+ABSENT → false/0;`getRegimeFilterConfig` 不套默认值;
+`GetDefaultStrategyConfig` 只在"无配置兜底"时用,不回填现存策略。
+
+### min_eff_pct 档位塌陷:仍未修,等回测
+0.3% 地板**不能去掉**:ATR 0.118% 时 0.9-ATR 目标 0.106% < 往返成本 0.12%。
+但它导致 TP1/TP2/TP3(1.1/1.7/2.5 ATR = 0.130/0.201/0.295%)全钳到同一价,
+53% 仓位 + BE1 + Drawdown 挤在 1856.693。315 快照 11 个重叠,2 个 XAUUSDT
+四档全塌。0.118% 是第 **0.4** 百分位(P5=0.272%, P50=0.759%),真问题但罕见。
+用户要求:主动收敛与 floor 阈值都要**按 0.1% 精度逐个回测**看实际收益变化,
+回测出来再决定。改下单逻辑,未经确认不动。
+
+## 2026-08-01 Deploy: RR 审计同时上报计划与实际可挂 (pid 532689, commit 7e27aff)
 
 ## 2026-08-01 Deploy: RR 审计同时上报计划与实际可挂 (pid 532689, commit 7e27aff)
 md5 37dfd393a8ad721b75505f787580c000 ← 上一版 48edc644
