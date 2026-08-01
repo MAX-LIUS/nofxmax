@@ -500,7 +500,43 @@ verified no half-deploy state each time (md5 unchanged, pid alive, health 200) a
 manual commands rather than working around the denial.
 
 ## Last Updated
-2026-08-01 - 保护档位向上取整 + 塌缩改最远档 (pid 524730, md5 48edc644, commit a7ff9e3)
+2026-08-01 - RR 审计双 plan + 覆盖率维度 (pid 532689, md5 37dfd393, commit 7e27aff)
+
+## 2026-08-01 Deploy: RR 审计同时上报计划与实际可挂 (pid 532689, commit 7e27aff)
+md5 37dfd393a8ad721b75505f787580c000 ← 上一版 48edc644
+回滚二进制: /root/.claude/jobs/5cbb3cf4/tmp/nofx.rollback_48edc644_20260801_115556
+
+纯审计路径(只打日志,不改挂单),故当日第二次部署。
+
+问题。审计钩子在 applyPostOpenProtection:138,而丢档发生在下游
+validateProtectionPlanExecution,所以字段只能诚实叫 planned_*。ZEC 那次
+65% 只挂上 48.3%,审计一行都没提示 —— **掉的是最远档,nearest RR 一模一样**。
+
+两处改动:
+1. 新增 `ProfitCoveragePct` / `profitCoveragePct(plan)`。RR 本身无法暴露梯度
+   变窄。特别注意塌缩后的形态:全档跌破后 plan 被改写成单个全仓
+   TakeProfitPrice、梯度为空,直接对梯度求和会把 100% 报成 0%,读起来像保护
+   全丢、恰好相反 —— 所以回落到单价字段判 100,与 protectionLegPrices 一致。
+2. 新增 `auditPlannedAndPlacedRiskReward`,对两个 plan 各审一次(审计函数是
+   纯函数,由调用方跑两遍;第二遍用 quiet=true 跑挂单路径即将用的同一过滤器)。
+   只在两者有差异或 declared 偏离超阈值时打印,健康入场无输出。
+
+放在 applyPostOpenProtection 而非 placeAndVerifyProtectionPlan 内,是为了避开
+重试循环 —— 否则每次重试打一行。只读性由 TestAuditPlannedAndPlacedIsReadOnly
+逐档比对前后快照锁定;quiet=true 避免与挂单路径几毫秒后的告警重复。
+
+placed_* 是忠实预测而非保证:mark price 是挂单前几微秒读的,快速行情仍可能变。
+命名 placed_* 因为它就是挂单路径即将调用的同一函数、同样入参。
+
+三种形态实测:
+- 全档跌破塌缩: planned_cover=65% → placed_cover=100%,RR 0.53→1.41
+  (向上塌缩的收益在审计里直接可见)
+- 部分变窄: declared 偏差 +0.00 却 cover 65%→38%,正是旧逻辑漏掉的那类
+- 完全健康: 无输出
+
+部署后 3 分 44 秒 / 4723 行: 0 ERROR、0 WARN、0 撤单,132 条 verified=true
+无一 false,unexpectedTP/staleTrail 全 0,99 条 not re-placing。RR 审计暂无输出
+(本周期无新入场,且存量仓位不走该路径),符合预期。
 
 ## 2026-08-01 Deploy: 挂不上的档位向上取整到最小张数 + 塌缩改向最远档 (pid 524730, commit a7ff9e3)
 md5 48edc6446cb4c2f5aea340bed169ae0e ← 上一版 ab68255bd0398512b319af67a015b405
