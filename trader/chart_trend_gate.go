@@ -106,16 +106,24 @@ func chartSwingAlign(highs, lows []float64, side string, lb int) float64 {
 
 // chartTrendGate evaluates the chart_trend ALLOW-list gate. Returns (block, detail).
 // block=true means the entry is NOT a clean chart trend and should be rejected.
-func chartTrendGate(c shadowGateCtx, window int, alignMin, r2Min float64) (bool, string) {
+//
+// pivotLB is the swing-pivot lookback for the alignment term. Callers pass 2 to
+// reproduce the original calibration; it used to be hardcoded, which made the
+// gate unable to express the lb=3 setting the structural gate treats as the
+// decisive one.
+func chartTrendGate(c shadowGateCtx, window int, alignMin, r2Min float64, pivotLB int) (bool, string) {
+	if pivotLB <= 0 {
+		pivotLB = 2
+	}
 	slopePct, r2 := chartRegChannel(c.closes, window)
 	dirSlope := slopePct
 	if strings.EqualFold(c.side, "SHORT") {
 		dirSlope = -slopePct
 	}
-	align := chartSwingAlign(c.highs, c.lows, c.side, 2)
+	align := chartSwingAlign(c.highs, c.lows, c.side, pivotLB)
 	allow := align >= alignMin && r2 >= r2Min && dirSlope > 0
-	detail := fmt.Sprintf("align=%.2f(>=%.2f) r2=%.2f(>=%.2f) dirSlope=%+.3f side=%s allow=%v",
-		align, alignMin, r2, r2Min, dirSlope, c.side, allow)
+	detail := fmt.Sprintf("align=%.2f(>=%.2f,lb=%d) r2=%.2f(>=%.2f) dirSlope=%+.3f side=%s allow=%v",
+		align, alignMin, pivotLB, r2, r2Min, dirSlope, c.side, allow)
 	return !allow, detail
 }
 

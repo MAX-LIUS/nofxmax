@@ -140,6 +140,11 @@ type RegimeGateConfig struct {
 		Lookback    int     `json:"lookback,omitempty"`
 		AlignMin    float64 `json:"align_min,omitempty"` // chart_trend: min swing-structure alignment (0..1)
 		R2Min       float64 `json:"r2_min,omitempty"`    // chart_trend: min regression-channel R^2 (0..1)
+		// ADXPeriod overrides the ADX lookback for adx_weak. 0/unset = 14.
+		// The useful period is timeframe-dependent: on 15m primaries ADX(14) is
+		// flat-to-harmful at every threshold while ADX(10) discriminates, so this
+		// has to be settable per strategy rather than hardcoded.
+		ADXPeriod int `json:"adx_period,omitempty"`
 	} `json:"params,omitempty"`
 }
 

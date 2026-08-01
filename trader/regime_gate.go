@@ -60,8 +60,18 @@ func evalRegimeGate(g store.RegimeGateConfig, ctx shadowGateCtx) (bool, string) 
 		if thr == 0 {
 			thr = 20
 		}
-		adx := sgADX(ctx.highs, ctx.lows, ctx.closes, 14)
-		return adx < thr, fmt.Sprintf("adx=%.1f<%.1f", adx, thr)
+		// Period is configurable because the useful period is timeframe-dependent.
+		// Default stays 14 so existing configs keep their exact behaviour.
+		// Measured on Claude-R 15m (369 entries, neutral 6h hold): ADX(14) is flat
+		// to harmful at every threshold (>=20 → -0.072, >=25 → -0.064, >=30 →
+		// -0.120 vs baseline -0.071), while ADX(10)>=30 is the only variant that
+		// helps. Hardcoding 14 made that combination unexpressible in config.
+		period := g.Params.ADXPeriod
+		if period <= 0 {
+			period = 14
+		}
+		adx := sgADX(ctx.highs, ctx.lows, ctx.closes, period)
+		return adx < thr, fmt.Sprintf("adx%d=%.1f<%.1f", period, adx, thr)
 	case "donchian_counter":
 		n := g.Params.Lookback
 		if n == 0 {
@@ -83,7 +93,16 @@ func evalRegimeGate(g store.RegimeGateConfig, ctx shadowGateCtx) (bool, string) 
 		if r2Min == 0 {
 			r2Min = 0.60
 		}
-		return chartTrendGate(ctx, w, alignMin, r2Min)
+		// Pivot lookback for the swing-alignment term. Default 2 preserves the
+		// behaviour this gate was calibrated with; it is settable because the
+		// rest of the codebase treats lb=2 and lb=3 as materially different
+		// (see store.EntryGateConfig.StructuralPivotLookback: lb=2 is noise-level,
+		// lb=3 is decisive) and this gate had no way to express that.
+		lb := g.Params.Lookback
+		if lb <= 0 {
+			lb = 2
+		}
+		return chartTrendGate(ctx, w, alignMin, r2Min, lb)
 	}
 	return false, "unknown_category:" + g.Category
 }

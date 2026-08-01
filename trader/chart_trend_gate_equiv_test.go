@@ -38,7 +38,7 @@ func TestChartTrendGateEquivalence(t *testing.T) {
 			dirSlope = -slopePct
 		}
 		align := chartSwingAlign(c.Highs, c.Lows, c.Side, 2)
-		block, _ := chartTrendGate(ctx, 30, 0.55, 0.60)
+		block, _ := chartTrendGate(ctx, 30, 0.55, 0.60, 2)
 		goAllow := !block
 		if math.Abs(align-c.PyAlign) > 1e-3 || math.Abs(r2-c.PyR2) > 1e-3 || math.Abs(dirSlope-c.PyDirSlope) > 1e-3 {
 			mism++

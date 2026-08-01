@@ -122,6 +122,23 @@ func (at *AutoTrader) applyPostOpenProtection(req *protectionExecutionRequest) e
 
 		logger.Infof("  🛡 Applying %s protection plan: stop=%v tp=%v ladderSL=%d ladderTP=%d",
 			plan.Mode, plan.NeedsStopLoss, plan.NeedsTakeProfit, len(plan.StopLossOrders), len(plan.TakeProfitOrders))
+
+		// Audit only. The plan is final here (AI/config merge, target clamping and
+		// the structural fallback have all run) and req.EntryPrice is the
+		// exchange-confirmed fill, so this is the one point where the DECLARED RR
+		// and the RR actually being placed are both known. Logs a line and nothing
+		// else — it must never change what gets placed.
+		if req.Decision.EntryProtection != nil {
+			if a := auditPlanRiskReward(plan, req.EntryPrice, req.Decision.EntryProtection.RiskReward.GrossEstimatedRR); a.Valid {
+				if math.Abs(a.NearestDiff) > rrAuditMaterialGap {
+					logger.Infof("  📐 RR audit %s %s: declared=%.2f placed_nearest=%.2f (%+.2f) placed_weighted=%.2f tiers=%dSL/%dTP mode=%s",
+						req.Symbol, req.PositionSide, a.DeclaredRR, a.NearestRR, a.NearestDiff, a.WeightedRR,
+						a.StopTiers, a.ProfitTiers, plan.Mode)
+				}
+			} else if a.Reason != "" {
+				logger.Debugf("  📐 RR audit skipped for %s %s: %s", req.Symbol, req.PositionSide, a.Reason)
+			}
+		}
 		if err := at.placeAndVerifyProtectionPlanWithRetry(req.Symbol, req.PositionSide, req.Quantity, plan); err != nil {
 			planErr = err
 			logger.Warnf("  ⚠️ Primary protection plan failed for %s %s: %v", req.Symbol, req.PositionSide, err)
