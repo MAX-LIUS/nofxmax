@@ -654,6 +654,21 @@ func (s *Server) handlePositionHistory(c *gin.Context) {
 					if tiers, err := snap.Tiers(); err == nil {
 						placed = placedFromSnapshotTiers(tiers, isLong)
 					}
+					// The ATR every ATR-unit tier was resolved against. Surfaced so a
+					// review can check `multiple × ATR / entry` itself instead of
+					// trusting the stored percent — and so a floor-clamped tier (see
+					// ATRProtection.min_eff_pct) is recognizable rather than looking
+					// like an arbitrary number. Older rows carry 0; omit those so the
+					// panel can tell "unknown" from "zero volatility".
+					if snap.ATRValue > 0 {
+						enrichedPos["protection_atr_value"] = snap.ATRValue
+						if pos.EntryPrice > 0 {
+							enrichedPos["protection_atr_pct"] = snap.ATRValue / pos.EntryPrice * 100
+						}
+					}
+					if snap.ATRTimeframe != "" {
+						enrichedPos["protection_atr_timeframe"] = snap.ATRTimeframe
+					}
 				}
 			}
 			if len(placed) == 0 {

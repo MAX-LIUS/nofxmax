@@ -1160,13 +1160,152 @@ function StatCard({
   )
 }
 
+// positionPnlPct is the signed price move from entry to exit in the position's
+// profit direction. Shared by the history row and the per-symbol trade dropdown
+// so the same trade never shows two different percentages. Returns 0 when the
+// entry price is unknown or the position has not exited.
+export function positionPnlPct(position: HistoricalPosition): number {
+  const entry = position.entry_price || 0
+  const exit = position.exit_price || 0
+  if (entry <= 0 || exit <= 0) return 0
+  const raw = ((exit - entry) / entry) * 100
+  return (position.side || '').toUpperCase() === 'LONG' ? raw : -raw
+}
+
+// SYMBOL_SORT_KEYS are the sortable columns of the symbol-performance table.
+// 'symbol' sorts alphabetically; the rest numerically.
+const SYMBOL_SORT_KEYS = [
+  'symbol',
+  'total_trades',
+  'win_rate',
+  'total_pnl',
+  'avg_pnl',
+  'avg_hold_mins',
+] as const
+type SymbolSortKey = (typeof SYMBOL_SORT_KEYS)[number]
+
+// SymbolTradeList is the per-symbol breakdown behind a symbol row: one line per
+// closed trade with its exit time, realized PnL and price-move %. The aggregate
+// row answers "which symbols work"; this answers "was that one lucky fill or a
+// repeatable edge", which the aggregate cannot show.
+//
+// `trades` comes from the positions already loaded in the panel, which may be a
+// shorter window than the server-side aggregate the row is built from. When it is
+// short, the count mismatch is shown rather than silently implying completeness.
+function SymbolTradeList({
+  trades,
+  expectedCount,
+  language,
+}: {
+  trades: HistoricalPosition[]
+  expectedCount: number
+  language: string
+}) {
+  const zh = language === 'zh'
+  if (trades.length === 0) {
+    return (
+      <div className="px-3 py-2 text-[11px]" style={{ color: '#848E9C' }}>
+        {zh
+          ? '当前已加载的持仓里没有这个品种的记录，点上方「加载全部」后再展开。'
+          : 'No trades for this symbol in the loaded window — load all positions first.'}
+      </div>
+    )
+  }
+  return (
+    <div className="px-3 pb-2">
+      {trades.length < expectedCount && (
+        <div className="text-[10px] mb-1" style={{ color: '#F0B90B' }}>
+          {zh
+            ? `已加载 ${trades.length} / 共 ${expectedCount} 笔，展开的是已加载部分`
+            : `Showing ${trades.length} of ${expectedCount} trades (loaded window)`}
+        </div>
+      )}
+      <table className="w-full text-[11px]">
+        <thead>
+          <tr style={{ color: '#848E9C' }}>
+            <th className="text-left font-normal py-1">
+              {zh ? '平仓时间' : 'Exit time'}
+            </th>
+            <th className="text-left font-normal py-1">
+              {zh ? '方向' : 'Side'}
+            </th>
+            <th className="text-right font-normal py-1">
+              {zh ? '盈亏' : 'PnL'}
+            </th>
+            <th className="text-right font-normal py-1">
+              {zh ? '比例' : 'PnL %'}
+            </th>
+            <th className="text-right font-normal py-1">
+              {zh ? '持仓' : 'Hold'}
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {trades.map((p) => {
+            const pnl = p.realized_pnl || 0
+            const pct = positionPnlPct(p)
+            const color = pnl >= 0 ? '#0ECB81' : '#F6465D'
+            const entryMs = p.entry_time ? new Date(p.entry_time).getTime() : 0
+            const exitMs = p.exit_time ? new Date(p.exit_time).getTime() : 0
+            const heldMins =
+              entryMs > 0 && exitMs > entryMs ? (exitMs - entryMs) / 60000 : 0
+            return (
+              <tr
+                key={p.id ?? `${p.symbol}-${p.exit_time}-${p.entry_time}`}
+                style={{ borderTop: '1px solid #2B3139' }}
+              >
+                <td className="py-1 font-mono" style={{ color: '#EAECEF' }}>
+                  {formatDate(p.exit_time || p.entry_time)}
+                </td>
+                <td
+                  className="py-1"
+                  style={{
+                    color:
+                      (p.side || '').toUpperCase() === 'LONG'
+                        ? '#0ECB81'
+                        : '#F6465D',
+                  }}
+                >
+                  {(p.side || '').toUpperCase() === 'LONG' ? 'L' : 'S'}
+                </td>
+                <td className="py-1 text-right font-mono" style={{ color }}>
+                  {pnl >= 0 ? '+' : ''}
+                  {formatNumber(pnl)}
+                </td>
+                <td className="py-1 text-right font-mono" style={{ color }}>
+                  {pct >= 0 ? '+' : ''}
+                  {pct.toFixed(2)}%
+                </td>
+                <td
+                  className="py-1 text-right font-mono"
+                  style={{ color: '#848E9C' }}
+                >
+                  {formatDuration(heldMins)}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 // Symbol Stats Row
 function SymbolStatsRow({
   stat,
   onSymbolClick,
+  trades,
+  language,
+  expanded,
+  onToggle,
 }: {
   stat: SymbolStats
   onSymbolClick?: (symbol: string) => void
+  trades: HistoricalPosition[]
+  language: string
+  expanded: boolean
+  onToggle: () => void
 }) {
   const totalPnl = stat.total_pnl || 0
   const winRate = stat.win_rate || 0
@@ -1175,45 +1314,293 @@ function SymbolStatsRow({
     winRate >= 60 ? '#0ECB81' : winRate >= 40 ? '#F0B90B' : '#F6465D'
 
   return (
-    <div
-      className="flex items-center justify-between p-3 rounded-lg transition-all duration-200 hover:bg-white/5"
-      style={{ borderBottom: '1px solid #2B3139' }}
-    >
-      <div className="flex items-center gap-3">
+    <div style={{ borderBottom: '1px solid #2B3139' }}>
+      <div className="flex items-center justify-between p-3 rounded-lg transition-all duration-200 hover:bg-white/5">
+        <div className="flex items-center gap-3">
+          {/* Disclosure control is a real button so the row stays keyboard
+              operable and announces its state; the symbol itself keeps its
+              existing drill-down click. */}
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-expanded={expanded}
+            aria-label={
+              language === 'zh'
+                ? `展开 ${stat.symbol} 的每笔交易`
+                : `Show individual ${stat.symbol} trades`
+            }
+            className="transition-transform"
+            style={{
+              color: '#848E9C',
+              fontSize: '9px',
+              transform: expanded ? 'rotate(90deg)' : 'none',
+            }}
+          >
+            ▶
+          </button>
+          <button
+            type="button"
+            onClick={() => onSymbolClick?.(stat.symbol)}
+            className="font-mono font-semibold hover:text-cyan-300 transition-colors"
+            style={{ color: '#EAECEF' }}
+          >
+            {(stat.symbol || '').replace('USDT', '')}
+          </button>
+          <span className="text-xs" style={{ color: '#848E9C' }}>
+            {stat.total_trades || 0} trades
+          </span>
+        </div>
+        <div className="flex items-center gap-6">
+          <div className="text-right">
+            <div className="text-xs" style={{ color: '#848E9C' }}>
+              {language === 'zh' ? '均持仓' : 'Avg Hold'}
+            </div>
+            <div className="font-mono" style={{ color: '#EAECEF' }}>
+              {formatDuration(stat.avg_hold_mins || 0)}
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="text-xs" style={{ color: '#848E9C' }}>
+              {language === 'zh' ? '均盈亏' : 'Avg P&L'}
+            </div>
+            <div
+              className="font-mono"
+              style={{
+                color: (stat.avg_pnl || 0) >= 0 ? '#0ECB81' : '#F6465D',
+              }}
+            >
+              {(stat.avg_pnl || 0) >= 0 ? '+' : ''}
+              {formatNumber(stat.avg_pnl || 0)}
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="text-xs" style={{ color: '#848E9C' }}>
+              Win Rate
+            </div>
+            <div
+              className="font-mono font-semibold"
+              style={{ color: winRateColor }}
+            >
+              {winRate.toFixed(1)}%
+            </div>
+          </div>
+          <div className="text-right min-w-[80px]">
+            <div className="text-xs" style={{ color: '#848E9C' }}>
+              P&L
+            </div>
+            <div
+              className="font-mono font-semibold"
+              style={{ color: pnlColor }}
+            >
+              {totalPnl >= 0 ? '+' : ''}
+              {formatNumber(totalPnl)}
+            </div>
+          </div>
+        </div>
+      </div>
+      {expanded && (
+        <SymbolTradeList
+          trades={trades}
+          expectedCount={stat.total_trades || trades.length}
+          language={language}
+        />
+      )}
+    </div>
+  )
+}
+
+// SYMBOL_PAGE_SIZE keeps the default view the same height as the old top-10 list
+// so the panel does not jump; the rest is reachable by paging instead of hidden.
+const SYMBOL_PAGE_SIZE = 10
+
+// sortSymbolStats orders the FULL symbol list. Exported for test because the
+// ordering is the whole point of the feature: paging a wrongly-ordered list still
+// hides the symbols the operator is looking for.
+export function sortSymbolStats(
+  stats: SymbolStats[],
+  key: SymbolSortKey,
+  dir: 'asc' | 'desc'
+): SymbolStats[] {
+  const mul = dir === 'asc' ? 1 : -1
+  return [...stats].sort((a, b) => {
+    if (key === 'symbol') {
+      return (a.symbol || '').localeCompare(b.symbol || '') * mul
+    }
+    return ((a[key] || 0) - (b[key] || 0)) * mul
+  })
+}
+
+// SymbolStatsTable renders every symbol (not just the best 10), sortable on any
+// column in either direction and paged. Sorting happens over the FULL list before
+// paging — sorting only the visible page would make "worst first" show the worst
+// of the best ten, which is the exact blind spot this replaces.
+function SymbolStatsTable({
+  symbolStats,
+  positions,
+  language,
+  onSymbolClick,
+}: {
+  symbolStats: SymbolStats[]
+  positions: HistoricalPosition[]
+  language: string
+  onSymbolClick?: (symbol: string) => void
+}) {
+  const zh = language === 'zh'
+  const [sortKey, setSortKey] = useState<SymbolSortKey>('total_pnl')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+  const [page, setPage] = useState(1)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+
+  // Closed trades grouped by symbol, newest exit first, for the dropdowns.
+  const tradesBySymbol = useMemo(() => {
+    const map = new Map<string, HistoricalPosition[]>()
+    for (const p of positions) {
+      if (!p.symbol) continue
+      const list = map.get(p.symbol)
+      if (list) list.push(p)
+      else map.set(p.symbol, [p])
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => {
+        const ta = a.exit_time ? new Date(a.exit_time).getTime() : 0
+        const tb = b.exit_time ? new Date(b.exit_time).getTime() : 0
+        return tb - ta
+      })
+    }
+    return map
+  }, [positions])
+
+  const sorted = useMemo(
+    () => sortSymbolStats(symbolStats, sortKey, sortDir),
+    [symbolStats, sortKey, sortDir]
+  )
+
+  const totalPages = Math.max(1, Math.ceil(sorted.length / SYMBOL_PAGE_SIZE))
+  // Clamp instead of storing a corrected page: the symbol list can shrink when a
+  // trader is switched, and writing state during render would loop.
+  const safePage = Math.min(page, totalPages)
+  const pageRows = sorted.slice(
+    (safePage - 1) * SYMBOL_PAGE_SIZE,
+    safePage * SYMBOL_PAGE_SIZE
+  )
+
+  const sortLabels: Record<SymbolSortKey, string> = {
+    symbol: zh ? '品种' : 'Symbol',
+    total_trades: zh ? '笔数' : 'Trades',
+    win_rate: zh ? '胜率' : 'Win rate',
+    total_pnl: zh ? '总盈亏' : 'Total P&L',
+    avg_pnl: zh ? '均盈亏' : 'Avg P&L',
+    avg_hold_mins: zh ? '均持仓' : 'Avg hold',
+  }
+
+  const toggle = (symbol: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(symbol)) next.delete(symbol)
+      else next.add(symbol)
+      return next
+    })
+  }
+
+  return (
+    <div>
+      <div className="flex items-center flex-wrap gap-2 mb-3 text-[11px]">
+        <label htmlFor="symbol-sort-key" style={{ color: '#848E9C' }}>
+          {zh ? '排序' : 'Sort'}
+        </label>
+        <select
+          id="symbol-sort-key"
+          value={sortKey}
+          onChange={(e) => {
+            setSortKey(e.target.value as SymbolSortKey)
+            setPage(1)
+          }}
+          className="rounded px-2 py-1"
+          style={{
+            background: '#0B0E11',
+            border: '1px solid #2B3139',
+            color: '#EAECEF',
+          }}
+        >
+          {SYMBOL_SORT_KEYS.map((k) => (
+            <option key={k} value={k}>
+              {sortLabels[k]}
+            </option>
+          ))}
+        </select>
         <button
           type="button"
-          onClick={() => onSymbolClick?.(stat.symbol)}
-          className="font-mono font-semibold hover:text-cyan-300 transition-colors"
-          style={{ color: '#EAECEF' }}
+          onClick={() => {
+            setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+            setPage(1)
+          }}
+          className="rounded px-2 py-1"
+          style={{
+            background: '#0B0E11',
+            border: '1px solid #2B3139',
+            color: '#EAECEF',
+          }}
+          aria-label={
+            zh
+              ? `切换排序方向，当前${sortDir === 'asc' ? '正序' : '倒序'}`
+              : `Toggle sort direction, currently ${sortDir === 'asc' ? 'ascending' : 'descending'}`
+          }
         >
-          {(stat.symbol || '').replace('USDT', '')}
+          {sortDir === 'asc'
+            ? `↑ ${zh ? '正序' : 'Asc'}`
+            : `↓ ${zh ? '倒序' : 'Desc'}`}
         </button>
-        <span className="text-xs" style={{ color: '#848E9C' }}>
-          {stat.total_trades || 0} trades
+        <span className="ml-auto" style={{ color: '#848E9C' }}>
+          {zh
+            ? `共 ${sorted.length} 个品种 · 第 ${safePage}/${totalPages} 页`
+            : `${sorted.length} symbols · page ${safePage}/${totalPages}`}
         </span>
       </div>
-      <div className="flex items-center gap-6">
-        <div className="text-right">
-          <div className="text-xs" style={{ color: '#848E9C' }}>
-            Win Rate
-          </div>
-          <div
-            className="font-mono font-semibold"
-            style={{ color: winRateColor }}
-          >
-            {winRate.toFixed(1)}%
-          </div>
-        </div>
-        <div className="text-right min-w-[80px]">
-          <div className="text-xs" style={{ color: '#848E9C' }}>
-            P&L
-          </div>
-          <div className="font-mono font-semibold" style={{ color: pnlColor }}>
-            {totalPnl >= 0 ? '+' : ''}
-            {formatNumber(totalPnl)}
-          </div>
-        </div>
+
+      <div className="space-y-1">
+        {pageRows.map((stat) => (
+          <SymbolStatsRow
+            key={stat.symbol}
+            stat={stat}
+            onSymbolClick={onSymbolClick}
+            trades={tradesBySymbol.get(stat.symbol) || []}
+            language={language}
+            expanded={expanded.has(stat.symbol)}
+            onToggle={() => toggle(stat.symbol)}
+          />
+        ))}
       </div>
+
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-2 mt-3 text-[11px]">
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={safePage <= 1}
+            className="rounded px-2 py-1 disabled:opacity-40"
+            style={{
+              background: '#0B0E11',
+              border: '1px solid #2B3139',
+              color: '#EAECEF',
+            }}
+          >
+            {zh ? '上一页' : 'Prev'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            disabled={safePage >= totalPages}
+            className="rounded px-2 py-1 disabled:opacity-40"
+            style={{
+              background: '#0B0E11',
+              border: '1px solid #2B3139',
+              color: '#EAECEF',
+            }}
+          >
+            {zh ? '下一页' : 'Next'}
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -1421,7 +1808,7 @@ function resolveLadderFiring(
 // its concrete trigger price and close ratio. `firedKeys` (mechanism#index)
 // highlights only the tiers that actually fired so the plan and the outcome read
 // as one story — a single 20% TP fill marks TP1 only, not the whole ladder.
-function EntryProtectionPlan({
+export function EntryProtectionPlan({
   plan,
   language,
   firedKeys,
@@ -1455,14 +1842,41 @@ function EntryProtectionPlan({
               title={item.note || ''}
             >
               <span style={{ color: c, fontWeight: 600 }}>{item.label}</span>
-              <span className="ml-1" style={{ color: '#848E9C' }}>
-                {item.triggerPct >= 0 ? '+' : ''}
-                {item.triggerPct}%
-              </span>
-              {typeof item.triggerPrice === 'number' && (
-                <span className="ml-1 font-mono">
-                  @{formatPrice(item.triggerPrice)}
-                </span>
+              {/* For most tiers triggerPct and triggerPrice describe the SAME
+                  level, so "+0.42%@1854.37" reads correctly. Break-even is the
+                  exception: triggerPct is the ARM threshold (how far in profit
+                  before the stop moves) while triggerPrice is the stop parked at
+                  the OFFSET — two different levels. Rendering them adjacent read
+                  as if the % described the price, which is what made a BE row
+                  look wrong ("+1.3%@1856.69" where 1856.69 is entry −0.3%).
+                  Drawdown has the same split (activation vs callback fill) and is
+                  already disambiguated by the executionPrice arrow below. */}
+              {item.kind === 'be' ? (
+                <>
+                  <span className="ml-1" style={{ color: '#848E9C' }}>
+                    {language === 'zh' ? '激活' : 'arm'}
+                    {item.triggerPct >= 0 ? '+' : ''}
+                    {item.triggerPct}%
+                  </span>
+                  {typeof item.triggerPrice === 'number' && (
+                    <span className="ml-1 font-mono">
+                      → {language === 'zh' ? '止损' : 'stop'}@
+                      {formatPrice(item.triggerPrice)}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <>
+                  <span className="ml-1" style={{ color: '#848E9C' }}>
+                    {item.triggerPct >= 0 ? '+' : ''}
+                    {item.triggerPct}%
+                  </span>
+                  {typeof item.triggerPrice === 'number' && (
+                    <span className="ml-1 font-mono">
+                      @{formatPrice(item.triggerPrice)}
+                    </span>
+                  )}
+                </>
               )}
               {typeof item.closeRatioPct === 'number' && (
                 <span className="ml-1" style={{ color: '#848E9C' }}>
@@ -1714,14 +2128,7 @@ function PositionRow({
   // Calculate PnL percentage based on entry price
   const entryPrice = position.entry_price || 0
   const exitPrice = position.exit_price || 0
-  let pnlPct = 0
-  if (entryPrice > 0) {
-    if (isLong) {
-      pnlPct = ((exitPrice - entryPrice) / entryPrice) * 100
-    } else {
-      pnlPct = ((entryPrice - exitPrice) / entryPrice) * 100
-    }
-  }
+  const pnlPct = positionPnlPct(position)
 
   // Use entry_quantity for display (original position size)
   const displayQty = position.entry_quantity || position.quantity || 0
@@ -2100,6 +2507,31 @@ function PositionRow({
                       ▶
                     </span>
                     {'复盘上下文 / Review Context'}
+                    {/* The open-time frozen ATR, pinned right. Every ATR-unit
+                        protection distance is `multiple × ATR / entry × 100`, so
+                        without this number no stored percent in the plan above can
+                        be checked or reproduced — and the live frozen-ATR record is
+                        deleted when the position closes. */}
+                    {typeof position.protection_atr_value === 'number' && (
+                      <span
+                        className="ml-auto font-mono text-[10px]"
+                        style={{ color: '#848E9C' }}
+                        title={
+                          language === 'zh'
+                            ? '开仓时冻结的 ATR，所有 ATR 单位保护档的换算分母：档位% = 倍数 × ATR / 开仓价 × 100'
+                            : 'ATR frozen at open — the denominator behind every ATR-unit tier: pct = multiple × ATR / entry × 100'
+                        }
+                      >
+                        ATR
+                        {position.protection_atr_timeframe
+                          ? `(${position.protection_atr_timeframe})`
+                          : ''}{' '}
+                        {formatPrice(position.protection_atr_value)}
+                        {typeof position.protection_atr_pct === 'number'
+                          ? ` · ${position.protection_atr_pct.toFixed(3)}%`
+                          : ''}
+                      </span>
+                    )}
                   </summary>
                   <div
                     className="mt-1 text-[11px] leading-5"
@@ -2928,15 +3360,12 @@ export function PositionHistory({
               {t('positionHistory.symbolPerformance', language)}
             </span>
           </div>
-          <div className="space-y-1">
-            {symbolStats.slice(0, 10).map((stat) => (
-              <SymbolStatsRow
-                key={stat.symbol}
-                stat={stat}
-                onSymbolClick={onSymbolClick}
-              />
-            ))}
-          </div>
+          <SymbolStatsTable
+            symbolStats={symbolStats}
+            positions={positions}
+            language={language}
+            onSymbolClick={onSymbolClick}
+          />
         </div>
       )}
 

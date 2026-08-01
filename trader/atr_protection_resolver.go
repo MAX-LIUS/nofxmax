@@ -174,6 +174,38 @@ func (at *AutoTrader) frozenATRAndEntryForPosition(symbol, side string, entryPri
 	return atr, entryPrice, true
 }
 
+// frozenATRForPositionReadOnly reports the ATR already frozen for this position
+// WITHOUT ever freezing one. It consults the in-memory cache, then the persisted
+// record, and gives up — it never calls atrForProtection and never writes.
+//
+// Why a separate function: frozenATRForPosition is a get-or-freeze. On a full miss
+// it fetches live ATR and persists a new FrozenATRRecord, which is correct for the
+// protection path (that value goes on to size real orders) but wrong for anything
+// observational. A reporting caller must not be able to mint trading state, or a
+// panel read could bind a position to an ATR measured hours after it opened.
+// Callers that only want to DESCRIBE a position's ATR use this one.
+func (at *AutoTrader) frozenATRForPositionReadOnly(symbol, side string, entryPrice float64, cfg store.ATRProtectionConfig) (float64, bool) {
+	key := frozenATRKey(at.id, symbol, cfg.WithDefaults().Timeframe, side)
+	curCTime := at.currentPositionCreatedTime(symbol, side)
+
+	frozenATRMu.Lock()
+	ent, ok := frozenATRCache[key]
+	frozenATRMu.Unlock()
+	if ok && entryPrice > 0 && ent.atr > 0 &&
+		frozenATRIdentityMatches(ent.posCreatedTime, curCTime, ent.entryPrice, entryPrice) {
+		return ent.atr, true
+	}
+	if entryPrice > 0 && at.store != nil {
+		if state, err := at.store.LoadFrozenATRState(); err == nil {
+			if rec, found := state.Records[key]; found && rec.ATR > 0 &&
+				frozenATRIdentityMatches(rec.PositionCreatedTime, curCTime, rec.EntryPrice, entryPrice) {
+				return rec.ATR, true
+			}
+		}
+	}
+	return 0, false
+}
+
 // adoptFrozenATRPositionIdentity 给一条"冻结时还不知道 cTime"的记录补上仓位身份。
 // 内存缓存与持久化记录都补,后者用 read-modify-write 以免抹掉 structural/trail 字段。
 func (at *AutoTrader) adoptFrozenATRPositionIdentity(key, symbol string, ent frozenATREntry, cTime int64) {

@@ -34,12 +34,52 @@ func (at *AutoTrader) snapshotResolvedPlan(req *protectionExecutionRequest, plan
 	if plan != nil {
 		mode = plan.Mode
 	}
-	if err := at.store.ProtectionPlanSnapshot().Save(
-		at.id, at.exchangeID, market.Normalize(req.Symbol), req.PositionSide, mode,
-		req.EntryPrice, at.cycleNumber, tiers, time.Now().UTC().UnixMilli(),
-	); err != nil {
+	// Freeze the ATR the tiers were resolved against. Not cosmetic: the live
+	// frozen-ATR record is deleted at close, so this is the only surviving copy
+	// of the denominator behind every ATR-unit percent above.
+	atrValue, atrTF := at.snapshotATRContext(req)
+	if err := at.store.ProtectionPlanSnapshot().Save(store.SaveProtectionPlanSnapshotInput{
+		TraderID:       at.id,
+		ExchangeID:     at.exchangeID,
+		Symbol:         market.Normalize(req.Symbol),
+		Side:           req.PositionSide,
+		Mode:           mode,
+		EntryPrice:     req.EntryPrice,
+		DecisionCycle:  at.cycleNumber,
+		Tiers:          tiers,
+		SnapshotTimeMs: time.Now().UTC().UnixMilli(),
+		ATRValue:       atrValue,
+		ATRTimeframe:   atrTF,
+	}); err != nil {
 		logger.Warnf("⚠️ Failed to snapshot protection plan for %s %s: %v", req.Symbol, req.PositionSide, err)
 	}
+}
+
+// snapshotATRContext returns the open-time frozen ATR and the timeframe it was
+// measured on, or (0, "") when this strategy has no ATR protection. It reuses
+// the SAME frozen value the resolver used rather than recomputing, so the stored
+// number always reconciles with the stored percents.
+func (at *AutoTrader) snapshotATRContext(req *protectionExecutionRequest) (float64, string) {
+	if at.config.StrategyConfig == nil {
+		return 0, ""
+	}
+	acfg := at.config.StrategyConfig.ATRProtection
+	if !acfg.Enabled {
+		return 0, ""
+	}
+	// WithDefaults resolves the effective timeframe, which AlignToPrimaryTimeframe
+	// may already have rewritten to the strategy's primary bar — record what was
+	// actually used, not what the static config file says.
+	tf := acfg.WithDefaults().Timeframe
+	// Read-only on purpose: the resolver has already frozen the ATR by the time a
+	// plan is snapshotted, so this is a cache hit. Using the get-or-freeze variant
+	// would let a bookkeeping call mint a frozen-ATR record on a miss — writing
+	// trading state from the reporting path. A miss just records "unknown".
+	atr, ok := at.frozenATRForPositionReadOnly(req.Symbol, req.PositionSide, req.EntryPrice, acfg)
+	if !ok || atr <= 0 {
+		return 0, tf
+	}
+	return atr, tf
 }
 
 // buildPlanSnapshotTiers converts a resolved plan (+ effective drawdown rules) into

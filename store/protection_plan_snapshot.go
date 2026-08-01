@@ -31,9 +31,20 @@ type ProtectionPlanSnapshot struct {
 	// TiersJSON is a JSON array of ProtectionPlanTier in the exact shape the
 	// frontend plan renderer consumes (mechanism/kind/label/triggerPct/
 	// triggerPrice/closeRatioPct/note).
-	TiersJSON    string `gorm:"column:tiers_json;type:text;default:''" json:"tiers_json"`
-	SnapshotTime int64  `gorm:"column:snapshot_time;not null;index:idx_pps_match,sort:desc" json:"snapshot_time"`
-	CreatedAt    int64  `gorm:"column:created_at" json:"created_at"`
+	TiersJSON string `gorm:"column:tiers_json;type:text;default:''" json:"tiers_json"`
+	// ATRValue is the open-time frozen ATR (absolute price units) every ATR-unit
+	// tier above was resolved against, and ATRTimeframe the bar it came from.
+	// Persisted here because the live frozen-ATR record is DELETED when the
+	// position closes (see DeleteFrozenATRRecord), so a review has no other way
+	// back to the denominator: `pct = multiple × ATR / entry × 100`. Without it
+	// the panel can only divide peak_pnl_pct by peak_atr_mult, which explodes
+	// when the excursion is ~0 (a scratch trade shows MFE +0.00%/+0.01×).
+	// 0 means unknown: a legacy row written before this column existed, or a
+	// strategy with ATR protection off (nothing to resolve).
+	ATRValue     float64 `gorm:"column:atr_value;default:0" json:"atr_value"`
+	ATRTimeframe string  `gorm:"column:atr_timeframe;default:''" json:"atr_timeframe"`
+	SnapshotTime int64   `gorm:"column:snapshot_time;not null;index:idx_pps_match,sort:desc" json:"snapshot_time"`
+	CreatedAt    int64   `gorm:"column:created_at" json:"created_at"`
 }
 
 func (ProtectionPlanSnapshot) TableName() string { return "protection_plan_snapshots" }
@@ -71,6 +82,17 @@ func (s *ProtectionPlanSnapshotStore) InitTables() error {
 		var exists int64
 		s.db.Raw(`SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'protection_plan_snapshots'`).Scan(&exists)
 		if exists > 0 {
+			// The table is managed outside AutoMigrate on postgres, so columns added
+			// after it was created must be backfilled explicitly. IF NOT EXISTS keeps
+			// this idempotent across restarts.
+			for _, ddl := range []string{
+				`ALTER TABLE protection_plan_snapshots ADD COLUMN IF NOT EXISTS atr_value DOUBLE PRECISION DEFAULT 0`,
+				`ALTER TABLE protection_plan_snapshots ADD COLUMN IF NOT EXISTS atr_timeframe TEXT DEFAULT ''`,
+			} {
+				if err := s.db.Exec(ddl).Error; err != nil {
+					return fmt.Errorf("failed to add protection_plan_snapshots column: %w", err)
+				}
+			}
 			return nil
 		}
 	}
@@ -80,28 +102,48 @@ func (s *ProtectionPlanSnapshotStore) InitTables() error {
 	return nil
 }
 
-// Save persists one snapshot for a position open. tiers is serialized to JSON.
-// side is normalized to upper-case. Best-effort: a marshal error is returned so
+// SaveProtectionPlanSnapshotInput carries one open's snapshot. A struct rather
+// than positional args because the list had already grown past readable length
+// and ATRValue/ATRTimeframe are optional — callers without ATR protection leave
+// them zero.
+type SaveProtectionPlanSnapshotInput struct {
+	TraderID       string
+	ExchangeID     string
+	Symbol         string
+	Side           string
+	Mode           string
+	EntryPrice     float64
+	DecisionCycle  int
+	Tiers          []ProtectionPlanTier
+	SnapshotTimeMs int64
+	ATRValue       float64
+	ATRTimeframe   string
+}
+
+// Save persists one snapshot for a position open. Tiers is serialized to JSON.
+// Side is normalized to upper-case. Best-effort: a marshal error is returned so
 // the caller can log it without failing the open.
-func (s *ProtectionPlanSnapshotStore) Save(traderID, exchangeID, symbol, side, mode string, entryPrice float64, decisionCycle int, tiers []ProtectionPlanTier, snapshotTimeMs int64) error {
-	if s.db == nil || traderID == "" || len(tiers) == 0 {
+func (s *ProtectionPlanSnapshotStore) Save(in SaveProtectionPlanSnapshotInput) error {
+	if s.db == nil || in.TraderID == "" || len(in.Tiers) == 0 {
 		return nil
 	}
-	blob, err := json.Marshal(tiers)
+	blob, err := json.Marshal(in.Tiers)
 	if err != nil {
 		return fmt.Errorf("marshal protection plan tiers: %w", err)
 	}
 	row := &ProtectionPlanSnapshot{
-		TraderID:      traderID,
-		ExchangeID:    exchangeID,
-		Symbol:        symbol,
-		Side:          strings.ToUpper(side),
-		EntryPrice:    entryPrice,
-		Mode:          mode,
-		DecisionCycle: decisionCycle,
+		TraderID:      in.TraderID,
+		ExchangeID:    in.ExchangeID,
+		Symbol:        in.Symbol,
+		Side:          strings.ToUpper(in.Side),
+		EntryPrice:    in.EntryPrice,
+		Mode:          in.Mode,
+		DecisionCycle: in.DecisionCycle,
 		TiersJSON:     string(blob),
-		SnapshotTime:  snapshotTimeMs,
-		CreatedAt:     snapshotTimeMs,
+		ATRValue:      in.ATRValue,
+		ATRTimeframe:  in.ATRTimeframe,
+		SnapshotTime:  in.SnapshotTimeMs,
+		CreatedAt:     in.SnapshotTimeMs,
 	}
 	return s.db.Create(row).Error
 }

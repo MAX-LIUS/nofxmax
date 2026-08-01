@@ -782,6 +782,13 @@ export interface HistoricalPosition {
   placed_protection?: PlacedProtectionItem[]
   // Manual (placed) vs AI (structural) SL/TP deviation + R multiples.
   protection_deviation?: ProtectionDeviation
+  // Open-time frozen ATR every ATR-unit protection tier was resolved against
+  // (`pct = multiple × ATR / entry × 100`), plus the bar it was measured on.
+  // Absent on positions opened before this was recorded, or when the strategy
+  // runs percent-unit protection only.
+  protection_atr_value?: number
+  protection_atr_pct?: number
+  protection_atr_timeframe?: string
   protection_runtime?: ProtectionRuntime
   entry_scene_tags?: string // JSON: {trend_phase, regime, chg4h, chg1h, ema20_dev, direction}
   // Excursion (MFE/MAE): favorable peak + adverse trough profit% and each extreme in
