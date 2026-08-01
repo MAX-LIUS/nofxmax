@@ -140,3 +140,9 @@ backtest
 .deploy-backup/
 /gbsim
 /closeeventbackfill
+
+# Research data caches: derived parquet re-generated from the production DB by the
+# scripts alongside them. The scripts are versioned (they are the analysis
+# provenance); the ~340MB of cached frames are not.
+research/**/cache/
+*.parquet
