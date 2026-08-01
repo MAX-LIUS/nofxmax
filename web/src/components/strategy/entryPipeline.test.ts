@@ -55,4 +55,39 @@ describe('buildEntryPipeline', () => {
       '<=1%'
     )
   })
+
+  it('low volatility block stays active with regime_filter disabled', () => {
+    // Unlike every other market_state row, this one must NOT follow the parent
+    // switch: the backend evaluates the floor before the regime_filter.enabled
+    // early-return, so showing it as inactive would misreport a live rejection.
+    const gates = buildEntryPipeline(
+      {} as any,
+      { enabled: false, block_low_volatility: true, min_atr14_pct: 0.3 } as any
+    )
+    const low = gates.find((g) => g.label[1] === 'Low volatility block')
+    expect(low?.active).toBe(true)
+    expect(low?.value).toBe('ATR14>=0.3%')
+  })
+
+  it('low volatility block inactive when its own switch is off', () => {
+    const gates = buildEntryPipeline(
+      {} as any,
+      { enabled: true, block_low_volatility: false, min_atr14_pct: 0.3 } as any
+    )
+    expect(
+      gates.find((g) => g.label[1] === 'Low volatility block')?.active
+    ).toBe(false)
+  })
+
+  it('high volatility block still follows the parent switch', () => {
+    // Guards the asymmetry above from being "fixed" into consistency: the ceiling
+    // really is gated on regime_filter.enabled in the backend.
+    const gates = buildEntryPipeline(
+      {} as any,
+      { enabled: false, block_high_volatility: true, max_atr14_pct: 3 } as any
+    )
+    expect(
+      gates.find((g) => g.label[1] === 'High volatility block')?.active
+    ).toBe(false)
+  })
 })

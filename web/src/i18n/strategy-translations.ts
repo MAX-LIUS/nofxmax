@@ -1090,6 +1090,15 @@ export const preEntryGate = {
   allowedRegimes: { zh: '允许的市场状态', en: 'Allowed Regimes' },
   blockHighFunding: { zh: '屏蔽高资金费率', en: 'Block high funding' },
   blockHighVolatility: { zh: '屏蔽高波动', en: 'Block high volatility' },
+  blockLowVolatility: { zh: '屏蔽低波动', en: 'Block low volatility' },
+  minAtrUnit: {
+    zh: 'ATR14/价格×100, 0.3 = 波动率0.3%。低于此值手续费占比过高',
+    en: 'ATR14/Price×100, 0.3 = 0.3% volatility. Below this, fees take an outsized share',
+  },
+  volatilityWindowInverted: {
+    zh: '下限须小于上限，否则所有开仓都会被拒',
+    en: 'Floor must be below the ceiling, otherwise every entry is rejected',
+  },
   requireTrendAlignment: { zh: '要求趋势同向', en: 'Require trend alignment' },
   // Momentum Gate
   momentumGate: { zh: '币种动量门禁', en: 'Coin Momentum Gate' },

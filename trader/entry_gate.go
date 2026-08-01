@@ -186,6 +186,37 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 	}
 
 	regimeCfg := getRegimeFilterConfig(input.StrategyConfig)
+	atr14Pct := computeATR14Pct(data)
+
+	// 1a-0. ATR volatility FLOOR — the fee-dominated regime.
+	//
+	// Evaluated BEFORE the regime_filter.enabled early-return on purpose. Every
+	// other check in this function hangs off that parent switch, which is false on
+	// 3 of the 4 live strategies, so anything placed below it is settable in the UI
+	// and inert in production. That is exactly the trap EntryGateConfig.MinATR14Pct
+	// fell into (it hangs off EntryStructure.Enabled, false everywhere), and the
+	// floor exists specifically to not repeat it: block_low_volatility is its own
+	// switch and is the only authority over this check.
+	//
+	// atr14Pct == 0 means ATR is unavailable, which is not the same as "too low" —
+	// skip rather than block on missing data.
+	if regimeCfg.BlockLowVolatility && regimeCfg.MinATR14Pct > 0 && atr14Pct > 0 {
+		passed := atr14Pct >= regimeCfg.MinATR14Pct
+		check := EntryGateCheck{
+			Code:     "volatility_too_low",
+			Stage:    string(EntryGateStageMarketState),
+			Passed:   passed,
+			Enforced: true,
+			Values:   fmt.Sprintf("atr14_pct=%.2f min=%.2f", atr14Pct, regimeCfg.MinATR14Pct),
+		}
+		if passed {
+			check.Detail = fmt.Sprintf("ATR14%%=%.2f at or above floor %.2f", atr14Pct, regimeCfg.MinATR14Pct)
+		} else {
+			check.Detail = fmt.Sprintf("ATR14%%=%.2f below floor %.2f — range too tight, fees would take an outsized share of every tier", atr14Pct, regimeCfg.MinATR14Pct)
+		}
+		checks = append(checks, check)
+	}
+
 	if !regimeCfg.Enabled {
 		return checks
 	}
@@ -229,8 +260,7 @@ func evaluateMarketStateGate(input entryGateInput) []EntryGateCheck {
 		checks = append(checks, check)
 	}
 
-	// 1c. ATR volatility
-	atr14Pct := computeATR14Pct(data)
+	// 1c. ATR volatility ceiling (atr14Pct computed above, before the floor check)
 	if regimeCfg.BlockHighVolatility && regimeCfg.MaxATR14Pct > 0 {
 		passed := atr14Pct <= regimeCfg.MaxATR14Pct
 		check := EntryGateCheck{

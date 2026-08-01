@@ -1185,6 +1185,27 @@ type RegimeFilterConfig struct {
 	MaxFundingRateAbs     float64                  `json:"max_funding_rate_abs,omitempty"`
 	BlockHighVolatility   bool                     `json:"block_high_volatility"`
 	MaxATR14Pct           float64                  `json:"max_atr14_pct,omitempty"`
+	// BlockLowVolatility rejects entries whose ATR14% sits BELOW MinATR14Pct — the
+	// regime where round-trip fees eat an unacceptable share of every tier. It is a
+	// deliberate sibling of BlockHighVolatility rather than a reuse of
+	// EntryGateConfig.MinATR14Pct: that one lives under EntryStructure and is
+	// short-circuited whenever EntryStructure.Enabled is false (all four live
+	// strategies), so an operator can set it and see nothing happen.
+	//
+	// This one answers to no parent switch. It lives on RegimeFilterConfig for
+	// grouping (it is one window with BlockHighVolatility over the same
+	// measurement) but evaluateMarketStateGate deliberately evaluates it BEFORE its
+	// `if !Enabled { return }` early-return, because Enabled is false on 3 of the 4
+	// live strategies. Grouping only; not a dependency.
+	//
+	// Default OFF. Measured on 519 closed positions: splitting each symbol at its
+	// own ATR median, the LOW half was +20.01 net at 63% win while the HIGH half was
+	// -132.69 at 52% — i.e. low volatility is where this system currently makes
+	// money, so blocking it by default would remove the profitable half. It exists
+	// for the genuinely fee-dominated tail (ATR% ~0.1, where a 0.9-ATR target is
+	// 0.106% against a 0.12% round-trip cost) and must be opted into.
+	BlockLowVolatility bool    `json:"block_low_volatility"`
+	MinATR14Pct        float64 `json:"min_atr14_pct,omitempty"`
 	RequireTrendAlignment bool                     `json:"require_trend_alignment"`
 	TrendAlignmentMode    RegimeTrendAlignmentMode `json:"trend_alignment_mode,omitempty"`
 	// BlockLongInHTFDowntrend hard-blocks open_long into an established downtrend
@@ -1727,6 +1748,8 @@ func GetDefaultStrategyConfig(lang string) StrategyConfig {
 				MaxFundingRateAbs:     0.01,
 				BlockHighVolatility:   false,
 				MaxATR14Pct:           3.0,
+				BlockLowVolatility:    false,
+				MinATR14Pct:           0.3,
 				RequireTrendAlignment: false,
 			},
 		},

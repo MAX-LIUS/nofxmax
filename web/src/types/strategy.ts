@@ -414,6 +414,11 @@ export interface RegimeFilterConfig {
   max_funding_rate_abs: number
   block_high_volatility: boolean
   max_atr14_pct: number
+  // Volatility FLOOR, sibling of the ceiling above. Optional because strategies
+  // saved before it existed carry neither key; the editor and the Go default both
+  // treat absent as off.
+  block_low_volatility?: boolean
+  min_atr14_pct?: number
   require_trend_alignment: boolean
   trend_alignment_mode?: 'strict' | 'allow_range_edge_reversal'
   // Block open_long into confirmed 1h+4h downtrend (multi-TF gate, symmetric with short-side).

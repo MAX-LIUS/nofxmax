@@ -55,6 +55,17 @@ export function buildEntryPipeline(
   })
   gates.push({
     stage: 'market_state',
+    label: ['低波动拦截', 'Low volatility block'],
+    // Intentionally NOT gated on rf?.enabled, unlike every sibling row here. The
+    // backend evaluates this floor before the regime_filter.enabled early-return,
+    // so it is live even when the parent switch is off; mirroring the parent here
+    // would show it as inactive while it is in fact rejecting entries.
+    active: !!rf?.block_low_volatility,
+    value: rf?.min_atr14_pct ? `ATR14>=${rf.min_atr14_pct}%` : undefined,
+    source: 'regime_filter',
+  })
+  gates.push({
+    stage: 'market_state',
     label: ['趋势对齐', 'Trend alignment'],
     active: !!rf?.enabled && !!rf?.require_trend_alignment,
     value: rf?.trend_alignment_mode,

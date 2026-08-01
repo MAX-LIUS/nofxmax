@@ -602,6 +602,21 @@ func (at *AutoTrader) evaluateDecisionRegimeGate(decision *kernel.Decision, data
 		return result
 	}
 
+	// Volatility floor, mirroring the ceiling above. NOTE: this whole function is
+	// currently reachable only from tests (allowDecisionByRegime has no production
+	// caller — the live gate is buildEntryGateResult in entry_gate.go). The floor is
+	// duplicated here on purpose: if this path is ever re-wired, a missing floor
+	// would silently reintroduce fee-dominated entries, and divergent copies of gate
+	// logic are what made the EntryStructure short-circuit so hard to spot.
+	// ATR14Pct == 0 means unavailable, which is not "too low".
+	if cfg.BlockLowVolatility && cfg.MinATR14Pct > 0 && result.ATR14Pct > 0 &&
+		result.ATR14Pct < cfg.MinATR14Pct {
+		result.Allowed = false
+		result.ReasonCode = "atr_below_min"
+		result.Reason = fmt.Sprintf("atr14_pct %.2f below min %.2f", result.ATR14Pct, cfg.MinATR14Pct)
+		return result
+	}
+
 	if cfg.RequireTrendAlignment {
 		aligned := isTrendAlignedWithMode(decision.Action, decision.SetupType, data, cfg.TrendAlignmentMode, resolveBlockLongInHTFDowntrend(cfg), resolveBlockShortInHTFUptrend(cfg))
 		result.TrendAligned = &aligned

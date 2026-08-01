@@ -369,7 +369,7 @@ export function PreEntryGateEditor({
               })}
             </div>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <div>
               <div className="flex items-center gap-2 mb-1">
                 <input
@@ -434,6 +434,60 @@ export function PreEntryGateEditor({
               <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
                 {ts(preEntryGate.atrUnit, language)}
               </div>
+            </div>
+            {/* Low-volatility floor. Sits beside the ceiling because they are one
+                window on the same measurement, but unlike the ceiling it answers to
+                NO parent switch: the backend evaluates it ahead of the
+                regime_filter.enabled early-return, so this checkbox alone decides.
+                That is deliberate — entry_gate.min_atr14_pct does the same job and is
+                inert because it hangs off entry_structure.enabled, and the ceiling
+                beside it is itself dead whenever the regime filter is off. Default
+                off: on 519 closed positions the LOW-ATR half was the profitable one
+                (+20.01 at 63% win vs -132.69 at 52%), so this is for the
+                fee-dominated tail only, not a general-purpose filter. */}
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <input
+                  type="checkbox"
+                  checked={config.block_low_volatility ?? false}
+                  onChange={(e) =>
+                    update('block_low_volatility', e.target.checked)
+                  }
+                  disabled={disabled}
+                  className="h-4 w-4 accent-sky-500"
+                />
+                <label className="text-sm" style={{ color: '#EAECEF' }}>
+                  {ts(preEntryGate.blockLowVolatility, language)}
+                </label>
+              </div>
+              <input
+                type="number"
+                value={config.min_atr14_pct ?? 0.3}
+                min={0}
+                step={0.1}
+                onChange={(e) =>
+                  update('min_atr14_pct', parseFloat(e.target.value) || 0)
+                }
+                disabled={disabled || !config.block_low_volatility}
+                className="w-full px-3 py-2 rounded"
+                style={inputStyle}
+              />
+              <div className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+                {ts(preEntryGate.minAtrUnit, language)}
+              </div>
+              {config.block_low_volatility &&
+                config.block_high_volatility &&
+                (config.min_atr14_pct ?? 0) > 0 &&
+                (config.max_atr14_pct ?? 0) > 0 &&
+                (config.min_atr14_pct ?? 0) >= (config.max_atr14_pct ?? 0) && (
+                  <div
+                    className="text-[11px] mt-1"
+                    style={{ color: '#F6465D' }}
+                    role="alert"
+                  >
+                    {ts(preEntryGate.volatilityWindowInverted, language)}
+                  </div>
+                )}
             </div>
           </div>
         </SubCard>

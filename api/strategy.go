@@ -253,6 +253,23 @@ func validateStrategyConfig(config *store.StrategyConfig) []string {
 		if regime.BlockHighVolatility && regime.MaxATR14Pct <= 0 {
 			warnings = append(warnings, "protection.regime_filter.max_atr14_pct must be > 0 when block_high_volatility is enabled.")
 		}
+		// An inverted window blocks everything: nothing can be both >= min and <= max.
+		// Only meaningful inside this branch, since the ceiling half of the window is
+		// itself skipped when the regime filter is disabled.
+		if regime.BlockLowVolatility && regime.BlockHighVolatility &&
+			regime.MinATR14Pct > 0 && regime.MaxATR14Pct > 0 &&
+			regime.MinATR14Pct >= regime.MaxATR14Pct {
+			warnings = append(warnings, "protection.regime_filter.min_atr14_pct must be < max_atr14_pct, otherwise every entry is rejected.")
+		}
+	}
+
+	// The volatility floor is checked OUTSIDE the regime.Enabled branch to match the
+	// runtime: evaluateMarketStateGate runs it before its own enabled early-return.
+	// Validating it inside would drop the warning in precisely the configuration
+	// where it matters most — parent switch off, floor on, threshold left at 0, so
+	// the operator sees a ticked box that silently never rejects anything.
+	if regime.BlockLowVolatility && regime.MinATR14Pct <= 0 {
+		warnings = append(warnings, "protection.regime_filter.min_atr14_pct must be > 0 when block_low_volatility is enabled.")
 	}
 
 	return warnings

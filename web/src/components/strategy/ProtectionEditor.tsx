@@ -98,6 +98,8 @@ export const defaultProtectionConfig: ProtectionConfig = {
     max_funding_rate_abs: 0.01,
     block_high_volatility: false,
     max_atr14_pct: 3,
+    block_low_volatility: false,
+    min_atr14_pct: 0.3,
     require_trend_alignment: false,
   },
   giveback_guard: {
