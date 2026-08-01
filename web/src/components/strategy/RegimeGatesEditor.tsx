@@ -29,6 +29,7 @@ type ParamKey =
   | 'block_side'
   | 'min_conf'
   | 'threshold'
+  | 'adx_period'
   | 'lookback'
   | 'align_min'
   | 'r2_min'
@@ -156,6 +157,18 @@ const CATALOG: CategorySpec[] = [
         hintZh: 'ADX 低于此值判定为弱趋势，默认20。',
         hintEn: 'ADX below this counts as weak. Default 20.',
       },
+      {
+        key: 'adx_period',
+        labelZh: 'ADX 周期',
+        labelEn: 'ADX period',
+        kind: 'number',
+        default: 14,
+        step: 1,
+        hintZh:
+          '计算 ADX 的周期，默认14（留空等同14，不改变原有行为）。合适的周期随主周期而变：15m 主周期实测 ADX(14) 各档全部无效或有害（阈值20→-0.072、25→-0.064、30→-0.120，基线-0.071），只有 ADX(10) 配阈值30 才有增量（+0.139，三折全正）。',
+        hintEn:
+          'ADX lookback period. Default 14 (leaving it unset behaves exactly as before). The useful period depends on the primary timeframe: on a 15m primary every ADX(14) threshold measured flat-to-harmful (20→-0.072, 25→-0.064, 30→-0.120 against a -0.071 baseline), while ADX(10) at threshold 30 is the only variant that helps (+0.139, all 3 folds positive).',
+      },
     ],
   },
   {
@@ -217,6 +230,18 @@ const CATALOG: CategorySpec[] = [
         step: 0.01,
         hintZh: '线性回归R²最小值（0-1），默认0.60。',
         hintEn: 'Minimum regression R² (0-1). Default 0.60.',
+      },
+      {
+        key: 'lookback',
+        labelZh: '摆动点半宽',
+        labelEn: 'Pivot half-width',
+        kind: 'number',
+        default: 2,
+        step: 1,
+        hintZh:
+          '判定摆动点所需的左右各N根K线，默认2（留空等同2，即本闸门标定时的取值）。注意本闸门的默认2与「结构方向对齐」闸门的默认3不同：后者的实测结论是 lb=2 属噪声、lb=3 才决定性，若两处要保持一致需显式设为3。',
+        hintEn:
+          'Bars either side required for a swing pivot. Default 2 (leaving it unset behaves as 2, the value this gate was calibrated with). Note this default of 2 differs from the Structural Alignment gate default of 3, where the measured result is that lb=2 is noise-level and lb=3 is decisive; set this explicitly to 3 if you want the two to agree.',
       },
     ],
   },

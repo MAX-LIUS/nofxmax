@@ -221,7 +221,8 @@ export interface RegimeGateConfig {
     block_side?: 'LONG' | 'SHORT' // trend_direction_only
     min_conf?: number // chop_lowconf
     threshold?: number // adx_weak
-    lookback?: number // donchian_counter
+    adx_period?: number // adx_weak; unset = 14
+    lookback?: number // donchian_counter; also chart_trend pivot half-width (unset = 2)
     align_min?: number // chart_trend
     r2_min?: number // chart_trend
   }
