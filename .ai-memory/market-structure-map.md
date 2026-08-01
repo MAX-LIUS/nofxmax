@@ -100,6 +100,29 @@ regime_cross_validation_failed / protection_policy_rejected / fake_retest_trap.
 - [ ] 图表层展示新结构数据(VP/AVWAP/BOS/供需区/zone状态) — 前端 web/src/components/charts (React/TS 编译), 单独较大工程.
 - [ ] Phase3: 门禁哲学重构(硬门→信心加分,仅失效位保留硬门) — 风险最高单独做
 
+## 时段开盘区间模块 (2026-07-30, 纯证据已落地)
+- 来源: 用户提供 The Rumers 日内框架, 我把其中"开盘区间+扩张度"规则化为证据字段.
+- 新增 market/session_range.go + 测试; market/types.go 加 SessionRange 字段;
+  market/data.go 用最细粒度序列算开盘区间 / 最宽序列算日ATR; kernel/formatter_structural.go
+  加 formatSessionRange. 未碰任何 gate, 无人消费该字段做决策.
+- 三时段锚点(UTC): ASIA 00:00 / EU 07:00 / US 13:30. 开盘窗口名义 15m,
+  timeframe 更粗时退化为一根 bar; 粗于 1h 直接返回 nil.
+- 因果安全: 只用已收盘 bar(OpenTime+barSize<=now), 未收盘 bar 不进开盘区间.
+  Complete=false 时窗口标记为发展中并回报实际覆盖分钟数.
+- !! 关键校准结论: **原始 OR/日ATR 比值不能用固定档位分级**.
+  Doug 偏好 70-80% 来自单时段股票市场; crypto 24h 连续交易, 15m 窗口只占全天 1/96,
+  原始比值必然贴近 sqrt(15/1440)=10.2%. 实测 14天x12币 15m: p50=9.7% p99=52%,
+  用 20/40/70% 分档 → 74% 落在 compressed, 0.3% 落在 exhausted, 完全无区分度
+  (与 isRangeMiddleRegime 里那条死掉的 "range" 分支同一类缺陷).
+- 修正: 除以随机游走期望 sqrt(window/1440) 得 ExpansionRatio (量纲无关, 1.0=窗口时长应有的宽度).
+  实测分位 p25=0.6 p50=1.0 p75=1.9 p90=2.9 p99=5.1.
+  档位 compressed<0.6 / normal 0.6-1.3 / expanded 1.3-2.5 / exhausted>=2.5.
+  复测分布四档均有量, US 时段 exhausted 占其自身 20% (最高), ASIA/EU 明显更低 — 符合预期.
+- ExpansionPct(原始%)仍保留输出, 仅供与文献对齐, **不用于分级**.
+- exhausted 档在 prompt 里附一句"顺势追单等于追已耗尽的波动", 其余档不附(否则会压制所有顺势单).
+- 验证: go build market/kernel/trader/api/store 全绿; go test ./market/ ./kernel/ 绿;
+  真实 OKX 5m/15m 数据跑通 14868 次评估 0 崩溃.
+
 ## 注意
 - go 在 /usr/local/go/bin (PATH需export). `go build ./...` 会超时,按包 build ./market/ ./kernel/.
 - 全程纯增量,未改任何 gate/校验逻辑.

@@ -446,8 +446,58 @@ native trailing triggering AT ENTRY (immediate stop-out → unresolved_exchange_
 - Deployed via start.sh; new PID 1805235, 4 traders loaded, health ok, no panics.
   BN trader restarted (was stopped for testing). Backend-only — no frontend rebuild.
 
+## 2026-08-01 Deploy: Claude-R 15m gate parameterization + RR audit (pid 494713)
+
+Commits (option B order — session_range committed & verified FIRST, then shipped together):
+`9d1c269` session_range → `fac0f1e` parameterization + RR audit → `d3add9f` UI → `5035861` harness.
+Binary md5 `ab68255bd0398512b319af67a015b405`; backup `nofx.bak-20260801-044713`
+(prev md5 `61d0da2e...` — NOTE: that is a **binary md5 prefix, not a git commit**, I mislabelled it
+for several turns); config backup `/tmp/cfg_backup_20260801-044713/`.
+
+**Ordering matters and is not interchangeable: binary FIRST, then config.** Writing
+`adx_period=10` under the old binary silently falls back to ADX(14)+threshold 30 — the
+single worst measured cell (-0.120 vs baseline -0.071).
+
+Code:
+- `store/strategy.go` `RegimeGateParams.ADXPeriod` (0/unset = 14, existing configs unchanged).
+- `trader/regime_gate.go` `adx_weak` honours the period; `chart_trend` honours `Lookback` (default 2).
+- `trader/chart_trend_gate.go` signature widened with `pivotLB`.
+- `trader/rr_audit.go` (new) + hook in `protection_execution.go` — **audit only, never alters the plan**.
+  Placed after the AI/config merge, target clamping and structural fallback have all run, and
+  `req.EntryPrice` is the exchange-confirmed fill: the one point where declared RR and placed RR
+  are both known. Threshold `rrAuditMaterialGap=0.05` pinned to kernel tolerance by test.
+- Frontend: `RegimeGatesEditor.tsx` (+`adx_period`, +`lookback`), `types/strategy.ts`,
+  `i18n/strategy-translations.ts` (evidence split by primary timeframe).
+
+Config (Claude-R only): regime_gates counter_trend(96) / chop_reject / adx_weak(thr 30, **period 10**)
+all enforce; entry_gate structural `lb=4 n=3 pct=0` **audit_only**.
+Basis and the reasons audit_only ≠ enforce: `.ai-memory/entry-structure-gate-backtest.md` §15m 专项.
+
+Verification: `go test ./...` 23 pkg ok, `-race` clean, tsc clean, vite 35.71s, madge 157 files
+no circular deps. Post-restart pid 494713, NRestarts=0, health 200, 0 ERROR / 0 panic,
+all 9 positions `state=protected verified=true`, zero unexpected/stale/foreign orders,
+managed-monitor co-run (双保险) posture intact.
+All four changes observed live in the 13:16 CST cycle:
+`[chop_reject] blocked ETHUSDT open_long: consensusChop=true`;
+`[counter_trend] blocked SOLUSDT open_long: slope96=TREND_DN side=LONG`;
+`⚠ structural_alignment_missing` (⚠ not ✗ — confirms audit-only);
+`📐 RR audit ZECUSDT LONG: declared=2.32 placed_nearest=0.35 (-1.97) placed_weighted=0.66 tiers=1SL/4TP mode=manual`;
+chart_trend count 0 (deliberately not enabled — 100/100 grid cells negative on 15m).
+
+**Reading the RR audit gap correctly (mode=manual):** the ZEC line is arithmetically right —
+ladder is 4 ATR-unit TP tiers 1.1/1.7/2.5/3.6 ATR at 20/18/15/12% against a 3.2 ATR SL, so
+nearest = 1.1/3.2 = 0.34 and weighted = 2.05/3.2 = 0.64. But in `manual` mode the gap measures
+**"AI thesis vs the operator's own ladder", not AI overstatement** — the ladder is ours, not the
+model's. And only ~65% of size exits via the ladder; the rest trails. So a large gap here is
+NOT by itself evidence of a bad AI call. Treat it as a prompt for "is the ladder aligned with
+the thesis", not as an AI-accuracy metric.
+
+Deployment was blocked twice by the Claude Code auto-mode classifier (`systemctl stop/start nofx`);
+verified no half-deploy state each time (md5 unchanged, pid alive, health 200) and handed the user
+manual commands rather than working around the denial.
+
 ## Last Updated
-2026-07-29 - v1.17.2 多档 DD 档位标识真正生效（pid 66117, commit a1114fc；账本 16→14 条、冲突 2→0、reclaim churn 980→0）
+2026-08-01 - Claude-R 15m gate parameterization + RR audit (pid 494713, md5 ab68255b, commits 9d1c269/fac0f1e/d3add9f/5035861)
 
 ## 2026-07-20 Deploy: unified SL band 1.5/2.5 + max-hold disabled + reward-ATR≥1.0 (pid 1556740)
 Backtest-driven risk tuning, ALL 4 traders identical:
