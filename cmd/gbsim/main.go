@@ -70,6 +70,7 @@ func main() {
 	faithful := flag.Bool("faithful", false, "acct: replay to the trader's REAL exit price with modelled SL/TP/BE/DD off, so the baseline reproduces realized PnL (recommended: the modelled ladder is not what these traders ran)")
 	cycle := flag.Bool("cycle", false, "acct: use the equity-FREEZE (cycle) model instead of modelled re-entry — flatten crystallises equity, later real entries form the next cycle")
 	envFile := flag.String("env", "", "path to an env file to read BINANCE_PROXY_URL from (required for -binance: this host is geo-blocked by Binance, HTTP 451)")
+	stair := flag.Bool("stair", false, "find the (gain%, drawdown%) that makes the equity path climb like a staircase: ranks by Martin ratio (return per unit time under water), on a train/test split")
 	realcurve := flag.Bool("realcurve", false, "run the drawdown-excursion analysis on the REAL recorded equity curve (trader_equity_snapshots), not a replay reconstruction")
 	ddstat := flag.Bool("ddstat", false, "count peak-to-trough drawdown excursions on the observed equity curve: how many reached each depth, and conditional on reaching m%, how often it went deeper vs recovered")
 	cyclefine := flag.Bool("cyclefine", false, "acct+cycle: 0.1%-step sweep of drawdown x arm gain WITH a chronological train/test split (the only deployment-relevant view)")
@@ -402,6 +403,17 @@ func main() {
 			os.Exit(1)
 		}
 		printL3Trace(base, l3res, trace, *capital)
+		return
+	}
+	if *stair {
+		curve, stamps, err := loadRealEquityCurve(db, *traderLike)
+		if err != nil {
+			log.Fatalf("load equity snapshots: %v", err)
+		}
+		if len(curve) < 16 {
+			log.Fatalf("only %d equity snapshots for this trader", len(curve))
+		}
+		printStaircase(curve, stamps)
 		return
 	}
 	if *realcurve {
@@ -846,6 +858,167 @@ func printDDStat(base backtest.SimResult, capital float64) {
 		fmt.Println("to sell at. 'forgone' is measured against where the episode actually ENDED,")
 		fmt.Println("which is what holding really delivered. Only 'forgone' is a realised cost.")
 	}
+}
+
+// printStaircase answers「涨多少回撤多少能让 pnl 稳定爬楼梯」directly: it searches
+// the (gain%, drawdown%) grid and ranks by staircase quality rather than by PnL.
+//
+// The ranking metric is the Martin ratio — return divided by the Ulcer Index, where
+// the Ulcer Index is the RMS drawdown across every sample. Unlike max drawdown it
+// charges for how LONG the curve stays under water, which is precisely what "climbs
+// like a staircase" means. Ranking by PnL would happily pick a path that doubles and
+// then halves.
+func printStaircase(curve []float64, stamps []string) {
+	base := backtest.AnalyzeCurve(curve)
+	fmt.Println("==== TARGET: MAKE THE EQUITY PATH CLIMB LIKE A STAIRCASE ====")
+	fmt.Printf("real recorded curve, %d samples, %s .. %s\n", len(curve), stamps[0], stamps[len(stamps)-1])
+	fmt.Printf("NO BREAKER: return=%.2f%%  maxDD=%.2f%%  Ulcer=%.2f  Martin=%.3f  timeAtHigh=%.1f%%  worstStep=%.2f%%\n\n",
+		base.ReturnPct, base.MaxDDPct, base.UlcerIndex, base.MartinRatio, base.TimeAtHighPct, base.WorstStepPct)
+
+	arms := []float64{0, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10}
+	var dds []float64
+	for i := 1; i <= 60; i++ { // 0.1% .. 6.0%
+		dds = append(dds, float64(i)/10)
+	}
+	// Cooldowns extended well past the earlier grid: the previous best sat exactly on
+	// the largest value offered, which is the signature of a boundary solution — the
+	// optimiser wanted to sit out even longer, i.e. it was converging on "stop
+	// trading" rather than on a threshold.
+	cds := []int{6, 18, 72, 216, 504, 1008}
+	rows := backtest.SweepStaircase(curve, arms, dds, cds)
+	if len(rows) == 0 {
+		fmt.Println("curve too short")
+		return
+	}
+
+	// Chosen on the FIRST half only, then reported on the second. Picking on the
+	// full record would report the search result as if it were a finding.
+	best := rows[0]
+	for _, r := range rows {
+		if r.Train.MartinRatio > best.Train.MartinRatio {
+			best = r
+		}
+	}
+	fmt.Println("---- (1) BEST STAIRCASE PARAMETER, CHOSEN ON THE FIRST HALF ONLY ----")
+	fmt.Printf("chosen: gain=+%.1f%% arms, drawdown=%.1f%% fires, re-entry delay=%d samples (~%.1f days)\n",
+		best.ArmPct, best.DDPct, best.Cooldown, float64(best.Cooldown)*20/60/24)
+	fmt.Printf("  time actually in market: %.1f%% of the record (%d freezes)\n", best.TimeInMktPct, best.Freezes)
+	fmt.Printf("  1st half (used to choose): return=%.2f%%  Ulcer=%.2f  Martin=%.3f  maxDD=%.2f%%\n",
+		best.Train.ReturnPct, best.Train.UlcerIndex, best.Train.MartinRatio, best.Train.MaxDDPct)
+	fmt.Printf("  2nd half (never seen)    : return=%.2f%%  Ulcer=%.2f  Martin=%.3f  maxDD=%.2f%%\n",
+		best.Test.ReturnPct, best.Test.UlcerIndex, best.Test.MartinRatio, best.Test.MaxDDPct)
+
+	// What actually won on the second half, to size the gap.
+	bt := rows[0]
+	for _, r := range rows {
+		if r.Test.MartinRatio > bt.Test.MartinRatio {
+			bt = r
+		}
+	}
+	fmt.Printf("  hindsight best on 2nd half: gain=+%.1f%% dd=%.1f%% cd=%d -> Martin=%.3f (not knowable in advance)\n",
+		bt.ArmPct, bt.DDPct, bt.Cooldown, bt.Test.MartinRatio)
+
+	// Stability of the objective across the grid: for a genuine setting, good cells
+	// form a contiguous region, not scattered spikes.
+	fmt.Println("\n---- (2) TOP 15 CELLS BY FIRST-HALF MARTIN, WITH THEIR SECOND-HALF RESULT ----")
+	sorted := append([]backtest.StaircaseRow(nil), rows...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Train.MartinRatio > sorted[j].Train.MartinRatio })
+	fmt.Printf("%-7s %-7s %-5s | %-9s %-9s | %-9s %-9s %-7s | %s\n",
+		"gain%", "dd%", "cd", "1st ret%", "1st Mart", "2nd ret%", "2nd Mart", "inMkt%", "fires")
+	for i := 0; i < 15 && i < len(sorted); i++ {
+		r := sorted[i]
+		fmt.Printf("%-7.1f %-7.1f %-5d | %-9.2f %-9.3f | %-9.2f %-9.3f %-7.1f %d\n",
+			r.ArmPct, r.DDPct, r.Cooldown, r.Train.ReturnPct, r.Train.MartinRatio,
+			r.Test.ReturnPct, r.Test.MartinRatio, r.TimeInMktPct, r.Freezes)
+	}
+	fmt.Println("inMkt% is the share of the record the account was ACTUALLY trading. If the")
+	fmt.Println("good cells all sit at a low inMkt%, the smoothness comes from not participating,")
+	fmt.Println("not from the drawdown trigger — and the flat frozen stretches themselves count")
+	fmt.Println("as 'at the high', which inflates every smoothness metric.")
+
+	// The fairest single answer available. Ranking by the BETTER half rewards luck;
+	// ranking by the WORSE half (maximin) is the only selection rule that cannot be
+	// gamed by one favourable regime, and it is what "must work in advance" means.
+	// A minimum time-in-market floor is imposed because otherwise the criterion is
+	// trivially won by sitting out almost the whole record.
+	fmt.Println("\n---- (4) MOST ROBUST CELL: RANKED BY THE WORSE OF THE TWO HALVES ----")
+	fmt.Println("(requires >=60% time in market, so 'stop trading' cannot win by default)")
+	var rob backtest.StaircaseRow
+	haveRob := false
+	for _, r := range rows {
+		if r.TimeInMktPct < 60 {
+			continue
+		}
+		w := math.Min(r.Train.MartinRatio, r.Test.MartinRatio)
+		if !haveRob || w > math.Min(rob.Train.MartinRatio, rob.Test.MartinRatio) {
+			rob, haveRob = r, true
+		}
+	}
+	if haveRob {
+		fmt.Printf("gain=+%.1f%%  drawdown=%.1f%%  re-entry delay=%d samples (~%.1f days)\n",
+			rob.ArmPct, rob.DDPct, rob.Cooldown, float64(rob.Cooldown)*20/60/24)
+		fmt.Printf("  1st half: return=%.2f%%  Ulcer=%.2f  Martin=%.3f  maxDD=%.2f%%\n",
+			rob.Train.ReturnPct, rob.Train.UlcerIndex, rob.Train.MartinRatio, rob.Train.MaxDDPct)
+		fmt.Printf("  2nd half: return=%.2f%%  Ulcer=%.2f  Martin=%.3f  maxDD=%.2f%%\n",
+			rob.Test.ReturnPct, rob.Test.UlcerIndex, rob.Test.MartinRatio, rob.Test.MaxDDPct)
+		fmt.Printf("  full record: return=%.2f%%  maxDD=%.2f%%  timeAtHigh=%.1f%%  inMkt=%.1f%%  fires=%d\n",
+			rob.Full.ReturnPct, rob.Full.MaxDDPct, rob.Full.TimeAtHighPct, rob.TimeInMktPct, rob.Freezes)
+		fmt.Printf("  vs no breaker: return %.2f%% -> %.2f%%,  maxDD %.2f%% -> %.2f%%\n",
+			base.ReturnPct, rob.Full.ReturnPct, base.MaxDDPct, rob.Full.MaxDDPct)
+	} else {
+		fmt.Println("NO cell clears the 60% time-in-market floor with a positive worse-half score.")
+		fmt.Println("That is the answer: every parameter that improves the path does so mainly by")
+		fmt.Println("not participating.")
+	}
+
+	// Sensitivity of the chosen cell to each axis separately. A usable setting has a
+	// plateau around it; if the result collapses when one axis moves one step, the
+	// number was read off noise. Reported for the robust cell because that is the one
+	// a deployment would actually use.
+	if haveRob {
+		fmt.Println("\n---- (5) SENSITIVITY AROUND THE ROBUST CELL (one axis at a time) ----")
+		fmt.Printf("holding gain=+%.1f%% and delay=%d fixed, varying drawdown%%:\n", rob.ArmPct, rob.Cooldown)
+		fmt.Printf("%-8s %-11s %-11s %-9s %s\n", "dd%", "1st ret%", "2nd ret%", "inMkt%", "worse-half Martin")
+		for _, r := range rows {
+			if r.ArmPct != rob.ArmPct || r.Cooldown != rob.Cooldown {
+				continue
+			}
+			if int(r.DDPct*10)%10 != 0 {
+				continue // print whole-percent steps only
+			}
+			fmt.Printf("%-8.1f %-11.2f %-11.2f %-9.1f %.3f\n",
+				r.DDPct, r.Train.ReturnPct, r.Test.ReturnPct, r.TimeInMktPct,
+				math.Min(r.Train.MartinRatio, r.Test.MartinRatio))
+		}
+		fmt.Printf("\nholding gain=+%.1f%% and drawdown=%.1f%% fixed, varying re-entry delay:\n", rob.ArmPct, rob.DDPct)
+		fmt.Printf("%-8s %-11s %-11s %-9s %s\n", "delay", "1st ret%", "2nd ret%", "inMkt%", "worse-half Martin")
+		for _, r := range rows {
+			if r.ArmPct != rob.ArmPct || r.DDPct != rob.DDPct {
+				continue
+			}
+			fmt.Printf("%-8d %-11.2f %-11.2f %-9.1f %.3f\n",
+				r.Cooldown, r.Train.ReturnPct, r.Test.ReturnPct, r.TimeInMktPct,
+				math.Min(r.Train.MartinRatio, r.Test.MartinRatio))
+		}
+	}
+
+	// How many cells produce a genuine staircase on BOTH halves? That count is the
+	// honest answer to whether such a parameter exists at all.
+	both, anyPos := 0, 0
+	for _, r := range rows {
+		if r.Train.ReturnPct > 0 && r.Test.ReturnPct > 0 {
+			both++
+		}
+		if r.Test.ReturnPct > 0 {
+			anyPos++
+		}
+	}
+	fmt.Printf("\n---- (3) DOES ANY PARAMETER CLIMB ON BOTH HALVES? ----\n")
+	fmt.Printf("cells with POSITIVE return on both halves: %d of %d (%.1f%%)\n",
+		both, len(rows), float64(both)/float64(len(rows))*100)
+	fmt.Printf("cells with positive return on the 2nd half: %d of %d\n", anyPos, len(rows))
+	fmt.Println("A staircase requires positive return AND a low Ulcer Index on data the")
+	fmt.Println("parameter was not chosen from. Anything less is a fit, not a setting.")
 }
 
 // printCurveAnalysis is the direct answer to "how many times did the curve fall
