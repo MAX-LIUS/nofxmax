@@ -1,5 +1,52 @@
 # Production Deployment - Critical Information
 
+## 2026-08-02 Deploy: 备用端点按 Priority 排序 + 6 端点全通 (pid 641545, commit ede8ea9)
+备份 `/root/.claude/jobs/5cbb3cf4/tmp/dbbak/nofx_prev_5acea85f` (md5 `5acea85f…` = 线上 v1.17.7 / commit `6a817f2`),
+新二进制 md5 `7215def1a329eb1581721af72ebc53de`,`vcs.revision=ede8ea9`。
+`MainPID=641545`,`ActiveState=active`,0 PANIC / 0 ERROR。
+
+**用户诉求**:「模型主备来源 claude 和 gpt 各 3 个,一共 6 个,测试是否都可用」→ 实测后修优先级 bug → 填 key 上线。
+
+**首测 1/6 可用**(密钥更换前):claude 3 个全 401、openai 仅 1 个通。**根因不是网关而是密钥拓扑** ——
+claude/openai 两行主密钥是**同一个 11 字符失效 token**,而 `switchToNextEndpoint` 对空 `api_key`
+的处理是「不换密钥、沿用当前」,加上 `CallWithMessages` 每次调用前 `restoreToPrimary()`,
+**空密钥备用端点永远拿主密钥去打** → 主密钥一坏,3 个空密钥备用同时陪葬,等于没有备份。
+用户换密钥后复测 4/6,填完最后一个 key 后 **6/6 全通**。
+
+**修掉的 bug(本次唯一代码改动)**:`switchToNextEndpoint` 只按数组下标推进,**从未读取 `Priority`**,
+注释却写着「Find next available endpoint with higher priority」。生产 claude 行是
+NovaI(prio=2) 在数组第 0 位、lt48(prio=1) 在第 1 位 → **实际先打低优先级、与运维意图相反**。
+修法:在 `SetFallbackEndpoints` **入口**做一次 `sort.SliceStable`(升序),使下标遍历本身即优先级顺序。
+放配置期而非切换期=不变量只有一处、每次故障转移少一趟比较;稳定排序让同 prio 保持书写顺序;
+**排序作用于副本**——调用方切片来自 `GetFallbackEndpoints` 可能被复用,就地重排会污染他人数据。
+`mcp/failover_test.go` 新增 4 例(含用生产配置复现的回归例);**摘掉排序验证过 3 例失败、装回全绿**。
+
+**DB 改动(唯一一处)**:`ai_models` claude 行 `fallback_endpoints[0].api_key` 由空填为 novaiapi 专属 key。
+openai 行同位置**库里已是用户给的值,脚本判定 no change needed 未写库**。改前值备份于
+`tmp/dbbak/fallback_before.txt`。脚本 `set_fallback_key.py` 按 **base_url 子串**匹配目标而非数组下标
+(JSON 重排也不会写错端点)、key 走环境变量不进 argv、参数化 UPDATE、写后回读校验、只打印掩码。
+
+**⚠️ 两个未解决的问题(用户已知,本次未动)**:
+1. **claude try#1(lt48)靠继承主密钥才通,自身 `api_key` 仍为空** → 主密钥轮换/失效时
+   claude 主+try#1 会同时失效,只剩 try#2。用户只给了 try#2 的 key,无法一并修。
+2. **备用密钥在库里是明文**,主密钥是 `ENC:`+AES-GCM。`UpdateWithFallbacks` 直接
+   `json.Marshal` 进 text 列,不走 `EncryptedString` → 库文件泄露即泄露全部备用密钥。
+   要修需带 `ENC:` 前缀探测的兼容读(存量明文)+ 一次迁移。
+
+**端点实测特征(留给下次判断用)**:`us.novaiapi.com` **不是坏的,是慢且抖** ——
+首测 60s 超时判失败,放宽 180s 后 16.78s 正常返回;`/v1/models` 探活 401 仅 0.4s(连通性没问题)。
+生产 `DefaultTimeout=300s` 容得下,但 **`auto_trader_breakout.go:199` 把超时压到 20s**,
+该端点在突破路径上贴着超时线(用户明确表示「超时没问题」,未改)。
+顺带确认这些 OpenAI 兼容网关**确实支持 Anthropic 原生 `/messages`+`x-api-key`**
+(claude 主/try#1 都走这条路正常返回),上次全 401 纯粹是密钥问题不是格式不兼容。
+
+**探针 `cmd/aiendpointprobe`**(已进仓库):逐个实测主+全部备用端点。复用生产同一套 provider
+客户端(线格式/鉴权头/请求体与真实调用一致)、复刻空密钥继承语义、复刻 Priority 排序;
+`mode=ro` 只读开库不 AutoMigrate,密钥仅掩码。`-dry-run` 只解析不发请求。
+
+部署后验证(16:16 CST 起):3 持仓 SOL/HYPE/SPCX+SKHYNIX 全 `state=protected verified=true missingSL=false`、
+`Configured 2 fallback endpoint(s)` × 3 trader、`Invalid token` / `all endpoints failed` / `Switched to fallback` 均 0。
+
 ## 2026-08-02 Deploy: v1.17.7 OKX trailing 激活判据 + 51149 半成功回读 (pid 626448, commit 6a817f2)
 备份 `/opt/webstack/nofx/nofx.bak-v11705-20260802-060338` (md5 `69a264009fcd69074dce330453d84321` = 线上 v1.17.5+ / commit `9a48070`),
 新二进制 md5 `5acea85ffeac6fd18c16c5503a085b91`。构建 `go build -o /tmp/nofx_v1177 .`。
