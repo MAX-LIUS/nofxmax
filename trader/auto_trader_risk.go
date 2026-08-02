@@ -2065,6 +2065,24 @@ func (at *AutoTrader) exchangeSideCoversDrawdownTierWithOrders(symbol, side stri
 			symbol, side, rule.CloseRatioPct)
 		return false
 	}
+	if !at.exchangeHasEffectiveTrailingForTier(symbol, side, rule, entryPrice, markPrice, openOrders) {
+		return false
+	}
+	logger.Infof("🛡 Exchange side covers drawdown tier (%s %s close=%.1f%%) — suppressing code-side close to avoid double execution",
+		symbol, side, rule.CloseRatioPct)
+	return true
+}
+
+// exchangeHasEffectiveTrailingForTier answers ONLY the factual question "is a matching
+// trailing order live and effective on the exchange for this tier right now", with no
+// ownership or breaker semantics attached.
+//
+// Split out of exchangeSideCoversDrawdownTierWithOrders so the panel can ask it while
+// the re-arm breaker is tripped. The coverage gate must report a tripped tier as
+// uncovered (the managed monitor owns execution), but that verdict is about who
+// executes — it is not evidence that the exchange has no order, and conflating the two
+// is what let a 30-minute-long panel warning sit on top of demonstrably live orders.
+func (at *AutoTrader) exchangeHasEffectiveTrailingForTier(symbol, side string, rule store.DrawdownTakeProfitRule, entryPrice, markPrice float64, openOrders []OpenOrder) bool {
 	existing, _, _, _ := at.findEquivalentPartialTrailingOrder(symbol, side, rule, entryPrice, openOrders)
 	if existing == nil {
 		return false
@@ -2092,8 +2110,6 @@ func (at *AutoTrader) exchangeSideCoversDrawdownTierWithOrders(symbol, side stri
 			symbol, side, rule.CloseRatioPct, existing.ActivationStatus, existing.ActivationPrice, markPrice)
 		return false
 	}
-	logger.Infof("🛡 Exchange side covers drawdown tier (%s %s close=%.1f%% status=%s) — suppressing code-side close to avoid double execution",
-		symbol, side, rule.CloseRatioPct, existing.ActivationStatus)
 	return true
 }
 
@@ -2245,11 +2261,36 @@ func (at *AutoTrader) accountReArmBreaker(symbol, side string, entryPrice, markP
 			// it every poll would be exactly the churn the breaker exists to stop. Report
 			// the tier as uncovered so this verdict stays honest: the exchange side is not
 			// being maintained for it, and the managed monitor is its only executor.
+			//
+			// The PANEL is a separate question from execution ownership. A tripped tier is
+			// not re-placed for up to reArmBreakerCooldown (30min), and during that window
+			// the demotion below the coverage check never runs — so a panel warning could
+			// outlive the condition that caused it by half an hour even after the false
+			// "not effective" verdict was fixed. Read-only evidence check: if a matching
+			// trailing order is in fact live and effective on the exchange right now, stop
+			// telling the user there is none. Execution ownership is untouched — allCovered
+			// stays false and the managed monitor still owns this tier until the breaker
+			// cools down.
+			if at.exchangeHasEffectiveTrailingForTier(symbol, side, rule, entryPrice, markPrice, openOrders) {
+				at.clearExchangeFailedProtectionState(symbol, side)
+			}
 			allCovered = false
 			continue
 		}
 		if at.exchangeSideCoversDrawdownTierWithOrders(symbol, side, rule, entryPrice, markPrice, openOrders) {
 			at.resetReArmFail(key)
+			// The counter resets, but the PANEL state written when the breaker tripped did
+			// not — and nothing else ever cleared it. drawdown_order_reclaim.go rewrites the
+			// ownership ledger to match the exchange but contains zero setProtectionState
+			// calls, so once applyExchangeFailedLocalMonitor wrote *_exchange_failed_armed
+			// the panel reported "交易所挂单失败·本地保护(无交易所单)" for the rest of the
+			// position's life — while the reconciler in the SAME poll logged
+			// "state=protected verified=true ... coverage is complete" about the very same
+			// live orders (2026-08-02 ETHUSDT short: ~410 false panel reports from one
+			// transient event, orders 3791832803965304832 + 3794662695304069120 live on OKX
+			// throughout). Demote it here: exchange coverage for this tier is confirmed from
+			// a fresh open-orders read, which is the strongest evidence available.
+			at.clearExchangeFailedProtectionState(symbol, side)
 			continue
 		}
 		// Satisfied tier not effectively covered despite the arm attempt this poll.
@@ -2655,6 +2696,32 @@ func (at *AutoTrader) applyExchangeFailedLocalMonitor(symbol, side string, entry
 	logger.Warnf("⚠️ Exchange trailing placement FAILED — LOCAL managed-drawdown monitor ACTIVE (panel warning set): %s %s | activation=%.6f callbackRatio=%.6f close=%.1f%%",
 		symbol, side, activationPrice, callbackRatio, rule.CloseRatioPct)
 	return true
+}
+
+// clearExchangeFailedProtectionState is the exact inverse of the state upgrade in
+// applyExchangeFailedLocalMonitor: it demotes *_exchange_failed_armed back to the
+// plain managed-armed value once the exchange side is confirmed covered again.
+//
+// Why demote to managed_*_armed and not to a native_* state: the failure path armed
+// the in-process managed monitor and that monitor is still armed and still co-running.
+// Only the "the exchange could not carry this" claim has been disproven. Writing a
+// native_* value here would erase the memory that the managed monitor is armed, and
+// protection_reconciler.go:98's preserve-list exists precisely because losing that
+// memory causes a re-arm every poll. The arm loop owns promotion back to native_*.
+//
+// Without this inverse, the upgrade was a one-way latch. isManagedDrawdownProtectionState
+// and positionHasArmedProtection both read these states as "managed monitor armed",
+// which stays true across the demotion, so no close-path semantics change — the panel
+// simply stops claiming the exchange has no order when it demonstrably does.
+func (at *AutoTrader) clearExchangeFailedProtectionState(symbol, side string) {
+	switch at.getProtectionState(symbol, side) {
+	case "managed_drawdown_exchange_failed_armed":
+		at.setProtectionState(symbol, side, "managed_drawdown_armed")
+		logger.Infof("🟢 Exchange trailing coverage confirmed again — clearing exchange-failed panel warning (%s %s): managed monitor stays armed as co-runner", symbol, side)
+	case "managed_partial_drawdown_exchange_failed_armed":
+		at.setProtectionState(symbol, side, "managed_partial_drawdown_armed")
+		logger.Infof("🟢 Exchange trailing coverage confirmed again — clearing exchange-failed panel warning (%s %s): managed monitor stays armed as co-runner", symbol, side)
+	}
 }
 
 // applyNativeTrailingDrawdown 返回 true 表示"这一档此刻在交易所侧确有有效保护"

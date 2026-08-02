@@ -7,7 +7,55 @@
 > **历史**: v1.16.18(2026-07-27 23:40 pid 2381838 md5 e6abee6582e455b908b9efa32c37f51f,提交 `5f2163f`);部署后核对:4 trader 全部加载、API 200、无 panic、CL 持仓 `staleTrail=0 claimedTrail=2 dynamicOwner=2`(**claimedTrail=2 证明认领集合真的解析到了两张在场单,不是走 nil/空集合容忍兜底**)、交易所 7 张单与部署前逐一致(无误撤)
 > **部署后核对(v1.16.13)**:ETH/CL/WLD 从 `1 tiers` 变 `2 tiers` 且数量正确,`partial_profit_lock` 命名正常;KAITO 单档已确认是策略本身只配一档(GPT-ct50),非丢档。
 > **更新**: 2026-07-27 (v1.16.9 该 bug 类第 6 次实例:开仓即挂路径漏 ATR 换算,把 ATR 倍数当百分数挂单——用户从面板发现"两档配置显示三档 0.6/1.2/1.8";并订正"OKX 没问题"的判断:OKX 同样中招,只是它上报 callbackRate 把原始那条掩住了 | v1.16.8 构造交易所对等测试项目,挖出 HEAD 里既存的 OKX 局部档吃掉 dd1 全平单缺陷;并订正两处我自己的错误结论:Binance triggerPrice≠活动价、审计工具漏配 USDC 路由导致谎报无保护)
-> **版本**: v1.17.6 (**待部署**:全量日志合规审计(64 笔平仓全合规)顺带挖出 4 个缺陷 —— ①BE 两档抢同一张单(0.1503% 间距落在 0.2% 匹配容差内 + reconciler/monitor 两条规则管线不同源,账本翻转 53 次);②reclaim 分支裸 return 导致 7688 条 "not verified" 假警告、BTCUSDT LONG 连续 1900 轮假 degraded(保护其实在位),顺带把容忍/reclaim 两处内联布尔式收口成唯一判据 `protectionCoverageComplete`;③time-stop/max-hold 在 NO_POSITION 上打 ✅(纯可观测性,幂等未坏,但按日志计数会翻倍);④OKX 51277 触发价已被市价越过的 TP 档被计入 tier 失败 → 整份计划连坐,其余 3 档 TP+SL 其实都挂上了。**不撤任何交易所挂单,不改变实物挂单行为**) / v1.17.5 (**已部署 2026-07-30 13:34 pid 164364 md5 abca7a86df493492d5082b67209980a4,提交 `4918a8d`,回滚备份 `/opt/webstack/nofx/nofx.bak-v11744-20260730-053404` = v1.17.4b md5 e7ce2f20**:核对 health 200/单进程/NRestarts=0/ERROR+panic 0/部署后亏损中棘轮 0 次/XAU 已有边界 4039.49 未被放松;`staleTrail=1` 在 ETH/BTC/SOL 上是**既存**问题(今日 1729 次、绝大多数在部署前,同四个币重启前后一致,SPCX 反而自愈),表现为 reclaim 41 次 / "nothing to cancel" 41 次**完全配平、零撤零挂**=无 churn,但账本改写不落地导致每轮重认领、面板显示 degraded 而保护其实在位 —— 与本次改动无关,**待单独处理**:棘轮结构位默认值订正 —— `TrailMinProfitATR` 指针化 nil→1.0(显式 0 仍关闭)、`TrailOnLoss` 默认 false、回测手抄默认值收口到 store 访问器) / v1.17.2 (**待部署**:v1.17.1 的档位标识在 ATR 单位策略上恒返回 0 = 死代码,4 个实盘交易员全中;reclaim 是 `getActiveDrawdownRulesForPosition` 唯一漏 `resolveDrawdownRulesATR` 的消费者 → BN WLDUSDT 4 条 armed 记录抢 2 张单且映射反向;新增"一单一主"不变量,判据用交易所形状而**不是** UpdatedAt —— 线上错的那条恰恰更新) / v1.17.1 (**已部署 `90de970`,但档位标识在 ATR 策略上从未生效,见 v1.17.2** 提交 `8133f80`:挂单 clientOrderID 自带档位标识 `<prefix><code2>T<1-9><nonce>` 作多档 DD 第二重身份,补 reclaim 把 dd2 单认给 dd1 的错认) / v1.17.0 (**已部署 2026-07-29 pid 2696350**:DD 不在交易所 + managed 陪跑形同虚设,6 根因 RC-1…RC-6 一次性收口 —— 假成交按归属判定/managed 不再压制补挂/熔断 30min 冷却衰减/活单拒撤改重写账本/覆盖判定要活单背书/武装门禁改 max(cur,peak);另注意 Go 文件名 `_arm` 会被当 GOARCH 静默跳过整个测试文件) / v1.16.28 (**已随 v1.17.0 部署**:加仓后保护单数量不跟涨 → 静态 SL/TP/兜底 + BE 逐档双路径的**量维度**收敛,只撤不挂/只管不足不管超出/量化后再比,两条路径用 BE 认领集合互斥防抢单;Binance 端核实 GetOpenOrders 两条命名空间都回 Quantity、CancelAlgoOrderByID 带 -2011 回退能撤两种单 → resize 在 BN 全链路可用,cTime=0 不影响) / v1.16.27 (休眠风险专项:能力表位置初始化→键名、venue callbackRate 能力从注释变数据、空 orderID 记录在不能模糊匹配的交易所上判为下单失败落本地 monitor,提交 `92a17f6`) / v1.16.26 (已部署:在场档位比例锚定当前量,ZEC ping-pong 根因,提交 `b292774`) / v1.16.25 (已部署 2026-07-28 13:38 pid 2479237 md5 1b5a608a:所有权日志分歧+黄灯 unknown_mark+runner 迁移撤错档,提交 `7efc6cf`) / v1.16.24 (待部署:挂单等价性按交易所粒度判定 + 阶梯档被推断执行后免撤,提交 `9682f65`) / v1.16.23 (已部署:前端归因枚举补齐 5 处 + 契约测试锁住前后端对齐,提交 `f3ee04e`) / v1.16.22 (已部署:保护档按成交价排序 + callback 单位收口 + 细粒度归因保留 + 开仓竞态宽限期,提交 `de6a3a5`) / v1.16.18 (待部署:OKX tag 装不下 reason → 定向撤单实为广撤;reason 收口到 coded client id) / v1.16.17 (待部署:trailing 归属按认领集合判定 + 档位分配锚定开仓量,提交 `87490ba`) / v1.16.16 (已部署:ATR→% 换算的除数锚定到冻结开仓价,提交 `80845a2`) / v1.16.15 (已部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,提交 `75854df`) / v1.16.14 (已部署:immediate trailing 落库归属 + 撤单点按返回值收口,提交 `b4f35e0`) / v1.16.13 (已部署:managed 全程陪跑双保险,取消账户级接管,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
+> **版本**: v1.17.7 (**待部署**:追查"交易所 DD 为什么被重新挂"挖出两件独立的事 —— ①OKX 51149「Order timed out」是**半成功**(单子落地、响应体丢失),我们当硬失败丢弃且**没有按 `algoClOrdId` 回读**,于是所有权账本无 orderID、无法认领 → 10 秒后补挂;②OKX 适配器的 trailing 激活状态是从**哪个查询桶**回的行推断的,而不是读行自己的 `state`/`moveTriggerPx` → `pending_activation` 4 天 1528 次 vs `activated` 5 次,叠加 `nativeTrailingEffective` 对健康单逻辑反转,把在场活单判成"present but NOT effective" → 熔断 → `*_exchange_failed_armed` 是**单向锁**,`drawdown_order_reclaim.go` 零处 `setProtectionState` → ETHUSDT short 面板假报 ~410 次。**只改判据与回读,不撤任何交易所挂单**) / v1.17.6 (**待部署**:全量日志合规审计(64 笔平仓全合规)顺带挖出 4 个缺陷 —— ①BE 两档抢同一张单(0.1503% 间距落在 0.2% 匹配容差内 + reconciler/monitor 两条规则管线不同源,账本翻转 53 次);②reclaim 分支裸 return 导致 7688 条 "not verified" 假警告、BTCUSDT LONG 连续 1900 轮假 degraded(保护其实在位),顺带把容忍/reclaim 两处内联布尔式收口成唯一判据 `protectionCoverageComplete`;③time-stop/max-hold 在 NO_POSITION 上打 ✅(纯可观测性,幂等未坏,但按日志计数会翻倍);④OKX 51277 触发价已被市价越过的 TP 档被计入 tier 失败 → 整份计划连坐,其余 3 档 TP+SL 其实都挂上了。**不撤任何交易所挂单,不改变实物挂单行为**) / v1.17.5 (**已部署 2026-07-30 13:34 pid 164364 md5 abca7a86df493492d5082b67209980a4,提交 `4918a8d`,回滚备份 `/opt/webstack/nofx/nofx.bak-v11744-20260730-053404` = v1.17.4b md5 e7ce2f20**:核对 health 200/单进程/NRestarts=0/ERROR+panic 0/部署后亏损中棘轮 0 次/XAU 已有边界 4039.49 未被放松;`staleTrail=1` 在 ETH/BTC/SOL 上是**既存**问题(今日 1729 次、绝大多数在部署前,同四个币重启前后一致,SPCX 反而自愈),表现为 reclaim 41 次 / "nothing to cancel" 41 次**完全配平、零撤零挂**=无 churn,但账本改写不落地导致每轮重认领、面板显示 degraded 而保护其实在位 —— 与本次改动无关,**待单独处理**:棘轮结构位默认值订正 —— `TrailMinProfitATR` 指针化 nil→1.0(显式 0 仍关闭)、`TrailOnLoss` 默认 false、回测手抄默认值收口到 store 访问器) / v1.17.2 (**待部署**:v1.17.1 的档位标识在 ATR 单位策略上恒返回 0 = 死代码,4 个实盘交易员全中;reclaim 是 `getActiveDrawdownRulesForPosition` 唯一漏 `resolveDrawdownRulesATR` 的消费者 → BN WLDUSDT 4 条 armed 记录抢 2 张单且映射反向;新增"一单一主"不变量,判据用交易所形状而**不是** UpdatedAt —— 线上错的那条恰恰更新) / v1.17.1 (**已部署 `90de970`,但档位标识在 ATR 策略上从未生效,见 v1.17.2** 提交 `8133f80`:挂单 clientOrderID 自带档位标识 `<prefix><code2>T<1-9><nonce>` 作多档 DD 第二重身份,补 reclaim 把 dd2 单认给 dd1 的错认) / v1.17.0 (**已部署 2026-07-29 pid 2696350**:DD 不在交易所 + managed 陪跑形同虚设,6 根因 RC-1…RC-6 一次性收口 —— 假成交按归属判定/managed 不再压制补挂/熔断 30min 冷却衰减/活单拒撤改重写账本/覆盖判定要活单背书/武装门禁改 max(cur,peak);另注意 Go 文件名 `_arm` 会被当 GOARCH 静默跳过整个测试文件) / v1.16.28 (**已随 v1.17.0 部署**:加仓后保护单数量不跟涨 → 静态 SL/TP/兜底 + BE 逐档双路径的**量维度**收敛,只撤不挂/只管不足不管超出/量化后再比,两条路径用 BE 认领集合互斥防抢单;Binance 端核实 GetOpenOrders 两条命名空间都回 Quantity、CancelAlgoOrderByID 带 -2011 回退能撤两种单 → resize 在 BN 全链路可用,cTime=0 不影响) / v1.16.27 (休眠风险专项:能力表位置初始化→键名、venue callbackRate 能力从注释变数据、空 orderID 记录在不能模糊匹配的交易所上判为下单失败落本地 monitor,提交 `92a17f6`) / v1.16.26 (已部署:在场档位比例锚定当前量,ZEC ping-pong 根因,提交 `b292774`) / v1.16.25 (已部署 2026-07-28 13:38 pid 2479237 md5 1b5a608a:所有权日志分歧+黄灯 unknown_mark+runner 迁移撤错档,提交 `7efc6cf`) / v1.16.24 (待部署:挂单等价性按交易所粒度判定 + 阶梯档被推断执行后免撤,提交 `9682f65`) / v1.16.23 (已部署:前端归因枚举补齐 5 处 + 契约测试锁住前后端对齐,提交 `f3ee04e`) / v1.16.22 (已部署:保护档按成交价排序 + callback 单位收口 + 细粒度归因保留 + 开仓竞态宽限期,提交 `de6a3a5`) / v1.16.18 (待部署:OKX tag 装不下 reason → 定向撤单实为广撤;reason 收口到 coded client id) / v1.16.17 (待部署:trailing 归属按认领集合判定 + 档位分配锚定开仓量,提交 `87490ba`) / v1.16.16 (已部署:ATR→% 换算的除数锚定到冻结开仓价,提交 `80845a2`) / v1.16.15 (已部署:梯度身份与开仓均价解耦 + drawdownState 一格两用拆分,提交 `75854df`) / v1.16.14 (已部署:immediate trailing 落库归属 + 撤单点按返回值收口,提交 `b4f35e0`) / v1.16.13 (已部署:managed 全程陪跑双保险,取消账户级接管,提交 `b18ff54`) / v1.16.12 (待部署:全平档不占部分档预算 + supersede/累加/规则匹配四处配套) / v1.16.11 (已部署:档位分配 ATR→% + 身份匹配) / v1.16.10 (已部署:兜底匹配排除兄弟档已认领单) / v1.16.9 (已部署:开仓 ATR 换算 + entry 校正) / v1.16.8 (已部署) / v1.16.7 (三条 arm 分支补落库) / v1.16.6 (同 ruleFP 记录去重) / v1.16.5 (collapse 保留兄弟档) / v1.16.4 (取最新 arm 记录) / v1.16.3 (全档 cooldown 兜底) / v1.16.2 (orderID 身份,引入全档 churn) / v1.16.1 / v1.16.0 (近价锚定,已弃) / v1.15.0
+
+> **🔥🔥🔥 v1.17.7 "交易所的 DD 为什么要重新挂?" —— 追下去是两件独立的事,一件是半成功当失败,一件是判据读错了地方(2026-07-30,待部署)**
+>
+> **起因**:用户从交易所侧发现 ETHUSDT short 的 DD 单**确实被重新挂过**,质疑「交易所的 dd 应该很稳定不会随便丢失,系统为什么要重新挂?」
+> 追下去发现是**两个不相干的事件**,不是同一个故事的两幕。
+>
+> **事件 1 —— 07-31 22:23:43 真的重挂了,起因是一次假失败(OKX 51149)**
+> - 22:23:33 dd1 下单 → OKX 回 `code=51149 msg=Order timed out`。我们按硬失败处理:丢弃、**不采集 algoId**、武装本地 monitor。
+> - 但 OKX **其实挂上了**:algoId `3791832449865392128`,qty 0.156,activePx 1833.77。
+>   `order_sync.recordProtectionOrder` 从挂单列表把它刮回来、22:23:34 写进 DB 行 88622 —— **静默**写入
+>   (该函数只在失败时打日志,所以 `grep 3791832449865392128` 在日志里零命中,这正是它一直没被发现的原因)。
+> - GetOpenOrders:6(22:23:33)→ 7(22:23:35,dd2 加入)→ **6(22:23:43)**。这个窗口内我们自己没有任何撤单日志,
+>   所以是 **OKX 自己在几秒后把这张超时单撤掉了**。
+> - 因为下单"失败",所有权账本里没有 orderID,认领/维护都无从下手;22:23:43 arm 循环发现没有 dd1 → 正确地补挂
+>   `3791832803965304832`,22:23:52 `claimedTrail=2 verified=true`。
+> - 根因:**超时被当成失败,且没有按 `algoClOrdId` 回读**。`grep -rn "51149"` 全仓零命中 = 从来没处理过。
+>   4 天里全部 6 次下单失败**都是这一个错误码**。
+>
+> **事件 2 —— 08-02 02:45:45 什么都没丢,是判定错了**
+> - `3791832803965304832` 在 OKX 上一直活到 05:01:32(仓位平掉)。**没有发生任何重挂** —— 熔断跳闸的含义恰恰是"停止往交易所挂"。
+> - 02:45:24 / :36 / :45 三次轮询判 `present but NOT effective (status=pending_activation activePx=1833.77 mark=1824.70/1824.96/1827.42)`,
+>   `fails=3` → 熔断 → `applyExchangeFailedLocalMonitor` 写 `managed_drawdown_exchange_failed_armed`
+>   → 面板此后整条持仓生命周期都显示"交易所挂单失败·本地保护(无交易所单)",**假报约 410 次**。
+> - 判定系统性错误的量化证据:全部 **1104** 次 "NOT effective" 事件,穿越激活价的幅度都在 **0.20%–1.94%**(中位 0.52%),
+>   **每一次都刚好落在 0.2% 容差之外**,没有一次带真正的死单特征。OKX 上 4 天 `pending_activation` **1528** 次 vs `activated` **5** 次。
+> - 机制:OKX 适配器把激活状态从**哪个查询桶回了这一行**推断出来(`for trailingState := range []string{"", "effective"}`,
+>   `""` 桶先跑且 `seenTrailingIDs` 把第二轮去重掉了),**从不读行自己的 `state`/`moveTriggerPx`** —— 桶不是订单的属性。
+>   叠加 `nativeTrailingEffective` 的幽灵单规则"mark 已越过 activePx **且** 交易所仍说未激活",而**一张已激活的跟踪单必然早已越过它的 activePx**
+>   → 对健康单**逻辑是反的**。Binance 免疫,因为它的 `activated` 标记可靠。
+> - 而这个状态是**单向锁**:`drawdown_order_reclaim.go` 会把所有权账本改写成与交易所一致,但**零处 `setProtectionState`** →
+>   没有任何路径清得掉它;同一轮里 reconciler 还在对同一批活单打 `state=protected verified=true ... coverage is complete`。
+>
+> **三处修复**(`trader/okx/trader_orders.go` +98,`trader/auto_trader_risk.go` +71,3 个新测试文件):
+> ①trailing 响应结构体补 `State` 字段(同一函数里的条件单结构体本来就解析了 `State`,只有 trailing 那个漏了),
+>   激活判定改成**读行自己的** `state=="effective" || moveTriggerPx>0`,无 activePx 视为立即激活。
+> ②下单歧义失败时按 `algoClOrdId` 回读认领(envelope/transport 错误路径 + 逐单 `SCode` 路径都补),
+>   新增 `findTrailingByClientID`;**必须显式比对 clientID** —— 某些 OKX 端点会忽略未知过滤器回全量列表,
+>   否则会把别档的单认成自己的。
+> ③`clearExchangeFailedProtectionState`:覆盖恢复时把面板状态降级回 **managed 家族**(不是 native)——
+>   managed monitor 仍在武装陪跑,写 native 值会擦掉这段记忆、导致每轮重新 arm(这正是
+>   `protection_reconciler.go:98` 那份保留名单存在的理由)。熔断跳闸分支里也加了**只读**证据检查,
+>   让 30 分钟冷却窗口不再持续说谎(执行归属不变,`allCovered` 仍为 false)。
+>
+> **我订正的一个猜测**:我先前假设 OKX 拒绝激活是因为 reduce-only 的 trailing 数量超过了缩水后的持仓。
+> 数据否掉了:114 次熔断里有 9 次发生在 **30% 档**上,那一档永远不会超量 → 与"减仓后委托量超出持仓"没有必然关系,**撤回**。
+>
+> **顺带记下、尚未处理**:部分平仓后档位数量漂移(ETHUSDT dd2 = 0.047 对 0.064 持仓 = 73%,设计值是 30%;
+> BE1 挂 0.203 对 0.133 持仓)。修它要对**在场保护单做撤后重挂 = 高风险**,须用户明确确认。
 
 > **🔥🔥🔥 v1.17.6 全量日志合规审计挖出的 4 个缺陷 —— 3 个是"账本/日志在说谎",1 个是真连坐(2026-07-31,待部署)**
 >

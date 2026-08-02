@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"nofx/logger"
 	"nofx/store"
 	"nofx/trader/types"
@@ -650,6 +651,26 @@ func (t *OKXTrader) setTrailingStopLossWithTagReturningID(symbol string, positio
 
 	resp, err := t.doRequest("POST", okxAdvanceAlgoPath, body)
 	if err != nil {
+		// An error here does NOT prove the order was not placed. OKX 51149 ("Order timed
+		// out") is a half-success: the algo lands on the exchange but the response body
+		// is lost. Every trailing placement failure in production over 4 days was this
+		// one code (6 occurrences across 6 different symbols) — and at least one of them
+		// (2026-07-31 22:23:33 ETHUSDT short) provably landed: algo 3791832449865392128
+		// appeared in OKX's pending list one second later and was picked up by order_sync,
+		// but because placement had "failed" we never captured its algoId, so the ownership
+		// ledger could not claim it. It went unmaintained, OKX withdrew it seconds later,
+		// and we re-placed a duplicate for the same tier.
+		//
+		// algoClOrdId is client-controlled and unique per placement, so it is a safe
+		// idempotency key: read back by it and adopt the order if it landed. Only when
+		// the read-back finds nothing is this a genuine failure.
+		if placedClOrdID != "" {
+			if landedID := t.findTrailingByClientID(instId, placedClOrdID); landedID != "" {
+				logger.Infof("  ✓ [OKX] Trailing stop ADOPTED after ambiguous placement error: %s activation=%.4f callback=%.4f qty=%.4f sz=%s algoId=%s algoClOrdId=%s reason=%s (placement reported: %v)",
+					symbol, activationPrice, callbackRate, quantity, szStr, landedID, placedClOrdID, reasonTag, err)
+				return landedID, nil
+			}
+		}
 		return "", fmt.Errorf("failed to set trailing stop loss: %w", err)
 	}
 
@@ -660,6 +681,16 @@ func (t *OKXTrader) setTrailingStopLossWithTagReturningID(symbol string, positio
 	}
 	if err := json.Unmarshal(resp, &orders); err == nil && len(orders) > 0 {
 		if orders[0].SCode != "0" {
+			// Same half-success hazard as the transport/envelope error above: a per-order
+			// sCode can report failure for a request that still landed. Read back before
+			// declaring failure.
+			if placedClOrdID != "" {
+				if landedID := t.findTrailingByClientID(instId, placedClOrdID); landedID != "" {
+					logger.Infof("  ✓ [OKX] Trailing stop ADOPTED after per-order rejection: %s algoId=%s algoClOrdId=%s reason=%s (rejection reported: code=%s msg=%s)",
+						symbol, landedID, placedClOrdID, reasonTag, orders[0].SCode, orders[0].SMsg)
+					return landedID, nil
+				}
+			}
 			return "", fmt.Errorf("OKX trailing stop rejected: code=%s msg=%s", orders[0].SCode, orders[0].SMsg)
 		}
 		// algoClOrdId is logged because it is the only place the protection tier tag
@@ -678,6 +709,45 @@ func (t *OKXTrader) setTrailingStopLossWithTagReturningID(symbol string, positio
 
 	logger.Infof("  ✓ [OKX] Trailing stop set: %s activation=%.4f callback=%.4f qty=%.4f sz=%s resp=%s", symbol, activationPrice, callbackRate, quantity, szStr, string(resp))
 	return "", nil
+}
+
+// findTrailingByClientID resolves a trailing algo by the client id we set at placement
+// and returns its exchange algoId, or "" if it is not on the exchange.
+//
+// This is the read-back that turns an ambiguous placement error into a definite answer.
+// It deliberately queries the PENDING algo list rather than history: the question being
+// asked is "is this order live right now", and a filled/cancelled row in history would
+// be a wrong answer to adopt. Read failures return "" — treating an unreadable exchange
+// as "landed" would leave a tier believing it has coverage it cannot see.
+func (t *OKXTrader) findTrailingByClientID(instId, clientOrderID string) string {
+	if instId == "" || clientOrderID == "" {
+		return ""
+	}
+	path := fmt.Sprintf("%s?instType=SWAP&instId=%s&ordType=move_order_stop&algoClOrdId=%s",
+		okxAlgoPendingPath, instId, url.QueryEscape(clientOrderID))
+	data, err := t.doRequest("GET", path, nil)
+	if err != nil {
+		logger.Infof("  ⚠️ [OKX] Trailing read-back failed for algoClOrdId=%s: %v — treating placement as failed", clientOrderID, err)
+		return ""
+	}
+	var orders []struct {
+		AlgoId      string `json:"algoId"`
+		AlgoClOrdID string `json:"algoClOrdId"`
+	}
+	if err := json.Unmarshal(data, &orders); err != nil {
+		logger.Infof("  ⚠️ [OKX] Trailing read-back unparseable for algoClOrdId=%s: %v", clientOrderID, err)
+		return ""
+	}
+	for _, order := range orders {
+		// Match the client id explicitly. Some OKX endpoints ignore unknown filters and
+		// return the full list, which would otherwise let an unrelated tier's order be
+		// adopted as this tier's — the exact confusion that leaves one tier unprotected
+		// while another is double-claimed.
+		if order.AlgoId != "" && order.AlgoClOrdID == clientOrderID {
+			return order.AlgoId
+		}
+	}
+	return ""
 }
 
 func (t *OKXTrader) cancelOtherTrailingStopOrders(symbol string, keepAlgoID string) error {
@@ -1543,8 +1613,12 @@ func (t *OKXTrader) fetchOpenOrders(symbol string) ([]types.OpenOrder, error) {
 			CallbackRatio string `json:"callbackRatio"`
 			MoveTriggerPx string `json:"moveTriggerPx"`
 			Sz            string `json:"sz"`
-			Tag           string `json:"tag"`
-			AlgoClOrdID   string `json:"algoClOrdId"`
+			// State is the row's OWN lifecycle ("live"/"effective"/"pause"). Without it
+			// activation could only be inferred from which query bucket returned the row,
+			// which is not a property of the order — see activationStatus below.
+			State       string `json:"state"`
+			Tag         string `json:"tag"`
+			AlgoClOrdID string `json:"algoClOrdId"`
 		}
 		if err := json.Unmarshal(trailingData, &trailingOrders); err == nil {
 			for _, order := range trailingOrders {
@@ -1568,9 +1642,27 @@ func (t *OKXTrader) fetchOpenOrders(symbol string) ([]types.OpenOrder, error) {
 				if positionSide == "NET" {
 					positionSide = "BOTH"
 				}
+				// Activation must be decided by the ROW's own data, never by which query
+				// bucket returned it. Deriving it from trailingState made the label depend
+				// on iteration order: the state="" bucket runs first and stamps every row it
+				// sees "pending_activation", so any row visible in both buckets could never
+				// be reported activated (seenTrailingIDs dedupes the second bucket away).
+				// Production evidence over 4 days: 1528 pending_activation vs 5 activated on
+				// OKX. That false label then fed nativeTrailingEffective, whose phantom rule
+				// is "mark passed activePx AND venue still says not activated". An activated
+				// trailing order has ALWAYS passed its activePx by definition — so a healthy,
+				// correctly-trailing order was judged dead, and 3 such polls (~21s) tripped
+				// the re-arm breaker and wrote the exchange-failed panel state for the rest
+				// of the position's life (2026-08-02 02:45:45 ETHUSDT short: algo
+				// 3791832803965304832 stayed live on OKX until the 05:01 close while the
+				// panel reported "交易所挂单失败").
+				//
+				// Two row-local activation signals, either is sufficient:
+				//   - state == "effective": OKX's own word that the trail is running.
+				//   - moveTriggerPx > 0: OKX only publishes a moving trigger after activation.
 				activationStatus := "pending_activation"
 				stopPrice := activePx
-				if trailingState == "effective" {
+				if strings.EqualFold(order.State, "effective") || moveTriggerPx > 0 {
 					activationStatus = "activated"
 					if moveTriggerPx > 0 {
 						stopPrice = moveTriggerPx
