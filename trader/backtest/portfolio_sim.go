@@ -305,6 +305,14 @@ type SimResult struct {
 	L3ClosedQty float64 // total fraction-equivalent closed by L3
 	FeesPaid    float64 // total trading fees charged (quote ccy); 0 when FeeRatePct=0
 
+	// EquityCurve is the per-tick account equity (StartCapital + realized +
+	// unrealized), recorded POST-guard. Exposed so the drawdown-excursion analysis
+	// can count events directly on the observed curve instead of inferring them
+	// from breaker firing counts.
+	EquityCurve []float64
+	// EquityCurveMs is the tick timestamp for each EquityCurve sample.
+	EquityCurveMs []int64
+
 	// Breaker occupancy diagnostics. A config with L3Fires=0 is ambiguous without
 	// these: it could mean the market never triggered it, or that the arm/gate
 	// suppressed every trigger it had. ArmedPct/GatePct/TriggerHits separate those.
@@ -750,6 +758,8 @@ func runPortfolioSim(p ProtectionParams, g GuardParams, loaded []loadedEntry, wi
 	var l3Events int
 	var reentries int
 	var l3ClosedQty float64
+	equityCurve := make([]float64, 0, len(clock))
+	equityCurveMs := make([]int64, 0, len(clock))
 
 	res := SimResult{Trades: len(lives)}
 
@@ -920,6 +930,8 @@ func runPortfolioSim(p ProtectionParams, g GuardParams, loaded []loadedEntry, wi
 			maxGiveback = gb
 		}
 		equity := realizedSoFar + totalUnreal
+		equityCurve = append(equityCurve, g.StartCapital+equity)
+		equityCurveMs = append(equityCurveMs, t)
 		if equity > peakEquity {
 			peakEquity = equity
 		}
@@ -948,6 +960,8 @@ func runPortfolioSim(p ProtectionParams, g GuardParams, loaded []loadedEntry, wi
 		res.WinRatePct = float64(wins) / float64(len(lives)) * 100
 	}
 	res.MaxPortfolioDD = maxDD
+	res.EquityCurve = equityCurve
+	res.EquityCurveMs = equityCurveMs
 	res.MaxGiveback = maxGiveback
 	res.GuardTrims = guardTrims
 	res.GuardClosedQty = guardClosedQty

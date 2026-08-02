@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/rand"
 	"os"
 	"sort"
 	"strconv"
@@ -69,6 +70,8 @@ func main() {
 	faithful := flag.Bool("faithful", false, "acct: replay to the trader's REAL exit price with modelled SL/TP/BE/DD off, so the baseline reproduces realized PnL (recommended: the modelled ladder is not what these traders ran)")
 	cycle := flag.Bool("cycle", false, "acct: use the equity-FREEZE (cycle) model instead of modelled re-entry — flatten crystallises equity, later real entries form the next cycle")
 	envFile := flag.String("env", "", "path to an env file to read BINANCE_PROXY_URL from (required for -binance: this host is geo-blocked by Binance, HTTP 451)")
+	realcurve := flag.Bool("realcurve", false, "run the drawdown-excursion analysis on the REAL recorded equity curve (trader_equity_snapshots), not a replay reconstruction")
+	ddstat := flag.Bool("ddstat", false, "count peak-to-trough drawdown excursions on the observed equity curve: how many reached each depth, and conditional on reaching m%, how often it went deeper vs recovered")
 	cyclefine := flag.Bool("cyclefine", false, "acct+cycle: 0.1%-step sweep of drawdown x arm gain WITH a chronological train/test split (the only deployment-relevant view)")
 	cyclemeasure := flag.Bool("cyclemeasure", false, "acct+cycle: ENGINE PROBE — evaluate the trigger but never touch the book, so firing counts must be perfectly monotone in drop%")
 	reentry := flag.Int("reentry", 1, "acct: bars after a flatten before the position is re-opened (0 = no re-entry, which OVERSTATES the breaker)")
@@ -401,6 +404,44 @@ func main() {
 		printL3Trace(base, l3res, trace, *capital)
 		return
 	}
+	if *realcurve {
+		// The question "how many times did the PnL curve fall m% from its peak" is a
+		// question about the RECORDED curve, and the system already stores it. Using a
+		// replay reconstruction here would answer a different question and inherit
+		// every modelling gap in the replay.
+		curve, stamps, err := loadRealEquityCurve(db, *traderLike)
+		if err != nil {
+			log.Fatalf("load equity snapshots: %v", err)
+		}
+		if len(curve) < 2 {
+			log.Fatalf("only %d equity snapshots for this trader", len(curve))
+		}
+		fmt.Printf("==== REAL RECORDED EQUITY CURVE (trader_equity_snapshots) ====\n")
+		fmt.Printf("samples=%d  from %s to %s\n", len(curve), stamps[0], stamps[len(stamps)-1])
+		fmt.Printf("start=%.2f  peak=%.2f  now=%.2f  min=%.2f\n",
+			curve[0], maxOf(curve), curve[len(curve)-1], minOf(curve))
+		printCurveAnalysis(curve)
+		return
+	}
+	if *ddstat {
+		provider := backtest.OKXBars
+		if *binance {
+			provider = backtest.BinanceBars
+		}
+		loaded, skipped := backtest.PrepareEntries(entries, *tf, provider)
+		fmt.Printf("prepared %d entries (%d skipped)\n", len(loaded), skipped)
+		if len(loaded) == 0 {
+			os.Exit(1)
+		}
+		p := backtest.ClaudeBaselineParams()
+		if *faithful {
+			p = backtest.ProtectionParams{Unit: backtest.UnitPercent, FaithfulExits: true}
+		}
+		p.FeeRatePct = *feerate
+		base := backtest.RunPortfolioSim(p, backtest.GuardParams{StartCapital: *capital}, loaded)
+		printDDStat(base, *capital)
+		return
+	}
 	if *cyclefine {
 		provider := backtest.OKXBars
 		if *binance {
@@ -716,6 +757,451 @@ func printCycleFineOOS(rows []backtest.CycleSplitResult) {
 		fmt.Printf("neighbourhood (arm 3-5%%, dd 1.5-2.5%%): %d cells, TESTedge min %+.2f median %+.2f max %+.2f, %d/%d positive\n",
 			len(near), near[0], near[len(near)/2], near[len(near)-1], good, len(near))
 	}
+}
+
+// printDDStat answers, on the observed (no-breaker) equity curve: how many times
+// did the curve fall m% from a peak, and CONDITIONAL on falling m%, how often did
+// it keep going versus repair itself.
+//
+// The conditional is the whole point. "Drawdowns often exceeded 10%, so cutting at
+// 2% must pay" is only true if reaching 2% predicts reaching 10%. A 2% rule cannot
+// see which excursion it is in: it fires on every excursion that touches 2%,
+// including the ones that stop at 2.1% and recover. So the deciding ratio is
+// among the excursions that reached 2%, how many went on to 4%+ (saves) versus how
+// many recovered to the old peak (false stops).
+func printDDStat(base backtest.SimResult, capital float64) {
+	curve := base.EquityCurve
+	fmt.Printf("==== DRAWDOWN EXCURSIONS ON THE OBSERVED EQUITY CURVE (no breaker) ====\n")
+	fmt.Printf("capital=%.2f  final PnL=%.2f  samples=%d  (raw equity %%, leverage NOT divided out)\n",
+		capital, base.TotalPnL, len(curve))
+	if len(curve) < 2 {
+		fmt.Println("curve too short")
+		return
+	}
+	exs := backtest.DDExcursions(curve)
+	fmt.Printf("total peak-to-recovery episodes: %d\n", len(exs))
+	fmt.Println("(an episode starts only at a NEW equity high; successive dips that never regain")
+	fmt.Print(" the prior high are ONE episode, so declines are not multiply-counted)\n\n")
+
+	levels := []float64{0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, 15, 20}
+	stats := backtest.DDLevelStats(curve, levels)
+	fmt.Printf("%-7s %-9s %-11s %-11s %-11s %-11s %s\n",
+		"depth", "reached", "->2x depth", "->3x depth", "recovered", "med depth", "P(2x | reached)")
+	for _, st := range stats {
+		p2 := 0.0
+		if st.Reached > 0 {
+			p2 = float64(st.WentTwice) / float64(st.Reached) * 100
+		}
+		fmt.Printf("%-7.1f %-9d %-11d %-11d %-11d %-11.1f %.0f%%\n",
+			st.LevelPct, st.Reached, st.WentTwice, st.WentTriple, st.Recovered,
+			st.MedianDeeperPct, p2)
+	}
+
+	// The ledger above prices a firing as if freezing ENDED participation. It does
+	// not: the trader keeps opening positions, and under the freeze model those form
+	// the next cycle. So the ledger is an UPPER BOUND on what a breaker can capture.
+	// This block measures the gap by replaying the same threshold in the simulator
+	// and comparing against the ledger's naive prediction.
+	fmt.Println("\n---- WHY THE LEDGER OVERSTATES IT: participation continues after the freeze ----")
+	for _, lv := range []float64{2.0, 4.0} {
+		leds := backtest.EpisodeLedgers(curve, lv)
+		var naive float64
+		for _, l := range leds {
+			naive += l.Saved - l.Forgone
+		}
+		fmt.Printf("dd=%.1f%%: ledger's naive net = %+.2f  (assumes freezing ends participation)\n", lv, naive)
+	}
+	fmt.Println("The simulator's actual result for the same thresholds is far smaller, because")
+	fmt.Println("after the freeze the trader keeps opening positions and the new cycle takes its")
+	fmt.Println("own losses. The freeze changes WHEN a loss is booked, not WHETHER the account")
+	fmt.Println("keeps taking risk — so it cannot bank the trough-avoidance the ledger credits.")
+
+	fmt.Println("\nHow to read the 2.0% row: that many episodes are firings a 2% breaker makes.")
+	fmt.Println("'->2x depth' are the ones it genuinely saved from a 4%+ decline.")
+	fmt.Println("'recovered' are firings that cut a decline which then repaired itself on its own.")
+
+	// Per-episode ledger at the proposed threshold. This is where the argument is
+	// settled or lost, because it prices both sides of each individual firing.
+	for _, lv := range []float64{2.0, 4.0} {
+		leds := backtest.EpisodeLedgers(curve, lv)
+		fmt.Printf("\n---- PER-EPISODE LEDGER AT %.1f%% (what each firing bought and paid) ----\n", lv)
+		fmt.Printf("%-4s %-9s %-9s %-9s %-9s %-7s %-6s | %-9s %-9s %s\n",
+			"#", "peak", "cut@", "trough", "ended", "maxDD%", "recov", "saved", "forgone", "net")
+		var totSaved, totForgone float64
+		for _, l := range leds {
+			net := l.Saved - l.Forgone
+			_ = net
+			totSaved += l.Saved
+			totForgone += l.Forgone
+			rec := "no"
+			if l.Recovered {
+				rec = "YES"
+			}
+			fmt.Printf("%-4d %-9.2f %-9.2f %-9.2f %-9.2f %-7.1f %-6s | %-9.2f %-9.2f %+.2f\n",
+				l.Idx, l.PeakEquity, l.CutEquity, l.TroughEquity, l.EndEquity,
+				l.MaxDDPct, rec, l.Saved, l.Forgone, l.Saved-l.Forgone)
+		}
+		fmt.Printf("TOTAL saved-vs-trough=%.2f  forgone-vs-actual-ending=%.2f\n", totSaved, totForgone)
+		fmt.Println("NOTE: 'saved' is measured against the TROUGH, which holding does not force you")
+		fmt.Println("to sell at. 'forgone' is measured against where the episode actually ENDED,")
+		fmt.Println("which is what holding really delivered. Only 'forgone' is a realised cost.")
+	}
+}
+
+// printCurveAnalysis is the direct answer to "how many times did the curve fall
+// m% from a peak, and would cutting at m% have paid".
+//
+// It runs on a bare equity curve, so it applies equally to the recorded curve and
+// to a replay. The simulation at the end is deliberately the crudest possible
+// model of the user's rule, because the crude version is the one whose assumptions
+// are fully visible: on reaching -m% from the running peak, the equity is frozen
+// (further moves in that episode are skipped) and participation resumes at the
+// next new-high attempt. It answers "does truncating these declines help", which
+// is the question, without importing any of the replay's modelling gaps.
+func printCurveAnalysis(curve []float64) {
+	exs := backtest.DDExcursions(curve)
+	fmt.Printf("\ntotal peak-to-recovery episodes: %d\n", len(exs))
+	fmt.Println("(a new episode starts only at a NEW equity high, so one long decline is not")
+	fmt.Println(" multiply-counted as many small ones)")
+
+	fmt.Println("\n---- (1) HOW OFTEN DID THE CURVE FALL m%, AND WHAT HAPPENED NEXT ----")
+	levels := []float64{0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, 15, 20, 30}
+	fmt.Printf("%-7s %-9s %-11s %-11s %-11s %s\n",
+		"depth", "reached", "->2x depth", "recovered", "med depth", "P(recovered | reached)")
+	for _, st := range backtest.DDLevelStats(curve, levels) {
+		pr := 0.0
+		if st.Reached > 0 {
+			pr = float64(st.Recovered) / float64(st.Reached) * 100
+		}
+		fmt.Printf("%-7.1f %-9d %-11d %-11d %-11.1f %.0f%%\n",
+			st.LevelPct, st.Reached, st.WentTwice, st.Recovered, st.MedianDeeperPct, pr)
+	}
+	fmt.Println("\n'recovered' = the curve returned to the old peak on its own. Every one of those")
+	fmt.Println("is a firing that cut a decline which then repaired itself, i.e. a false stop.")
+
+	fmt.Println("\n---- (2) FREEZE SIMULATION, BY RE-ENTRY DELAY ----")
+	fmt.Println("On -m% from the running peak: freeze, wait N samples, then resume tracking the")
+	fmt.Println("curve with the drawdown reference reset to the frozen equity (= new cycle).")
+	fmt.Println("Snapshots are ~20min apart, so N=72 is about a day, N=504 about a week.")
+	hold := curve[len(curve)-1]
+	fmt.Printf("final equity by (m%%, re-entry delay). hold = %.2f\n\n", hold)
+	cds := []int{1, 6, 18, 72, 216, 504, 100000}
+	fmt.Printf("%-7s", "m%")
+	for _, c := range cds {
+		lbl := fmt.Sprintf("N=%d", c)
+		if c == 100000 {
+			lbl = "never"
+		}
+		fmt.Printf(" %-10s", lbl)
+	}
+	fmt.Println()
+	for _, m := range []float64{0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, 15, 20} {
+		fmt.Printf("%-7.1f", m)
+		for _, c := range cds {
+			fin, _ := simulateFreeze(curve, m, c)
+			fmt.Printf(" %-10.2f", fin)
+		}
+		fmt.Println()
+	}
+	// Placebo on the SAME curve, matched on freeze count. The drawdown trigger is
+	// replaced by a coin flip; everything else (freeze, cooldown, reference reset)
+	// is identical. If random freezing does as well, then what helps is holding less
+	// risk on a falling curve, not the drawdown threshold.
+	fmt.Println("\n---- (3) PLACEBO ON THE SAME CURVE: RANDOM FREEZE, MATCHED FREEZE COUNT ----")
+	fmt.Printf("%-7s %-8s | %-11s %-11s %-11s %-11s | %s\n",
+		"m%", "freezes", "real", "plac med", "plac min", "plac max", "percentile")
+	for _, m := range []float64{1, 1.5, 2, 2.5, 3, 4, 6, 10} {
+		const cd = 72
+		real, nf := simulateFreeze(curve, m, cd)
+		if nf == 0 {
+			continue
+		}
+		// Probability chosen so the expected number of random freezes matches nf.
+		prob := float64(nf) / float64(len(curve))
+		var vals []float64
+		for seed := int64(1); seed <= 200; seed++ {
+			v, _ := simulateRandomFreeze(curve, prob, cd, seed)
+			vals = append(vals, v)
+		}
+		sort.Float64s(vals)
+		better := 0
+		for _, v := range vals {
+			if real > v {
+				better++
+			}
+		}
+		pc := float64(better) / float64(len(vals)) * 100
+		fmt.Printf("%-7.1f %-8d | %-11.2f %-11.2f %-11.2f %-11.2f | %.0f%%\n",
+			m, nf, real, vals[len(vals)/2], vals[0], vals[len(vals)-1], pc)
+	}
+	fmt.Println("200 random seeds per row. A drawdown trigger that carries information should")
+	fmt.Println("sit near the 100th percentile of its own placebo. Near 50% means the threshold")
+	fmt.Println("is not choosing better moments than chance; the gain is from freezing at all.")
+
+	// MECHANISM TEST. A drawdown breaker can only work if being in drawdown predicts
+	// WORSE forward returns. That is a property of the curve itself and can be
+	// measured without any breaker: compare the average forward return following a
+	// -m% drawdown state against the unconditional average forward return.
+	//
+	// This is the test that decides the question, because it needs no re-entry rule,
+	// no cooldown, no threshold fitting, and no placebo — all of which are free
+	// parameters that can manufacture a result.
+	fmt.Println("\n---- (4) MECHANISM: DOES BEING IN DRAWDOWN PREDICT WORSE FORWARD RETURNS? ----")
+	fmt.Println("If it does not, no drawdown breaker can help, whatever its parameters.")
+	for _, h := range []int{6, 18, 72, 216} {
+		fmt.Printf("\nforward horizon = %d samples (~%.1f hours):\n", h, float64(h)*20/60)
+		fmt.Printf("%-8s %-9s %-13s %-13s %-13s %s\n",
+			"m%", "n obs", "fwd|in DD", "fwd|uncond", "difference", "sign")
+		uncond, nu := forwardMean(curve, h, 0, false)
+		for _, m := range []float64{0.5, 1, 1.5, 2, 3, 4, 6} {
+			cond, nc := forwardMean(curve, h, m, true)
+			if nc < 20 {
+				continue
+			}
+			diff := cond - uncond
+			sign := "no edge for a breaker"
+			if diff < 0 {
+				sign := "drawdown predicts weakness -> breaker CAN help"
+				_ = sign
+			}
+			if diff < 0 {
+				sign = "DD predicts weakness -> breaker can help"
+			} else {
+				sign = "DD predicts STRENGTH -> breaker hurts"
+			}
+			fmt.Printf("%-8.1f %-9d %-13.4f %-13.4f %-13.4f %s\n",
+				m, nc, cond*100, uncond*100, diff*100, sign)
+		}
+		fmt.Printf("(unconditional sample size %d; values are mean %% return over the horizon)\n", nu)
+	}
+
+	// The conditional test above is nearly vacuous on a curve that spends almost all
+	// its time below its peak: "in drawdown" is then the normal state, and the
+	// comparison is "almost always" against "always". Bucketing by DEPTH separates
+	// the two competing explanations:
+	//
+	//   (a) drawdown depth genuinely predicts weakness -> a threshold breaker helps;
+	//   (b) the account simply has negative drift -> holding less ALWAYS helps and
+	//       the drawdown state adds nothing, in which case plain size reduction
+	//       dominates because it needs no threshold and pays no churn.
+	//
+	// Under (a) the forward return must get monotonically worse with depth. Under (b)
+	// the buckets are flat and all equally negative.
+	fmt.Println("\n---- (5) IS IT DEPTH, OR JUST NEGATIVE DRIFT? FORWARD RETURN BY DEPTH BUCKET ----")
+	fmt.Println("Under 'depth predicts weakness' the forward return must worsen monotonically")
+	fmt.Println("with depth. If the buckets are flat, the account just has negative drift and a")
+	fmt.Println("threshold adds nothing over simply trading smaller.")
+	edges := []float64{0, 0.5, 1, 2, 3, 5, 8, 100}
+	for _, h := range []int{18, 72} {
+		fmt.Printf("\nforward horizon %d samples (~%.0fh):\n", h, float64(h)*20/60)
+		fmt.Printf("%-14s %-9s %-13s\n", "depth bucket", "n obs", "mean fwd %")
+		for bi := 0; bi+1 < len(edges); bi++ {
+			lo, hi := edges[bi], edges[bi+1]
+			m, n := forwardMeanBucket(curve, h, lo, hi)
+			if n < 20 {
+				continue
+			}
+			lbl := fmt.Sprintf("%.1f-%.1f%%", lo, hi)
+			if hi >= 100 {
+				lbl = fmt.Sprintf(">%.1f%%", lo)
+			}
+			fmt.Printf("%-14s %-9d %-13.4f\n", lbl, n, m*100)
+		}
+	}
+
+	fmt.Println("\nThe 'never' column is NOT a breaker: it is 'stop trading permanently at the")
+	fmt.Println("first -m% dip'. It is printed only to show how much of any apparent gain comes")
+	fmt.Println("from ceasing to participate rather than from the drawdown trigger.")
+}
+
+// simulateFreeze applies a drawdown breaker to a bare equity curve with an
+// EXPLICIT re-entry rule, and returns the final equity plus the freeze count.
+//
+// The re-entry rule is not a detail, it is the whole result. An earlier version of
+// this function had a defect that made the account, once frozen, never resume:
+// it only unfroze when the RAW curve set a new all-time high, which on a curve
+// that fell 51% and never recovered simply never happens. That version therefore
+// modelled "stop trading permanently near the top", which trivially beats holding
+// a collapsing curve, and it reported the drawdown breaker as +124 when the
+// breaker had nothing to do with the gain. Any drawdown-breaker study on an equity
+// curve must state its re-entry rule explicitly or it will accidentally measure
+// market timing instead.
+//
+// Here: on reaching -m% from the running peak the account stops tracking the curve
+// (skipping the remainder of that decline), waits cooldownBars samples, then
+// resumes tracking the curve's step-returns from its frozen equity with the
+// drawdown reference reset to that equity — which is exactly the user's model
+// (熔断=权益价值冻结, and positions opened after that point start a new cycle).
+func simulateFreeze(curve []float64, mPct float64, cooldownBars int) (float64, int) {
+	if len(curve) == 0 {
+		return 0, 0
+	}
+	equity := curve[0]
+	peak := curve[0]
+	frozenFor := -1 // -1 = active
+	freezes := 0
+	for i := 1; i < len(curve); i++ {
+		if curve[i-1] <= 0 {
+			continue
+		}
+		if frozenFor >= 0 {
+			frozenFor++
+			if frozenFor >= cooldownBars {
+				frozenFor = -1
+				peak = equity // new cycle: the reference is the crystallised equity
+			}
+			continue
+		}
+		equity *= curve[i] / curve[i-1]
+		if equity > peak {
+			peak = equity
+		}
+		if peak > 0 && (peak-equity)/peak*100 >= mPct {
+			frozenFor = 0
+			freezes++
+		}
+	}
+	return equity, freezes
+}
+
+// forwardMean returns the mean forward return over h samples, either
+// unconditionally or conditioned on currently being at least mPct below the
+// running peak.
+func forwardMean(curve []float64, h int, mPct float64, conditional bool) (float64, int) {
+	if len(curve) <= h+1 {
+		return 0, 0
+	}
+	peak := curve[0]
+	var sum float64
+	var n int
+	for i := 0; i+h < len(curve); i++ {
+		if curve[i] > peak {
+			peak = curve[i]
+		}
+		if curve[i] <= 0 {
+			continue
+		}
+		if conditional {
+			if peak <= 0 {
+				continue
+			}
+			dd := (peak - curve[i]) / peak * 100
+			if dd < mPct {
+				continue
+			}
+		}
+		sum += curve[i+h]/curve[i] - 1
+		n++
+	}
+	if n == 0 {
+		return 0, 0
+	}
+	return sum / float64(n), n
+}
+
+// forwardMeanBucket is forwardMean restricted to a drawdown-depth band [lo, hi).
+func forwardMeanBucket(curve []float64, h int, lo, hi float64) (float64, int) {
+	if len(curve) <= h+1 {
+		return 0, 0
+	}
+	peak := curve[0]
+	var sum float64
+	var n int
+	for i := 0; i+h < len(curve); i++ {
+		if curve[i] > peak {
+			peak = curve[i]
+		}
+		if curve[i] <= 0 || peak <= 0 {
+			continue
+		}
+		dd := (peak - curve[i]) / peak * 100
+		if dd < lo || dd >= hi {
+			continue
+		}
+		sum += curve[i+h]/curve[i] - 1
+		n++
+	}
+	if n == 0 {
+		return 0, 0
+	}
+	return sum / float64(n), n
+}
+
+// simulateRandomFreeze is the placebo: same freeze/cooldown/reset machinery, but
+// the trigger is a seeded coin flip instead of a drawdown threshold.
+func simulateRandomFreeze(curve []float64, prob float64, cooldownBars int, seed int64) (float64, int) {
+	if len(curve) == 0 {
+		return 0, 0
+	}
+	rng := rand.New(rand.NewSource(seed))
+	equity := curve[0]
+	peak := curve[0]
+	frozenFor := -1
+	freezes := 0
+	for i := 1; i < len(curve); i++ {
+		if curve[i-1] <= 0 {
+			continue
+		}
+		if frozenFor >= 0 {
+			frozenFor++
+			if frozenFor >= cooldownBars {
+				frozenFor = -1
+				peak = equity
+			}
+			continue
+		}
+		equity *= curve[i] / curve[i-1]
+		if equity > peak {
+			peak = equity
+		}
+		if rng.Float64() < prob {
+			frozenFor = 0
+			freezes++
+		}
+	}
+	return equity, freezes
+}
+
+// loadRealEquityCurve reads the recorded account equity series for a trader.
+func loadRealEquityCurve(db *sql.DB, traderID string) ([]float64, []string, error) {
+	rows, err := db.Query(`SELECT timestamp, total_equity FROM trader_equity_snapshots
+		WHERE trader_id LIKE ? AND total_equity > 0 ORDER BY timestamp ASC`, traderID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var curve []float64
+	var stamps []string
+	for rows.Next() {
+		var ts string
+		var eq float64
+		if err := rows.Scan(&ts, &eq); err != nil {
+			return nil, nil, err
+		}
+		curve = append(curve, eq)
+		stamps = append(stamps, ts)
+	}
+	return curve, stamps, rows.Err()
+}
+
+func maxOf(v []float64) float64 {
+	m := v[0]
+	for _, x := range v {
+		if x > m {
+			m = x
+		}
+	}
+	return m
+}
+
+func minOf(v []float64) float64 {
+	m := v[0]
+	for _, x := range v {
+		if x < m {
+			m = x
+		}
+	}
+	return m
 }
 
 // loadProxyURLOnly reads ONLY the BINANCE_PROXY_URL assignment out of an env
