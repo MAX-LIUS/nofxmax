@@ -319,10 +319,12 @@ func (s *Server) handleTopTraders(c *gin.Context) {
 
 // handleEquityHistoryBatch Batch get return rate historical data for multiple traders (no authentication required, for performance comparison)
 // Supports optional 'hours' parameter to filter data by time range (e.g., hours=24 for last 24 hours)
+// and 'max_points' to cap the returned samples per trader (0 = server default).
 func (s *Server) handleEquityHistoryBatch(c *gin.Context) {
 	var requestBody struct {
 		TraderIDs []string `json:"trader_ids"`
-		Hours     int      `json:"hours"` // Optional: filter by last N hours (0 = all data)
+		Hours     int      `json:"hours"`      // Optional: filter by last N hours (0 = all data)
+		MaxPoints int      `json:"max_points"` // Optional: downsample budget per trader
 	}
 
 	// Try to parse POST request JSON body
@@ -357,8 +359,12 @@ func (s *Server) handleEquityHistoryBatch(c *gin.Context) {
 			if hoursParam != "" {
 				fmt.Sscanf(hoursParam, "%d", &hours)
 			}
+			maxPoints := 0
+			if v := c.Query("max_points"); v != "" {
+				fmt.Sscanf(v, "%d", &maxPoints)
+			}
 
-			result := s.getEquityHistoryForTraders(traderIDs, hours)
+			result := s.getEquityHistoryForTraders(traderIDs, hours, maxPoints)
 			c.JSON(http.StatusOK, result)
 			return
 		}
@@ -374,6 +380,9 @@ func (s *Server) handleEquityHistoryBatch(c *gin.Context) {
 		if hoursParam != "" {
 			fmt.Sscanf(hoursParam, "%d", &requestBody.Hours)
 		}
+		if v := c.Query("max_points"); v != "" {
+			fmt.Sscanf(v, "%d", &requestBody.MaxPoints)
+		}
 	}
 
 	// Limit to maximum 20 traders to prevent oversized requests
@@ -381,17 +390,39 @@ func (s *Server) handleEquityHistoryBatch(c *gin.Context) {
 		requestBody.TraderIDs = requestBody.TraderIDs[:20]
 	}
 
-	result := s.getEquityHistoryForTraders(requestBody.TraderIDs, requestBody.Hours)
+	result := s.getEquityHistoryForTraders(requestBody.TraderIDs, requestBody.Hours, requestBody.MaxPoints)
 	c.JSON(http.StatusOK, result)
 }
+
+// equityBatchDefaultMaxPoints is the per-trader sample budget when the caller does
+// not ask for one. Large enough that a 45-day curve keeps its shape, small enough
+// that four traders stay well under a megabyte of JSON.
+const equityBatchDefaultMaxPoints = 1500
 
 // getEquityHistoryForTraders Get historical data for multiple traders
 // Query directly from database, not dependent on trader in memory (so historical data can be retrieved after restart)
 // Also appends current real-time data point to ensure chart matches leaderboard
-// hours: filter by last N hours (0 = use default limit of 500 records)
-func (s *Server) getEquityHistoryForTraders(traderIDs []string, hours int) map[string]interface{} {
+//
+// hours: window to return, counted back from now. 0 means the ENTIRE recorded
+// history. It previously meant "the latest 500 rows", which is not the same thing:
+// snapshots land every ~3 minutes, so 500 rows is roughly the last day, and the
+// "All" range therefore showed only the most recent few days of a 45-day history.
+//
+// maxPoints: display budget per trader, applied by peak/trough-preserving
+// downsampling AFTER the window is selected (0 = equityBatchDefaultMaxPoints).
+// Selecting the window first is what makes the range buttons actually change the
+// span instead of all returning the same recent tail.
+//
+// Each point also carries position_count / margin_used_pct (recorded live in the
+// snapshot) and position_notional / position_count_recon (replayed from
+// trader_positions), so the chart tooltip can show what was on the book.
+func (s *Server) getEquityHistoryForTraders(traderIDs []string, hours int, maxPoints int) map[string]interface{} {
+	if maxPoints <= 0 {
+		maxPoints = equityBatchDefaultMaxPoints
+	}
 	result := make(map[string]interface{})
 	histories := make(map[string]interface{})
+	sampling := make(map[string]interface{})
 	errors := make(map[string]string)
 
 	// Use a single consistent timestamp for all real-time data points
@@ -424,13 +455,38 @@ func (s *Server) getEquityHistoryForTraders(traderIDs []string, hours int) map[s
 			startTime := now.Add(-time.Duration(hours) * time.Hour)
 			snapshots, err = s.store.Equity().GetByTimeRange(traderID, startTime, now)
 		} else {
-			// Default: get latest 500 records
-			snapshots, err = s.store.Equity().GetLatest(traderID, 500)
+			// hours == 0 means the whole recorded history, not a row-count tail.
+			snapshots, err = s.store.Equity().GetAllAscending(traderID)
 		}
 		if err != nil {
 			logger.Errorf("[API] Failed to get equity history for %s: %v", traderID, err)
 			errors[traderID] = "Failed to get historical data"
 			continue
+		}
+
+		// Record the true sample count before downsampling so the UI can say whether
+		// what it is drawing is the raw series or a reduction of it.
+		rawCount := len(snapshots)
+		snapshots = downsampleSnapshots(snapshots, maxPoints)
+
+		// Replay the position book at exactly the timestamps being returned. Done
+		// once per trader over the already-reduced set, so cost tracks the display
+		// budget rather than the raw history length.
+		exposureByTime := make(map[int64]store.ExposureAtTime, len(snapshots))
+		if len(snapshots) > 0 {
+			timesMs := make([]int64, len(snapshots))
+			for i, snap := range snapshots {
+				timesMs[i] = snap.Timestamp.UnixMilli()
+			}
+			if exposures, expErr := s.store.Position().GetExposureAtTimes(traderID, timesMs); expErr == nil {
+				for _, e := range exposures {
+					exposureByTime[e.TimeMs] = e
+				}
+			} else {
+				// Non-fatal: the equity curve is still fully usable without the
+				// notional overlay, so the chart should not fail over it.
+				logger.Errorf("[API] Failed to reconstruct exposure for %s: %v", traderID, expErr)
+			}
 		}
 
 		// Get initial balance for calculating PnL percentage
@@ -450,13 +506,26 @@ func (s *Server) getEquityHistoryForTraders(traderIDs []string, hours int) map[s
 				pnlPct = (snap.TotalEquity - initialBalance) / initialBalance * 100
 			}
 
-			history = append(history, map[string]interface{}{
-				"timestamp":     snap.Timestamp,
-				"total_equity":  snap.TotalEquity,
-				"total_pnl":     snap.UnrealizedPnL,
-				"total_pnl_pct": pnlPct,
-				"balance":       snap.Balance,
-			})
+			point := map[string]interface{}{
+				"timestamp":       snap.Timestamp,
+				"total_equity":    snap.TotalEquity,
+				"total_pnl":       snap.UnrealizedPnL,
+				"total_pnl_pct":   pnlPct,
+				"balance":         snap.Balance,
+				"position_count":  snap.PositionCount,
+				"margin_used_pct": snap.MarginUsedPct,
+			}
+			if e, ok := exposureByTime[snap.Timestamp.UnixMilli()]; ok {
+				point["position_notional"] = e.Notional
+				point["long_notional"] = e.LongNotional
+				point["short_notional"] = e.ShortNotional
+				// Kept separate from position_count: the snapshot count comes from the
+				// exchange account at that moment, this one is replayed from local
+				// rows. When they disagree, local bookkeeping drifted, and hiding that
+				// behind one number would destroy the only signal of it.
+				point["position_count_recon"] = e.OpenCount
+			}
+			history = append(history, point)
 			if snap.Timestamp.After(lastSnapshotTime) {
 				lastSnapshotTime = snap.Timestamp
 			}
@@ -464,6 +533,18 @@ func (s *Server) getEquityHistoryForTraders(traderIDs []string, hours int) map[s
 
 		// Append current real-time data point to ensure chart matches leaderboard
 		// This ensures the latest point is always current, not from a potentially stale snapshot
+		// The nil check matters because the recorded history is fully serviceable without
+		// the live tail; dereferencing a missing manager would take down a public,
+		// unauthenticated endpoint over an optional last data point.
+		if s.traderManager == nil {
+			histories[traderID] = history
+			sampling[traderID] = map[string]interface{}{
+				"raw_points":      rawCount,
+				"returned_points": len(history),
+				"downsampled":     rawCount > len(history),
+			}
+			continue
+		}
 		if trader, err := s.traderManager.GetTrader(traderID); err == nil {
 			if accountInfo, err := trader.GetAccountInfo(); err == nil {
 				// Only append if it's been more than 30 seconds since last snapshot
@@ -485,21 +566,43 @@ func (s *Server) getEquityHistoryForTraders(traderIDs []string, hours int) map[s
 						pnlPct = (totalEquity - initialBalance) / initialBalance * 100
 					}
 
-					history = append(history, map[string]interface{}{
+					livePoint := map[string]interface{}{
 						"timestamp":     now,
 						"total_equity":  totalEquity,
 						"total_pnl":     totalPnL,
 						"total_pnl_pct": pnlPct,
 						"balance":       walletBalance,
-					})
+					}
+					// Carry the book fields onto the live point too. Without them the
+					// freshest sample - the one under the cursor most of the time -
+					// would be the only one with an empty position readout.
+					if v, ok := accountInfo["position_count"].(int); ok {
+						livePoint["position_count"] = v
+					}
+					if v, ok := accountInfo["margin_used_pct"].(float64); ok {
+						livePoint["margin_used_pct"] = v
+					}
+					if exposures, expErr := s.store.Position().GetExposureAtTimes(traderID, []int64{now.UnixMilli()}); expErr == nil && len(exposures) == 1 {
+						livePoint["position_notional"] = exposures[0].Notional
+						livePoint["long_notional"] = exposures[0].LongNotional
+						livePoint["short_notional"] = exposures[0].ShortNotional
+						livePoint["position_count_recon"] = exposures[0].OpenCount
+					}
+					history = append(history, livePoint)
 				}
 			}
 		}
 
 		histories[traderID] = history
+		sampling[traderID] = map[string]interface{}{
+			"raw_points":      rawCount,
+			"returned_points": len(history),
+			"downsampled":     rawCount > len(history),
+		}
 	}
 
 	result["histories"] = histories
+	result["sampling"] = sampling
 	result["count"] = len(histories)
 	if len(errors) > 0 {
 		result["errors"] = errors

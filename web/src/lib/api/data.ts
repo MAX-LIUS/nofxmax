@@ -120,13 +120,20 @@ export const dataApi = {
     return result.data!
   },
 
+  /**
+   * @param hours window to fetch, counted back from now. 0 = entire history.
+   * @param maxPoints per-trader sample budget; the server downsamples with
+   *   peak/trough preservation so drawdowns survive the reduction. Omit to take the
+   *   server default.
+   */
   async getEquityHistoryBatch(
     traderIds: string[],
-    hours?: number
+    hours?: number,
+    maxPoints?: number
   ): Promise<any> {
     const result = await httpClient.post<any>(
       `${API_BASE}/equity-history-batch`,
-      { trader_ids: traderIds, hours: hours || 0 }
+      { trader_ids: traderIds, hours: hours || 0, max_points: maxPoints || 0 }
     )
     if (!result.success) throw new Error('Failed to fetch batch equity history')
     return result.data!

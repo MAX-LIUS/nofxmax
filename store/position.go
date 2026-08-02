@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1610,6 +1611,138 @@ func (s *PositionStore) GetClosedTradesForEvolution(traderID, symbol, side strin
 		return nil, fmt.Errorf("failed to query evolution trades: %w", err)
 	}
 	return positions, nil
+}
+
+// ExposureAtTime is the reconstructed book state at one instant: how many
+// positions were open and their combined notional.
+type ExposureAtTime struct {
+	TimeMs        int64   `json:"time_ms"`
+	OpenCount     int     `json:"open_count"`
+	Notional      float64 `json:"notional"`
+	LongNotional  float64 `json:"long_notional"`
+	ShortNotional float64 `json:"short_notional"`
+}
+
+// GetExposureAtTimes reconstructs open position count and notional at each of the
+// given instants, in a single pass over the position rows.
+//
+// Why this exists: trader_equity_snapshots records position_count but not notional,
+// so the chart tooltip cannot show "how much was on the book" from snapshots alone.
+// Rather than start recording a new column (which would only cover the future and
+// leave the whole history blank) the book is replayed from trader_positions, which
+// already stores entry/exit times in ms.
+//
+// Notional is entry_price * entry_quantity, matching GetSideExposureSeries. It is
+// deliberately NOT mark-price notional: historical mark prices are not stored, so
+// any mark-based figure would need per-symbol kline fetches per timestamp. Entry
+// notional answers the question actually being asked ("how much did it commit")
+// and is stable, but it does not drift with price, so it is labelled as entry
+// notional in the UI rather than passed off as live exposure.
+//
+// timesMs need not be sorted; results come back in the caller's order.
+func (s *PositionStore) GetExposureAtTimes(traderID string, timesMs []int64) ([]ExposureAtTime, error) {
+	out := make([]ExposureAtTime, len(timesMs))
+	for i, t := range timesMs {
+		out[i] = ExposureAtTime{TimeMs: t}
+	}
+	if len(timesMs) == 0 {
+		return out, nil
+	}
+
+	minT, maxT := timesMs[0], timesMs[0]
+	for _, t := range timesMs {
+		if t < minT {
+			minT = t
+		}
+		if t > maxT {
+			maxT = t
+		}
+	}
+
+	// Only positions overlapping [minT, maxT] can matter: entered at or before the
+	// last instant, and either still open or exited at or after the first.
+	var positions []TraderPosition
+	err := s.db.Model(&TraderPosition{}).
+		Select("entry_time", "exit_time", "status", "side", "entry_price", "entry_quantity", "quantity").
+		Where("trader_id = ? AND entry_time <= ?", traderID, maxT).
+		Where("status = 'OPEN' OR exit_time = 0 OR exit_time >= ?", minT).
+		Find(&positions).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to query positions for exposure: %w", err)
+	}
+	if len(positions) == 0 {
+		return out, nil
+	}
+
+	// Sweep line: +notional at entry, -notional at exit. A position with no exit
+	// time (still open, or a row whose exit was never stamped) never gets a
+	// closing event, so it stays counted to the end of the window.
+	type ev struct {
+		ms    int64
+		count int
+		notio float64
+		long  bool
+	}
+	events := make([]ev, 0, len(positions)*2)
+	for i := range positions {
+		p := &positions[i]
+		qty := p.EntryQuantity
+		if qty <= 0 {
+			qty = p.Quantity
+		}
+		notio := p.EntryPrice * qty
+		if notio <= 0 {
+			continue
+		}
+		isLong := strings.EqualFold(p.Side, "LONG")
+		events = append(events, ev{ms: p.EntryTime, count: 1, notio: notio, long: isLong})
+		if p.ExitTime > 0 {
+			events = append(events, ev{ms: p.ExitTime, count: -1, notio: -notio, long: isLong})
+		}
+	}
+	sort.Slice(events, func(i, j int) bool { return events[i].ms < events[j].ms })
+
+	// Walk the requested instants in time order, advancing the sweep. Sorting an
+	// index array keeps the caller's ordering in the result.
+	order := make([]int, len(timesMs))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(a, b int) bool { return timesMs[order[a]] < timesMs[order[b]] })
+
+	var curCount int
+	var curLong, curShort float64
+	ei := 0
+	for _, idx := range order {
+		t := timesMs[idx]
+		// Apply every event at or before t: a position opened exactly at t counts
+		// as open, one closed exactly at t counts as closed.
+		for ei < len(events) && events[ei].ms <= t {
+			curCount += events[ei].count
+			if events[ei].long {
+				curLong += events[ei].notio
+			} else {
+				curShort += events[ei].notio
+			}
+			ei++
+		}
+		// Guard against float drift and against rows whose exit predates entry.
+		if curCount < 0 {
+			curCount = 0
+		}
+		l, sh := curLong, curShort
+		if l < 0 {
+			l = 0
+		}
+		if sh < 0 {
+			sh = 0
+		}
+		out[idx].OpenCount = curCount
+		out[idx].Notional = l + sh
+		out[idx].LongNotional = l
+		out[idx].ShortNotional = sh
+	}
+	return out, nil
 }
 
 // SideExposureBucket is one hourly snapshot of long vs short notional exposure
