@@ -129,8 +129,14 @@ dmypy.json
 PR_DESCRIPTION.md
 
 # compiled backtest binary (build artifact)
+#
+# Anchored with a leading slash so it matches ONLY the root-level binary. Without
+# the slash, gitignore applies the pattern at every directory level, so it also
+# excluded the entire trader/backtest/ SOURCE package: files committed before the
+# rule stayed tracked, but every new file added there was silently ignored and
+# would be lost on commit.
 btrobust_bin
-backtest
+/backtest
 
 # Local strategy-config backups / scratch prompt dirs (may contain live config)
 .backups/

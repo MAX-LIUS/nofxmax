@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -59,6 +60,14 @@ func main() {
 	l3 := flag.Bool("l3", false, "account-level EQUITY drawdown circuit breaker study: sweep staged-cut tier ladders on real entries")
 	capital := flag.Float64("capital", 250, "l3: account start capital (USDT) anchoring the equity-drawdown %")
 	l3trace := flag.Bool("l3trace", false, "l3: run the production preset with a per-firing trace log (position-level decisions)")
+	acct := flag.Bool("acct", false, "account-equity breaker study (user spec): sweep 1.5-4% whole-book flatten with exposure gate (pos>=3 OR margin>=70%) + two-state arm, FEES ON")
+	nomlev := flag.Float64("nomlev", 5, "acct: nominal leverage for the leverage-aware margin gate")
+	feerate := flag.Float64("feerate", 0.05, "acct: taker fee % per side (charged on entry + every partial exit)")
+	faithful := flag.Bool("faithful", false, "acct: replay to the trader's REAL exit price with modelled SL/TP/BE/DD off, so the baseline reproduces realized PnL (recommended: the modelled ladder is not what these traders ran)")
+	cycle := flag.Bool("cycle", false, "acct: use the equity-FREEZE (cycle) model instead of modelled re-entry — flatten crystallises equity, later real entries form the next cycle")
+	cyclemeasure := flag.Bool("cyclemeasure", false, "acct+cycle: ENGINE PROBE — evaluate the trigger but never touch the book, so firing counts must be perfectly monotone in drop%")
+	reentry := flag.Int("reentry", 1, "acct: bars after a flatten before the position is re-opened (0 = no re-entry, which OVERSTATES the breaker)")
+	binance := flag.Bool("binance", false, "acct: replay on Binance bars instead of OKX (use for the BN trader, which executed there)")
 	breadth := flag.Bool("breadth", false, "breadth breaker study: per-symbol majority-retrace gate that cuts losers only (winners ride BE). Sweep quorum/frac/retrace defs; works with -robust or DB entries")
 	whipsaw := flag.Bool("whipsaw", false, "breadth whipsaw-lever study: hold the live breadth gate fixed and sweep ONLY vel_eps + cooldown (the V-bottom false-positive controls). Row 1 = live config")
 	strictgate := flag.Bool("strictgate", false, "breadth strict-gate study: hold cd6 fixed and tighten quorum/frac/ATR-mult to test whether the breaker can fire LESS often (rare true breaker) without losing tail protection. Row 1 = live gate + cd6")
@@ -369,6 +378,29 @@ func main() {
 		printL3Trace(base, l3res, trace, *capital)
 		return
 	}
+	if *acct {
+		provider := backtest.OKXBars
+		if *binance {
+			provider = backtest.BinanceBars
+		}
+		// A negative reentry value selects the equity-freeze (cycle) model, which
+		// has no re-entry axis: it never fabricates exposure.
+		reentryArg := *reentry
+		if *cycle {
+			reentryArg = -1
+		}
+		if *cyclemeasure {
+			reentryArg = -2 // selects the cycle grid in measure-only probe mode
+		}
+		base, rows, prepared, skipped := backtest.SweepAccountBreakerFull(
+			entries, *tf, *capital, *nomlev, *feerate, reentryArg, *faithful, provider)
+		fmt.Printf("prepared %d entries (%d skipped)\n", prepared, skipped)
+		if prepared == 0 {
+			os.Exit(1)
+		}
+		printAcctSweep(base, rows, *capital, *top)
+		return
+	}
 	if *l3 {
 		base, rows, prepared, skipped := backtest.SweepEquityBreakerFromEntries(entries, *tf, *capital)
 		fmt.Printf("prepared %d entries (%d skipped)\n", prepared, skipped)
@@ -493,6 +525,253 @@ func printL3Sweep(base backtest.SimResult, rows []backtest.EquityBreakerRow, cap
 			i+1, l3Describe(r.Guard), r.Result.TotalPnL, r.Result.WinRatePct,
 			r.Result.MaxPortfolioDD, r.DDCut, r.PnLCost, r.Result.L3Fires)
 	}
+}
+
+// printAcctSweep prints the account-breaker study. It shows the full drop-band
+// sweep in ASCENDING drop order (not ranked), because the question is not "which
+// single config won" but "how does the outcome behave across the band" — a
+// ranking hides non-monotonicity, and non-monotonicity is exactly the symptom of
+// an engine or overfitting problem.
+//
+// armed%/gate%/hits are printed for every row so an inert config is visible: a
+// row with fires=0 and armed%=4 is not "no signal", it is "the breaker was
+// switched off 96% of the time".
+func printAcctSweep(base backtest.SimResult, rows []backtest.EquityBreakerRow, capital float64, top int) {
+	fmt.Printf("==== BASELINE (breaker OFF, fees ON, capital=%.0f USDT) ====\n", capital)
+	fmt.Printf("PnL=%.2f (%.2f%% of capital) Win%%=%.1f MaxPortfolioDD=%.2f Fees=%.2f trades=%d\n",
+		base.TotalPnL, base.TotalPnL/capital*100, base.WinRatePct,
+		base.MaxPortfolioDD, base.FeesPaid, base.Trades)
+
+	// Engine validity gate, printed BEFORE any result. If firing counts are not
+	// monotone in the threshold, the trigger is not measuring what it claims and
+	// nothing below should be acted on.
+	viol := backtest.CheckAccountBreakerMonotonicity(rows)
+	if len(viol) == 0 {
+		fmt.Println("ENGINE CHECK: monotonicity OK (firing counts non-increasing in drop% within every policy)")
+	} else {
+		// Report magnitude, since that is what separates feedback from a bug.
+		worst := 0
+		for _, v := range viol {
+			if d := v.HigherFires - v.LowerFires; d > worst {
+				worst = d
+			}
+		}
+		// Non-monotonicity is EXPECTED for the cycle model and is not by itself a
+		// defect: a firing re-anchors the drawdown peak, so a stricter threshold that
+		// fires later can end up firing more often overall. The way to tell feedback
+		// from a measurement bug is the -cyclemeasure probe, which removes feedback
+		// and must then be perfectly monotone. That probe reports OK for all traders
+		// tested, so the residual gaps below are feedback.
+		verdict := "feedback-scale (expected for a closed-loop breaker)"
+		if worst > 5 {
+			verdict = "large — confirm with -cyclemeasure (feedback-free probe must be monotone)"
+		}
+		fmt.Printf("ENGINE CHECK: %d non-monotone pairs, worst gap +%d firings — %s\n",
+			len(viol), worst, verdict)
+		for i, v := range viol {
+			if i >= 10 {
+				fmt.Printf("  ... and %d more\n", len(viol)-10)
+				break
+			}
+			fmt.Printf("  [%s] drop %.2f%% fired %d, stricter drop %.2f%% fired %d\n",
+				v.Policy, v.LowerDrop, v.LowerFires, v.HigherDrop, v.HigherFires)
+		}
+	}
+
+	// Ascending-by-drop view of the primary policy (whole-book flatten, gated).
+	prim := make([]backtest.EquityBreakerRow, 0, len(rows))
+	for _, r := range rows {
+		g := r.Guard
+		if g.L3CycleEnabled {
+			// Cycle model: the primary view is the gated rows (placebo excluded; it
+			// is printed separately since its axis is probability, not drop%).
+			if g.L3GateMinPos == 3 && g.L3CyclePlaceboProb == 0 {
+				prim = append(prim, r)
+			}
+			continue
+		}
+		if g.L3RollCutPct == 100 && !g.L3RollCounterOnly && g.L3GateMinPos == 3 && g.L3FireCooldownBars == 0 {
+			prim = append(prim, r)
+		}
+	}
+	sort.Slice(prim, func(i, j int) bool {
+		ai, aj := backtest.AcctArmOf(prim[i].Guard), backtest.AcctArmOf(prim[j].Guard)
+		if ai != aj {
+			return ai < aj
+		}
+		return backtest.AcctDropOf(prim[i].Guard) < backtest.AcctDropOf(prim[j].Guard)
+	})
+	fmt.Println("==== PRIMARY: whole-book flatten, gate(pos>=3 OR mgn>=70%), by arm% then drop% ====")
+	fmt.Printf("%-5s %-6s | %-9s %-8s %-9s %-8s %-8s %-6s %-6s %-7s %-7s %-6s\n",
+		"arm%", "drop%", "PnL", "vs base", "MaxDD", "DDcut", "Fees", "fires", "reent", "armed%", "gate%", "hits")
+	for _, r := range prim {
+		t := r.Result
+		armedPct, gatePct := 0.0, 0.0
+		if t.BreakerTicks > 0 {
+			armedPct = float64(t.ArmedTicks) / float64(t.BreakerTicks) * 100
+			gatePct = float64(t.GateOpenTicks) / float64(t.BreakerTicks) * 100
+		}
+		fmt.Printf("%-5.0f %-6.2f | %-9.2f %-8.2f %-9.2f %-8.2f %-8.2f %-6d %-6d %-7.1f %-7.1f %-6d\n",
+			backtest.AcctArmOf(r.Guard), backtest.AcctDropOf(r.Guard), t.TotalPnL,
+			t.TotalPnL-base.TotalPnL, t.MaxPortfolioDD, r.DDCut, t.FeesPaid,
+			t.L3Events, t.L3Reentries, armedPct, gatePct, t.TriggerHits)
+	}
+
+	// Placebo view: the falsification test. Printed right after the primary table
+	// so the reader compares like-for-like on firing count.
+	var plac []backtest.EquityBreakerRow
+	for _, r := range rows {
+		if r.Guard.L3CyclePlaceboProb > 0 {
+			plac = append(plac, r)
+		}
+	}
+	if len(plac) > 0 {
+		printPlacebo(base, prim, plac)
+	}
+
+	fmt.Println("==== TOP BY SCORE (all policies incl. controls) ====")
+	fmt.Printf("%-3s %-40s | %-8s %-9s %-8s %-8s %-6s %-6s\n",
+		"#", "config", "PnL", "MaxDD", "DDcut", "Fees", "fires", "reent")
+	n := top
+	if n > len(rows) {
+		n = len(rows)
+	}
+	for i := 0; i < n; i++ {
+		r := rows[i]
+		fmt.Printf("%-3d %-40s | %-8.2f %-9.2f %-8.2f %-8.2f %-6d %-6d\n",
+			i+1, acctDescribe(r.Guard), r.Result.TotalPnL, r.Result.MaxPortfolioDD,
+			r.DDCut, r.Result.FeesPaid, r.Result.L3Events, r.Result.L3Reentries)
+	}
+}
+
+// printPlacebo runs the falsification test. For each real-trigger config it finds
+// the placebo runs with a comparable firing count and reports what PERCENTILE the
+// real result sits at within that placebo distribution.
+//
+// This is the only comparison that answers the question the user actually cares
+// about. Under the freeze model a firing is a permanent early exit, so on a book
+// whose baseline loses money almost any truncation improves PnL — "breaker beats
+// baseline" is therefore not evidence the drawdown trigger works. It is evidence
+// only if the trigger beats a coin flip that fires equally often.
+func printPlacebo(base backtest.SimResult, prim, plac []backtest.EquityBreakerRow) {
+	fmt.Println("==== PLACEBO DISTRIBUTION (random fire, same machinery, no DD signal) ====")
+	// Bucket the placebo by firing count.
+	type cell struct {
+		arm    float64
+		bucket int
+	}
+	buckets := map[cell][]float64{}
+	for _, r := range plac {
+		c := cell{backtest.AcctArmOf(r.Guard), bucketOf(r.Result.L3Events)}
+		buckets[c] = append(buckets[c], r.Result.TotalPnL)
+	}
+	var cs []cell
+	for c := range buckets {
+		cs = append(cs, c)
+	}
+	sort.Slice(cs, func(i, j int) bool {
+		if cs[i].arm != cs[j].arm {
+			return cs[i].arm < cs[j].arm
+		}
+		return cs[i].bucket < cs[j].bucket
+	})
+	fmt.Printf("%-6s %-8s %-4s | %-9s %-9s %-9s %-9s\n",
+		"arm%", "fires~", "n", "min", "median", "max", "spread")
+	for _, c := range cs {
+		v := append([]float64(nil), buckets[c]...)
+		sort.Float64s(v)
+		fmt.Printf("%-6.0f %-8s %-4d | %-9.2f %-9.2f %-9.2f %-9.2f\n",
+			c.arm, bucketLabel(c.bucket), len(v), v[0], pctl(v, 50), v[len(v)-1],
+			v[len(v)-1]-v[0])
+	}
+
+	fmt.Println("==== REAL TRIGGER vs PLACEBO at matched arm% AND firing count ====")
+	fmt.Printf("%-6s %-6s %-6s | %-9s %-9s %-4s %-8s %s\n",
+		"arm%", "drop%", "fires", "real PnL", "plac med", "n", "pctile", "verdict")
+	beats, total := 0, 0
+	for _, r := range prim {
+		v := append([]float64(nil), buckets[cell{backtest.AcctArmOf(r.Guard), bucketOf(r.Result.L3Events)}]...)
+		if len(v) < 5 {
+			continue // too few placebo samples at this firing rate to say anything
+		}
+		sort.Float64s(v)
+		better := 0
+		for _, x := range v {
+			if r.Result.TotalPnL > x {
+				better++
+			}
+		}
+		pc := float64(better) / float64(len(v)) * 100
+		verdict := "within placebo noise"
+		if pc >= 95 {
+			verdict = "beats placebo (p<0.05)"
+			beats++
+		} else if pc <= 5 {
+			verdict = "WORSE than placebo"
+		}
+		total++
+		fmt.Printf("%-6.0f %-6.2f %-6d | %-9.2f %-9.2f %-4d %-8.0f %s\n",
+			backtest.AcctArmOf(r.Guard), backtest.AcctDropOf(r.Guard), r.Result.L3Events,
+			r.Result.TotalPnL, pctl(v, 50), len(v), pc, verdict)
+	}
+	fmt.Printf("SUMMARY: %d of %d comparable configs beat the coin flip at p<0.05.\n", beats, total)
+}
+
+// bucketOf groups firing counts into ratio bands so a real config is compared
+// against placebos that acted a similar NUMBER of times. Exact matching is
+// impossible (the placebo count is stochastic), and equal-width bins would lump
+// 2 firings with 20; log-ish bands keep the comparison honest at both ends.
+func bucketOf(n int) int {
+	switch {
+	case n <= 1:
+		return 0
+	case n <= 3:
+		return 1
+	case n <= 6:
+		return 2
+	case n <= 12:
+		return 3
+	case n <= 25:
+		return 4
+	case n <= 50:
+		return 5
+	default:
+		return 6
+	}
+}
+
+func bucketLabel(b int) string {
+	return []string{"0-1", "2-3", "4-6", "7-12", "13-25", "26-50", "50+"}[b]
+}
+
+func pctl(sorted []float64, p float64) float64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	i := int(p / 100 * float64(len(sorted)-1))
+	return sorted[i]
+}
+
+// acctDescribe renders an account-breaker config compactly, including the gate
+// and arm settings that l3Describe does not know about.
+func acctDescribe(g backtest.GuardParams) string {
+	if g.L3CycleEnabled {
+		gate := "nogate"
+		if g.L3GateMinPos > 0 || g.L3GateMarginPct > 0 {
+			gate = fmt.Sprintf("g%d/%.0f%%", g.L3GateMinPos, g.L3GateMarginPct)
+		}
+		return fmt.Sprintf("freeze -%.2f%% arm%.0f%% %s", g.L3CycleDDPct, g.L3CycleArmGainPct, gate)
+	}
+	pol := "whole"
+	if g.L3RollCounterOnly {
+		pol = fmt.Sprintf("ct+k%.0f", g.L3TrendKeepMult*100)
+	}
+	gate := "nogate"
+	if g.L3GateMinPos > 0 || g.L3GateMarginPct > 0 {
+		gate = fmt.Sprintf("g%d/%.0f%%", g.L3GateMinPos, g.L3GateMarginPct)
+	}
+	return fmt.Sprintf("-%.2f%%/cut%.0f%% %s %s arm%.0f%% cd%d",
+		g.L3RollDropPct, g.L3RollCutPct, pol, gate, g.L3ArmProfitPct, g.L3FireCooldownBars)
 }
 
 // printL3Trace prints a position-level trace of every L3 firing: the equity

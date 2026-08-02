@@ -1,6 +1,9 @@
 package backtest
 
-import "sort"
+import (
+	"fmt"
+	"sort"
+)
 
 // EquityBreakerRow is one evaluated L3 equity-circuit-breaker config plus its
 // drawdown-cut / PnL-cost score against the guard-off baseline.
@@ -47,15 +50,15 @@ func L3Grid(capital float64) []GuardParams {
 		mk(0.0, 3, 2, 10), // longer velocity window (10 bars)
 		// --- Rolling-baseline variants (no tiers/latch/re-arm) ---
 		// whole-book: trim X% of EVERY remaining position each -drop%
-		mkRoll(capital, 4, 20, false, 0, 6),  // every -4% -> cut 20% of remaining (whole book)
-		mkRoll(capital, 4, 30, false, 0, 6),  // every -4% -> cut 30%
-		mkRoll(capital, 6, 30, false, 0, 6),  // every -6% -> cut 30%
-		mkRoll(capital, 3, 25, false, 0, 6),  // every -3% -> cut 25% (tighter)
-		mkRoll(capital, 6, 50, false, 0, 6),  // every -6% -> cut 50% (aggressive)
+		mkRoll(capital, 4, 20, false, 0, 6), // every -4% -> cut 20% of remaining (whole book)
+		mkRoll(capital, 4, 30, false, 0, 6), // every -4% -> cut 30%
+		mkRoll(capital, 6, 30, false, 0, 6), // every -6% -> cut 30%
+		mkRoll(capital, 3, 25, false, 0, 6), // every -3% -> cut 25% (tighter)
+		mkRoll(capital, 6, 50, false, 0, 6), // every -6% -> cut 50% (aggressive)
 		// counter-only: cut counter-trend in full, keep trend (TrendKeepMult)
-		mkRoll(capital, 4, 50, true, 0, 6),   // every -4% -> counter cut 50%, keep trend
-		mkRoll(capital, 4, 100, true, 0, 6),  // every -4% -> counter cut 100%, keep trend
-		mkRoll(capital, 6, 100, true, 0, 6),  // every -6% -> counter cut 100%, keep trend
+		mkRoll(capital, 4, 50, true, 0, 6),    // every -4% -> counter cut 50%, keep trend
+		mkRoll(capital, 4, 100, true, 0, 6),   // every -4% -> counter cut 100%, keep trend
+		mkRoll(capital, 6, 100, true, 0, 6),   // every -6% -> counter cut 100%, keep trend
 		mkRoll(capital, 4, 100, true, 0.3, 6), // counter 100%, trend trimmed .3
 	}
 }
@@ -199,6 +202,184 @@ func SweepEquityBreakerFromEntries(entries []Entry, tf string, capital float64) 
 	return base, rows, len(loaded), skipped
 }
 
+// SweepAccountBreakerFromEntries runs the user-specified account-breaker study
+// (L3AccountBreakerGrid) with FEES ENABLED at feeRatePct per side.
+//
+// Fees are non-optional here. The breaker produces no alpha of its own; it only
+// re-times exposure, and every firing pays a full round trip on the whole book.
+// Scored fee-free, "fire more often" is a free option and the sweep's ranking is
+// meaningless. Both the baseline and every grid row are charged identically, so
+// the comparison stays apples-to-apples.
+// AccountBreakerMonotonicityViolation records one place where raising the
+// drawdown threshold produced MORE breaker firings on identical data.
+type AccountBreakerMonotonicityViolation struct {
+	Policy      string  // policy signature the two rows share
+	LowerDrop   float64 // easier threshold
+	LowerFires  int
+	HigherDrop  float64 // stricter threshold
+	HigherFires int
+}
+
+// CheckAccountBreakerMonotonicity groups sweep rows by policy (everything except
+// the drop threshold) and reports where firing counts RISE as the threshold
+// rises. Interpreting the output requires care, and the distinction below is the
+// whole reason this function exists:
+//
+//   - A closed-loop breaker is legitimately path-dependent. Firing changes the
+//     book, which changes later equity, which changes later triggers. A stricter
+//     threshold delays the first cut, so the two runs diverge and the stricter one
+//     can encounter MORE later opportunities. Small violations (±1-3 firings) are
+//     this effect, not a defect. Verified in TestMonotoneUnderZeroFeedback:
+//     with cuts disabled the same sweep is perfectly monotone, which proves the
+//     trigger itself measures correctly and the residual is feedback.
+//
+//   - A measurement bug looks completely different: order-of-magnitude jumps
+//     (the earlier equity-series study produced 4 firings at 1.9% and 39 at 2.0%)
+//     because the drawdown was measured against the SIMULATED path's own peak
+//     while real returns were credited to it, so adjacent thresholds were scored
+//     in incompatible universes.
+//
+// So violations are reported as a diagnostic with their magnitude, NOT as an
+// automatic invalidation. Large or clustered ones mean stop and investigate.
+//
+// Comparison uses L3Events (firings), never L3Fires (per-position trims) — trims
+// legitimately vary with book size and would produce spurious violations.
+// acctDropOf returns the row's drawdown threshold regardless of which breaker
+// model produced it: the cycle (equity-freeze) model carries it in L3CycleDDPct,
+// the rolling model in L3RollDropPct. Monotonicity and ordering must be checked
+// on the same axis for both, or the cycle sweep would silently be checked against
+// an all-zero threshold and always report "OK".
+func acctDropOf(g GuardParams) float64 {
+	if g.L3CycleEnabled {
+		return g.L3CycleDDPct
+	}
+	return g.L3RollDropPct
+}
+
+// acctArmOf returns the arm-gain requirement for either model.
+func acctArmOf(g GuardParams) float64 {
+	if g.L3CycleEnabled {
+		return g.L3CycleArmGainPct
+	}
+	return g.L3ArmProfitPct
+}
+
+// AcctDropOf / AcctArmOf expose the model-agnostic axes for CLI rendering.
+func AcctDropOf(g GuardParams) float64 { return acctDropOf(g) }
+func AcctArmOf(g GuardParams) float64  { return acctArmOf(g) }
+
+func CheckAccountBreakerMonotonicity(rows []EquityBreakerRow) []AccountBreakerMonotonicityViolation {
+	type key struct {
+		cut, keep, arm, margin, rollRearm, scale float64
+		counterOnly                              bool
+		minPos, cooldown, velWin                 int
+	}
+	groups := map[key][]EquityBreakerRow{}
+	for _, r := range rows {
+		g := r.Guard
+		// Placebo rows are excluded: their trigger is a coin flip, so they have no
+		// drawdown-threshold axis to be monotone along. Including them produced a
+		// spurious "worst gap +76 firings" — the checker was lining up rows that all
+		// carry the same inert dd=999% sentinel and differ only by random seed, then
+		// reporting the seed-to-seed spread as a monotonicity violation.
+		if g.L3CyclePlaceboProb > 0 {
+			continue
+		}
+		k := key{
+			cut: g.L3RollCutPct, keep: g.L3TrendKeepMult, arm: acctArmOf(g),
+			margin: g.L3GateMarginPct, rollRearm: g.L3RollReArmPct,
+			scale: g.L3RollScaleCap, counterOnly: g.L3RollCounterOnly,
+			minPos: g.L3GateMinPos, cooldown: g.L3FireCooldownBars, velWin: g.L3VelWindow,
+		}
+		groups[k] = append(groups[k], r)
+	}
+	var out []AccountBreakerMonotonicityViolation
+	for k, grp := range groups {
+		sort.Slice(grp, func(i, j int) bool {
+			return acctDropOf(grp[i].Guard) < acctDropOf(grp[j].Guard)
+		})
+		for i := 1; i < len(grp); i++ {
+			prev, cur := grp[i-1], grp[i]
+			if cur.Result.L3Events > prev.Result.L3Events {
+				pol := "whole"
+				if k.counterOnly {
+					pol = "counter-first"
+				}
+				if cur.Guard.L3CycleEnabled {
+					pol = "freeze"
+				}
+				out = append(out, AccountBreakerMonotonicityViolation{
+					Policy: fmt.Sprintf("%s cut%.0f%% arm%.0f%% gate%d/%.0f%% cd%d",
+						pol, k.cut, k.arm, k.minPos, k.margin, k.cooldown),
+					LowerDrop: acctDropOf(prev.Guard), LowerFires: prev.Result.L3Events,
+					HigherDrop: acctDropOf(cur.Guard), HigherFires: cur.Result.L3Events,
+				})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Policy < out[j].Policy })
+	return out
+}
+
+func SweepAccountBreakerFromEntries(entries []Entry, tf string, capital, nominalLeverage, feeRatePct float64, reentryBars int) (SimResult, []EquityBreakerRow, int, int) {
+	return SweepAccountBreakerWithProvider(entries, tf, capital, nominalLeverage, feeRatePct, reentryBars, OKXBars)
+}
+
+// SweepAccountBreakerWithProvider is SweepAccountBreakerFromEntries with an
+// explicit bar provider, so a Binance-executed trader replays on Binance bars
+// rather than OKX ones. Replaying a book against a different exchange's prices
+// introduces basis and different wick extremes, which is precisely the kind of
+// silent data mismatch that invalidates a stop/breaker study.
+func SweepAccountBreakerWithProvider(entries []Entry, tf string, capital, nominalLeverage, feeRatePct float64, reentryBars int, provider BarsProvider) (SimResult, []EquityBreakerRow, int, int) {
+	return SweepAccountBreakerFull(entries, tf, capital, nominalLeverage, feeRatePct, reentryBars, false, provider)
+}
+
+// SweepAccountBreakerFull adds the faithful-exit switch. With faithful=true the
+// baseline reproduces the trader's realized PnL (positions run to their real exit
+// price, modelled SL/TP/BE/DD off), so the breaker is the only overlay and its
+// measured effect is attributable to it rather than to a protection ladder the
+// trader never used. See ProtectionParams.FaithfulExits.
+func SweepAccountBreakerFull(entries []Entry, tf string, capital, nominalLeverage, feeRatePct float64, reentryBars int, faithful bool, provider BarsProvider) (SimResult, []EquityBreakerRow, int, int) {
+	loaded, skipped := PrepareEntries(entries, tf, provider)
+	if len(loaded) == 0 {
+		return SimResult{}, nil, 0, skipped
+	}
+	p := ClaudeBaselineParams()
+	if faithful {
+		p = ProtectionParams{Unit: UnitPercent, FaithfulExits: true}
+	}
+	p.FeeRatePct = feeRatePct
+	base := RunPortfolioSim(p, GuardParams{}, loaded)
+	var grid []GuardParams
+	if reentryBars == -2 {
+		// Engine probe: cycle grid with feedback removed.
+		grid = L3CycleGrid(capital, nominalLeverage)
+		for i := range grid {
+			grid[i].L3CycleMeasureOnly = true
+		}
+	} else if reentryBars < 0 {
+		// reentryBars<0 selects the equity-freeze (cycle) model, which has no
+		// re-entry axis by construction: it never invents exposure, so the flag
+		// that configures fabricated re-entries is meaningless there.
+		grid = L3CycleGrid(capital, nominalLeverage)
+	} else {
+		grid = L3AccountBreakerGrid(capital, nominalLeverage, reentryBars)
+	}
+	rows := make([]EquityBreakerRow, 0, len(grid))
+	for _, g := range grid {
+		r := RunPortfolioSim(p, g, loaded)
+		rows = append(rows, EquityBreakerRow{
+			Guard:   g,
+			Result:  r,
+			DDCut:   base.MaxPortfolioDD - r.MaxPortfolioDD,
+			PnLCost: base.TotalPnL - r.TotalPnL,
+			Score:   (base.MaxPortfolioDD - r.MaxPortfolioDD) - (base.TotalPnL - r.TotalPnL),
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Score > rows[j].Score })
+	return base, rows, len(loaded), skipped
+}
+
 // L3RollingGrid is the FOCUSED large sweep of the rolling-baseline breaker. It
 // systematically varies drop% (trigger spacing), the counter-trend cut, and the
 // trend-aligned keep multiplier (the "cut counter in full, trim trend lightly"
@@ -278,6 +459,166 @@ func L3RollingGrid(capital float64) []GuardParams {
 			g.L3RollReArmPct = 30
 			grid = append(grid, g)
 		}
+	}
+	return grid
+}
+
+// L3AccountBreakerGrid is the study of the user-specified account-equity circuit
+// breaker: 「仓位>2 或 保证金使用率达标 时，账户权益回撤 X% 全仓熔断；熔断后要正收益
+// 达到一定比例才重新挂上熔断，否则各自仓位控制」.
+//
+// Differences from L3RollingGrid, all required by that spec:
+//
+//   - Drop band is 1.5%..4.0% in 0.25% steps. The existing grid starts at 3% and
+//     never enters the band at all, so it could not answer the question.
+//   - Whole-book flatten (CounterOnly=false, cut=100) is the PRIMARY policy,
+//     because 「全仓熔断」 means flatten everything, not cut-losers-only. Partial
+//     cuts (50%) and cut-losers-only are included as controls, so the sweep can
+//     say whether full flattening is actually better than trimming.
+//   - Exposure gate: MinPos=3 (「仓位大于2」) OR margin>=70%, leverage-aware at
+//     the trader's nominal leverage.
+//   - Two-state arm: L3ArmProfitPct over 0/1/2/3%, where 0 is the always-armed
+//     control. This is the parameter the user's spec hinges on and the one most
+//     likely to make the breaker inert.
+//
+// A caution carried over from the equity-series study: at ~3.7x effective
+// leverage, a 1.5% equity drawdown is a ~0.4% price move — inside noise and
+// tighter than any stop. The band is swept because the user asked for it, but
+// the ATR-normalized variants in L3RollingGrid exist precisely because raw
+// equity% is leverage-contaminated, and that caveat applies to every row here.
+func L3AccountBreakerGrid(capital, nominalLeverage float64, reentryBars int) []GuardParams {
+	var grid []GuardParams
+	drops := []float64{1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.25, 3.5, 3.75, 4.0}
+	arms := []float64{0, 1, 2, 3}
+
+	withGate := func(g GuardParams, arm float64) GuardParams {
+		g.L3GateMinPos = 3 // 「仓位大于2」
+		g.L3GateMarginPct = 70
+		g.L3NominalLeverage = nominalLeverage
+		g.L3ArmProfitPct = arm
+		// Re-entry ON by default for this study (「熔断将会降低损失并重新开仓」).
+		// Without it a flatten is a permanent early exit: the breaker sheds all
+		// later adverse moves and never pays to restore exposure, which flatters
+		// every drawdown-reduction number. Re-entry is what makes the trade-off
+		// honest — it pays a full round trip and re-enters at the post-flatten
+		// price, so a breaker that fires into a V-bounce is correctly penalised.
+		g.L3ReentryBars = reentryBars
+		g.L3ReentryMaxCycles = 3
+		return g
+	}
+
+	// Primary: whole-book flatten at each drop%, across arm thresholds.
+	for _, d := range drops {
+		for _, arm := range arms {
+			grid = append(grid, withGate(mkRoll(capital, d, 100, false, 0, 6), arm))
+		}
+	}
+	// Control A: half-book de-lever instead of a full flatten. Isolates "is
+	// flattening everything necessary, or is trimming enough?"
+	for _, d := range drops {
+		grid = append(grid, withGate(mkRoll(capital, d, 50, false, 0, 6), 0))
+	}
+	// Control B: cut-losers-first policy (counter-trend full, trend kept 30%).
+	// Isolates 全仓 vs 砍逆势留顺势 at the same trigger.
+	for _, d := range drops {
+		grid = append(grid, withGate(mkRoll(capital, d, 100, true, 0.3, 6), 0))
+	}
+	// Control C: no exposure gate, whole-book. Isolates the gate's contribution;
+	// if these match the gated rows, the gate is not doing anything (expected,
+	// since the book holds >=3 positions ~76% of the time).
+	for _, d := range drops {
+		g := mkRoll(capital, d, 100, false, 0, 6)
+		g.L3ArmProfitPct = 0
+		g.L3ReentryBars = reentryBars // keep re-entry identical; isolate the gate
+		g.L3ReentryMaxCycles = 3
+		grid = append(grid, g)
+	}
+	// Control D: cooldown on the leading band values, to test whipsaw sensitivity
+	// at these very tight thresholds where re-firing is most likely.
+	for _, d := range []float64{1.5, 2.0, 2.5, 3.0} {
+		for _, cd := range []int{3, 6} {
+			g := withGate(mkRoll(capital, d, 100, false, 0, 6), 0)
+			g.L3FireCooldownBars = cd
+			grid = append(grid, g)
+		}
+	}
+	return grid
+}
+
+// L3CycleGrid sweeps the equity-freeze (cycle) breaker: 熔断=权益价值冻结，之后开仓算新周期.
+//
+// Range width is deliberate. The 1.5-4% band was only an example, and it is far
+// too narrow to contain an answer: raw account-equity drawdown% is roughly
+// leverage x price-move%, so at claude's ~3.7x effective leverage a 1.5% equity
+// drawdown is a ~0.4% price move — inside tick noise, tighter than any stop the
+// book runs. To find out whether an optimum exists at all, the sweep has to reach
+// up to where the threshold corresponds to a real adverse move (10-20% equity is
+// a 3-5% price move), and it has to include a NO-BREAKER row so every result is
+// read against the honest counterfactual rather than against its neighbours.
+//
+// The arm-gain axis is widened for the same reason: 「正收益达到一定比例」 gates the
+// breaker on the cycle first earning a profit, and if that requirement is small
+// the breaker is effectively always on, so the axis must extend far enough to
+// show where it starts to bind.
+func L3CycleGrid(capital, nominalLeverage float64) []GuardParams {
+	drops := []float64{1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0, 20.0}
+	arms := []float64{0, 1, 2, 3, 5, 8, 12}
+
+	mk := func(dd, arm float64, minPos int, marginPct float64) GuardParams {
+		return GuardParams{
+			Enabled: true, L3Enabled: true, StartCapital: capital,
+			L3CycleEnabled:    true,
+			L3CycleDDPct:      dd,
+			L3CycleArmGainPct: arm,
+			L3GateMinPos:      minPos,
+			L3GateMarginPct:   marginPct,
+			L3NominalLeverage: nominalLeverage,
+			L3VelWindow:       6,
+		}
+	}
+
+	var grid []GuardParams
+	// Primary: gated per the user spec (仓位>2 或 保证金使用率>=70%).
+	for _, d := range drops {
+		for _, a := range arms {
+			grid = append(grid, mk(d, a, 3, 70))
+		}
+	}
+	// Placebo control: identical machinery, drawdown trigger replaced by a coin
+	// flip, swept over probabilities so the firing counts span the real rows' range
+	// and 3 seeds each so the placebo's own dispersion is visible. This is the row
+	// set that decides whether the drawdown trigger carries information: if a
+	// random breaker at the same firing count does as well, the gain attributed to
+	// "熔断" is really just the gain from holding less risk on a losing book.
+	// 30 seeds per probability, not 3: the placebo's own spread across seeds turned
+	// out to be as wide as the entire effect being measured (three seeds at ~38
+	// firings spanned -22 to +47 PnL). With a spread that large, any single-seed
+	// comparison is meaningless; only a distribution supports a percentile claim.
+	// The placebo MUST sweep the same arm axis as the real rows. A first pass ran
+	// every placebo at arm=0 and produced a badly misleading "54 of 90 configs beat
+	// the coin flip": an arm=0 placebo is armed on 100% of ticks and so fires
+	// uniformly across the run, whereas an arm=12% real row is armed on only ~3% of
+	// ticks — the ones right after a gain. Matched on firing COUNT but not on firing
+	// OPPORTUNITY, that comparison credits the drawdown trigger with what is really
+	// the arm gate's profit-taking effect. Pairing at equal arm% isolates the only
+	// question that matters: given the same armed state, does drawdown MAGNITUDE
+	// pick better moments than a coin flip?
+	for _, arm := range arms {
+		for _, prob := range []float64{0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25} {
+			for seed := int64(1); seed <= 12; seed++ {
+				g := mk(0, arm, 3, 70)
+				g.L3CycleDDPct = 999 // inert; the placebo trigger takes over
+				g.L3CyclePlaceboProb = prob
+				g.L3CyclePlaceboSeed = seed
+				grid = append(grid, g)
+			}
+		}
+	}
+	// Control: no exposure gate. If these match the gated rows the gate is inert,
+	// which is the expected outcome since the book holds >=3 positions most of the
+	// time — worth showing rather than assuming.
+	for _, d := range drops {
+		grid = append(grid, mk(d, 0, 0, 0))
 	}
 	return grid
 }
@@ -446,10 +787,10 @@ func BreadthStrictGateGrid(capital float64) []GuardParams {
 	// Reference: live gate + cd6.
 	grid = append(grid, mk(4, 0.70, 0.9))
 	// Tighten one lever at a time.
-	grid = append(grid, mk(5, 0.70, 0.9))  // higher quorum
-	grid = append(grid, mk(4, 0.80, 0.9))  // higher frac (need 80% retracing)
-	grid = append(grid, mk(4, 0.70, 1.3))  // deeper ATR-from-peak
-	grid = append(grid, mk(4, 0.70, 1.5))  // deeper still
+	grid = append(grid, mk(5, 0.70, 0.9)) // higher quorum
+	grid = append(grid, mk(4, 0.80, 0.9)) // higher frac (need 80% retracing)
+	grid = append(grid, mk(4, 0.70, 1.3)) // deeper ATR-from-peak
+	grid = append(grid, mk(4, 0.70, 1.5)) // deeper still
 	// Combined strictness.
 	grid = append(grid, mk(5, 0.80, 1.3))
 	grid = append(grid, mk(5, 0.80, 1.5))

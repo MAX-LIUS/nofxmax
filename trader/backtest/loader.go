@@ -13,7 +13,13 @@ import (
 // zero/invalid entry price or quantity are skipped.
 func LoadClaudeEntries(db *sql.DB, traderIDLike string) ([]Entry, error) {
 	rows, err := db.Query(`
-		SELECT symbol, side, entry_price, entry_time, exit_time, quantity, realized_pnl, COALESCE(close_reason,'')
+		-- entry_quantity is the size the position was OPENED with; quantity is the
+		-- live REMAINING size and is 0 for many closed rows (79/557 for claude), so
+		-- reading quantity both mis-sizes positions and silently drops them via the
+		-- qty<=0 filter below. Prefer entry_quantity, fall back to quantity.
+		SELECT symbol, side, entry_price, entry_time, exit_time,
+		       CASE WHEN COALESCE(entry_quantity,0) > 0 THEN entry_quantity ELSE quantity END,
+		       realized_pnl, COALESCE(close_reason,''), COALESCE(exit_price,0)
 		FROM trader_positions
 		WHERE trader_id LIKE ? AND status='CLOSED'
 		ORDER BY entry_time ASC`, traderIDLike)
@@ -27,10 +33,11 @@ func LoadClaudeEntries(db *sql.DB, traderIDLike string) ([]Entry, error) {
 		var (
 			symbol, side              string
 			entryPrice, qty, realized float64
+			exitPrice                 float64
 			entryTime, exitTime       sql.NullInt64
 			closeReason               string
 		)
-		if err := rows.Scan(&symbol, &side, &entryPrice, &entryTime, &exitTime, &qty, &realized, &closeReason); err != nil {
+		if err := rows.Scan(&symbol, &side, &entryPrice, &entryTime, &exitTime, &qty, &realized, &closeReason, &exitPrice); err != nil {
 			return nil, err
 		}
 		if entryPrice <= 0 || qty <= 0 {
@@ -44,6 +51,7 @@ func LoadClaudeEntries(db *sql.DB, traderIDLike string) ([]Entry, error) {
 			ExitTime:    exitTime.Int64,
 			Quantity:    qty,
 			RealizedPnL: realized,
+			ExitPrice:   exitPrice,
 			CloseReason: closeReason,
 		})
 	}

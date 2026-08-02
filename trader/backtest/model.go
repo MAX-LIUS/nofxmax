@@ -91,6 +91,35 @@ type DDRule struct {
 type ProtectionParams struct {
 	Unit ValueUnit
 
+	// FaithfulExits replays each position to its ACTUAL live exit (Entry.ExitTime
+	// at Entry.ExitPrice) with all modelled protection layers disabled.
+	//
+	// Why this mode is necessary for any circuit-breaker study: the modelled
+	// ladder (percent SL/TP/BE/DD) is NOT the protection these traders ran. On the
+	// live book, 63% of claude's closes and 42% of GPT's came from mechanisms this
+	// engine does not implement at all — native exchange trailing stops, AI
+	// discretionary closes, max-hold expiry, the breadth guard, exchange sync.
+	// Replaying with the modelled ladder therefore produces a different equity
+	// path from the one that was actually traded (claude -72.83 modelled vs -36.67
+	// realized; GPT -45.17 vs -0.44).
+	//
+	// That matters because the equity drawdown breaker triggers ON that path. Tuned
+	// against a fictional curve, the resulting threshold describes a book that never
+	// existed. In faithful mode the baseline reproduces realized PnL, so the breaker
+	// is the ONLY intervention and its measured effect is attributable to it alone.
+	FaithfulExits bool
+
+	// FeeRatePct is the per-side taker fee in percent (e.g. 0.05 = 0.05%/side,
+	// OKX/Binance perp taker). Charged on the entry fill and on every partial
+	// exit, netted inside realizedPnL so equity/DD/PnL are all fee-aware.
+	//
+	// Zero (the default) reproduces the historical fee-free behaviour, which is
+	// why every existing sweep and test is unchanged by its introduction. It must
+	// be set for any circuit-breaker study: the breaker's only cost is churn, and
+	// at zero fees extra firing is free, so the optimiser would happily fire on
+	// noise.
+	FeeRatePct float64
+
 	// Ladder TP/SL
 	StopLossPct float64 // SL distance (percent mode), positive number e.g. 5 = -5%
 	StopLossATR float64 // SL distance in ATR multiples (atr mode)
@@ -291,6 +320,10 @@ type Entry struct {
 	EntryPrice float64
 	EntryTime  int64   // ms
 	ExitTime   int64   // ms; 0 = open-ended (replay until data end)
+	// ExitPrice is the trader's ACTUAL fill price when the position closed live.
+	// Used by faithful mode (ProtectionParams.FaithfulExits) to reproduce the real
+	// exit instead of inventing one from modelled SL/TP levels.
+	ExitPrice float64
 	Quantity   float64 // original position size (contracts/coins)
 	// RealizedPnL is Claude's actual realized P&L for this trade, used for
 	// engine-fidelity validation (percent baseline should approximate it).

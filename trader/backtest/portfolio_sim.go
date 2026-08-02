@@ -1,6 +1,7 @@
 package backtest
 
 import (
+	"math/rand"
 	"sort"
 	"strings"
 
@@ -103,10 +104,10 @@ type GuardParams struct {
 	//                              (whole-book de-lever; cut-of-current-remaining,
 	//                              so repeated drops compound into exponential
 	//                              de-leveraging).
-	L3Mode           string  // "" = legacy tier ladder; "rolling" = rolling baseline
-	L3RollDropPct    float64 // equity drop (% of rolling reference) that arms a cut
-	L3RollCutPct     float64 // fraction (%) of each remaining position to trim per cut
-	L3RollCounterOnly bool   // true => cut counter-trend in full, keep trend (TrendKeepMult)
+	L3Mode            string  // "" = legacy tier ladder; "rolling" = rolling baseline
+	L3RollDropPct     float64 // equity drop (% of rolling reference) that arms a cut
+	L3RollCutPct      float64 // fraction (%) of each remaining position to trim per cut
+	L3RollCounterOnly bool    // true => cut counter-trend in full, keep trend (TrendKeepMult)
 	// L3RollScaleCap scales the cut by how far the drop exceeds the threshold
 	// (gap/flash-crash protection ②): effCut = cut * min(ScaleCap, drop/DropPct).
 	// 1 = no scaling (fixed cut); 3 = a 3x-deep drop cuts up to 3x. 0 => treated as 1.
@@ -116,6 +117,119 @@ type GuardParams struct {
 	// fresh cut on a small bounce) until equity recovers at least this % above the
 	// post-cut equity. 0 => reference rises on any new high (most reactive).
 	L3RollReArmPct float64
+
+	// --- Exposure gate (user spec: 仓位>2 或 保证金使用率达标 才允许熔断) ---
+	// The rolling/tier breakers above fire on equity drawdown alone, which means
+	// they can fire while the book is tiny (1 position, 5% margin) — where a
+	// whole-book flatten is pure cost and no risk reduction. This gate requires
+	// the book to actually be exposed before the breaker is allowed to act:
+	//
+	//	fire allowed  <=>  openCount >= L3GateMinPos  OR  marginPct >= L3GateMarginPct
+	//
+	// marginPct is LEVERAGE-AWARE: sum(remaining notional)/L3NominalLeverage is
+	// the initial margin the exchange actually holds, and that over current
+	// equity is the utilisation the user is describing. Without dividing by
+	// leverage, "margin used" would be notional/equity, which at 10x reads 371%
+	// on a normal book and makes the gate meaningless.
+	//
+	// Both zero => gate disabled (fire on drawdown alone, previous behaviour).
+	L3GateMinPos      int     // minimum open positions that opens the gate (0 = ignore this leg)
+	L3GateMarginPct   float64 // margin utilisation % that opens the gate (0 = ignore this leg)
+	L3NominalLeverage float64 // nominal leverage for the margin calc (0 => 1, i.e. notional/equity)
+
+	// --- Cycle breaker: equity freeze + new cycle (熔断=权益价值冻结，之后开仓算新周期) ---
+	// This is the macro/portfolio formulation of the account circuit breaker, and
+	// it is the one to prefer over the rolling/tier breakers plus L3Reentry.
+	//
+	// Semantics. When it fires, every open position is closed at the current mark.
+	// That does not destroy value, it CRYSTALLISES it, so the account curve is
+	// continuous through a firing. The realised equity at that instant becomes the
+	// new cycle's baseline: the drawdown peak resets to it, and the positions the
+	// trader actually opened after that instant constitute the next cycle.
+	//
+	// Why this is more rigorous than modelling re-entry. L3ReentryBars had to
+	// invent a counterfactual — "the same position is re-established N bars later
+	// at price P" — for which there is no evidence; the trader may never have
+	// touched that symbol again. Invented exposure then compounds, which is what
+	// produced severe non-monotonicity in the firing counts. Here nothing is
+	// invented: the breaker only chooses WHERE TO TRUNCATE positions that were
+	// genuinely open, and every entry in the run is a real observed decision. The
+	// entry universe is therefore identical for every parameter value, which is
+	// what makes two thresholds comparable at all.
+	//
+	// Residual assumption, stated plainly: the trader's post-firing entries were
+	// actually taken in a world where the book had NOT been flattened. Whether
+	// they would have opened the same positions with a clean book is unknowable.
+	// Treating entry signals as exogenous is the standard assumption for an
+	// overlay study, and it is a far smaller one than fabricating re-entries.
+	L3CycleEnabled bool
+	// L3CycleDDPct fires the breaker when equity falls this % below the CURRENT
+	// cycle's peak. Measured on the continuous account curve.
+	L3CycleDDPct float64
+	// L3CycleArmGainPct is 「正收益达到一定比例才挂上回撤熔断」: the cycle must first
+	// gain this % above its baseline before the drawdown breaker arms. Until then
+	// the book runs on per-position control alone (「否则各自仓位控制」). 0 = always
+	// armed from the cycle's start.
+	L3CycleArmGainPct float64
+
+	// --- Placebo control (falsification test for the freeze model) ---
+	// Under the freeze model a firing is a PERMANENT early exit: the truncated
+	// positions are never re-established, only later real entries arrive. For a
+	// book whose baseline loses money, cutting positions early at ANY time tends to
+	// improve PnL, so "breaker beats baseline" is not evidence that the drawdown
+	// trigger works. It may just be evidence that trading less would have helped.
+	//
+	// L3CyclePlaceboProb replaces the drawdown trigger with a seeded coin flip of
+	// this per-tick probability, keeping everything else identical (whole-book
+	// freeze, gate, arm, fees, new-cycle re-anchor). Sweeping the probability
+	// produces placebo runs at matched firing counts. The real trigger is only
+	// worth anything if it beats the placebo AT THE SAME NUMBER OF FIRINGS.
+	L3CyclePlaceboProb float64
+	L3CyclePlaceboSeed int64
+
+	// L3CycleMeasureOnly evaluates the trigger and counts firings but does NOT
+	// close positions and does NOT re-anchor the cycle. It exists to separate two
+	// causes of non-monotone firing counts that look identical in output:
+	//
+	//   (a) a measurement bug — the trigger is not reading the drawdown it claims;
+	//   (b) closed-loop feedback — firing truncates the book, which changes later
+	//       equity, which changes later triggers.
+	//
+	// With feedback removed, counts MUST be non-increasing in the threshold. If they
+	// are, residual violations in the live sweep are (b), which is intrinsic to the
+	// model rather than a defect: the cycle model re-anchors the drawdown peak at
+	// every firing, so it has structurally STRONGER feedback than a de-lever model.
+	L3CycleMeasureOnly bool
+
+	// --- Breaker re-entry (user spec: 熔断将会降低损失并重新开仓，你需要仿真) ---
+	// Without this, a flatten is a permanent early exit and the sim silently
+	// credits the breaker with avoiding every later adverse move — it removes
+	// exposure and never pays to restore it. That overstates the breaker badly,
+	// because a live breaker re-enters and pays a full round trip each time.
+	//
+	// When L3ReentryBars > 0, each position the breaker flattens is re-opened
+	// L3ReentryBars bars later at that bar's close, with the original quantity,
+	// fresh SL/TP/BE levels computed from the new entry price, and full entry+exit
+	// fees charged on both legs. L3ReentryMaxCycles bounds how many times one
+	// position may be recycled, so a whipsawing market cannot manufacture
+	// unlimited round trips.
+	//
+	// This models "flatten now, re-establish the same view shortly after". It does
+	// NOT model the trader changing their mind about direction — that would need a
+	// decision model, which no backtest can supply.
+	L3ReentryBars      int
+	L3ReentryMaxCycles int
+
+	// --- Two-state arm (user spec: 熔断后要正收益达到一定比例才重新挂上熔断) ---
+	// After a firing, the breaker DISARMS entirely: per-position control (SL/BE/
+	// DD/TP) carries the book alone until equity has recovered L3ArmProfitPct%
+	// above the equity level at that firing. Only then does the drawdown breaker
+	// re-arm. This differs from L3RollReArmPct, which only pins the rolling
+	// REFERENCE (the breaker can still fire below the floor); this suppresses the
+	// trigger outright, which is what "达不到一定比例就各自仓位控制" means.
+	//
+	// 0 => always armed (no disarm phase).
+	L3ArmProfitPct float64
 
 	// --- ATR-normalized trigger (leverage-free, volatility-normalized) ---
 	// When L3RollATRMult > 0, the rolling breaker fires on the portfolio-weighted
@@ -144,9 +258,9 @@ type GuardParams struct {
 	// full (BreadthLoserCutPct, default 100); WINNING positions (profitPct>=0) are
 	// left untouched — in live they are protected by their break-even stop. This
 	// stops the bleeding side while letting BE lock in the profitable side.
-	BreadthEnabled    bool
-	BreadthMinPos     int     // minimum open positions before the gate can fire (quorum)
-	BreadthFrac       float64 // fraction (0..1) of positions retracing that fires the gate
+	BreadthEnabled     bool
+	BreadthMinPos      int     // minimum open positions before the gate can fire (quorum)
+	BreadthFrac        float64 // fraction (0..1) of positions retracing that fires the gate
 	BreadthLoserCutPct float64 // % of each losing+retracing position to cut (default 100)
 	// Retracement definition. BreadthUseATR=false: a position is "retracing" when
 	// its peak-to-current giveback exceeds BreadthGivebackPct OR its pnl-velocity
@@ -173,8 +287,31 @@ type SimResult struct {
 	GuardClosedQty float64 // total fraction-equivalent closed by guard
 	WinRatePct     float64
 	Trades         int
-	L3Fires        int     // count of L3 equity-DD circuit-breaker firings
-	L3ClosedQty    float64 // total fraction-equivalent closed by L3
+	// L3Fires is the number of per-position TRIMS performed by L3, NOT the number
+	// of breaker firings: one whole-book flatten of 4 positions adds 4. Kept with
+	// its original meaning so existing sweeps/tests are unchanged.
+	L3Fires int
+	// L3Events is the number of distinct breaker FIRINGS (ticks on which L3
+	// acted). This is the one to use for firing frequency, cost-per-fire and any
+	// monotonicity reasoning; L3Fires conflates frequency with book size.
+	L3Events int
+	// L3Reentries is how many times a breaker-flattened position was re-opened.
+	// Zero when L3ReentryBars is unset, in which case a flatten is a permanent
+	// early exit and the breaker's benefit is overstated.
+	L3Reentries int
+	// L3Cycles is how many equity-freeze cycles the run was divided into
+	// (1 = never fired). L3CycleFires = L3Cycles-1 when the cycle breaker is on.
+	L3Cycles    int
+	L3ClosedQty float64 // total fraction-equivalent closed by L3
+	FeesPaid    float64 // total trading fees charged (quote ccy); 0 when FeeRatePct=0
+
+	// Breaker occupancy diagnostics. A config with L3Fires=0 is ambiguous without
+	// these: it could mean the market never triggered it, or that the arm/gate
+	// suppressed every trigger it had. ArmedPct/GatePct/TriggerHits separate those.
+	BreakerTicks  int // ticks the rolling breaker was consulted
+	ArmedTicks    int // of those, ticks the two-state arm was armed
+	GateOpenTicks int // of those, ticks the exposure gate was open
+	TriggerHits   int // ticks the raw drawdown threshold was met (pre-suppression)
 }
 
 // tpLvl mirrors replay.go's tpLevel (kept local to avoid touching the tested engine).
@@ -195,6 +332,35 @@ type simPos struct {
 	beStop      float64
 	beArmedTier int
 	ddFired     []bool
+
+	// --- Breaker re-entry state ---
+	// bankedPnL holds realized PnL from PREVIOUS entry cycles of this position.
+	// A breaker flatten followed by a re-entry restarts the position at a new
+	// entry price, which resets the VWAP-exit accumulators; without banking, that
+	// reset would erase the loss the breaker just took, making the breaker look
+	// free. realizedPnL therefore returns banked + current-cycle.
+	bankedPnL float64
+	// pendingReentry is set when the breaker flattened this position and it is
+	// scheduled to re-open. reentryAtMs is the bar OpenTime at/after which the
+	// re-entry fills; cycles counts completed re-entries (bounded to stop a
+	// pathological loop from generating unlimited round trips).
+	pendingReentry bool
+	reentryAtMs    int64
+	reentryCycles  int
+	// pendingRestoreFrac is how much of the ORIGINAL position size the breaker
+	// cut and that is awaiting restore. Accumulated across trims within one
+	// pending window, so a partial de-lever is rebuilt to its prior size.
+	pendingRestoreFrac float64
+
+	// feeQuote is cumulative trading fees in quote ccy (entry fill + every partial
+	// exit). Subtracted inside realizedPnL so equity, MaxPortfolioDD and TotalPnL
+	// are all fee-aware from one place. This matters specifically for the circuit
+	// breaker: its only cost IS churn, so a zero-fee sim makes firing look free
+	// and biases any sweep toward firing more often.
+	feeQuote float64
+	// feeRatePct is the per-side taker fee in percent, copied from
+	// ProtectionParams at construction so addExit needs no extra plumbing.
+	feeRatePct float64
 
 	remaining    float64 // fraction of original position still open (0..1)
 	peakPnlPct   float64 // peak position profit % (for BE/DD/L1 arming)
@@ -262,7 +428,11 @@ func newSimPos(p ProtectionParams, e Entry, atr float64) *simPos {
 		beArmedTier: -1,
 		remaining:   1.0,
 		ddFired:     make([]bool, len(p.DDRules)),
+		feeRatePct:  p.FeeRatePct,
 	}
+	// Entry fill fee, charged once on full notional. FeeRatePct defaults to 0, so
+	// every pre-existing caller and test is unaffected until it opts in.
+	sp.feeQuote = p.FeeRatePct / 100.0 * e.EntryPrice * e.Quantity
 	if e.EntryPrice > 0 && atr > 0 {
 		sp.atrPct = atr / e.EntryPrice * 100
 	}
@@ -289,6 +459,8 @@ func (sp *simPos) addExit(price, frac float64, reason string) {
 	sp.exitNotional += price * frac
 	sp.exitFrac += frac
 	sp.remaining -= frac
+	// Exit fee on the closed slice's notional at the fill price.
+	sp.feeQuote += sp.feeRatePct / 100.0 * price * sp.e.Quantity * frac
 	sp.closeReasons = append(sp.closeReasons, reason)
 	if sp.remaining <= 1e-9 {
 		sp.done = true
@@ -318,6 +490,13 @@ func (sp *simPos) notionalRemaining() float64 {
 // double-count within a bar.
 func (sp *simPos) stepBaseline(p ProtectionParams, atr float64, bar market.Kline) {
 	if sp.done {
+		return
+	}
+	// Faithful mode: no modelled SL/TP/BE/DD. The position is carried until the
+	// sim loop closes it at the trader's real exit, so the baseline equity path is
+	// the one actually traded rather than one invented by a ladder the trader
+	// never used. The guard/breaker still runs, so it remains the only overlay.
+	if p.FaithfulExits {
 		return
 	}
 	// --- adverse extreme first: SL / BE stop ---
@@ -408,11 +587,29 @@ func (sp *simPos) finalize(lastClose float64) {
 
 // realizedPnL returns the position's realized PnL given its VWAP exit.
 func (sp *simPos) realizedPnL() float64 {
+	// Fees are charged even before any exit (the entry fill is already paid), so
+	// they are subtracted outside the exitFrac guard. bankedPnL carries PnL from
+	// pre-re-entry cycles (see the field docs) and is always included.
 	if sp.exitFrac <= 0 {
-		return 0
+		return sp.bankedPnL - sp.feeQuote
 	}
+	// Gross is scaled by exitFrac: only the CLOSED fraction has realized PnL.
+	//
+	// This corrects a real defect. The original form omitted exitFrac and priced
+	// the VWAP exit on full quantity, which is right only when the position is
+	// completely closed (exitFrac==1). But realizedPnL is also read MID-FLIGHT to
+	// build the portfolio equity curve, and there partial closes were booked at
+	// full size — a 30% trim was credited as 3.33x its true value. Since the L3
+	// equity breaker triggers on exactly that curve, it was reading an inflated
+	// series, and any partial-close protection layer (TP/BE/DD ladders, guard
+	// trims) inflated it further.
+	//
+	// Verified against the independent ReplayEntry path, which sums per-leg PnL
+	// correctly, by TestPortfolioSimGuardDisabledMatchesBaseline.
 	exitPrice := sp.exitNotional / sp.exitFrac
-	return pnlPct(sp.e.Side, sp.e.EntryPrice, exitPrice) / 100.0 * sp.e.EntryPrice * sp.e.Quantity
+	gross := pnlPct(sp.e.Side, sp.e.EntryPrice, exitPrice) / 100.0 *
+		sp.e.EntryPrice * sp.e.Quantity * sp.exitFrac
+	return sp.bankedPnL + gross - sp.feeQuote
 }
 
 // simEntry bundles a prepared entry with its bars, entry index, and entry ATR.
@@ -550,12 +747,53 @@ func runPortfolioSim(p ProtectionParams, g GuardParams, loaded []loadedEntry, wi
 	var guardTrims int
 	var guardClosedQty float64
 	var l3Fires int
+	var l3Events int
+	var reentries int
 	var l3ClosedQty float64
 
 	res := SimResult{Trades: len(lives)}
 
 	for _, t := range clock {
 		gstate.traceTick = t
+
+		// 0) fill any scheduled breaker re-entries due at this tick. Done before
+		//    stepping so a re-entered position is marked and guarded this bar like
+		//    any other open position. The re-entry is only filled while the
+		//    original entry's exit window is still open: re-establishing a position
+		//    past the point the trader had actually closed it would invent exposure
+		//    the trader never had.
+		if g.L3ReentryBars > 0 {
+			for _, lv := range lives {
+				if !lv.pos.pendingReentry {
+					continue
+				}
+				bi, ok := lv.barIdx[t]
+				if !ok {
+					continue
+				}
+				if lv.pos.reentryAtMs == 0 {
+					// Resolve the due bar the first time we see this symbol's clock
+					// after the flatten: L3ReentryBars bars forward from here.
+					due := bi + g.L3ReentryBars
+					if due >= len(lv.se.loaded.bars) {
+						lv.pos.pendingReentry = false
+						continue
+					}
+					lv.pos.reentryAtMs = lv.se.loaded.bars[due].OpenTime
+				}
+				if lv.se.loaded.bars[bi].OpenTime < lv.pos.reentryAtMs {
+					continue
+				}
+				e := lv.se.loaded.entry
+				if e.ExitTime > 0 && lv.se.loaded.bars[bi].OpenTime > e.ExitTime {
+					lv.pos.pendingReentry = false // window closed; no re-entry
+					continue
+				}
+				lv.pos.reenter(p, lv.se.loaded.bars[bi].Close, lv.se.atr)
+				reentries++
+			}
+		}
+
 		// 1) advance each active position one baseline bar at this tick.
 		for _, lv := range lives {
 			if lv.pos.done {
@@ -572,7 +810,14 @@ func runPortfolioSim(p ProtectionParams, g GuardParams, loaded []loadedEntry, wi
 			}
 			if e.ExitTime > 0 && lv.se.loaded.bars[bi].OpenTime > e.ExitTime {
 				if !lv.pos.done {
-					lv.pos.finalize(lv.lastClose)
+					// Faithful mode closes at the trader's REAL fill price, so the
+					// baseline reproduces realized PnL. Otherwise fall back to the
+					// last bar close, which is the engine's original convention.
+					px := lv.lastClose
+					if p.FaithfulExits && e.ExitPrice > 0 {
+						px = e.ExitPrice
+					}
+					lv.pos.finalize(px)
 				}
 				continue
 			}
@@ -618,16 +863,41 @@ func runPortfolioSim(p ProtectionParams, g GuardParams, loaded []loadedEntry, wi
 					gps = append(gps, guardPos{pos: lv.pos, price: lv.lastClose})
 				}
 			}
-			if g.BreadthEnabled {
+			if g.L3CycleEnabled {
+				// Cycle breaker REPLACES the other account-level breakers: it is the
+				// same decision (act on account equity drawdown) expressed as a
+				// freeze-and-restart rather than as a partial de-lever.
+				nc, ncq := applyCycleBreaker(g, gps, curEquity, gstate)
+				l3Fires += nc
+				l3ClosedQty += ncq
+				if nc > 0 {
+					l3Events++
+				}
+				if gstate.cyclePendingAnchor {
+					// Re-anchor from the full book: capital + all realised PnL.
+					anchor := g.StartCapital
+					for _, lv2 := range lives {
+						anchor += lv2.pos.realizedPnL()
+					}
+					gstate.cycleBase, gstate.cyclePeak = anchor, anchor
+					gstate.cyclePendingAnchor = false
+				}
+			} else if g.BreadthEnabled {
 				// Breadth breaker REPLACES the equity/rolling circuit breakers:
 				// per-symbol monitoring + majority-retrace gate + cut losers only.
 				nb, ncqb := applyBreadthBreaker(g, gps, gstate)
 				l3Fires += nb
+				if nb > 0 {
+					l3Events++
+				}
 				l3ClosedQty += ncqb
 			} else {
 				n3, ncq3 := applyEquityBreaker(g, gps, curEquity, gstate.equityPeak, gstate)
 				l3Fires += n3
 				l3ClosedQty += ncq3
+				if n3 > 0 {
+					l3Events++ // one tick on which the breaker acted, regardless of book size
+				}
 				if n3 == 0 {
 					nt, ncq := applyGuards(g, gps, portfolioPeakUnreal, gstate)
 					guardTrims += nt
@@ -682,7 +952,17 @@ func runPortfolioSim(p ProtectionParams, g GuardParams, loaded []loadedEntry, wi
 	res.GuardTrims = guardTrims
 	res.GuardClosedQty = guardClosedQty
 	res.L3Fires = l3Fires
+	res.L3Events = l3Events
+	res.L3Reentries = reentries
+	res.L3Cycles = gstate.cycleCount
 	res.L3ClosedQty = l3ClosedQty
+	for _, lv := range lives {
+		res.FeesPaid += lv.pos.feeQuote
+	}
+	res.BreakerTicks = gstate.ticksTotal
+	res.ArmedTicks = gstate.ticksArmed
+	res.GateOpenTicks = gstate.ticksGateOpen
+	res.TriggerHits = gstate.ticksTriggerHit
 	return res, l3trace
 }
 
@@ -708,14 +988,46 @@ type guardState struct {
 
 	// Rolling-baseline mode state (L3Mode=="rolling"): a single reference equity
 	// that resets to current equity after every cut. No latch/no re-arm.
-	rollRef    float64 // rolling reference equity; a cut fires when equity drops L3RollDropPct% below it
-	rollInit   bool    // rollRef seeded yet
+	rollRef      float64 // rolling reference equity; a cut fires when equity drops L3RollDropPct% below it
+	rollInit     bool    // rollRef seeded yet
 	rollArmFloor float64 // whipsaw guard: rollRef won't rise until equity exceeds this post-cut floor
 
 	// ATR-normalized trigger state (L3RollATRMult>0): the portfolio-weighted
 	// adverse-move-in-ATR at the last fire. Re-fire only when the crash deepens
 	// past this level by L3RollReArmPct% (whipsaw guard in ATR units, leverage-free).
 	lastFireATR float64
+
+	// Cycle breaker state. cycleBase is the account equity the current cycle
+	// started from (the frozen value at the previous firing, or StartCapital for
+	// cycle 0); cyclePeak is the high-water mark since then, which is what the
+	// drawdown is measured against. cycleArmed tracks whether the cycle has met
+	// L3CycleArmGainPct yet.
+	cycleBase  float64
+	cyclePeak  float64
+	cycleArmed bool
+	cycleInit  bool
+	cycleCount int
+	cycleFires int
+	// cyclePendingAnchor: a firing happened this tick and the new cycle baseline
+	// must be re-anchored by the sim loop from the full book's realised equity.
+	cyclePendingAnchor bool
+	// placeboRNG is seeded once per run so a given (seed, prob) is reproducible.
+	placeboRNG *rand.Rand
+
+	// Two-state arm (L3ArmProfitPct>0). armCycleBase is the equity at the last
+	// firing; the breaker stays disarmed until equity reaches
+	// armCycleBase*(1+L3ArmProfitPct/100). armed starts true (the first episode
+	// needs no prior profit) and is flipped false by every firing.
+	armCycleBase float64
+	armed        bool
+	armInit      bool
+	// Diagnostics for the gate/arm study: how many ticks the breaker was
+	// suppressed by each mechanism, and how many it was live. Without these a
+	// zero-fire config is indistinguishable from a never-armed one.
+	ticksTotal      int
+	ticksArmed      int
+	ticksGateOpen   int
+	ticksTriggerHit int // drawdown threshold met (before gate/arm suppression)
 
 	// Optional trace sink: when non-nil, each L3 firing appends a full snapshot.
 	trace     *[]L3FireEvent
@@ -1061,6 +1373,240 @@ func applyEquityBreaker(g GuardParams, gps []guardPos, curEquity, equityPeak flo
 //   - whole-book:   trim L3RollCutPct% of EVERY remaining position. Because it cuts
 //     a fraction of CURRENT remaining each time, repeated drops compound into
 //     exponential de-leveraging without any latch.
+//
+// gateOpen reports whether the book is exposed enough for a whole-book breaker
+// to be worth firing: at least L3GateMinPos open positions OR at least
+// L3GateMarginPct margin utilisation. Margin is leverage-aware (see the field
+// docs). When both legs are zero the gate is disabled and always open, which
+// preserves the pre-gate behaviour of every existing grid.
+// maxReentryCycles resolves the re-entry cycle bound, defaulting to 3 so a
+// misconfigured sweep cannot spin up unlimited round trips on a whipsawing path.
+func maxReentryCycles(g GuardParams) int {
+	if g.L3ReentryMaxCycles > 0 {
+		return g.L3ReentryMaxCycles
+	}
+	return 3
+}
+
+// reenter restarts a flattened position at price, banking the completed cycle's
+// PnL and resetting protective levels from the new entry. Fees for the new entry
+// fill are charged here; the closing leg was already charged by addExit.
+func (sp *simPos) reenter(p ProtectionParams, price, atr float64) {
+	// Restore exactly what the breaker cut. Partial trims are restored too (see
+	// the scheduling site): otherwise a cut50% policy would shed exposure for free
+	// while cut100% paid a round trip, and the sweep would rank policies by
+	// avoided cost rather than by risk management.
+	restore := sp.pendingRestoreFrac
+	if restore <= 0 {
+		restore = 1 - sp.remaining
+	}
+	if restore > 1 {
+		restore = 1
+	}
+	if restore <= 1e-9 {
+		sp.pendingReentry, sp.pendingRestoreFrac = false, 0
+		return
+	}
+	held := sp.remaining
+
+	// Bank the finished cycle before clearing its accumulators, otherwise the
+	// loss the breaker just realized would vanish and the breaker would look free.
+	sp.bankedPnL = sp.realizedPnL() + sp.feeQuote // realizedPnL nets fees; re-add
+	sp.feeQuote += p.FeeRatePct / 100.0 * price * sp.e.Quantity * restore
+
+	// Blend the restored slice into any surviving slice at a size-weighted entry,
+	// which is what adding to an existing position actually produces.
+	if held > 1e-9 {
+		sp.e.EntryPrice = (sp.e.EntryPrice*held + price*restore) / (held + restore)
+	} else {
+		sp.e.EntryPrice = price
+	}
+	sp.exitNotional, sp.exitFrac = 0, 0
+	sp.remaining = held + restore
+	if sp.remaining > 1 {
+		sp.remaining = 1
+	}
+	sp.pendingRestoreFrac = 0
+	sp.done = false
+	sp.peakPnlPct = 0
+	sp.peakUnrealQuote = 0
+	sp.l1FiredAtPeak = 0
+	sp.beStop = 0
+	sp.beArmedTier = -1
+	sp.pnlHist = sp.pnlHist[:0]
+	sp.closeReasons = append(sp.closeReasons, "l3_reentry")
+	sp.pendingReentry = false
+	sp.reentryCycles++
+
+	// Recompute protective levels from the new entry price, mirroring newSimPos.
+	sp.ddFired = make([]bool, len(p.DDRules))
+	if price > 0 && atr > 0 {
+		sp.atrPct = atr / price * 100
+	}
+	slDist := p.slDistancePct(price, atr)
+	sp.slPrice = priceAtDistance(price, slDist, sp.isLong, false)
+	sp.tps = sp.tps[:0]
+	for _, leg := range p.TPLegs {
+		d := legDistancePct(leg, p.Unit, price, atr)
+		sp.tps = append(sp.tps, tpLvl{
+			price: priceAtDistance(price, d, sp.isLong, true),
+			frac:  leg.CloseRatioPct / 100.0,
+		})
+	}
+}
+
+// applyCycleBreaker is the equity-freeze cycle breaker. It measures drawdown from
+// the CURRENT cycle's peak and, when the threshold is breached with the gate open
+// and the cycle armed, flattens the whole book and starts a new cycle anchored at
+// the equity realised by that flatten.
+//
+// Returns (positionsClosed, closedFractionTotal).
+func applyCycleBreaker(g GuardParams, gps []guardPos, curEquity float64, st *guardState) (int, float64) {
+	if !g.L3CycleEnabled || g.L3CycleDDPct <= 0 || curEquity <= 0 {
+		return 0, 0
+	}
+	// Seed cycle 0 at the account's starting equity.
+	if !st.cycleInit {
+		st.cycleBase, st.cyclePeak = curEquity, curEquity
+		st.cycleInit, st.cycleCount = true, 1
+		// Armed immediately only when no gain is required.
+		st.cycleArmed = g.L3CycleArmGainPct <= 0
+	}
+	if curEquity > st.cyclePeak {
+		st.cyclePeak = curEquity
+	}
+
+	st.ticksTotal++
+	// Arm once the cycle has earned the required gain above its baseline. Latching
+	// (never disarming within a cycle) is deliberate: 「正收益达到一定比例就开始挂上
+	// 熔断」 arms the breaker for the cycle, and a subsequent dip is exactly the
+	// event it exists to catch — disarming on the dip would switch it off at the
+	// worst moment.
+	if !st.cycleArmed && g.L3CycleArmGainPct > 0 && st.cycleBase > 0 &&
+		curEquity >= st.cycleBase*(1+g.L3CycleArmGainPct/100) {
+		st.cycleArmed = true
+	}
+	if st.cycleArmed {
+		st.ticksArmed++
+	}
+	gate := gateOpen(g, gps, curEquity)
+	if gate {
+		st.ticksGateOpen++
+	}
+
+	if st.cyclePeak <= 0 {
+		return 0, 0
+	}
+	triggered := false
+	if g.L3CyclePlaceboProb > 0 {
+		// Placebo: same machinery, no drawdown information.
+		if st.placeboRNG == nil {
+			st.placeboRNG = rand.New(rand.NewSource(g.L3CyclePlaceboSeed))
+		}
+		triggered = st.placeboRNG.Float64() < g.L3CyclePlaceboProb
+	} else {
+		ddPct := (st.cyclePeak - curEquity) / st.cyclePeak * 100
+		triggered = ddPct >= g.L3CycleDDPct
+	}
+	if !triggered {
+		return 0, 0
+	}
+	st.ticksTriggerHit++
+	if !st.cycleArmed || !gate {
+		// Suppressed. Do NOT advance the cycle or move its peak: a disarmed breaker
+		// must not consume the drawdown signal, or the reference would ratchet down
+		// through a decline and the breaker would find "no drawdown" once armed.
+		return 0, 0
+	}
+
+	if g.L3CycleMeasureOnly {
+		// Count the firing, touch nothing. Advance the arm state as usual so the
+		// two-state machine is still exercised.
+		st.cycleCount++
+		st.cycleFires++
+		st.cycleArmed = g.L3CycleArmGainPct <= 0
+		return 0, 0
+	}
+	// Freeze: close every open position at its current mark.
+	closedN := 0
+	var closedFrac float64
+	for _, gp := range gps {
+		sp := gp.pos
+		if sp.done || sp.remaining <= 1e-9 {
+			continue
+		}
+		before := sp.remaining
+		sp.addExit(gp.price, sp.remaining, "l3_cycle_freeze")
+		closedFrac += before - sp.remaining
+		closedN++
+	}
+
+	// Mark the cycle as needing a re-anchor. The new baseline must be the equity
+	// realised across the WHOLE book, including positions closed in earlier cycles,
+	// and only the sim loop can see that — gps holds just the currently-open
+	// subset. Anchoring off gps alone would understate the frozen equity by every
+	// prior cycle's realised PnL.
+	st.cyclePendingAnchor = true
+	st.cycleCount++
+	st.cycleFires++
+	st.cycleArmed = g.L3CycleArmGainPct <= 0
+	return closedN, closedFrac
+}
+
+func gateOpen(g GuardParams, gps []guardPos, curEquity float64) bool {
+	if g.L3GateMinPos <= 0 && g.L3GateMarginPct <= 0 {
+		return true
+	}
+	openCount := 0
+	var notional float64
+	for _, gp := range gps {
+		if gp.pos.done || gp.pos.remaining <= 1e-9 {
+			continue
+		}
+		openCount++
+		notional += gp.pos.notionalRemaining()
+	}
+	if g.L3GateMinPos > 0 && openCount >= g.L3GateMinPos {
+		return true
+	}
+	if g.L3GateMarginPct > 0 && curEquity > 0 {
+		lev := g.L3NominalLeverage
+		if lev <= 0 {
+			lev = 1
+		}
+		if notional/lev/curEquity*100 >= g.L3GateMarginPct {
+			return true
+		}
+	}
+	return false
+}
+
+// armCheck maintains the two-state arm. Returns whether the drawdown breaker is
+// currently allowed to fire. The first episode is armed by definition; every
+// firing disarms until equity recovers L3ArmProfitPct% above the firing level.
+func armCheck(g GuardParams, curEquity float64, st *guardState) bool {
+	if g.L3ArmProfitPct <= 0 {
+		return true
+	}
+	if !st.armInit {
+		st.armed, st.armInit, st.armCycleBase = true, true, curEquity
+	}
+	if !st.armed && st.armCycleBase > 0 &&
+		curEquity >= st.armCycleBase*(1+g.L3ArmProfitPct/100) {
+		st.armed = true
+	}
+	return st.armed
+}
+
+// disarmAfterFire records the post-fire equity and drops the arm, so the next
+// firing needs a fresh L3ArmProfitPct recovery first.
+func disarmAfterFire(g GuardParams, curEquity float64, st *guardState) {
+	if g.L3ArmProfitPct <= 0 {
+		return
+	}
+	st.armed, st.armInit, st.armCycleBase = false, true, curEquity
+}
+
 func applyRollingBreaker(g GuardParams, gps []guardPos, curEquity float64, st *guardState) (int, float64) {
 	if g.L3RollCutPct <= 0 || curEquity <= 0 {
 		return 0, 0
@@ -1087,8 +1633,32 @@ func applyRollingBreaker(g GuardParams, gps []guardPos, curEquity float64, st *g
 			st.rollArmFloor = 0 // recovery confirmed; clear the floor
 		}
 	}
+	// Diagnostics: record arm/gate occupancy every tick the breaker is consulted,
+	// so a zero-fire result can be attributed (never armed? gate never open?
+	// trigger never hit?) instead of being reported as "no signal".
+	st.ticksTotal++
+	armedNow := armCheck(g, curEquity, st)
+	if armedNow {
+		st.ticksArmed++
+	}
+	gateNow := gateOpen(g, gps, curEquity)
+	if gateNow {
+		st.ticksGateOpen++
+	}
+
 	dropPct := (st.rollRef - curEquity) / st.rollRef * 100
 	if dropPct < g.L3RollDropPct {
+		return 0, 0
+	}
+	st.ticksTriggerHit++
+	// Exposure gate + two-state arm. Both are evaluated AFTER the raw trigger so
+	// ticksTriggerHit measures the unsuppressed signal rate: the difference
+	// between it and the fire count is exactly what the gate and arm removed.
+	//
+	// NOTE the asymmetry: a suppressed trigger must NOT re-base rollRef. If it
+	// did, a disarmed breaker would silently consume the drawdown signal and the
+	// reference would ratchet down through a decline without a single cut.
+	if !gateNow || !armedNow {
 		return 0, 0
 	}
 	// Whipsaw cooldown ①: enforce a minimum bar gap between fires when configured.
@@ -1142,6 +1712,7 @@ func applyRollingBreaker(g GuardParams, gps []guardPos, curEquity float64, st *g
 	if g.L3RollReArmPct > 0 {
 		st.rollArmFloor = curEquity * (1 + g.L3RollReArmPct/100)
 	}
+	disarmAfterFire(g, curEquity, st)
 	return trims, closed
 }
 
@@ -1171,6 +1742,21 @@ func rollingCutLoop(g GuardParams, gps []guardPos, cutPct, keepMult float64, win
 			sp.addExit(gp.price, cutAmt, "guard_l3roll")
 			closed += before - sp.remaining
 			trims++
+			// Schedule a restore if re-entry is configured. This applies to PARTIAL
+			// trims as well as full flattens, and that is deliberate: if only full
+			// flattens were restored, a cut50% policy would shed exposure and never
+			// pay to rebuild it, while cut100% paid a full round trip every time.
+			// The sweep would then rank policies by how much re-entry cost they
+			// managed to avoid rather than by how well they managed risk.
+			//
+			// pendingRestoreFrac accumulates how much of the original position size
+			// must be rebuilt, so a de-lever is modelled as temporary, matching the
+			// intent of a circuit breaker (reduce risk now, resume after).
+			if g.L3ReentryBars > 0 && sp.reentryCycles < maxReentryCycles(g) {
+				sp.pendingRestoreFrac += before - sp.remaining
+				sp.pendingReentry = true
+				sp.reentryAtMs = 0 // resolved by the sim loop against bar times
+			}
 		}
 		if ev != nil {
 			ev.Positions = append(ev.Positions, L3FirePos{
