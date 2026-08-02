@@ -1,5 +1,37 @@
 # Production Deployment - Critical Information
 
+## 2026-08-02 Deploy: v1.17.7 OKX trailing 激活判据 + 51149 半成功回读 (pid 626448, commit 6a817f2)
+备份 `/opt/webstack/nofx/nofx.bak-v11705-20260802-060338` (md5 `69a264009fcd69074dce330453d84321` = 线上 v1.17.5+ / commit `9a48070`),
+新二进制 md5 `5acea85ffeac6fd18c16c5503a085b91`。构建 `go build -o /tmp/nofx_v1177 .`。
+`MainPID=626448` == `pgrep -x nofx`,`NRestarts=0`,`ActiveState=active`,health 200 @0.9ms。
+
+**用户要求"仅部署我的修复"。隔离性已核实**:线上是 `9a48070`,`9a48070..HEAD` 的非文档改动
+**恰好只有这一笔**(`1fdbb8d` 是纯记忆文档),所以直接从 HEAD 构建 = 线上代码 + 仅此修复,
+**不需要 cherry-pick**。改动见 `unified-protection-system.md` v1.17.7 段。
+
+部署前基线(14:03 CST):4 持仓全 `verified=true claimedTrail=3`、7 张活 trailing、
+`status=pending_activation` **57 次 / `activated` 0 次**(缺陷特征)、`NOT effective` 0、熔断 0、51149 0。
+
+部署后核对(14:04→14:22):
+- **零 churn**:撤单 **0** 次、挂单 **0** 次,GetOpenOrders 稳定在 6/7(与基线同样的 6/7 波动)
+  → 判据改动没有惊动任何在场交易所挂单,符合"只改判据与回读"的设计意图;
+- 4 持仓(SKHYNIXUSDT/SPCXUSDT/ZECUSDT LONG + HYPEUSDT SHORT)全部
+  `state=protected verified=true staleTrail=0`,`exchange protection verified (preserving dynamic state=native_trailing_armed)`;
+- WARN 0、panic 0;
+- **唯一 ERRO 是既存问题**:`drawdown_claim_conflict.go:300` 同一档被两张单应答
+  —— 重启后 168 条,而**同日重启前已有 9679 条**,频率一致(前 ≈692/h,后 ≈720/h),
+  与本次改动无关;该日志自述是**有意保留全部认领**(撤错会掀掉在工作的那张单),是 same-tier fork 路径的职责。
+
+**⚠️ 尚未获得的验证 —— 主修复点没有观测窗口**:`status=activated` 是否开始出现,
+需要**已武装的 DD 档**才会打印那行(`auto_trader_risk.go:2095`)。重启后 4 个持仓全是
+`🟣 Drawdown arm pending`(利润未到武装线,如 SKHYNIX 2.88% < 5.15%),所以核心判据修复
+(激活状态改读订单行自身)**目前只有单元测试背书,没有实盘证据**。
+下次有持仓武装 DD 时必须回看:`grep -oE 'status=(pending_activation|activated)'`,
+预期 `activated` 应从"4 天 5 次"变成常态。**51149 回读路径同理**(4 天只发生 6 次,属稀疏事件)。
+
+回滚:`systemctl stop nofx` → `cp nofx.bak-v11705-20260802-060338 nofx` → `systemctl start nofx`。
+无配置变更,无 DB 迁移,回滚不需要恢复任何配置。
+
 ## 2026-07-31 Deploy: HH/HL 结构闸门上线 + 窗口缺陷修复 (pid 345250)
 备份 `/opt/webstack/nofx/nofx.bak-20260731-030515` (md5 `abca7a86df493492d5082b67209980a4`),
 配置备份 `/tmp/cfg_backup_20260731-030515/`。新二进制 md5 `934a97bd357b2fccde92e14dbfa879e9`。
