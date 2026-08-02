@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -185,9 +186,27 @@ func (client *Client) SetAPIKey(apiKey, apiURL, customModel string) {
 	client.Model = customModel
 }
 
-// SetFallbackEndpoints sets the fallback endpoints for automatic failover
+// SetFallbackEndpoints sets the fallback endpoints for automatic failover.
+//
+// Endpoints are sorted by Priority ascending (lower number = tried first) right
+// here, at the single point of entry, so that switchToNextEndpoint's plain index
+// walk IS the priority order. Doing it here rather than in switchToNextEndpoint
+// keeps the ordering invariant in one place and costs one sort per config load
+// instead of one comparison pass per failover.
+//
+// The sort is stable: endpoints sharing a Priority keep their configured order,
+// which is what an operator listing several equal-rank backups expects.
 func (client *Client) SetFallbackEndpoints(endpoints []FallbackEndpoint) {
-	client.FallbackEndpoints = endpoints
+	// Copy before sorting: the caller owns the slice it passed in (it comes from
+	// store.AIModel.GetFallbackEndpoints and may be reused), so reordering it
+	// in place would be a side effect on someone else's data.
+	sorted := make([]FallbackEndpoint, len(endpoints))
+	copy(sorted, endpoints)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].Priority < sorted[j].Priority
+	})
+
+	client.FallbackEndpoints = sorted
 	client.currentEndpointIndex = -1 // -1 means using primary endpoint
 	// Snapshot the current (primary) connection params so we can always restore
 	// to the primary at the start of each call. SetAPIKey runs before this, so
@@ -220,7 +239,11 @@ func (client *Client) switchToNextEndpoint() bool {
 		return false
 	}
 
-	// Find next available endpoint with higher priority (lower priority number)
+	// Walk to the next endpoint. FallbackEndpoints was sorted by Priority
+	// ascending in SetFallbackEndpoints, so advancing the index here means
+	// advancing to the next-lowest Priority number, i.e. the next preferred
+	// backup. Do NOT re-sort or re-scan by Priority here — the ordering
+	// invariant is established once at configuration time.
 	nextIndex := client.currentEndpointIndex + 1
 	if nextIndex >= len(client.FallbackEndpoints) {
 		return false // No more fallbacks
