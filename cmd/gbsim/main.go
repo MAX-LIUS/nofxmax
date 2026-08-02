@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -13,6 +14,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"nofx/config"
+	"nofx/proxyhook"
 	"nofx/trader/backtest"
 )
 
@@ -65,6 +68,8 @@ func main() {
 	feerate := flag.Float64("feerate", 0.05, "acct: taker fee % per side (charged on entry + every partial exit)")
 	faithful := flag.Bool("faithful", false, "acct: replay to the trader's REAL exit price with modelled SL/TP/BE/DD off, so the baseline reproduces realized PnL (recommended: the modelled ladder is not what these traders ran)")
 	cycle := flag.Bool("cycle", false, "acct: use the equity-FREEZE (cycle) model instead of modelled re-entry — flatten crystallises equity, later real entries form the next cycle")
+	envFile := flag.String("env", "", "path to an env file to read BINANCE_PROXY_URL from (required for -binance: this host is geo-blocked by Binance, HTTP 451)")
+	cyclefine := flag.Bool("cyclefine", false, "acct+cycle: 0.1%-step sweep of drawdown x arm gain WITH a chronological train/test split (the only deployment-relevant view)")
 	cyclemeasure := flag.Bool("cyclemeasure", false, "acct+cycle: ENGINE PROBE — evaluate the trigger but never touch the book, so firing counts must be perfectly monotone in drop%")
 	reentry := flag.Int("reentry", 1, "acct: bars after a flatten before the position is re-opened (0 = no re-entry, which OVERSTATES the breaker)")
 	binance := flag.Bool("binance", false, "acct: replay on Binance bars instead of OKX (use for the BN trader, which executed there)")
@@ -76,6 +81,24 @@ func main() {
 	revmode := flag.String("revmode", "rules", "reversal study grid: rules (rule attribution) | age (MinAgeBars sweep) | safety (whipsaw safeguards)")
 	fine := flag.Bool("fine", false, "breadth: use the narrow refinement grid around min4/f60%/ATR1.0 (frac step 0.05, ATR step 0.1)")
 	flag.Parse()
+
+	// Binance blocks this host's IP directly (HTTP 451). The live process reaches
+	// it through BINANCE_PROXY_URL, so a Binance-sourced replay must register the
+	// same hook the production binary registers, or every kline fetch fails and the
+	// trader silently comes out as "0 entries prepared".
+	//
+	// Only BINANCE_PROXY_URL is lifted out of the env file. Klines are public data,
+	// so no API credentials are needed; loading the whole file would pull the live
+	// trading keys into this analysis process for no reason.
+	if *envFile != "" {
+		if err := loadProxyURLOnly(*envFile); err != nil {
+			log.Fatalf("read proxy url from %s: %v", *envFile, err)
+		}
+	}
+	if *binance {
+		config.Init()
+		proxyhook.Register()
+	}
 
 	// Select the parameter grid to sweep.
 	grid := guardGrid
@@ -378,6 +401,49 @@ func main() {
 		printL3Trace(base, l3res, trace, *capital)
 		return
 	}
+	if *cyclefine {
+		provider := backtest.OKXBars
+		if *binance {
+			provider = backtest.BinanceBars
+		}
+		loaded, skipped := backtest.PrepareEntries(entries, *tf, provider)
+		fmt.Printf("prepared %d entries (%d skipped)\n", len(loaded), skipped)
+		if len(loaded) == 0 {
+			os.Exit(1)
+		}
+		p := backtest.ClaudeBaselineParams()
+		if *faithful {
+			p = backtest.ProtectionParams{Unit: backtest.UnitPercent, FaithfulExits: true}
+		}
+		p.FeeRatePct = *feerate
+		rows, trainBase, testBase := backtest.SweepCycleFineSplit(p, loaded, *capital, *nomlev)
+		printCycleFine(rows, trainBase, testBase, *capital)
+
+		// The control that tests the user's argument directly: "cutting exposure on a
+		// losing book is positive expectancy." True — and plain size reduction is the
+		// cheapest way to act on it, with no threshold to fit and no extra fees.
+		fmt.Println("\n---- (4) CONTROL: JUST TRADE SMALLER (no breaker, no parameter to fit) ----")
+		fmt.Printf("%-8s | %-10s %-10s | %-10s %-10s\n", "size", "TRAIN PnL", "TRAINedge", "TEST PnL", "TESTedge")
+		for _, sr := range backtest.SweepSizeScaleSplit(p, loaded, []float64{1.0, 0.75, 0.5, 0.25, 0.1}) {
+			fmt.Printf("%-8.0f%% | %-10.2f %-10.2f | %-10.2f %-10.2f\n",
+				sr.Frac*100, sr.TrainPnL, sr.TrainPnL-sr.TrainBase, sr.TestPnL, sr.TestPnL-sr.TestBase)
+		}
+		// Reverse the split direction. One direction can collapse by luck; if
+		// fitting the SECOND half and testing on the FIRST also collapses, the
+		// parameter is not learnable from either regime, which is a much stronger
+		// statement than a single split can support.
+		fmt.Println("\n################ REVERSE SPLIT (fit on 2nd half, test on 1st) ################")
+		rev := make([]backtest.CycleSplitResult, len(rows))
+		for i, r := range rows {
+			rev[i] = backtest.CycleSplitResult{
+				Guard:    r.Guard,
+				TrainPnL: r.TestPnL, TrainBase: r.TestBase, TrainFires: r.TestFires,
+				TestPnL: r.TrainPnL, TestBase: r.TrainBase, TestFires: r.TrainFires,
+			}
+		}
+		printCycleFine(rev, testBase, trainBase, *capital)
+		return
+	}
 	if *acct {
 		provider := backtest.OKXBars
 		if *binance {
@@ -525,6 +591,163 @@ func printL3Sweep(base backtest.SimResult, rows []backtest.EquityBreakerRow, cap
 			i+1, l3Describe(r.Guard), r.Result.TotalPnL, r.Result.WinRatePct,
 			r.Result.MaxPortfolioDD, r.DDCut, r.PnLCost, r.Result.L3Fires)
 	}
+}
+
+// printCycleFine reports the 0.1%-step sweep under a chronological train/test
+// split. It is built to resist the one failure mode that matters here: with ~1200
+// cells the best in-sample cell is guaranteed to look excellent by selection
+// alone, so the headline number is NOT the best cell — it is what the best
+// in-sample cell then did out-of-sample.
+func printCycleFine(rows []backtest.CycleSplitResult, trainBase, testBase backtest.SimResult, capital float64) {
+	fmt.Printf("==== 0.1%%-STEP FINE SWEEP, RAW EQUITY %%, CHRONOLOGICAL TRAIN/TEST ====\n")
+	fmt.Printf("capital=%.2f  (drawdown %% is on raw equity: 148 -> 146.52 is 1%%, leverage NOT divided out)\n", capital)
+	fmt.Printf("TRAIN baseline (no breaker): PnL=%.2f  MaxDD=%.2f  trades=%d\n",
+		trainBase.TotalPnL, trainBase.MaxPortfolioDD, trainBase.Trades)
+	fmt.Printf("TEST  baseline (no breaker): PnL=%.2f  MaxDD=%.2f  trades=%d\n\n",
+		testBase.TotalPnL, testBase.MaxPortfolioDD, testBase.Trades)
+
+	// 1) The take-profit limit test. dd->0 is a pure take-profit at +arm% with no
+	// retrace given back. If the objective is "don't let earned profit slip away",
+	// the limit must dominate any positive dd, because every 0.1% of dd is profit
+	// handed back by construction. Reported per arm so the comparison is like-for-like.
+	fmt.Println("---- (1) IS THE DRAWDOWN GIVEBACK WORTH ANYTHING? best dd per arm, vs the dd->0 limit ----")
+	fmt.Printf("%-6s | %-9s %-9s | %-9s %-9s %-9s | %s\n",
+		"arm%", "dd->0.1%", "TESTedge", "best dd", "TESTedge", "TRAINedge", "verdict")
+	byArm := map[float64][]backtest.CycleSplitResult{}
+	for _, r := range rows {
+		a := r.Guard.L3CycleArmGainPct
+		byArm[a] = append(byArm[a], r)
+	}
+	var arms []float64
+	for a := range byArm {
+		arms = append(arms, a)
+	}
+	sort.Float64s(arms)
+	for _, a := range arms {
+		grp := byArm[a]
+		var limit backtest.CycleSplitResult
+		best := grp[0]
+		for _, r := range grp {
+			if r.Guard.L3CycleDDPct <= 0.1001 {
+				limit = r
+			}
+			// "best" is chosen on TRAIN only. Choosing on test would be the exact
+			// look-ahead this whole table exists to expose.
+			if r.TrainEdge() > best.TrainEdge() {
+				best = r
+			}
+		}
+		verdict := "giveback pays"
+		if limit.TestEdge() >= best.TestEdge() {
+			verdict = "TAKE-PROFIT LIMIT WINS (dd giveback is pure cost)"
+		}
+		fmt.Printf("%-6.1f | %-9.1f %-9.2f | %-9.1f %-9.2f %-9.2f | %s\n",
+			a, 0.1, limit.TestEdge(), best.Guard.L3CycleDDPct, best.TestEdge(), best.TrainEdge(), verdict)
+	}
+	printCycleFineOOS(rows)
+}
+
+// printCycleFineOOS is the deployment verdict: it contrasts the config chosen on
+// the training half with how that same config behaved out-of-sample, and with
+// what would have won out-of-sample. The gap between those is the part of the
+// in-sample gain that was selection rather than edge.
+func printCycleFineOOS(rows []backtest.CycleSplitResult) {
+	if len(rows) == 0 {
+		return
+	}
+	bestTrain, bestTest := rows[0], rows[0]
+	for _, r := range rows {
+		if r.TrainEdge() > bestTrain.TrainEdge() {
+			bestTrain = r
+		}
+		if r.TestEdge() > bestTest.TestEdge() {
+			bestTest = r
+		}
+	}
+	fmt.Println("\n---- (2) OUT-OF-SAMPLE VERDICT ----")
+	fmt.Printf("chosen on TRAIN : dd=%.1f%% arm=%.1f%%  TRAINedge=%+.2f (fires %d)  -> TESTedge=%+.2f (fires %d)\n",
+		bestTrain.Guard.L3CycleDDPct, bestTrain.Guard.L3CycleArmGainPct,
+		bestTrain.TrainEdge(), bestTrain.TrainFires, bestTrain.TestEdge(), bestTrain.TestFires)
+	fmt.Printf("hindsight best on TEST: dd=%.1f%% arm=%.1f%%  TESTedge=%+.2f  (not achievable in advance)\n",
+		bestTest.Guard.L3CycleDDPct, bestTest.Guard.L3CycleArmGainPct, bestTest.TestEdge())
+	kept := 0.0
+	if bestTrain.TrainEdge() != 0 {
+		kept = bestTrain.TestEdge() / bestTrain.TrainEdge() * 100
+	}
+	fmt.Printf("retention: the train-chosen config kept %.0f%% of its edge out-of-sample\n", kept)
+
+	// How much of the grid helps out-of-sample at all? If a large majority of cells
+	// help on TEST, the effect is broad and not a fitted spike; if only a handful
+	// do, the "winner" was noise.
+	pos, tot := 0, 0
+	for _, r := range rows {
+		tot++
+		if r.TestEdge() > 0 {
+			pos++
+		}
+	}
+	fmt.Printf("breadth: %d of %d cells (%.0f%%) improve on the TEST half\n", pos, tot, float64(pos)/float64(tot)*100)
+
+	// The user's stated configuration, reported explicitly whether or not it wins,
+	// since it was absent from the earlier coarse grid.
+	fmt.Println("\n---- (3) THE PROPOSED CONFIG: +4% gain arms, 2% drawdown fires ----")
+	for _, r := range rows {
+		if math.Abs(r.Guard.L3CycleArmGainPct-4.0) < 1e-9 && math.Abs(r.Guard.L3CycleDDPct-2.0) < 1e-9 {
+			fmt.Printf("dd=2.0%% arm=4.0%%  TRAINedge=%+.2f (fires %d)  TESTedge=%+.2f (fires %d)\n",
+				r.TrainEdge(), r.TrainFires, r.TestEdge(), r.TestFires)
+		}
+	}
+	// Neighbourhood stability: a real setting is surrounded by other settings that
+	// also work. An isolated spike is a fitting artefact.
+	var near []float64
+	for _, r := range rows {
+		if math.Abs(r.Guard.L3CycleArmGainPct-4.0) <= 1.0 && math.Abs(r.Guard.L3CycleDDPct-2.0) <= 0.5 {
+			near = append(near, r.TestEdge())
+		}
+	}
+	if len(near) > 0 {
+		sort.Float64s(near)
+		good := 0
+		for _, v := range near {
+			if v > 0 {
+				good++
+			}
+		}
+		fmt.Printf("neighbourhood (arm 3-5%%, dd 1.5-2.5%%): %d cells, TESTedge min %+.2f median %+.2f max %+.2f, %d/%d positive\n",
+			len(near), near[0], near[len(near)/2], near[len(near)-1], good, len(near))
+	}
+}
+
+// loadProxyURLOnly reads ONLY the BINANCE_PROXY_URL assignment out of an env
+// file and sets it in this process. Deliberately not godotenv.Load: that would
+// import DATA_ENCRYPTION_KEY, RSA_PRIVATE_KEY and every exchange credential into
+// a backtest tool that has no use for them.
+func loadProxyURLOnly(path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	const key = "BINANCE_PROXY_URL"
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		eq := strings.IndexByte(line, '=')
+		if eq <= 0 || strings.TrimSpace(line[:eq]) != key {
+			continue
+		}
+		v := strings.TrimSpace(line[eq+1:])
+		v = strings.Trim(v, `"'`)
+		if v == "" {
+			continue
+		}
+		return os.Setenv(key, v)
+	}
+	// Not an error: the caller may legitimately have no proxy configured.
+	fmt.Fprintf(os.Stderr, "warning: %s not found in %s; Binance will be tried directly and will likely return HTTP 451\n", key, path)
+	return nil
 }
 
 // printAcctSweep prints the account-breaker study. It shows the full drop-band

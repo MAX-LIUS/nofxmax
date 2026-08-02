@@ -545,6 +545,159 @@ func L3AccountBreakerGrid(capital, nominalLeverage float64, reentryBars int) []G
 	return grid
 }
 
+// ScaleEntrySizes returns a copy of the prepared entries with every position
+// quantity multiplied by frac.
+//
+// This is the control that tests the user's own argument rather than a strawman of
+// it. The argument is: "cutting exposure on a losing book must be positive
+// expectancy." That is CORRECT, and this function is the cheapest possible way to
+// act on it — it holds less risk with no threshold to choose, no parameter to fit,
+// no extra round trips, and no extra fees.
+//
+// If simply trading smaller captures as much as the breaker does, then the breaker
+// is an expensive, overfittable way to buy something a one-line size change buys
+// outright, and the drawdown trigger is not the source of the benefit.
+func ScaleEntrySizes(loaded []LoadedEntry, frac float64) []LoadedEntry {
+	out := make([]LoadedEntry, len(loaded))
+	for i, le := range loaded {
+		cp := le
+		cp.entry.Quantity = le.entry.Quantity * frac
+		out[i] = cp
+	}
+	return out
+}
+
+// SizeScaleControl evaluates plain size reduction on the same train/test split the
+// breaker was judged on, so the two are directly comparable.
+type SizeScaleRow struct {
+	Frac      float64
+	TrainPnL  float64
+	TestPnL   float64
+	TrainBase float64
+	TestBase  float64
+}
+
+func SweepSizeScaleSplit(p ProtectionParams, loaded []LoadedEntry, fracs []float64) []SizeScaleRow {
+	train, test := SplitEntriesByTime(loaded)
+	trainBase := RunPortfolioSim(p, GuardParams{}, train).TotalPnL
+	testBase := RunPortfolioSim(p, GuardParams{}, test).TotalPnL
+	var out []SizeScaleRow
+	for _, f := range fracs {
+		rt := RunPortfolioSim(p, GuardParams{}, ScaleEntrySizes(train, f))
+		rv := RunPortfolioSim(p, GuardParams{}, ScaleEntrySizes(test, f))
+		out = append(out, SizeScaleRow{
+			Frac: f, TrainPnL: rt.TotalPnL, TestPnL: rv.TotalPnL,
+			TrainBase: trainBase, TestBase: testBase,
+		})
+	}
+	return out
+}
+
+// L3CycleFineGrid is the 0.1%-step sweep of the equity-freeze breaker, on RAW
+// account equity with no leverage adjustment (equity 148 -> 146.52 is a 1% drop).
+//
+// It exists because the coarse grid never actually tested the configuration under
+// discussion: arm was only {0,1,2,3,5,8,12}, so "+4% gain then 2% drawdown" was
+// never run. Coarse grids that skip the point of interest are worthless for
+// settling a disagreement about that point.
+//
+// The drawdown axis deliberately starts at 0.1% and steps by 0.1%. That is not
+// padding: the limit dd->0 IS a pure take-profit at +arm%, with no retrace given
+// back. If the goal is "don't let earned profit slip away", the take-profit limit
+// should dominate any positive dd, because every basis point of dd is profit
+// handed back by construction. Including the limit turns an opinion into a
+// measurement.
+//
+// WARNING on interpretation: this grid has ~1200 cells, so the best cell is
+// guaranteed to look good by selection alone. It must only ever be read together
+// with the train/test split (SweepCycleFineSplit), never on its own.
+func L3CycleFineGrid(capital, nominalLeverage float64) []GuardParams {
+	var grid []GuardParams
+	for ddI := 1; ddI <= 60; ddI++ { // 0.1% .. 6.0% by 0.1%
+		for armI := 0; armI <= 100; armI += 5 { // 0% .. 10% by 0.5%
+			grid = append(grid, GuardParams{
+				Enabled: true, L3Enabled: true, StartCapital: capital,
+				L3CycleEnabled:    true,
+				L3CycleDDPct:      float64(ddI) / 10,
+				L3CycleArmGainPct: float64(armI) / 10,
+				L3GateMinPos:      3,
+				L3GateMarginPct:   70,
+				L3NominalLeverage: nominalLeverage,
+				L3VelWindow:       6,
+			})
+		}
+	}
+	return grid
+}
+
+// SplitEntriesByTime splits prepared entries into two consecutive halves by entry
+// time, for out-of-sample validation. Returns (train, test).
+//
+// Chronological, never random: a random split would leak, because positions open
+// at the same time share the same market path, so a random test set would contain
+// near-copies of train rows and report a fake pass.
+func SplitEntriesByTime(loaded []LoadedEntry) ([]LoadedEntry, []LoadedEntry) {
+	if len(loaded) < 4 {
+		return loaded, nil
+	}
+	byTime := append([]LoadedEntry(nil), loaded...)
+	sort.Slice(byTime, func(i, j int) bool {
+		return byTime[i].entry.EntryTime < byTime[j].entry.EntryTime
+	})
+	mid := len(byTime) / 2
+	return byTime[:mid], byTime[mid:]
+}
+
+// CycleSplitResult reports one config's train and test outcome.
+type CycleSplitResult struct {
+	Guard      GuardParams
+	TrainPnL   float64
+	TrainBase  float64
+	TestPnL    float64
+	TestBase   float64
+	TrainFires int
+	TestFires  int
+}
+
+// TrainEdge / TestEdge are improvements over the no-breaker baseline on each half.
+func (c CycleSplitResult) TrainEdge() float64 { return c.TrainPnL - c.TrainBase }
+func (c CycleSplitResult) TestEdge() float64  { return c.TestPnL - c.TestBase }
+
+// SweepCycleFineSplit answers the only question that matters for deployment: does
+// a config chosen on past data still help on data it was not chosen on?
+//
+// Every config is evaluated on BOTH halves. The caller can then compare the
+// config that won the training half against how it did out-of-sample, and against
+// what actually won out-of-sample. A rule with a real edge keeps most of it; a
+// rule that was merely fitted loses it, and the size of the loss is the honest
+// estimate of how much of the in-sample gain was selection.
+func SweepCycleFineSplit(p ProtectionParams, loaded []LoadedEntry, capital, nominalLeverage float64) ([]CycleSplitResult, SimResult, SimResult) {
+	train, test := SplitEntriesByTime(loaded)
+	trainBase := RunPortfolioSim(p, GuardParams{}, train)
+	testBase := RunPortfolioSim(p, GuardParams{}, test)
+
+	grid := L3CycleFineGrid(capital, nominalLeverage)
+	out := make([]CycleSplitResult, 0, len(grid))
+	for _, g := range grid {
+		// StartCapital must match the capital actually at risk in each half, or the
+		// arm/drawdown percentages mean different things across the two halves.
+		gt := g
+		gt.StartCapital = capital
+		rTrain := RunPortfolioSim(p, gt, train)
+		rTest := RunPortfolioSim(p, gt, test)
+		out = append(out, CycleSplitResult{
+			Guard:      g,
+			TrainPnL:   rTrain.TotalPnL,
+			TrainBase:  trainBase.TotalPnL,
+			TestPnL:    rTest.TotalPnL,
+			TestBase:   testBase.TotalPnL,
+			TrainFires: rTrain.L3Cycles - 1,
+			TestFires:  rTest.L3Cycles - 1,
+		})
+	}
+	return out, trainBase, testBase
+}
+
 // L3CycleGrid sweeps the equity-freeze (cycle) breaker: 熔断=权益价值冻结，之后开仓算新周期.
 //
 // Range width is deliberate. The 1.5-4% band was only an example, and it is far
