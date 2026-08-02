@@ -80,6 +80,25 @@ func (s *EquityStore) GetLatest(traderID string, limit int) ([]*EquitySnapshot, 
 	return snapshots, nil
 }
 
+// GetAllAscending returns every equity record for a trader, oldest first.
+//
+// GetLatest(traderID, N) cannot serve an "all history" chart: it takes the N most
+// RECENT rows, so asking for the full curve with a bounded N silently returns only
+// its tail. With snapshots written every ~3 minutes, the 500-row default covered
+// about 25 hours, which is why the "All" range rendered as a few recent days.
+// Downsampling to a display budget is the caller's job and must happen AFTER the
+// full range is known, otherwise the earliest data can never appear.
+func (s *EquityStore) GetAllAscending(traderID string) ([]*EquitySnapshot, error) {
+	var snapshots []*EquitySnapshot
+	err := s.db.Where("trader_id = ?", traderID).
+		Order("timestamp ASC").
+		Find(&snapshots).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to query equity records: %w", err)
+	}
+	return snapshots, nil
+}
+
 // GetByTimeRange gets equity records within specified time range
 func (s *EquityStore) GetByTimeRange(traderID string, start, end time.Time) ([]*EquitySnapshot, error) {
 	var snapshots []*EquitySnapshot

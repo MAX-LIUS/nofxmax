@@ -1196,6 +1196,19 @@ export const translations = {
       '7d': '7D',
       '30d': '30D',
       all: 'All',
+      zoomHint: 'Scroll to zoom · drag to pan · double-click to reset',
+      zoomIn: 'Zoom in',
+      zoomOut: 'Zoom out',
+      panLeft: 'Pan earlier',
+      panRight: 'Pan later',
+      reset: 'Reset',
+      positions: 'Positions',
+      notional: 'Notional',
+      margin: 'Margin',
+      reconShort: 'local ',
+      downsampled: 'downsampled',
+      notionalNote:
+        'Notional = entry price x quantity, replayed from local position records. A -Nm tag means the position figures are that old, since traders snapshot at different times.',
     },
 
     // TraderDashboardPage
@@ -2550,6 +2563,19 @@ export const translations = {
       '7d': '7天',
       '30d': '30天',
       all: '全部',
+      zoomHint: '滚轮缩放 · 拖动平移 · 双击复位',
+      zoomIn: '放大',
+      zoomOut: '缩小',
+      panLeft: '向前平移',
+      panRight: '向后平移',
+      reset: '复位',
+      positions: '持仓数',
+      notional: '名义额度',
+      margin: '保证金',
+      reconShort: '本地 ',
+      downsampled: '已降采样',
+      notionalNote:
+        '名义额度 = 开仓价 x 数量，由本地持仓记录回放得出。带 -Nm 标记表示该持仓读数是多久之前的（各交易员快照时刻不同）。',
     },
 
     traderDashboard: {
@@ -3856,6 +3882,19 @@ export const translations = {
       '7d': '7H',
       '30d': '30H',
       all: 'Semua',
+      zoomHint: 'Scroll untuk zoom · geser untuk pan · klik ganda untuk reset',
+      zoomIn: 'Perbesar',
+      zoomOut: 'Perkecil',
+      panLeft: 'Geser ke awal',
+      panRight: 'Geser ke akhir',
+      reset: 'Reset',
+      positions: 'Posisi',
+      notional: 'Notional',
+      margin: 'Margin',
+      reconShort: 'lokal ',
+      downsampled: 'disampel ulang',
+      notionalNote:
+        'Notional = harga masuk x jumlah, direkonstruksi dari catatan posisi lokal. Tanda -Nm berarti angka posisi sudah selama itu, karena setiap trader mengambil snapshot pada waktu berbeda.',
     },
 
     traderDashboard: {
