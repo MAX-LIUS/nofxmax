@@ -1,6 +1,7 @@
 package trader
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -486,12 +487,109 @@ func (at *AutoTrader) frozenStructBoundaryForPosition(symbol string, entryPrice 
 func (at *AutoTrader) computeStructuralBoundary(symbol string, entryPrice float64, isLong bool, sscfg store.StructuralSLConfig, acfg store.ATRProtectionConfig) (float64, bool) {
 	c := acfg.WithDefaults()
 	ss := sscfg.WithDefaults()
-	// Fetch a little more than the lookback so we can drop the live/forming bar.
+	// Fetch depth: the T1 pivot scan only needs LookbackBars, but the T3 clustered
+	// layer (DetectStructuralLevels) scores levels by touch count and recency, and
+	// its volume-cluster half needs >=20 bars to run at all. Asking for
+	// LookbackBars+4 (28 on the default config) starved that layer into always
+	// returning nothing, which is part of why the ladder used to collapse straight to
+	// the bar-extreme fallback. structuralHistoryBars is the floor for the clustered
+	// layer; the pivot window is still sliced to LookbackBars below so T1's
+	// "nearest, not most extreme" semantics are unchanged.
+	fetch := ss.LookbackBars + 4
+	if fetch < structuralHistoryBars {
+		fetch = structuralHistoryBars
+	}
+	bars, err := market.GetKlines(symbol, c.Timeframe, at.exchange, fetch)
+	if err != nil || len(bars) < 4 {
+		reason := "kline fetch failed"
+		if err == nil {
+			reason = fmt.Sprintf("insufficient bars (%d)", len(bars))
+		}
+		logBoundaryMiss(symbol, isLong, entryPrice, reason, len(bars))
+		return 0, false
+	}
+	// Use the last LookbackBars CLOSED bars (drop the final, still-forming bar).
+	end := len(bars) - 1
+	start := end - ss.LookbackBars
+	if start < 0 {
+		start = 0
+	}
+	window := bars[start:end]
+	// closedBars is the full history minus the forming bar — what the clustered layer
+	// and the order-block finder consume. Passing the raw `bars` there would let the
+	// live, incomplete bar influence a boundary that is supposed to be frozen at entry.
+	closedBars := bars[:end]
+	k := ss.PivotStrength
+	if k < 1 {
+		k = 1
+	}
+
+	// ATR for the tolerance cushion and for T2's internal scale. Computed from the
+	// SAME closed bars the boundary is derived from rather than read from the frozen
+	// per-position ATR: this function runs BEFORE the freeze (it is what produces the
+	// value being frozen), so reaching for the frozen ATR here would be a cold read on
+	// the first call of every position — exactly the case that matters. Using one bar
+	// set for both the level and its cushion also keeps them dimensionally consistent.
+	atrForBoundary := 0.0
+	if len(closedBars) >= c.ATRPeriod+1 {
+		var highs, lows, closes []float64
+		for _, b := range closedBars {
+			highs = append(highs, b.High)
+			lows = append(lows, b.Low)
+			closes = append(closes, b.Close)
+		}
+		atrForBoundary = wilderATRLast(highs, lows, closes, c.ATRPeriod)
+	}
+
+	preferProven := ss.PreferProvenLevels != nil && *ss.PreferProvenLevels
+	pick, ok := selectStructuralBoundary(
+		window, closedBars, entryPrice, atrForBoundary, isLong, k, c.Timeframe,
+		preferProven, at.nearestProvenBoundaryAdapter,
+	)
+	if !ok {
+		logBoundaryMiss(symbol, isLong, entryPrice, "all tiers empty (no level on protective side)", len(bars))
+		return 0, false
+	}
+
+	tol := boundaryTolATR(ss)
+	padded := applyBoundaryTolerance(pick.Price, atrForBoundary, tol, isLong)
+	// The cushion must never cross entry — that would place the stop on the wrong side
+	// of the position and close it instantly. Can only happen when the level sits
+	// within tol×ATR of entry, which the floor clamp downstream would fix anyway, but
+	// returning a wrong-side price here would corrupt the log line above it.
+	if isLong && padded >= entryPrice {
+		padded = pick.Price
+	}
+	if !isLong && padded <= entryPrice {
+		padded = pick.Price
+	}
+	logBoundaryPick(symbol, isLong, entryPrice, atrForBoundary, pick, padded, tol)
+	return padded, true
+}
+
+// structuralHistoryBars is the minimum bar count fetched for boundary resolution.
+// Set by the deepest consumer: DetectStructuralLevels' volume-cluster half needs 20
+// bars, nearestProvenBoundary needs 20 plus ATR(14) warmup, and touch-count scoring
+// is meaningless on a short window. 120 gives every layer real history without a
+// second API round trip.
+const structuralHistoryBars = 120
+
+// nearestProvenBoundaryAdapter adapts the method to the function value
+// selectStructuralBoundary takes, keeping that function free of *AutoTrader so it
+// stays unit-testable without a live trader.
+func (at *AutoTrader) nearestProvenBoundaryAdapter(bars []market.Kline, entryPrice float64, isLong bool, timeframe string) (float64, bool) {
+	return at.nearestProvenBoundary(bars, entryPrice, isLong, timeframe)
+}
+
+// computeStructuralBoundaryLegacy is the pre-ladder implementation, kept only as
+// executable documentation of what the ladder replaced. Not called.
+func (at *AutoTrader) computeStructuralBoundaryLegacy(symbol string, entryPrice float64, isLong bool, sscfg store.StructuralSLConfig, acfg store.ATRProtectionConfig) (float64, bool) {
+	c := acfg.WithDefaults()
+	ss := sscfg.WithDefaults()
 	bars, err := market.GetKlines(symbol, c.Timeframe, at.exchange, ss.LookbackBars+4)
 	if err != nil || len(bars) < 4 {
 		return 0, false
 	}
-	// Use the last LookbackBars CLOSED bars (drop the final, still-forming bar).
 	end := len(bars) - 1
 	start := end - ss.LookbackBars
 	if start < 0 {

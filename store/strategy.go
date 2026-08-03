@@ -744,6 +744,23 @@ type StructuralSLConfig struct {
 	// this fixed ATR distance so a structure-less entry still has a reasonable stop.
 	// Must be <= BackstopATRMul to have any effect. Default 3.0.
 	FallbackATRMul float64 `json:"fallback_atr_mul,omitempty"`
+	// EntryTolATR is the volatility tolerance buffer (ATR multiples) added BEYOND the
+	// structural level when the ENTRY boundary is first frozen, so the stop sits a
+	// cushion past structure rather than exactly on it.
+	//
+	// Why this exists: a stop sitting exactly on the structural level treats "price
+	// touched the level" and "the structure failed" as the same event. Real price
+	// action pokes a level by a tick or two and reclaims it constantly — that is
+	// liquidity hunting, not invalidation. The ratcheting trail has had this cushion
+	// since it shipped (TrailTolATR, default 0.5) but the entry boundary never did,
+	// which is an asymmetry with no justification.
+	//
+	// Default 0.25 — deliberately tighter than TrailTolATR. The entry boundary is the
+	// WIDEST point of the position's risk (nothing is locked in yet), while the trail
+	// runs on a position already in profit where a wider cushion costs less. The
+	// padded boundary still passes through floor/backstop clamping, so this can never
+	// push the stop outside the configured envelope.
+	EntryTolATR float64 `json:"entry_tol_atr,omitempty"`
 	// FallbackRRCapRatio: when the fallback (no near structure) path is taken, the
 	// resulting stop distance must stay BELOW this ratio × the entry's take-profit
 	// target move, i.e. fallbackSL% <= ratio × TP%. This guarantees a minimum
@@ -870,6 +887,15 @@ func (c StructuralSLConfig) WithDefaults() StructuralSLConfig {
 	}
 	if c.FallbackRRCapRatio <= 0 {
 		c.FallbackRRCapRatio = 0.8
+	}
+	// Entry-boundary cushion. A plain float64 cannot distinguish "unset" from an
+	// explicit 0, and every other field here treats 0 as unset, so 0 gets the default
+	// too. Negative is meaningless (it would pull the stop INSIDE the structure and
+	// fire before the level is reached) and is corrected rather than honoured.
+	// Consequence to be aware of: "sit exactly on the structure" is NOT reachable
+	// through config. If that is ever needed it wants a *float64, like TrailMinProfitATR.
+	if c.EntryTolATR <= 0 {
+		c.EntryTolATR = 0.25
 	}
 	// Ratcheting-trail defaults (only meaningful when TrailEnabled).
 	if c.TrailTolATR <= 0 {

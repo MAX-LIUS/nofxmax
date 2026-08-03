@@ -993,7 +993,19 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 			StopPrice:      stopPrice,
 			Quantity:       quantity,
 			Status:         string(order.Status),
-			ClientOrderID:  order.ClientOrderID,
+			ClientOrderID: order.ClientOrderID,
+			// ProtectionRole is decoded from the client id we set at placement. Without
+			// it the shared reconciler can only tell tiers apart BY PRICE (0.2%
+			// tolerance), and the ladder/BE/DD tiers are all derived from the same ATR
+			// multiples so they collide constantly: across 342 production plan
+			// snapshots, 259 (75.7%) contained at least one pair of tiers closer than
+			// that tolerance — break_even vs ladder_tp 345 times, ladder_sl vs
+			// structural_sl 109, ladder_tp vs managed_drawdown 107. Two of those pairs
+			// were byte-identical. A colliding tier gets claimed by the wrong matcher,
+			// falls out of the allowed set, and is cancelled as a stale duplicate:
+			// that is how ZECUSDT's TP1 was cancelled 5 minutes after placement
+			// (2026-08-03, then never re-placed).
+			ProtectionRole: decodeReasonFromClientID(order.ClientOrderID),
 			ProtectionTier: tierFromClientID(order.ClientOrderID),
 		}
 
@@ -1045,7 +1057,10 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 				// stop looked manual/foreign to isLikelyBotProtectionOrder and was
 				// preserved forever — stale stops then accumulated across re-entries
 				// and eventually hit Binance's max stop-order limit (-4045).
-				ClientOrderID:  algoOrder.ClientAlgoId,
+				ClientOrderID: algoOrder.ClientAlgoId,
+				// Same reason as the regular-orders branch above: without a decoded
+				// role, tier identity degrades to price-only matching.
+				ProtectionRole: decodeReasonFromClientID(algoOrder.ClientAlgoId),
 				ProtectionTier: tierFromClientID(algoOrder.ClientAlgoId),
 			}
 
