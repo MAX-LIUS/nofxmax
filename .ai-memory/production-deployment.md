@@ -1,5 +1,51 @@
 # Production Deployment - Critical Information
 
+## 2026-08-02 Deploy: 竞赛对比图时间轴/缩放/持仓浮窗 (pid 711520, commit e235edd)
+
+前后端都动了。后端回滚点 `/root/.claude/jobs/5cbb3cf4/tmp/dbbak/nofx_prev_7215def1_20260802_1750`
+(md5 `7215def1…` = 线上 commit `ede8ea9`),新二进制 md5 `37b07ad1c89eead917a53f17837896d9`,
+`vcs.revision=e235edd`。前端回滚镜像 `nofxmax-nofx-frontend:rollback-pre-chart-20260802`。
+`MainPID=711520` == `pgrep -x nofx`,`NRestarts=0`,health 200 @0.7ms。
+
+**⚠️ 隔离性:必须 cherry-pick,不能直接从 dev HEAD 构建。** 线上是 `ede8ea9`,而
+`ede8ea9..dev` 之间除图表那一笔外还有 **9 个回测引擎 commit**。回测包**不是纯离线的** ——
+`api/handler_blocksim.go` 把 `nofx/trader/backtest` 链进了生产二进制(`go list -deps .` 命中),
+且 `api/server.go:659` 的 `startBlockSimReplayer()` 是常驻后台任务,调用面正是我改过的
+`loader.go` / `portfolio_sim.go` / `model.go`(其中 `realizedPnL()` 漏乘 `exitFrac` 是行为修正,
+会改变 blocksim 的输出数值)。故建 `deploy/chart-only` 分支从 `ede8ea9` 起只摘 `a420a0a`,
+落地 16 个文件、零 `trader/backtest/` 文件。**下次部署前务必先跑
+`git diff --name-only <线上commit>..HEAD` 看清附带了什么。**
+
+**vcs.modified=true 是未跟踪的第三方目录** `coin_direction_final_claude_delivery_2026-07-29/`
+造成的(`git check-ignore` 未命中),不是构建树脏。revision `e235edd` 仍可唯一定位。
+
+部署前基线(01:53 CST 前):7 持仓(GPT 2/claude 3/CR 2),`protected verified=true` 104 次、
+`degraded verified=false` **28** 次。
+部署后核对(01:53→02:08):`protected verified=true` 87 次、**`degraded` 0 次**;0 panic/fatal;
+4 交易员权益快照均正常续写;`Invalid token`/`all endpoints failed`/`Switched to fallback`/`401`
+全 0;`Configured 2 fallback endpoint(s)` 各 trader 均打印;AI 决策与回撤监控循环正常。
+**唯一 ERRO 是既存问题** `drawdown_claim_conflict.go:300`(SPCXUSDT same-tier fork):
+重启前 20/h、重启后 24/h,频率一致 → 与本次无关。
+⚠️ 更正:前一条部署记录写的"≈700/h"不适用于今天,今日实测 20-24/h,勿再照抄。
+
+**端点行为实测(生产,新旧对比见 `competition-chart-timeaxis.md`)**:
+`hours=0`「全部」从旧的 501 点 / 7.5 天变为 1502 点 / **06-16..08-03(48 天)**;
+1D/3D/7D/30D/全部五个区间**各不相同**(旧代码后四个完全相同,都是 07-31 起);
+降采样保峰谷已对数据库真值验证 —— 预算 100000/1500/300 三档下峰 **299.61** / 谷 **138.74**
+与 `SELECT MAX/MIN(total_equity)` 完全一致。持仓字段 `position_count`/`position_count_recon`/
+`position_notional`/`long_notional`/`short_notional`/`margin_used_pct` 均正常返回。
+
+**前端 nginx 坑再次复现**(记忆有效):`docker compose build` 后配置被烤回
+`proxy_pass http://nofx:8080/api/`,必须 `docker exec … sed` 改成 `172.20.0.1:8080`
+再 `docker restart`(不是 recreate)。修前若不改,`/api/` 直接 502。
+三处 bundle hash 一致:线上 index.html / `web/dist/assets` / 容器内均为 `index-N1zLDqyB.js`,
+经前端代理(:3000)调新端点返回 1502 点且含持仓字段。
+
+回滚:后端 `systemctl stop nofx` → `cp nofx_prev_7215def1_20260802_1750 /opt/webstack/nofx/nofx`
+→ `systemctl start nofx`;前端 `docker tag nofxmax-nofx-frontend:rollback-pre-chart-20260802
+nofxmax-nofx-frontend:latest` → `docker compose up -d --no-deps nofx-frontend` → 重做 nginx sed。
+无配置变更,无 DB 迁移(只新增读路径与只读回放),回滚不需恢复任何配置。
+
 ## 2026-08-02 Deploy: 备用端点按 Priority 排序 + 6 端点全通 (pid 641545, commit ede8ea9)
 备份 `/root/.claude/jobs/5cbb3cf4/tmp/dbbak/nofx_prev_5acea85f` (md5 `5acea85f…` = 线上 v1.17.7 / commit `6a817f2`),
 新二进制 md5 `7215def1a329eb1581721af72ebc53de`,`vcs.revision=ede8ea9`。
