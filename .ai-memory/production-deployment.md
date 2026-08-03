@@ -1,5 +1,60 @@
 # Production Deployment - Critical Information
 
+## 2026-08-03 Deploy: 保护档位角色感知匹配 + 计划闸门 + 结构位梯队 (pid 778013, commit 3d91258)
+
+后端 only。回滚点 `/root/.claude/jobs/5cbb3cf4/tmp/binbak/nofx_prev_37b07ad1_20260803_1930`
+(md5 `37b07ad1…` = 线上 commit `e235edd`),新二进制 md5 `b10fe32b1521f839d61713f7a2b2a568`,
+`vcs.revision=3d91258`。`MainPID=778013` == `pgrep -x nofx`(计数 1),`NRestarts=0`,health 200 @2.7ms。
+
+**⚠️ 隔离性教训再次生效**:线上 `e235edd`,而 `e235edd..dev` 又夹进了**同一批 9 个回测 commit**
+(上次特意排除的那批)。`go list -deps .` 仍命中 `nofx/trader/backtest`,`api/server.go:659`
+的 `startBlockSimReplayer()` 仍是常驻任务 → 再次建 `deploy/protection-tier-guard` 从 `e235edd`
+起只 cherry-pick `d8762ec`,落地 **10 个文件、零 `trader/backtest/`**(已用
+`git diff --name-only e235edd..HEAD | grep -c trader/backtest/` 验证 = 0)。
+**结论:图表那次的教训不是一次性的,dev 上只要有回测提交未上线,每次部署都必须走 cherry-pick 分支。**
+
+**修的三个缺陷(同一症状"保护单被误撤且不重挂"的三个独立成因)**:
+1. **档位身份只按价格** → `consumeAllowedProtectionSlot` 改为角色+价格三级匹配
+   (角色+价格 → 无角色槽位 → 角色未知退回纯价格)。前置条件:Binance 适配器之前只解
+   `ProtectionTier` **不解 `ProtectionRole`**,不补这个则改了匹配器也静默退回按价格匹配,
+   75.7% 的碰撞面一动不动(342 份快照 259 份至少一对档位落在 0.2% 容差内)。
+2. **计划闸门** `filterCancelIDsAgainstPlan`:两个 `no re-place` 撤单点都过闸门。判据是
+   **"撤掉会不会让某档失去覆盖"**,不是"价位在计划里" —— 后者会让同价位重复单
+   (TP 成交缩仓后遗留的整仓止损)永久驻留、每轮重复告警且永不收敛。
+3. **TP1 消失的真正机制**(与碰撞无关):`validateProtectionPlanExecution` 在 reconcile 路径
+   是 `quiet=true`,滤掉档位**连日志都没有**且**不登记进容忍名单** → 该档位不在计划里
+   (missing 检测看不到→不重挂)+ 不在 allowed 里(判多余→撤掉)= **永久真空**。
+   现场证据是 07:10:06 那行 `missingTP=false unexpectedTP=1` —— 两个数字同时成立只有这一种解释。
+
+**结构位梯队**(用户要求"按有效性层层退",swing 第一优先):T1 swing 枢轴 → T2 order block
+(之前只当收紧器,仍尊重 `PreferProvenLevels`)→ T3 聚类(**前高前低+成交密集区在这层**,
+走 `DetectStructuralLevels`,≥2 触碰 / ≥30 置信度)→ T4 bar 极值兜底。**斐波那契刻意排除**
+(推导价位,非市场防守过的位)。回看窗 **28→120 根**:T3 的触碰次数/密集区需要历史深度,
+28 根直接把这层饿死 —— 这是 ZEC 边界为空的一部分。已核 OKX `/market/candles` 上限 300、
+Binance 1500,且 `entry_structure_gate.go:182 structuralFetchBars=120` 本就取 120,负载不变。
+`EntryTolATR` 默认 0.25×ATR:止损坐在结构**外侧**一段,不压在位上(压在位上等于把
+"价格触碰"和"结构失效"当同一件事)。
+
+**部署窗口**:仅 1 个持仓(claude HYPEUSDT LONG),风险最低。基线(重启前 15min):
+47 次 `protected verified=true`、0 degraded、0 ERRO、0 panic。
+**部署后核对(19:30→19:50)**:48 次 `protected verified=true`、**degraded 0**、ERRO 0、panic 0;
+HYPEUSDT 5 张挂单全部 `unexpectedSL=0 unexpectedTP=0` —— **这是新匹配器最关键的验证点**
+(若角色匹配误判,这里会立刻冒 unexpected);4 交易员权益快照均续写(11:41-11:46,间隔 20min);
+`Invalid token`/`all endpoints failed`/`Switched to fallback` 全 0。
+⚠️ **"401" 的 13 次命中是 `auto_trader_loop.go:401` 行号误匹配,不是鉴权失败** —— 且这行
+恰好证明 AI 决策循环在跑(symbol 排队 wait)。下次别再被这个 grep 误导。
+⚠️ `protection_ladder_anchor.go:155`(锚点 Rule 1"档位已成交")重启前后频率一致
+(19:2x 53 次 → 19:3x 52 次),是 HYPEUSDT TP1/TP2 的既存行为,**与本次无关**。
+
+**三条新日志(之前 `computeStructuralBoundary` 一行日志都没有,边界为空无法归因)**:
+`🛡 Protection cancel guard`(救回了单 —— 同时是分类器误判的告警)、
+`🧷 Protection plan narrowing`(门禁滤掉但在场)、`🧱 Structural boundary`(命中/未命中)。
+部署后 20min 内三条均为 0:闸门只在救单时打印,结构位日志只在**开仓时**触发,
+而唯一持仓是重启前就开的 → 符合预期,**不代表代码没生效**。
+
+回滚:`systemctl stop nofx` → `cp nofx_prev_37b07ad1_20260803_1930 /opt/webstack/nofx/nofx`
+→ `systemctl start nofx`。无 DB 迁移、无配置变更、无前端改动。
+
 ## 2026-08-02 Deploy: 竞赛对比图时间轴/缩放/持仓浮窗 (pid 711520, commit e235edd)
 
 前后端都动了。后端回滚点 `/root/.claude/jobs/5cbb3cf4/tmp/dbbak/nofx_prev_7215def1_20260802_1750`
