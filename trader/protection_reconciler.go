@@ -280,6 +280,20 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 	// plan so existing collapse/fallback handling still applies.
 	if plan != nil {
 		if executablePlan, vErr := at.validateProtectionPlanExecution(symbol, positionSide, quantity, plan, true); vErr == nil && executablePlan != nil {
+			// 被可执行性门禁滤掉的档位,如果**交易所上还挂着**那张单,必须登记进容忍
+			// 名单 —— 否则该档位既不在计划里(missing 检测看不到它,不会重挂),又不在
+			// allowed 里(分类器把在场那张判成 stale duplicate 撤掉),结果就是
+			// 「撤了且永不重挂」。
+			//
+			// 这是 ZECUSDT TP1 消失的直接机制:07:10:06 那一轮 missingTP=false 且
+			// unexpectedTP=1 —— 两个数字同时成立只有一种解释,就是该档位已被从计划里
+			// 摘掉而它的在场单还在。门禁在 reconcile 路径上是 quiet=true,所以摘除
+			// 连日志都没有,现场只剩这两个自相矛盾的数字。
+			//
+			// 登记为容忍而不是"放回计划":放回计划会让 missing 检测要求它,而门禁下一轮
+			// 仍然滤掉它,于是变成撤一张挂一张的循环(2026-06-22 churn form-2 的原样
+			// 复发)。容忍的语义正好是"这个价位是预期的,但不由 reconciler 挂/撤"。
+			registerDroppedTiersAsTolerated(plan, executablePlan, openOrders, positionSide)
 			plan = executablePlan
 		}
 	}
@@ -461,19 +475,40 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 					result.Summary = "inactive position before stale duplicate cleanup; protection state cleaned"
 					return result, nil
 				}
-				at.cancelUnexpectedProtectionOrdersByID(symbol, unexpectedIDs)
+				// 走计划闸门:仍能对上计划档位价位的委托一律不撤(见
+				// protection_cancel_plan_guard.go)。这条分支明确不补挂,所以它误撤
+				// 一张活档位就是永久真空 —— ZECUSDT TP1 正是这样消失的。
+				toCancel, spared := filterCancelIDsAgainstPlan(unexpectedIDs, openOrders, plan)
+				if len(spared) > 0 {
+					logger.Warnf("🛡 Protection cancel guard: %s %s refusing to cancel %d order(s) still matching a live plan tier [%s] — classified unexpected but the plan still expects this price (kept, never re-placed)",
+						symbol, positionSide, len(spared), strings.Join(spared, ","))
+				}
+				if len(toCancel) == 0 {
+					result.ExchangeVerified = true
+					result.Summary = "all stale candidates spared by plan-tier guard (still expected by plan)"
+					return result, nil
+				}
+				at.cancelUnexpectedProtectionOrdersByID(symbol, toCancel)
 				at.setReconcileCooldown(positionKey(symbol, side))
 				remainingOrders, cleanErr := at.trader.GetOpenOrders(symbol)
 				if cleanErr != nil {
 					return result, fmt.Errorf("verify stale duplicate cleanup open orders: %w", cleanErr)
 				}
-				remStops, remTPs := detectUnexpectedProtectionOrders(remainingOrders, positionSide, plan, beOwnership,
+				// 收尾核验必须扣掉被闸门救下的单,否则它们每轮都会被重新判成"未清理
+				// 干净"并把整轮 reconcile 变成错误返回 —— 闸门本身就成了一个永久失败源。
+				// 用 id 集合比对而不是计数比对:救下的单会稳定复现,而任何**新**的多余
+				// 单仍然要报出来。
+				remIDs := collectUnexpectedProtectionOrderIDs(remainingOrders, positionSide, plan, beOwnership,
 					at.nativeTrailingOwnershipForPosition(symbol, side, entryPrice, nativeTrailingArmed))
-				if remStops > 0 || remTPs > 0 {
-					return result, fmt.Errorf("stale duplicate cleanup incomplete (unexpectedSL=%d unexpectedTP=%d)", remStops, remTPs)
+				if leftover := subtractOrderIDs(remIDs, spared); len(leftover) > 0 {
+					return result, fmt.Errorf("stale duplicate cleanup incomplete (%d unexpected order(s) remain: %s)",
+						len(leftover), strings.Join(leftover, ","))
 				}
 				result.ExchangeVerified = true
 				result.Summary = "canceled stale duplicate protection orders (coverage complete)"
+				if len(spared) > 0 {
+					result.Summary += fmt.Sprintf("; %d spared by plan-tier guard", len(spared))
+				}
 				return result, nil
 			}
 			logger.Warnf("🧹 Protection reconciler: %s %s found unexpected exchange protection orders (unexpectedSL=%d unexpectedTP=%d, planned=%d), staging replacement before cleanup",
@@ -486,21 +521,34 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 				at.setReconcileCooldown(positionKey(symbol, side))
 				return result, fmt.Errorf("stage replacement before cleanup: %w", err)
 			}
-			at.cancelUnexpectedProtectionOrdersByID(symbol, unexpectedIDs)
+			// 同一道计划闸门也用在补挂后的清理上。这条路径虽然先补挂再撤,但补挂是
+			// 「按计划挂一遍」,被误判的那张单如果价位仍在计划里,补挂会因等价判定
+			// (hasExistingEquivalentProtection)跳过它,随后这里把它撤掉 —— 结果同样
+			// 是真空。所以闸门两条路径都要过。
+			postToCancel, postSpared := filterCancelIDsAgainstPlan(unexpectedIDs, openOrders, plan)
+			if len(postSpared) > 0 {
+				logger.Warnf("🛡 Protection cancel guard: %s %s refusing to cancel %d order(s) still matching a live plan tier [%s] (staged-replacement path)",
+					symbol, positionSide, len(postSpared), strings.Join(postSpared, ","))
+			}
+			at.cancelUnexpectedProtectionOrdersByID(symbol, postToCancel)
 			remainingOrders, cleanErr := at.trader.GetOpenOrders(symbol)
 			if cleanErr != nil {
 				at.setReconcileCooldown(positionKey(symbol, side))
 				return result, fmt.Errorf("verify unexpected cleanup open orders: %w", cleanErr)
 			}
-			remainingUnexpectedStops, remainingUnexpectedTPs := detectUnexpectedProtectionOrders(remainingOrders, positionSide, plan, beOwnership,
+			remainingIDs := collectUnexpectedProtectionOrderIDs(remainingOrders, positionSide, plan, beOwnership,
 				at.nativeTrailingOwnershipForPosition(symbol, side, entryPrice, nativeTrailingArmed))
-			if remainingUnexpectedStops > 0 || remainingUnexpectedTPs > 0 {
+			if leftover := subtractOrderIDs(remainingIDs, postSpared); len(leftover) > 0 {
 				at.setReconcileCooldown(positionKey(symbol, side))
-				return result, fmt.Errorf("unexpected cleanup incomplete after replacement (unexpectedSL=%d unexpectedTP=%d)", remainingUnexpectedStops, remainingUnexpectedTPs)
+				return result, fmt.Errorf("unexpected cleanup incomplete after replacement (%d remain: %s)",
+					len(leftover), strings.Join(leftover, ","))
 			}
 			at.setReconcileCooldown(positionKey(symbol, side))
 			result.ExchangeVerified = true
 			result.Summary = "staged replacement before cleaning unexpected protection"
+			if len(postSpared) > 0 {
+				result.Summary += fmt.Sprintf("; %d spared by plan-tier guard", len(postSpared))
+			}
 			return result, nil
 		}
 
@@ -891,16 +939,68 @@ func isUnexpectedProtectionOrder(order OpenOrder, summary unexpectedProtectionSu
 	return false
 }
 
-func consumeAllowedProtectionPrice(prices *[]float64, actual float64) bool {
-	if prices == nil || actual <= 0 {
+// protectionRoleOfOrder returns the CANONICAL mechanism the exchange order belongs to,
+// or "" when it cannot be determined.
+//
+// Only roles that are registered mechanisms (store.CodeForReason resolves them) are
+// returned. That filter matters because enrichProtectionOrders back-fills an EMPTY
+// ProtectionRole with the coarse bucket ("stop_loss" / "take_profit" / "trailing" /
+// "unknown"), and treating those as mechanisms would make every stop look like it
+// belongs to a mechanism named "stop_loss" — matching nothing and turning legitimate
+// orders into stale duplicates. Unresolvable roles return "", which the matcher treats
+// as "any" so behaviour degrades to the pre-existing price-only match.
+func protectionRoleOfOrder(order OpenOrder) string {
+	role := store.NormalizeMechanism(order.ProtectionRole)
+	if role != "" && store.CodeForReason(role) != "" {
+		return role
+	}
+	return ""
+}
+
+// consumeAllowedProtectionSlot claims the plan slot that matches this order and removes
+// it, so two live orders can never both be explained by one plan tier.
+//
+// Matching is price AND role. Price alone was the old rule, and with a 0.2% tolerance
+// over tiers all derived from the same ATR multiples, collisions are the norm rather
+// than the exception (75.7% of 342 production snapshots had at least one colliding
+// pair). A cross-consumed slot leaves the real owner matching nothing, which classifies
+// it stale_bot_duplicate and gets it cancelled — that is how a live TP1 was cancelled
+// 5 minutes after placement and never re-placed.
+//
+// Preference order, so a stricter rule never rejects an order the old rule accepted:
+//  1. same price AND same role — the unambiguous case
+//  2. same price AND slot has no recorded role ("any") — tolerance-list entries
+//  3. same price, order role unknown (legacy / undecodable client id) — old behaviour
+//
+// A known order role that disagrees with every same-price slot's role returns false on
+// purpose: the order is not that tier, and the downstream dynamic-owner checks
+// (break-even / trailing claim sets) are what should explain it.
+func consumeAllowedProtectionSlot(slots *[]allowedProtectionSlot, actual float64, role string) bool {
+	if slots == nil || actual <= 0 {
 		return false
 	}
-	for i, expected := range *prices {
-		if approximatelyEqualPrice(actual, expected) {
-			items := *prices
-			items = append(items[:i], items[i+1:]...)
-			*prices = items
-			return true
+	items := *slots
+	take := func(i int) bool {
+		*slots = append(items[:i], items[i+1:]...)
+		return true
+	}
+	if role != "" {
+		for i, slot := range items {
+			if slot.Role == role && approximatelyEqualPrice(actual, slot.Price) {
+				return take(i)
+			}
+		}
+	}
+	for i, slot := range items {
+		if slot.Role == "" && approximatelyEqualPrice(actual, slot.Price) {
+			return take(i)
+		}
+	}
+	if role == "" {
+		for i, slot := range items {
+			if approximatelyEqualPrice(actual, slot.Price) {
+				return take(i)
+			}
 		}
 	}
 	return false
