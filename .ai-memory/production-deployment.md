@@ -1,5 +1,82 @@
 # Production Deployment - Critical Information
 
+## 2026-08-04 Deploy: 挂单量档位归属 + 动态武装记忆不被擦除 (pid 815160, commit f997a6a)
+
+后端 only。回滚点 `/root/.claude/jobs/5cbb3cf4/tmp/binbak/nofx_prev_3d91258_20260804_0240`
+(md5 `b10fe32b1521f839d61713f7a2b2a568` = 线上 commit `3d91258`),新二进制
+md5 `34b3c1a12de4c40225d6e3b393d4f14d`,`vcs.revision=f997a6ab`。
+`MainPID=815160` == `pgrep -x nofx`(计数 1),`NRestarts=0`,health 200 @1.2ms。
+分支 `deploy/protection-arm-memory` 从 **3d91258**(线上 commit)起 cherry-pick
+dev 上的 `dd65899`+`6f19929`,落地 4 个文件、零 `trader/backtest/`
+(`git diff --name-only e235edd..HEAD | grep -c trader/backtest/` = 0)。
+dev 上那 9 个回测 commit 仍未上线,**每次部署仍必须走 cherry-pick 分支**。
+
+**修的是一条完整因果链**(线上 SOLUSDT long claude-hhhl/OKX,23:01:47 起 **2.5 小时
+654 次 reclaim + 438 轮 degraded** 未收敛,面板全红而交易所侧 5 张保护单一直都在场):
+
+1. `22:57` **qty resize 误撤邻档 TP**(根因起点)。TP1(73.6931,目标 0.084)与
+   TP2(73.7761,在场 0.06)相距 **0.1126%**,落在 `protectionPriceTolerancePct`
+   0.2% 容差内。TP1 自己那张成交后,TP1 的档位目标把 TP2 的单当成自己的覆盖,
+   判 `covers 0.06 of 0.084 (71.4%)` → 撤 → 重挂 → 复读;"取量最小的候选"保证
+   每轮受害者都是无辜的小邻档。第 4 轮撞 OKX `51279`。
+   **教训:价格容差只能识别"是不是同一档",绝不能用来"区分相邻档"** —— 相邻档
+   本来就可能比容差更近。改为 `nearestQtyTargetForOrders` 唯一归属 + 角色排除矛盾。
+   日志措辞也修了:原文写 `after position grew`,而同一秒的日志是
+   `📉 Partial close: 0.420000 → 0.340000`,与事实直接矛盾。
+2. `22:59:09` 重挂被拒 → reconciler 把 `protectionState` 写成 `reconcile_failed: …`
+   → **覆盖掉 `native_trailing_armed`**;`23:01:47` 起再被改写成
+   `exchange_protection_verified`,武装记忆永久丢失。
+3. **死锁**:`protectionState` 是 AutoTrader 上的**内存 map**(不持久化),账本是
+   持久化的。两者不一致后 —— 账本 armed 让武装路径判"已 armed,跳过重新武装"
+   (`auto_trader_risk.go:1458` 的 `armedFingerprints` **只读账本、从不设内存状态**),
+   内存 false 让 `classifyTrailing` **第一行 `if !o.Armed` 就 return false** →
+   在场 trailing 单每轮记成 `staleTrail` → degraded → reclaim 重写账本 → 复读。
+   **谁都不会去修对方。**
+   ⚠️ 这也解释了此前查不通的 `claimedTrail=1` 与 `staleTrail=1` **并存**:
+   认领集合里确实有那张单,但 `Armed=false` 让判断根本没走到集合那一步。
+
+**⚠️ 必须诚实记录:churn 停下来不是新加的 rehydrate 的功劳。**
+`🩹` 日志部署后至今 **0 次**。重启清空内存 map 后,是**早已存在**的启动恢复路径
+`auto_trader.go:658-666` 从账本把 5 个仓位全部设回 `native_trailing_armed`
+(连"全平档优先于部分档"的优先级都和新写的一致)。所以:
+- **真正治本的是第 ① 和第 ② 条**(不再误撤 + 失败不擦记忆),消除死锁的**成因**;
+- `rehydratedNativeTrailingState` 在**重启路径上是冗余的**,只在"运行中被改写、
+  没重启"那条路上才有价值(即 SOL 这次的形态)。它比启动恢复**更严**:要求账本
+  armed **且** 该 orderID 确实在交易所在场且是 TRAILING 单。
+  ⚠️ **既有风险(本次没动)**:`auto_trader.go:658-666` 只读账本、不验交易所,
+  陈旧 armed 记录会掩蔽 `missingTP` → 该补的止盈永远不补。下次碰这块时优先修它。
+- `supersedeOlderArmedRecords` 的 `continue` 缺口修复**本次未被触发**(churn 停了就
+  不再 persist,`🗂 Superseded` = 0)。SOL 那两条只差仓位数量的 armed 记录**仍在账本里**
+  (都指向 ...704,同档同单,无害),等仓位平掉由
+  `DeleteDynamicProtectionRecordsForInactive` 清理,或下次真武装时收敛。
+
+**基线(02:25-02:40)→ 部署后(02:44-02:59)**:
+`protected verified=true` 432 → 441;**degraded 48 → 0**;**SOL reclaim 48 → 0**;
+ERRO 0 → 0;panic 0 → 0;`missingSL/TP=true` 0 → 0;`unexpectedSL/TP≠0` 0 → 0;
+`Invalid token`/`all endpoints failed`/`Switched to fallback` 全 0。
+5 个持仓(BTC/ETH/SKHYNIX/SOL LONG + XAU SHORT)全部 `state=protected verified=true`。
+SOL 从 `degraded staleTrail=1 dynamicOwner=1(trail=0 be=1)` 变为
+`protected staleTrail=0 dynamicOwner=2(trail=1 be=1)`。
+⚠️ 基线 48 degraded 与 48 次 SOL reclaim **一一对应** —— degraded 全部来自 SOL,
+其余 4 仓位当时就是干净的。别把这 48 当成全局劣化。
+
+**门禁**:`go build`/`go vet` 干净;全量 `go test`(排除 `trader/backtest`)**22 包全绿
+EXIT=0**;14 个新用例;**四处修复各做破坏性验证**,还原任一处都能让对应用例转红
+(这是唯一能证明用例真的在钉不变量的方法,不能只看"测试通过")。
+改动的 4 个文件 `gofmt` 干净(仓库基线本来就有 75 个未格式化文件,与本次无关)。
+
+**两个被验证推翻的提议(记下来避免重走)**:
+- 「把 `native_trailing` 纳入 store 层独占组」**会破坏真实不变量**:
+  `TestDynamicProtectionStateKeepsNativeTrailingTiersArmed` 转红,两个并存的
+  partial 档会互相降级。多档 trailing 并存是正常态,不是重复。
+- 「`dynamicProtectionStageFromFingerprint` 的 `parts[4]` 应改 `parts[5]`」**是死代码**:
+  该函数只在 `singletonDynamicProtectionGroup` 返回非空时可达,而它只对
+  `break_even_stop` 返回非空 —— BE 指纹正好 5 字段,`parts[4]` 就是 stage;
+  DD 的 11 字段指纹永远走不到那里。
+
+回滚:`systemctl stop nofx` → `cp nofx_prev_3d91258_20260804_0240 /opt/webstack/nofx/nofx`
+→ `systemctl start nofx`。无 DB 迁移、无配置变更、无前端改动。
+
 ## 2026-08-03 Deploy: 保护档位角色感知匹配 + 计划闸门 + 结构位梯队 (pid 778013, commit 3d91258)
 
 后端 only。回滚点 `/root/.claude/jobs/5cbb3cf4/tmp/binbak/nofx_prev_37b07ad1_20260803_1930`
