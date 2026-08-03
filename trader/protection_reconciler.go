@@ -89,7 +89,26 @@ func (at *AutoTrader) reconcilePositionProtections() {
 		result, err := at.reconcileProtectionForPosition(symbol, side, quantity, entryPrice, markPrice)
 		if err != nil {
 			logger.Infof("❌ Protection reconciler: %s %s reconcile failed: %v", symbol, side, err)
-			at.setProtectionState(symbol, side, "reconcile_failed: "+err.Error())
+			// 一次对账失败**不能**擦掉动态保护的武装记忆。这一格是唯一的进度记忆,
+			// 而 reconcile_failed 不属于 isDynamicDrawdownArmState,写进去之后:
+			//   nativeTrailingArmed=false → classifyTrailing 直接判"不是我的"
+			//   → 在场的 trailing 单每轮被记为 staleTrail → state=degraded;
+			//   而账本还是 armed,于是"已 armed,跳过重新武装"—— 状态永远回不来,
+			//   死锁成立,reclaim 每 ~20s 重写账本一次,永不收敛。
+			//
+			// 2026-08-03 线上 SOLUSDT long 的完整链条:22:59:09 挂单被 OKX 拒
+			// (51279) → 这里写 reconcile_failed → 覆盖掉 native_trailing_armed
+			// → 23:01:47 起 438 轮 degraded + 433 次 reclaim,直到本次修复。
+			//
+			// 失败本身不丢:err 已经打进日志,而且下一轮会重新对账。真正需要清掉
+			// 武装记忆的场合(仓位换了指纹)由 reconcileProtectionForPosition 内部
+			// 那段"belongs to an old position fingerprint"负责,那里有账本做依据。
+			prev := at.getProtectionState(symbol, side)
+			if next := protectionStateAfterReconcileFailure(prev, err); next != "" {
+				at.setProtectionState(symbol, side, next)
+			} else {
+				logger.Infof("🟣 Protection reconciler: %s %s keeping dynamic arm state=%s across reconcile failure", symbol, side, prev)
+			}
 			continue
 		}
 
@@ -152,6 +171,72 @@ func (at *AutoTrader) describeProtectionSnapshot(symbol, side string, openOrders
 	return strings.Join(parts, " | ")
 }
 
+// protectionStateAfterReconcileFailure 返回对账失败后应写入 protectionState 的值,
+// 返回 "" 表示**不要写**(保留原值)。
+//
+// 抽成纯函数是为了能直接钉住这条不变量,而不必搭出整个 AutoTrader:
+// 动态保护的武装进度只由武装/解除路径改写,对账失败不是解除。
+func protectionStateAfterReconcileFailure(previous string, err error) string {
+	if err == nil {
+		return ""
+	}
+	if isDynamicDrawdownArmState(previous) {
+		return ""
+	}
+	return "reconcile_failed: " + err.Error()
+}
+
+// rehydratedNativeTrailingState 在内存里的武装记忆丢了、但账本+交易所都证明这一档
+// 还活着时,返回应当恢复的 protectionState;无证据时返回 ""。
+//
+// 为什么必须有它:protectionState 是 AutoTrader 上的**内存 map**,不持久化,而账本是
+// 持久化的。两者一旦不一致就会死锁 —— 账本 armed 让武装路径跳过("已 armed"),
+// 内存 false 让分类器把在场单判成无主(staleTrail → degraded)。谁都不会去修对方。
+// 已知两条进入路径:
+//  1. 进程重启(每次部署都会发生,持仓中的 trailing 档位必然踩到);
+//  2. 任何把这一格写成非动态状态的代码路径(上面 reconcile_failed 那条已修)。
+//
+// 恢复的判据必须是**双重实证**,不能只看账本:armed 记录认领的 orderID 必须真的在
+// 交易所在场挂单里、且确实是一张 TRAILING 单。只看账本会让陈旧 armed 记录(单子早已
+// 成交/被撤)把 missingTP 掩蔽掉,那是"该补的 TP 永远不补"—— 比死锁更危险。
+func (at *AutoTrader) rehydratedNativeTrailingState(symbol, side string, entryPrice, quantity float64, openOrders []OpenOrder) string {
+	live := make(map[string]struct{}, len(openOrders))
+	for _, o := range openOrders {
+		if o.OrderID == "" || !strings.Contains(strings.ToUpper(o.Type), "TRAILING") {
+			continue
+		}
+		live[o.OrderID] = struct{}{}
+	}
+	if len(live) == 0 {
+		return ""
+	}
+	var sawFull, sawPartial bool
+	for _, record := range at.getArmedDrawdownRecordsForPosition(symbol, side, entryPrice, quantity, 0) {
+		if record.ExchangeOrderID == "" {
+			continue
+		}
+		if _, ok := live[record.ExchangeOrderID]; !ok {
+			continue
+		}
+		switch record.ProtectionType {
+		case "native_trailing":
+			sawFull = true
+		case "native_partial_trailing":
+			sawPartial = true
+		}
+	}
+	// 全平档优先:两档并存时全平档的语义更强(它掩蔽 missingTP 是对的 —— 整个仓位
+	// 都由那张 trailing 兜着)。用显式优先级而不是 range 里先命中谁,否则 map 的
+	// 遍历顺序会让恢复出来的状态在两个值之间随机抖动。
+	if sawFull {
+		return "native_trailing_armed"
+	}
+	if sawPartial {
+		return "native_partial_trailing_armed"
+	}
+	return ""
+}
+
 func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quantity, entryPrice, markPrice float64) (protectionReconcileResult, error) {
 	result := protectionReconcileResult{}
 	positionSide := strings.ToUpper(side)
@@ -167,6 +252,17 @@ func (at *AutoTrader) reconcileProtectionForPosition(symbol, side string, quanti
 			logger.Infof("🟣 Protection reconciler: %s %s native trailing state belongs to an old position fingerprint, re-arming current position", symbol, positionSide)
 			currentProtectionState = ""
 			at.clearProtectionState(symbol, side)
+		}
+	} else if !isDynamicDrawdownArmState(currentProtectionState) {
+		// 反方向对齐:上面处理"状态说 armed、账本没记录",这里处理"账本+交易所都说
+		// 还活着、内存状态丢了"。两者缺一个就是单向的,而死锁恰好发生在缺的那一侧。
+		//
+		// 只在这一格**不是**任何动态武装状态时才恢复:managed 的武装记忆不能被
+		// native 覆盖(managed 那几个状态本身就意味着交易所侧没有活单可认领)。
+		if restored := at.rehydratedNativeTrailingState(symbol, side, entryPrice, quantity, openOrders); restored != "" {
+			logger.Warnf("🩹 Protection reconciler: %s %s native trailing arm memory was lost (state=%q) but the ledger still owns a live trailing order — restoring state=%s", symbol, positionSide, currentProtectionState, restored)
+			currentProtectionState = restored
+			at.setProtectionState(symbol, side, restored)
 		}
 	}
 
@@ -1245,8 +1341,17 @@ func (at *AutoTrader) supersedeOlderArmedRecords(current store.DynamicProtection
 		if record.ExchangeOrderID == current.ExchangeOrderID {
 			// 同一张交易所单被两条**不同档**的 armed 记录同时认领 —— 账本自相矛盾,
 			// 必须当场收敛。见 supersedeConflictingOrderClaim 的注释。
-			at.supersedeConflictingOrderClaim(record, current)
-			continue
+			//
+			// 它返回 false 只有一种情形:**同档同单**(账本因仓位数量分叉出两条同档
+			// armed 记录)。那种情形本函数下面的窄匹配才是负责人 —— 以前这里无条件
+			// continue,把窄匹配整段跳过了,于是两条路互相推诿、谁都不退役旧记录
+			// (2026-08-03 线上 SOLUSDT long 的账本腐烂环节)。
+			// 反过来:它已经动过手(或明确判定与本对无关)时必须 continue,否则
+			// 同一对记录会被两套规则各判一次,极端情况下两条都被标 superseded ——
+			// 那张活单就变成**零个 armed 主人**,比重复认领更危险。
+			if at.supersedeConflictingOrderClaim(record, current) {
+				continue
+			}
 		}
 		if record.TraderID != current.TraderID || record.ProtectionType != current.ProtectionType {
 			continue
@@ -1291,26 +1396,35 @@ func (at *AutoTrader) supersedeOlderArmedRecords(current store.DynamicProtection
 // 收敛规则:新写入的这条(current)胜。它是刚刚发生的事实(挂单成功/认领成功),
 // 旧的那条只是对同一张单的陈旧解释。不比 UpdatedAt —— 不变量是绝对的,不是"看谁更新"。
 // 只在两条记录**档位身份不同**时动手:同档的陈旧分叉交给上面的窄匹配按时序处理。
-func (at *AutoTrader) supersedeConflictingOrderClaim(record, current store.DynamicProtectionRecord) {
+//
+// 返回值 = "这一对已经处理完,调用方不要再往下走"。返回 false 只有一种含义:
+// **同档同单**,本函数明确不管,必须由窄匹配按时序退役旧的那条。
+//
+// 为什么要有这个返回值(2026-08-03 线上 SOLUSDT long):调用方以前在"同一 orderID"
+// 分支里无条件 continue,而本函数在同档时第一时间 return —— 两条路互相推诿,
+// 同档同单的重复 armed 记录**谁都不退役**。SOL 那两条 armed 记录(只差
+// position_fingerprint 里的仓位数量)因此在账本里并存了 2.5 小时,全仓库
+// 一条 "🗂 Superseded" 日志都没有。
+func (at *AutoTrader) supersedeConflictingOrderClaim(record, current store.DynamicProtectionRecord) bool {
 	if current.ExchangeOrderID == "" || record.ExchangeOrderID != current.ExchangeOrderID {
-		return
+		return true
 	}
 	if record.TraderID != current.TraderID {
-		return
+		return true
 	}
 	if !strings.EqualFold(record.Symbol, current.Symbol) || !strings.EqualFold(record.Side, current.Side) {
-		return
+		return true
 	}
 	if drawdownRuleIdentity(record.RuleFingerprint) == drawdownRuleIdentity(current.RuleFingerprint) &&
 		record.ProtectionType == current.ProtectionType {
-		return
+		return false
 	}
 	// 幂等闸:两条记录只要有一条已经不是 armed,冲突就已经收敛过了 —— 不变量
 	// "一张活单只有一个 armed 主人"已经成立,不需要再写库、也不该再打日志。
 	// 没有这道闸,已收敛的状态每轮仍会重复落盘 + 重复打 WARN,读日志的人会以为
 	// 还在翻转(线上那 53 行里有相当一部分就是这种"已经定局却仍在喊"的噪音)。
 	if record.Status != "armed" || current.Status != "armed" {
-		return
+		return true
 	}
 	// 保本档之间的跨档冲突(BE1 与 BE2 抢同一张 _sl)必须用**与写入顺序无关**的规则收敛,
 	// 否则两个 writer 交替调用本函数时,"current 胜"会让双方轮流被标 superseded —— 每轮
@@ -1345,23 +1459,24 @@ func (at *AutoTrader) supersedeConflictingOrderClaim(record, current store.Dynam
 			superseded.Status = "superseded"
 			if err := at.store.SaveDynamicProtectionRecord(superseded); err != nil {
 				logger.Warnf("⚠️ Dynamic protection state: failed to supersede conflicting claim on order %s (%s %s): %v", current.ExchangeOrderID, current.Symbol, current.Side, err)
-				return
+				return true
 			}
 			logger.Warnf("🧾 Ownership conflict resolved: exchange order %s was claimed by TWO tiers (%s ruleID=%s superseded ← %s ruleID=%s kept, deterministic tier order) on %s %s — one live order must have exactly one owner",
 				current.ExchangeOrderID, current.ProtectionType, currentID,
 				record.ProtectionType, recordID, current.Symbol, current.Side)
-			return
+			return true
 		}
 	}
 	superseded := record
 	superseded.Status = "superseded"
 	if err := at.store.SaveDynamicProtectionRecord(superseded); err != nil {
 		logger.Warnf("⚠️ Dynamic protection state: failed to supersede conflicting claim on order %s (%s %s): %v", record.ExchangeOrderID, record.Symbol, record.Side, err)
-		return
+		return true
 	}
 	logger.Warnf("🧾 Ownership conflict resolved: exchange order %s was claimed by TWO tiers (%s ruleID=%s superseded ← %s ruleID=%s kept) on %s %s — one live order must have exactly one owner",
 		record.ExchangeOrderID, record.ProtectionType, drawdownRuleIdentity(record.RuleFingerprint),
 		current.ProtectionType, drawdownRuleIdentity(current.RuleFingerprint), record.Symbol, record.Side)
+	return true
 }
 
 // getPositionDetailsForFingerprint 返回 (仓位数量, 开仓时间戳)。
