@@ -7,7 +7,6 @@ import type {
   CompetitionData,
   PositionHistoryResponse,
   OpenOrder,
-  EvolutionProfile,
   GateBlockEntry,
   CloseAttributionResponse,
   FlipObservationsResponse,
@@ -225,31 +224,11 @@ export const dataApi = {
     return result.data!
   },
 
-  async getEvolutionProfiles(traderId: string): Promise<EvolutionProfile[]> {
-    const result = await httpClient.get<EvolutionProfile[]>(
-      `${API_BASE}/evolution/profiles?trader_id=${traderId}`
-    )
-    if (!result.success) return []
-    return result.data || []
-  },
-
   async getGateBlocks(traderId: string, limit = 50): Promise<GateBlockEntry[]> {
     const result = await httpClient.get<{ blocks: GateBlockEntry[] }>(
       `${API_BASE}/gate-blocks?trader_id=${traderId}&limit=${limit}`
     )
     if (!result.success) return []
     return result.data?.blocks || []
-  },
-
-  async resetEvolutionProfile(
-    traderId: string,
-    symbol: string,
-    side: string
-  ): Promise<boolean> {
-    const result = await httpClient.post<{ message: string }>(
-      `${API_BASE}/evolution/reset`,
-      { trader_id: traderId, symbol, side }
-    )
-    return result.success
   },
 }

@@ -12,7 +12,6 @@ import { ExpectancyPanel } from '../components/trader/ExpectancyPanel'
 import { CloseAttributionPanel } from '../components/trader/CloseAttributionPanel'
 import { FlipObservationsPanel } from '../components/trader/FlipObservationsPanel'
 import { BreakerHistoryPanel } from '../components/trader/BreakerHistoryPanel'
-import { EvolutionProfilePanel } from '../components/trader/EvolutionProfilePanel'
 import { InsightPanel } from '../components/trader/InsightPanel'
 const PositionHistory = lazy(() =>
   import('../components/trader/PositionHistory').then((m) => ({
@@ -1044,13 +1043,6 @@ export function TraderDashboardPage({
                   disableAutoRefresh={false}
                 />
               </Suspense>
-              {/* Coin evolution summary below chart */}
-              {selectedChartSymbol && selectedTraderId && (
-                <CoinProfileSummary
-                  traderId={selectedTraderId}
-                  symbol={selectedChartSymbol}
-                />
-              )}
             </div>
 
             {/* Current Positions */}
@@ -1607,7 +1599,6 @@ export function TraderDashboardPage({
                 section="stats"
               />
             </Suspense>
-            <EvolutionProfilePanel traderId={selectedTraderId} />
           </div>
         )}
 
@@ -1663,11 +1654,7 @@ export function TraderDashboardPage({
 
         {/* Smart Insights Panel */}
         {selectedTraderId && decisions && (
-          <InsightPanel
-            traderId={selectedTraderId}
-            decisions={decisions}
-            language={language}
-          />
+          <InsightPanel decisions={decisions} language={language} />
         )}
       </div>
     </DeepVoidBackground>
@@ -2084,70 +2071,5 @@ function SystemHealthCard({
   )
 }
 
-function CoinProfileSummary({
-  traderId,
-  symbol,
-}: {
-  traderId: string
-  symbol: string
-}) {
-  const [summary, setSummary] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!traderId || !symbol) {
-      setSummary(null)
-      return
-    }
-    api
-      .getEvolutionProfiles(traderId)
-      .then((profiles) => {
-        const matching = profiles.filter(
-          (p) =>
-            p.symbol === symbol ||
-            p.symbol === symbol.replace('USDT', '') + 'USDT'
-        )
-        if (matching.length === 0) {
-          setSummary(null)
-          return
-        }
-
-        const parts: string[] = []
-        for (const p of matching) {
-          const avgScore =
-            p.factors?.length > 0
-              ? Math.round(
-                  p.factors.reduce((s, f) => s + f.score, 0) / p.factors.length
-                )
-              : 0
-          const topInsight = p.factors?.find(
-            (f) =>
-              f.insight && f.sample_size >= 5 && (f.score < 35 || f.score > 65)
-          )
-          let line = `${p.side.toUpperCase()} ${avgScore}/100`
-          if (topInsight?.insight) line += ` · ${topInsight.insight}`
-          if (p.adaptations?.length > 0)
-            line += ` · ${p.adaptations.length}个调整`
-          parts.push(line)
-        }
-        setSummary(parts.join(' | '))
-      })
-      .catch(() => setSummary(null))
-  }, [traderId, symbol])
-
-  if (!summary) return null
-
-  return (
-    <div
-      className="mt-2 px-3 py-2 rounded-lg text-[11px] text-nofx-text-muted"
-      style={{
-        background: 'rgba(99,102,241,0.05)',
-        border: '1px solid rgba(99,102,241,0.15)',
-      }}
-    >
-      <span className="text-indigo-300 font-medium mr-2">
-        🧬 {symbol.replace('USDT', '')}
-      </span>
-      {summary}
-    </div>
-  )
-}
+// (removed 2026-08-04) CoinProfileSummary rendered the 🧬 evolution-profile
+// strip under the chart. The coin evolution engine is gone.

@@ -186,7 +186,6 @@ export interface StrategyConfig {
   entry_structure?: EntryStructureConfig
   prompt_sections?: PromptSectionsConfig
   strategy_control_policy?: StrategyControlPolicyConfig
-  evolution?: EvolutionConfig
   // Grid trading configuration (only used when strategy_type is 'grid_trading')
   grid_config?: GridStrategyConfig
   // Breakout entry configuration (only used when strategy_type is 'breakout_trading')
@@ -239,16 +238,6 @@ export interface BreakoutEntryConfig {
   leverage?: number
   // Position size as a fraction of equity (1.0 = 100% of equity notional).
   size_equity_frac?: number
-}
-
-export interface EvolutionConfig {
-  enabled: boolean
-  half_life_days?: number
-  min_sample_size?: number
-  adaptation_ttl_days?: number
-  score_threshold_low?: number
-  score_threshold_high?: number
-  inject_to_prompt?: boolean
 }
 
 export type ProtectionMode = 'disabled' | 'manual' | 'ai'

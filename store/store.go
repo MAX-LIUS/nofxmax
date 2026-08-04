@@ -37,7 +37,6 @@ type Store struct {
 	order                  *OrderStore
 	grid                   *GridStore
 	aiCharge               *AIChargeStore
-	evolution              *EvolutionStore
 	telegramConfig         TelegramConfigStore
 
 	mu sync.RWMutex
@@ -197,9 +196,11 @@ func (s *Store) initTables() error {
 	if err := s.AICharge().initTables(); err != nil {
 		return fmt.Errorf("failed to initialize AI charge tables: %w", err)
 	}
-	if err := s.Evolution().AutoMigrate(); err != nil {
-		return fmt.Errorf("failed to initialize evolution tables: %w", err)
-	}
+	// NOTE: the coin evolution profile engine was removed on 2026-08-04. It fed a
+	// per-coin "Historical Performance Profile" into the AI prompt and mechanically
+	// scaled position size from past outcomes, which hardened the system's technical
+	// bias over time. The coin_evolution_profiles table is intentionally left in
+	// place (no data deletion); nothing reads or writes it any more.
 	// 统一保护系统表迁移
 	if err := MigrateUnifiedProtection(s.db); err != nil {
 		return fmt.Errorf("failed to initialize unified protection tables: %w", err)
@@ -367,16 +368,6 @@ func (s *Store) BlockedSim() *BlockedSimStore {
 		s.blockedSim = NewBlockedSimStore(s.gdb)
 	}
 	return s.blockedSim
-}
-
-// Evolution gets evolution engine storage
-func (s *Store) Evolution() *EvolutionStore {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.evolution == nil {
-		s.evolution = NewEvolutionStore(s.gdb)
-	}
-	return s.evolution
 }
 
 // Strategy gets strategy storage
