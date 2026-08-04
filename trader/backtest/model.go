@@ -352,6 +352,17 @@ type Entry struct {
 	// level distances (TP/BE/DD/backstop and the boundary clamp) stay pinned to the 1h
 	// ATR. That removes the ATR-shrink confound of a whole-engine small-TF replay.
 	ATROverride float64
+
+	// MaxHoldHoursOverride, when > 0, replaces CloseProxy.MaxHoldHours for THIS entry
+	// only. Exists for the max-hold PLACEBO: the real rule is conditional (fire at H
+	// hours only if pnl% < exempt), so a placebo that cuts at a random time
+	// UNCONDITIONALLY would vary two things at once (when to cut AND which trades get
+	// cut) and its difference from the real rule could not be attributed. Randomising
+	// only H per entry — with the exemption left intact — isolates "does the specific
+	// hour threshold carry information" from "does truncating a losing ledger help",
+	// which is the confound registered in equity-circuit-breaker (arbitrary truncation
+	// flatters a negative book). Zero (default) keeps the global parameter.
+	MaxHoldHoursOverride float64
 }
 
 // TradeResult is the outcome of replaying one entry under a ProtectionParams.

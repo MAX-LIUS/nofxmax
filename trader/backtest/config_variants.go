@@ -1,6 +1,9 @@
 package backtest
 
-import "strconv"
+import (
+	"math"
+	"strconv"
+)
 
 // config_variants.go builds FAITHFUL optimization candidates for a live trader:
 // each variant starts from the trader's actual LiveConfigParams (so it keeps the
@@ -59,6 +62,21 @@ func LiveVariants(base ProtectionParams) []ConfigVariant {
 		vs = append(vs, ConfigVariant{Name: "floor-1.0ATR", P: v})
 	}
 
+	// --- FLOOR ladder. A single 1.0 probe cannot tell a real gradient from one
+	//     lucky point, and the floor is the clamp that decides whether the stop may
+	//     sit where structure actually is. Sweep it so monotonicity is checkable;
+	//     skip the live value and the 1.0 point already emitted above.
+	if base.RangeSLEnabled {
+		for _, f := range []float64{0.5, 0.75, 1.25, 1.5, 1.75, 2.0} {
+			if math.Abs(f-base.RangeSLFloorATR) < 1e-9 {
+				continue
+			}
+			v := clone(base)
+			v.RangeSLFloorATR = f
+			vs = append(vs, ConfigVariant{Name: "floor-" + trimHours(f) + "ATR", P: v})
+		}
+	}
+
 	// --- tighter DD give-back on the first tier (retrace 30% vs live 40) ---
 	if len(base.DDRules) > 0 {
 		v := clone(base)
@@ -70,6 +88,25 @@ func LiveVariants(base ProtectionParams) []ConfigVariant {
 		vs = append(vs, ConfigVariant{Name: "dd-tighter-25pct", P: v})
 	}
 
+	// DD tier-1 grid. managed_drawdown is GPT's highest per-trade earner, so its
+	// arm (min profit) and give-back (max drawdown) are the two most load-bearing
+	// numbers in the stack; a single -25%% probe cannot show whether either axis is
+	// monotonic or where the peak sits.
+	if len(base.DDRules) > 0 && base.DDRules[0].MinProfitATR > 0 && base.DDRules[0].MaxDrawdownATR > 0 {
+		for _, arm := range []float64{0.6, 0.9, 1.2, 1.5, 2.0, 2.5, 3.0, 3.5} {
+			for _, gb := range []float64{0.3, 0.45, 0.6, 0.8, 1.1, 1.5, 2.0} {
+				a, g := arm, gb
+				if math.Abs(a-base.DDRules[0].MinProfitATR) < 1e-9 && math.Abs(g-base.DDRules[0].MaxDrawdownATR) < 1e-9 {
+					continue
+				}
+				v := clone(base)
+				v.DDRules[0].MinProfitATR = a
+				v.DDRules[0].MaxDrawdownATR = g
+				vs = append(vs, ConfigVariant{Name: "dd-arm" + trimHours(a) + "-gb" + trimHours(g), P: v})
+			}
+		}
+	}
+
 	// --- earlier BE1 arm (arm break-even sooner to lock gains) ---
 	if len(base.BELegs) > 0 {
 		v := clone(base)
@@ -79,6 +116,22 @@ func LiveVariants(base ProtectionParams) []ConfigVariant {
 			v.BELegs[0].TriggerPct *= 0.75
 		}
 		vs = append(vs, ConfigVariant{Name: "be1-earlier-25pct", P: v})
+	}
+
+	// --- ABSOLUTE BE1 arm ladder in ATR units. The 25%-relative variant above can
+	//     only probe one point next to whatever the config happens to hold, which is
+	//     useless when the live arm sits far out (GPT: 1.1 ATR) and the registered
+	//     entry-gate finding is about an absolute level (0.30 ATR). Sweep the level
+	//     itself so the arm's PnL curve is readable, and skip points equal to live.
+	if len(base.BELegs) > 0 && base.BELegs[0].TriggerATR > 0 {
+		for _, a := range []float64{0.3, 0.5, 0.7, 0.9, 1.3, 1.6} {
+			if math.Abs(a-base.BELegs[0].TriggerATR) < 1e-9 {
+				continue
+			}
+			v := clone(base)
+			v.BELegs[0].TriggerATR = a
+			vs = append(vs, ConfigVariant{Name: "be1arm-" + trimHours(a) + "ATR", P: v})
+		}
 	}
 
 	// --- tighter time-stop (cut the -1.5% time exit to fire 25% sooner) ---

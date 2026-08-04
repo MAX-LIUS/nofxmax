@@ -31,6 +31,7 @@ func main() {
 	liveConfig := flag.Bool("liveconfig", false, "use the trader's LIVE strategy protection config (ATR/structural) as the replay baseline")
 	variants := flag.Bool("variants", false, "compare pre-specified single-change optimization variants derived from the live baseline (keeps the structural stop type; faithful to live)")
 	pertrade := flag.Bool("pertrade", false, "with -variants: decompose each variant vs baseline TRADE-BY-TRADE (winners cut early vs losers saved)")
+	variantDump := flag.String("variantdump", "", "with -variants: write per-variant per-trade replay rows to this TSV path for external robustness analysis (leave-one-out, time split, per-symbol)")
 	trail := flag.Bool("trail", false, "sweep the ratcheting structural stop (TrailStruct*) vs the frozen baseline: fire count, profit locked, profit given up early (needs -liveconfig with a RangeSLCloseConfirm stop)")
 	entryQual := flag.Bool("entryqual", false, "profile ENTRY quality independent of stops: post-entry MAE/MFE in ATR, immediate-adverse rate, never-green rate. Isolates whether the entry price itself is bad.")
 	rewardATR := flag.Bool("rewardatr", false, "bucket entries by AI reward distance in ATR (first_target/entryATR) and by effective RR after floor/backstop clamp, with realized PnL per bucket, plus a reward-ATR floor-gate PnL simulation. Uses -slfloor/-slbackstop for the clamp band.")
@@ -41,6 +42,9 @@ func main() {
 	confirmStop := flag.Bool("confirmstop", false, "sweep a FIXED close-confirm adverse-excursion stop at N×ATR (active while underwater, close-confirmed, backstop kept for wicks) vs the live swing-confirm. Needs -liveconfig with a structural (RangeSL) baseline.")
 	combinedGate := flag.Bool("combinedgate", false, "replay full set under baseline vs entry-gate-only (skip target<minRewardATR) vs band-only (backstop tighten) vs both stacked. Needs -liveconfig.")
 	maxHold := flag.Bool("maxholdsweep", false, "sweep the max-hold time exit: live vs drop-profit-exemption vs disabled vs alternative hours. Needs -liveconfig -proxy.")
+	mhPlaceboH := flag.Float64("mhplacebo", 0, "with -maxholdsweep: run the max-hold PLACEBO at this hour threshold (random per-entry H with identical exemption) to test whether the threshold carries information or merely truncates a losing ledger")
+	mhPlaceboEx := flag.Float64("mhplaceboex", 3, "profit-exempt %% used by -mhplacebo (must match the grid cell being defended)")
+	mhPlaceboSeeds := flag.Int("mhplaceboseeds", 400, "number of placebo seeds for -mhplacebo")
 	anchorProx := flag.Bool("anchorprox", false, "bucket entries by entry→SL-anchor distance in ATR with realized PnL, plus a gate sim blocking entries whose confirmed anchor is farther than N×ATR (no-mans-land detection).")
 	minSLGate := flag.Bool("minslgate", false, "simulate the sl_distance_below_atr_min entry gate across thresholds (0.5-1.5): realized PnL kept vs blocked, to size the frequency/PnL tradeoff of raising the min-SL floor.")
 	provenSL := flag.Bool("provensl", false, "compare the baseline structural stop (fractal pivot) vs PreferProvenLevels (order-block edge, never wider than pivot): realized PnL, win%, drawdown, stop-hit% for fractal vs proven. Needs -liveconfig with a RangeSL baseline.")
@@ -219,6 +223,24 @@ func main() {
 		}
 		fmt.Println("→ dPnL is vs the live-baseline row. These deltas are on the FULL loaded")
 		fmt.Println("  sample (all close reasons) and use the same structural stop as live.")
+		// Aggregate dPnL hides whether a delta rests on a handful of trades. Dump
+		// per-variant per-trade replay PnL so leave-one-out / time-split /
+		// per-symbol robustness can be judged outside the engine.
+		if *variantDump != "" {
+			f, err := os.Create(*variantDump)
+			if err != nil {
+				log.Fatalf("variantdump: %v", err)
+			}
+			defer f.Close()
+			fmt.Fprintf(f, "variant\tsymbol\tside\tentry_time\tactual_pnl\treplay_pnl\tbars_held\tfully_closed\n")
+			for _, v := range backtest.LiveVariants(baseline) {
+				for _, r := range backtest.ReplayLoadedPerTrade(v.P, loaded) {
+					fmt.Fprintf(f, "%s\t%s\t%s\t%d\t%.6f\t%.6f\t%d\t%t\n",
+						v.Name, r.Symbol, r.Side, r.EntryTime, r.ActualPnL, r.ReplayPnL, r.BarsHeld, r.FullyClosed)
+				}
+			}
+			fmt.Printf("→ per-trade rows written to %s\n", *variantDump)
+		}
 
 		// Per-trade decomposition: does a variant cut winners early? Compare each
 		// variant against the baseline trade-by-trade.
@@ -282,6 +304,10 @@ func main() {
 		fmt.Println()
 		fmt.Print(backtest.FormatMaxHoldSweep(*traderLike, baseline, loaded))
 		fmt.Println()
+		if *mhPlaceboH > 0 {
+			fmt.Print(backtest.FormatMaxHoldPlacebo(baseline, loaded, *mhPlaceboH, *mhPlaceboEx, *mhPlaceboSeeds))
+			fmt.Println()
+		}
 		return
 	}
 

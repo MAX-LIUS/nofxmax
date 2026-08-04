@@ -349,8 +349,14 @@ func ReplayEntry(p ProtectionParams, e Entry, bars []market.Kline, entryIdx int)
 				res.CloseReasons = append(res.CloseReasons, "time_stop")
 				continue
 			}
-			// max-hold: held long enough, not a profitable runner.
-			if cp.MaxHoldHours > 0 && heldHours >= cp.MaxHoldHours &&
+			// max-hold: held long enough, not a profitable runner. A per-entry
+			// override (placebo) may replace the threshold; the exemption below is
+			// deliberately left untouched so only the timing varies.
+			maxHoldH := cp.MaxHoldHours
+			if e.MaxHoldHoursOverride > 0 {
+				maxHoldH = e.MaxHoldHoursOverride
+			}
+			if maxHoldH > 0 && heldHours >= maxHoldH &&
 				closePnL < cp.MaxHoldProfitExemptPct {
 				addExit(bar.Close, remaining)
 				res.CloseReasons = append(res.CloseReasons, "max_hold")
