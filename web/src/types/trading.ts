@@ -999,35 +999,8 @@ export interface GridRiskInfo {
   breakout_direction: string
 }
 
-// Evolution Engine Types
-export interface EvolutionFactor {
-  name: string
-  score: number
-  sample_size: number
-  confidence: number
-  insight: string
-  updated_at: number
-}
-
-export interface EvolutionAdaptation {
-  condition: string
-  action: string
-  reason: string
-  effectiveness: number
-  created_at: number
-  expires_at: number
-  contradictions: number
-}
-
-export interface EvolutionProfile {
-  symbol: string
-  side: string
-  sample_size: number
-  version: number
-  updated_at: number
-  factors: EvolutionFactor[]
-  adaptations: EvolutionAdaptation[]
-}
+// (removed 2026-08-04) Evolution Engine types — the coin evolution profile
+// feature was stripped; nothing consumes these any more.
 
 export interface SceneTags {
   trend_phase: string

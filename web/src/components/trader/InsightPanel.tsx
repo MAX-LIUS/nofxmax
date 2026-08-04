@@ -1,37 +1,19 @@
-import { useState, useMemo, useEffect } from 'react'
-import { api } from '../../lib/api'
-import type {
-  DecisionRecord,
-  DecisionAction,
-  EvolutionProfile,
-} from '../../types/trading'
+import { useState, useMemo } from 'react'
+import type { DecisionRecord, DecisionAction } from '../../types/trading'
 
+// traderId was dropped with the evolution tab (2026-08-04): the remaining tabs
+// derive everything from the `decisions` prop, so no fetch is needed here.
 interface InsightPanelProps {
-  traderId: string
   decisions: DecisionRecord[]
   language: string
 }
 
-type TabKey = 'actions' | 'evolution' | 'gates'
+// (removed 2026-08-04) the 'evolution' tab went with the coin evolution engine.
+type TabKey = 'actions' | 'gates'
 
-export function InsightPanel({
-  traderId,
-  decisions,
-  language,
-}: InsightPanelProps) {
+export function InsightPanel({ decisions, language }: InsightPanelProps) {
   const [activeTab, setActiveTab] = useState<TabKey>('actions')
   const [expanded, setExpanded] = useState(false)
-  const [evolutionProfiles, setEvolutionProfiles] = useState<
-    EvolutionProfile[]
-  >([])
-
-  useEffect(() => {
-    if (!traderId) return
-    api
-      .getEvolutionProfiles(traderId)
-      .then(setEvolutionProfiles)
-      .catch(() => {})
-  }, [traderId])
 
   const { actionableDecisions, gateBlocks, todayStats } = useMemo(() => {
     const now = new Date()
@@ -105,11 +87,6 @@ export function InsightPanel({
       count: actionableDecisions.length,
     },
     {
-      key: 'evolution',
-      label: language === 'zh' ? '进化洞察' : 'Evolution',
-      count: evolutionProfiles.length,
-    },
-    {
       key: 'gates',
       label: language === 'zh' ? 'Gate拦截' : 'Blocked',
       count: gateBlocks.length,
@@ -181,9 +158,6 @@ export function InsightPanel({
           <div className="max-h-[300px] overflow-y-auto custom-scrollbar">
             {activeTab === 'actions' && (
               <ActionsTab items={actionableDecisions} language={language} />
-            )}
-            {activeTab === 'evolution' && (
-              <EvolutionTab profiles={evolutionProfiles} language={language} />
             )}
             {activeTab === 'gates' && (
               <GatesTab items={gateBlocks} language={language} />
@@ -262,75 +236,7 @@ function ActionsTab({
   )
 }
 
-function EvolutionTab({
-  profiles,
-  language,
-}: {
-  profiles: EvolutionProfile[]
-  language: string
-}) {
-  if (!profiles || profiles.length === 0) {
-    return (
-      <div className="text-xs text-nofx-text-muted py-4 text-center">
-        {language === 'zh'
-          ? '进化引擎尚未生成画像'
-          : 'No evolution profiles yet'}
-      </div>
-    )
-  }
-
-  const sortedProfiles = [...profiles].sort(
-    (a, b) => b.updated_at - a.updated_at
-  )
-
-  return (
-    <div className="space-y-2">
-      {sortedProfiles.slice(0, 8).map((profile, i) => {
-        const updatedAgo = formatTimeAgo(profile.updated_at, language)
-        const topInsights = (profile.factors || [])
-          .filter(
-            (f) =>
-              f.insight && f.sample_size >= 5 && (f.score < 35 || f.score > 65)
-          )
-          .slice(0, 2)
-
-        return (
-          <div
-            key={i}
-            className="py-2 px-2 rounded-md bg-white/[0.02] border border-white/5"
-          >
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-medium text-nofx-text-main">
-                {profile.symbol} {profile.side.toUpperCase()}
-              </span>
-              <span className="text-[10px] text-nofx-text-muted">
-                v{profile.version}
-              </span>
-              <span className="text-[10px] text-nofx-text-muted ml-auto">
-                {updatedAgo}
-              </span>
-            </div>
-            {topInsights.map((f, j) => (
-              <div
-                key={j}
-                className="text-[10px] text-nofx-text-muted mt-1 pl-2 border-l border-white/10"
-              >
-                {f.insight}
-              </div>
-            ))}
-            {(profile.adaptations || []).length > 0 && (
-              <div className="text-[10px] mt-1 pl-2 border-l border-amber-500/30 text-amber-400/80">
-                {(profile.adaptations || [])
-                  .map((a) => `${a.condition}→${a.action}`)
-                  .join('; ')}
-              </div>
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
+// (removed 2026-08-04) EvolutionTab rendered the per-coin evolution profiles.
 
 function GatesTab({
   items,
@@ -381,12 +287,4 @@ function GatesTab({
   )
 }
 
-function formatTimeAgo(unixMs: number, language: string): string {
-  const diff = Date.now() - unixMs
-  const hours = Math.floor(diff / 3600000)
-  const days = Math.floor(hours / 24)
-
-  if (days > 0) return language === 'zh' ? `${days}天前` : `${days}d ago`
-  if (hours > 0) return language === 'zh' ? `${hours}小时前` : `${hours}h ago`
-  return language === 'zh' ? '刚刚' : 'just now'
-}
+// (removed 2026-08-04) formatTimeAgo was only used by EvolutionTab.

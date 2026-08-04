@@ -55,7 +55,6 @@ import { normalizeEntryStructureConfig } from '../components/strategy/EntryStruc
 import { PreEntryGateEditor } from '../components/strategy/PreEntryGateEditor'
 import { EntryPipelinePanel } from '../components/strategy/EntryPipelinePanel'
 import { RegimeGatesEditor } from '../components/strategy/RegimeGatesEditor'
-import { EvolutionEditor } from '../components/strategy/EvolutionEditor'
 import { DeepVoidBackground } from '../components/common/DeepVoidBackground'
 import { t } from '../i18n/translations'
 import { getJson, sendJson } from '../lib/httpClient'
@@ -141,7 +140,6 @@ export function StrategyStudioPage() {
     preEntryGate: false,
     riskControl: false,
     protection: false,
-    evolution: false,
     promptSections: false,
     customPrompt: false,
     publishSettings: false,
@@ -868,21 +866,7 @@ export function StrategyStudioPage() {
         </div>
       ),
     },
-    {
-      key: 'evolution' as const,
-      icon: Activity,
-      color: '#818CF8',
-      title: language === 'zh' ? '进化引擎' : 'Evolution Engine',
-      forStrategyType: 'ai_trading' as const,
-      content: editingConfig && (
-        <EvolutionEditor
-          config={editingConfig.evolution}
-          onChange={(evolution) => updateConfig('evolution', evolution)}
-          disabled={selectedStrategy?.is_default}
-          strategyId={selectedStrategy?.id}
-        />
-      ),
-    },
+    // (removed 2026-08-04) 进化引擎 / Evolution Engine section.
     {
       key: 'publishSettings' as const,
       icon: Globe,

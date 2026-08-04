@@ -109,7 +109,6 @@ type Context struct {
 	OIRankingData      *nofxos.OIRankingData               `json:"-"` // Market-wide OI ranking data
 	NetFlowRankingData *nofxos.NetFlowRankingData          `json:"-"` // Market-wide fund flow ranking data
 	PriceRankingData   *nofxos.PriceRankingData            `json:"-"` // Market-wide price gainers/losers
-	EvolutionContexts  map[string]string                   `json:"-"` // symbol -> evolution context snippet for AI
 	BTCETHLeverage     int                                 `json:"-"`
 	AltcoinLeverage    int                                 `json:"-"`
 	Timeframes         []string                            `json:"-"`

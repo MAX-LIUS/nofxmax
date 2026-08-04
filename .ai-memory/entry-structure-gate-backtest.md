@@ -290,3 +290,38 @@ ADX(14) 在 15m 上各阈值全部平到有害（>=20 → -0.072，>=25 → -0.0
   `🚫 ... no closed 5m candle has confirmed the rejection ... likely a fake retest`(07-28 20:48)、
   `SL distance 0.78x ATR14 < min 0.8x — structure too shallow, will be swept by normal noise`(21:49)。
 - `trader/entry_gate.go` 是**独立于 `kernel/engine_analysis.go` 校验器**的另一套闸门栈，别混淆。
+
+## n=2 的真实含义：只比较一对枢轴（2026-08-04 诊断，用户报「这不是正确的 HHHL 形态为什么放过了」）
+
+个案：SKHYNIXUSDT SHORT，08-04 01:23 UTC 入场 1064.91，37 分钟后 structural_sl 出局 −0.93 USDT / −2.89%
+（trader_positions.id=1926，GPT-hhhl+ / trader 24be455b，OKX）。用户直觉对：这**不是**干净的 LH+LL。
+
+**门禁没坏，是窗口只有一次比较。** 逐项核实：
+- `structural_alignment=True` 在 claude-hhhl 与 GPT-hhhl+ 两个实盘策略上都是开的（我一开始误判成
+  「未设置→false→门禁关着」，查库后自我纠正）。
+- `structural_audit_only=None`、`strategy_control_policy.mode='balanced'`、`RegimeFilter.AuditOnly` 未置
+  → `enforced=true`，不存在降级。
+- **日志里没有 `Gate checks:` 行不代表门禁没跑**：`auto_trader_loop.go:591/595` 只在 `!Allowed` 时打印。
+  没有该行 = 门禁跑了并**放行**。我曾把「找不到日志行」当成「门禁被跳过」的候选解释，是错的。
+- `primary_count=22` → 21 根已收盘 < `structuralMinBars=30` → `structuralBars()` 自取 120 根
+  （即上一节修的那条路径正常工作）。
+
+**根因**：`structural_pivot_lookback` / `structural_swing_count` 在两个策略里都是 **NULL** → `WithDefaults()`
+给 lb=3、**n=2**。而 `swingSeqDir` 的内层 `trend()` 先做 `seq = seq[len(seq)-n:]`，n=2 时序列只剩两个元素、
+**只做一次比较**。用 OKX 真实 1h 120 根复算（`swingSeqDir` 逐行 Python 移植，含/不含未收盘那根结果一致）：
+
+| | 倒4 | 倒3 | 倒2 | 倒1 |
+|---|---|---|---|---|
+| 摆动高 | 1129.63 | 1137.46 | 1162.47 | **1120.67** |
+| 摆动低 | 1058.60 | 1088.41 | 1094.45 | **1048.77** |
+
+- n=2：只看倒2→倒1，高跌 + 低跌 → `dir=-1` → 与 SHORT 一致 → **放行**
+- n=3 / n=4：高低都是「涨涨跌」混合 → `dir=0` → **拦截**
+
+即 **n=2 下「一个回撤」在语义上就等于「下跌结构」**，它无法表达用户读图时说的那个多段单调序列。
+这不是缺陷而是**已登记的取舍**（见 `store/strategy.go` 注释）：n=3 拦得住这笔，但开仓频率 11.5→4.5 笔/天
+（−80%）且 55% 收益集中在单一币种，n=2 才有 28 币分散与逐币留一 +0.180。**要不要改成 n=3 是策略取舍
+问题，不是修 bug**，需单独用数据决定。
+
+**复算脚本**：`$CLAUDE_JOB_DIR/tmp/kswing/replay.py`（OKX `history-candles`，注意默认 python-urllib UA 会被
+403，必须带 `User-Agent`；`fapi.binance.com` 仍 451 地理封锁）。

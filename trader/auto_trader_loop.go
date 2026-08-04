@@ -656,10 +656,10 @@ func (at *AutoTrader) runCycle() error {
 				logger.Infof("📊 Gate score %d/100 → size %.0f→%.0f (×%.2f) for %s %s",
 					gateResult.Score, originalSize, d.PositionSizeUSD, gateResult.SizeMultiplier, d.Symbol, d.Action)
 			}
-			// Apply evolution adaptations before execution (adjust size/confidence, not block)
-			if at.config.StrategyConfig != nil && at.config.StrategyConfig.Evolution.Enabled {
-				at.applyEvolutionAdaptations(&d, ctx.MarketDataMap[d.Symbol])
-			}
+			// NOTE: evolution adaptations used to rescale d.PositionSizeUSD here from
+			// the coin's past outcomes (including a ×1.15 BOOST on prior winners).
+			// Removed 2026-08-04: sizing must come from the gate score and risk
+			// budget only, not from a self-reinforcing history profile.
 			if err := at.executeDecisionWithRecord(&d, &actionRecord); err != nil {
 				logger.Infof("❌ Failed to execute decision (%s %s): %v", d.Symbol, d.Action, err)
 				actionRecord.Error = err.Error()
@@ -822,8 +822,6 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 						at.name, symbol, lastTrade.RealizedPnL, consecutiveLosses,
 						at.cooldownManager.duration*time.Duration(consecutiveLosses))
 				}
-				// Update evolution profile for the closed position
-				go at.updateEvolutionProfile(symbol, side)
 			}
 		}
 	}
@@ -941,32 +939,11 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 		logger.Infof("⚠️ [%s] Store is nil, cannot get recent trades", at.name)
 	}
 
-	// 7b. Load evolution profiles for candidate coins (non-blocking, best-effort)
-	if at.store != nil && strategyConfig.Evolution.Enabled {
-		evoContexts := make(map[string]string)
-		for _, coin := range candidateCoins {
-			// Try both long and short profiles, combine
-			for _, side := range []string{"long", "short"} {
-				profile, err := at.store.Evolution().GetProfile(at.id, coin.Symbol, side)
-				if err != nil || profile == nil || profile.SampleSize < 3 {
-					continue
-				}
-				snippet := store.BuildEvolutionContext(profile)
-				if snippet != "" {
-					key := coin.Symbol
-					if existing, ok := evoContexts[key]; ok {
-						evoContexts[key] = existing + " | " + strings.ToUpper(side) + ": " + snippet
-					} else {
-						evoContexts[key] = strings.ToUpper(side) + ": " + snippet
-					}
-				}
-			}
-		}
-		if len(evoContexts) > 0 && strategyConfig.Evolution.InjectToPrompt {
-			ctx.EvolutionContexts = evoContexts
-			logger.Infof("🧬 [%s] Loaded evolution profiles for %d coins", at.name, len(evoContexts))
-		}
-	}
+	// 7b. (removed 2026-08-04) The coin evolution profile block used to build a
+	// per-symbol "Historical Performance Profile: 适配度 xx/100 | EMA20一致胜率 xx%"
+	// snippet here and hand it to the prompt via ctx.EvolutionContexts. Removing it
+	// is the point: the AI must read the CURRENT structure, not a rolling verdict on
+	// how the coin treated this trader before.
 
 	// 8. Get quantitative data (if enabled in strategy config)
 	if strategyConfig.Indicators.EnableQuantData {

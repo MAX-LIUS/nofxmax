@@ -67,8 +67,12 @@ type StrategyConfig struct {
 	// Omitted or unknown modes default to strict to preserve current runtime blocks.
 	StrategyControlPolicy StrategyControlPolicyConfig `json:"strategy_control_policy,omitempty"`
 
-	// Evolution engine configuration
-	Evolution EvolutionConfig `json:"evolution,omitempty"`
+	// NOTE: the "evolution" block (coin evolution profile engine) was removed on
+	// 2026-08-04. Existing stored configs may still carry an "evolution" key; it is
+	// silently ignored on unmarshal. Do NOT reintroduce it: it injected a per-coin
+	// "Historical Performance Profile" into the AI prompt and mechanically scaled
+	// position size from past outcomes, so the system's technical bias sharpened
+	// with every trade instead of reading current structure.
 
 	// Breakout entry engine (CODE ENFORCED, data-validated 2026-06-13). When enabled,
 	// the decision cycle also opens on a pure breakout rule (close breaks prior-N-bar
@@ -1313,17 +1317,6 @@ type PromptSectionsConfig struct {
 	EntryStandards string `json:"entry_standards,omitempty"`
 	// decision process
 	DecisionProcess string `json:"decision_process,omitempty"`
-}
-
-// EvolutionConfig controls the self-evolution engine behavior.
-type EvolutionConfig struct {
-	Enabled            bool    `json:"enabled"`                        // Master switch
-	HalfLifeDays       int     `json:"half_life_days,omitempty"`       // Time decay half-life (default 14)
-	MinSampleSize      int     `json:"min_sample_size,omitempty"`      // Min trades before generating adaptations (default 5)
-	AdaptationTTLDays  int     `json:"adaptation_ttl_days,omitempty"`  // Adaptation expiry (default 30)
-	ScoreThresholdLow  float64 `json:"score_threshold_low,omitempty"`  // Below this triggers adaptation (default 35)
-	ScoreThresholdHigh float64 `json:"score_threshold_high,omitempty"` // Above this is positive signal (default 65)
-	InjectToPrompt     bool    `json:"inject_to_prompt,omitempty"`     // Whether to inject profiles into AI prompt
 }
 
 // CoinSourceConfig coin source configuration

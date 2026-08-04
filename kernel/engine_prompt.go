@@ -805,12 +805,7 @@ func (e *StrategyEngine) BuildUserPrompt(ctx *Context) string {
 				sb.WriteString(e.formatQuantData(quantData))
 			}
 		}
-		// Evolution profile context (if available)
-		if ctx.EvolutionContexts != nil {
-			if evoCtx, hasEvo := ctx.EvolutionContexts[coin.Symbol]; hasEvo && evoCtx != "" {
-				sb.WriteString("Historical Performance Profile: " + evoCtx + "\n")
-			}
-		}
+		// (removed 2026-08-04) "Historical Performance Profile" was injected here.
 		sb.WriteString("\n")
 	}
 	sb.WriteString("\n")
@@ -894,12 +889,7 @@ func (e *StrategyEngine) formatPositionInfo(index int, pos PositionInfo, ctx *Co
 				sb.WriteString(e.formatQuantData(quantData))
 			}
 		}
-		// Evolution context for position management decisions
-		if ctx.EvolutionContexts != nil {
-			if evoCtx, hasEvo := ctx.EvolutionContexts[pos.Symbol]; hasEvo && evoCtx != "" {
-				sb.WriteString("Historical Performance: " + evoCtx + "\n")
-			}
-		}
+		// (removed 2026-08-04) "Historical Performance" was injected here.
 		sb.WriteString("\n")
 	}
 
