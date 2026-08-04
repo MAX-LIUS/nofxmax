@@ -24,36 +24,93 @@ import (
 //	23:01:47  起 438 轮 degraded + 433 次 reclaim,持续 2.5 小时未收敛,
 //	          期间面板一直红,而交易所侧 5 张保护单其实都在场。
 //
-// 两条防线各钉一组用例:①失败不擦记忆(去掉入口);②账本+交易所双重实证可恢复记忆
-// (进程重启同样丢内存 map,每次部署都会踩,所以必须能自愈)。
+// 两条防线各钉一组用例:①任何非武装写入都擦不掉武装记忆(不变量钉在存取器上,对所有
+// 写入点一次成立);②账本+交易所双重实证可恢复记忆(进程重启同样丢内存 map,每次部署
+// 都会踩,所以必须能自愈)。
 
-// ① 对账失败不得擦掉动态武装记忆。
-func TestProtectionStateAfterReconcileFailureKeepsDynamicArmMemory(t *testing.T) {
-	boom := errAfterReconcile("re-apply manual protection plan: ladder placement rejected 51279")
-	for _, tc := range []struct {
-		name     string
-		previous string
-		want     string
-	}{
-		{"native 全平档武装中不得被覆盖", "native_trailing_armed", ""},
-		{"native 部分档武装中不得被覆盖", "native_partial_trailing_armed", ""},
-		{"native arming 中同样不得被覆盖", "native_trailing_arming", ""},
-		{"managed 武装记忆同样是唯一进度记忆", "managed_drawdown_armed", ""},
-		{"交易所已校验不是武装记忆,可以覆盖", "exchange_protection_verified", "reconcile_failed: " + boom.Error()},
-		{"空状态照常写入失败原因", "", "reconcile_failed: " + boom.Error()},
-	} {
-		if got := protectionStateAfterReconcileFailure(tc.previous, boom); got != tc.want {
-			t.Fatalf("%s: previous=%q got=%q want=%q", tc.name, tc.previous, got, tc.want)
-		}
+// ① 观测类写入不得擦掉动态武装记忆 —— 钉在存取器层,覆盖所有写入点。
+//
+// 以前这条不变量钉在 protectionStateAfterReconcileFailure 这一个写入点上,于是只有
+// "对账失败"这一条路被保护;exchange_protection_verified 那条路靠另一份手写并集,
+// 而那份并集漏掉过 managed_drawdown_armed。现在归属判定集中在
+// classifyProtectionStateWrite,任何写入点都自动受保护。
+func TestObservationWritesNeverEraseArmMemory(t *testing.T) {
+	boom := "reconcile_failed: re-apply manual protection plan: ladder placement rejected 51279"
+	armStates := []string{
+		"native_trailing_armed",
+		"native_partial_trailing_armed",
+		"native_trailing_arming",
+		"native_partial_trailing_arming",
+		"managed_drawdown_armed",
+		"managed_partial_drawdown_armed",
+		"managed_drawdown_exchange_failed_armed",
+		"managed_partial_drawdown_exchange_failed_armed",
 	}
-	if got := protectionStateAfterReconcileFailure("", nil); got != "" {
-		t.Fatalf("没有错误就不该写状态,got %q", got)
+	observations := []string{boom, "exchange_protection_verified"}
+	for _, arm := range armStates {
+		for _, obs := range observations {
+			at := &AutoTrader{protectionStateMutex: sync.RWMutex{}}
+			at.setProtectionState("SOLUSDT", "long", arm)
+			at.setProtectionState("SOLUSDT", "long", obs)
+			if got := at.getProtectionState("SOLUSDT", "long"); got != arm {
+				t.Fatalf("arm=%q 被观测 %q 覆盖成 %q", arm, obs, got)
+			}
+			if got := at.getProtectionArmState("SOLUSDT", "long"); got != arm {
+				t.Fatalf("arm=%q 写观测 %q 后武装维度变成 %q", arm, obs, got)
+			}
+		}
 	}
 }
 
-type errAfterReconcile string
+// 观测维度自身要能被读到:武装维度为空时,getProtectionState 返回观测值 ——
+// giveback_guard 的 state == "exchange_protection_verified" 判断依赖这一点。
+func TestObservationVisibleWhenNoArmState(t *testing.T) {
+	at := &AutoTrader{protectionStateMutex: sync.RWMutex{}}
+	at.setProtectionState("BTCUSDT", "long", "exchange_protection_verified")
+	if got := at.getProtectionState("BTCUSDT", "long"); got != "exchange_protection_verified" {
+		t.Fatalf("未武装时应看到观测值,got %q", got)
+	}
+	// 对账失败时同理:未武装的仓位必须能看到失败原因,否则面板/守卫失去唯一信号。
+	at.setProtectionState("BTCUSDT", "long", "reconcile_failed: boom")
+	if got := at.getProtectionState("BTCUSDT", "long"); got != "reconcile_failed: boom" {
+		t.Fatalf("未武装时应看到对账失败,got %q", got)
+	}
+}
 
-func (e errAfterReconcile) Error() string { return string(e) }
+// drawdown_triggered* 是唯一"观测且必须同时清掉武装记忆"的语义:managed 已经平过仓,
+// 仓位数量变了,原武装记忆指向的仓位指纹不再成立,留着会骗过重新武装的门禁。
+func TestDrawdownTriggeredResetsArmMemory(t *testing.T) {
+	for _, triggered := range []string{"drawdown_triggered", "drawdown_triggered_dd1"} {
+		at := &AutoTrader{protectionStateMutex: sync.RWMutex{}}
+		at.setProtectionState("ETHUSDT", "short", "native_trailing_armed")
+		at.setProtectionState("ETHUSDT", "short", triggered)
+		if got := at.getProtectionArmState("ETHUSDT", "short"); got != "" {
+			t.Fatalf("%s 之后武装维度应清空,got %q", triggered, got)
+		}
+		if got := at.getProtectionState("ETHUSDT", "short"); got != triggered {
+			t.Fatalf("%s 之后应看到该观测,got %q", triggered, got)
+		}
+	}
+}
+
+// 空串是整格重置:两个维度都清。clearProtectionState 同理。
+func TestEmptyWriteAndClearResetBothDimensions(t *testing.T) {
+	for name, reset := range map[string]func(*AutoTrader){
+		"空串写入": func(at *AutoTrader) { at.setProtectionState("XRPUSDT", "long", "") },
+		"显式清空": func(at *AutoTrader) { at.clearProtectionState("XRPUSDT", "long") },
+	} {
+		at := &AutoTrader{protectionStateMutex: sync.RWMutex{}}
+		at.setProtectionState("XRPUSDT", "long", "native_trailing_armed")
+		at.setProtectionState("XRPUSDT", "long", "exchange_protection_verified")
+		reset(at)
+		if got := at.getProtectionState("XRPUSDT", "long"); got != "" {
+			t.Fatalf("%s 之后应两维度全空,got %q", name, got)
+		}
+		if got := at.getProtectionArmState("XRPUSDT", "long"); got != "" {
+			t.Fatalf("%s 之后武装维度应空,got %q", name, got)
+		}
+	}
+}
 
 // solArmMemoryTrader 复刻线上 SOL 的账本:dd1 全平档 armed,认领 ...704。
 func solArmMemoryTrader(t *testing.T, name string, records ...store.DynamicProtectionRecord) *AutoTrader {
