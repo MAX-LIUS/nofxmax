@@ -89,38 +89,35 @@ func (at *AutoTrader) reconcilePositionProtections() {
 		result, err := at.reconcileProtectionForPosition(symbol, side, quantity, entryPrice, markPrice)
 		if err != nil {
 			logger.Infof("❌ Protection reconciler: %s %s reconcile failed: %v", symbol, side, err)
-			// 一次对账失败**不能**擦掉动态保护的武装记忆。这一格是唯一的进度记忆,
-			// 而 reconcile_failed 不属于 isDynamicDrawdownArmState,写进去之后:
+			// 一次对账失败**不能**擦掉动态保护的武装记忆:
 			//   nativeTrailingArmed=false → classifyTrailing 直接判"不是我的"
 			//   → 在场的 trailing 单每轮被记为 staleTrail → state=degraded;
 			//   而账本还是 armed,于是"已 armed,跳过重新武装"—— 状态永远回不来,
 			//   死锁成立,reclaim 每 ~20s 重写账本一次,永不收敛。
+			//   (2026-08-03 线上 SOLUSDT long:22:59:09 挂单被 OKX 拒 51279 →
+			//   覆盖掉 native_trailing_armed → 438 轮 degraded + 433 次 reclaim。)
 			//
-			// 2026-08-03 线上 SOLUSDT long 的完整链条:22:59:09 挂单被 OKX 拒
-			// (51279) → 这里写 reconcile_failed → 覆盖掉 native_trailing_armed
-			// → 23:01:47 起 438 轮 degraded + 433 次 reclaim,直到本次修复。
+			// 这里**不再**需要判"前值是不是武装态"。reconcile_failed 属于观测维度,
+			// setProtectionState 只会把它写进 protectionObservation,碰不到武装维度
+			// (见 protection_state_dimensions.go)。不变量由存取器保证,对所有写入点
+			// 一次性成立,而不是每个写入点各自提防 —— 后者漏点数等于写入点数。
 			//
-			// 失败本身不丢:err 已经打进日志,而且下一轮会重新对账。真正需要清掉
-			// 武装记忆的场合(仓位换了指纹)由 reconcileProtectionForPosition 内部
-			// 那段"belongs to an old position fingerprint"负责,那里有账本做依据。
-			prev := at.getProtectionState(symbol, side)
-			if next := protectionStateAfterReconcileFailure(prev, err); next != "" {
-				at.setProtectionState(symbol, side, next)
-			} else {
-				logger.Infof("🟣 Protection reconciler: %s %s keeping dynamic arm state=%s across reconcile failure", symbol, side, prev)
-			}
+			// 失败本身不丢:err 进日志,并且现在也进观测维度(武装态存在时不影响
+			// getProtectionState 的取值,武装维度优先)。真正需要清掉武装记忆的场合
+			// (仓位换了指纹)由 reconcileProtectionForPosition 内部那段
+			// "belongs to an old position fingerprint" 负责,那里有账本做依据。
+			at.setProtectionState(symbol, side, "reconcile_failed: "+err.Error())
 			continue
 		}
 
 		if result.ExchangeVerified {
-			currentState := at.getProtectionState(symbol, side)
-			// 动态保护的武装进度不能被 exchange_protection_verified 覆盖:那一格是
-			// 唯一的进度记忆。并集统一由 isDynamicDrawdownArmState 定义(手写并集曾漏掉
-			// managed_drawdown_armed,见 auto_trader_risk.go 里的注释)。
-			if isDynamicDrawdownArmState(currentState) {
-				logger.Infof("✅ Protection reconciler: %s %s exchange protection verified (preserving dynamic state=%s)", symbol, side, currentState)
+			// exchange_protection_verified 属于观测维度,写它碰不到武装维度,所以这里
+			// 不再需要"前值是武装态就跳过写入"的白名单(那个白名单历史上漏过
+			// managed_drawdown_armed,导致每轮重新武装一次)。
+			at.setProtectionState(symbol, side, "exchange_protection_verified")
+			if armed := at.getProtectionArmState(symbol, side); armed != "" {
+				logger.Infof("✅ Protection reconciler: %s %s exchange protection verified (dynamic arm state=%s intact)", symbol, side, armed)
 			} else {
-				at.setProtectionState(symbol, side, "exchange_protection_verified")
 				logger.Infof("✅ Protection reconciler: %s %s exchange protection verified", symbol, side)
 			}
 		} else {
@@ -169,21 +166,6 @@ func (at *AutoTrader) describeProtectionSnapshot(symbol, side string, openOrders
 	parts = append(parts, fmt.Sprintf("beArmed=%t", breakEvenArmed))
 	parts = append(parts, fmt.Sprintf("trailingArmed=%t", nativeTrailingArmed))
 	return strings.Join(parts, " | ")
-}
-
-// protectionStateAfterReconcileFailure 返回对账失败后应写入 protectionState 的值,
-// 返回 "" 表示**不要写**(保留原值)。
-//
-// 抽成纯函数是为了能直接钉住这条不变量,而不必搭出整个 AutoTrader:
-// 动态保护的武装进度只由武装/解除路径改写,对账失败不是解除。
-func protectionStateAfterReconcileFailure(previous string, err error) string {
-	if err == nil {
-		return ""
-	}
-	if isDynamicDrawdownArmState(previous) {
-		return ""
-	}
-	return "reconcile_failed: " + err.Error()
 }
 
 // rehydratedNativeTrailingState 在内存里的武装记忆丢了、但账本+交易所都证明这一档
@@ -1645,46 +1627,124 @@ func isNativeTrailingArmingState(state string) bool {
 	return state == "native_trailing_arming" || state == "native_partial_trailing_arming"
 }
 
-func (at *AutoTrader) claimProtectionArmingState(symbol, side, expectedCurrentState, armingState string) (claimed bool, previousState string, actualState string) {
+// claimProtectionArmingState 以 CAS 抢占武装维度。
+//
+// 比较基准必须是**合成值** deriveProtectionState,不能只看武装维度:调用方传进来的
+// expectedCurrentState 来自 getProtectionState(合成值)。维度分家后,武装维度为空而
+// 观测维度是 exchange_protection_verified 的仓位很常见,若这里只读武装维度就会拿 ""
+// 去比 "exchange_protection_verified",CAS 永远不成立 —— 一个从未武装过的仓位再也
+// 武装不上,比原 bug 更严重。
+//
+// previousArmState 单独返回武装维度的原值,给回滚用:回滚只该还原武装维度,观测维度
+// 在整个 arming 期间由别人独立维护,不属于本次抢占的范围。
+func (at *AutoTrader) claimProtectionArmingState(symbol, side, expectedCurrentState, armingState string) (claimed bool, previousArmState string, actualState string) {
 	at.protectionStateMutex.Lock()
 	defer at.protectionStateMutex.Unlock()
+	key := positionKey(symbol, side)
+	previousArmState = at.protectionState[key]
+	actualState = deriveProtectionState(previousArmState, at.protectionObservation[key])
+	if isNativeTrailingArmingState(actualState) {
+		return false, previousArmState, actualState
+	}
+	if actualState != expectedCurrentState {
+		return false, previousArmState, actualState
+	}
 	if at.protectionState == nil {
 		at.protectionState = make(map[string]string)
 	}
-	key := positionKey(symbol, side)
-	actualState = at.protectionState[key]
-	if isNativeTrailingArmingState(actualState) {
-		return false, actualState, actualState
-	}
-	if actualState != expectedCurrentState {
-		return false, actualState, actualState
-	}
 	at.protectionState[key] = armingState
-	return true, actualState, actualState
+	return true, previousArmState, actualState
 }
 
+// rollbackProtectionArmingState 撤销一次 claimProtectionArmingState:仅当武装维度仍是
+// 本次写入的 armingState 时,把它还原成抢占前的值(空则清掉)。
+//
+// 只碰武装维度是关键:arming 期间 reconciler 可能已经往观测维度写了
+// exchange_protection_verified 或 reconcile_failed,那些是独立事实,回滚不该把它们
+// 一起抹掉,更不该像分家前那样用"整格覆盖"把观测值当成武装值写回去。
+func (at *AutoTrader) rollbackProtectionArmingState(symbol, side, armingState, previousArmState string) {
+	at.protectionStateMutex.Lock()
+	defer at.protectionStateMutex.Unlock()
+	key := positionKey(symbol, side)
+	if at.protectionState[key] != armingState {
+		return
+	}
+	if previousArmState == "" {
+		delete(at.protectionState, key)
+		return
+	}
+	at.protectionState[key] = previousArmState
+}
+
+// getProtectionState 合成两个维度对外的单一取值(武装优先),见
+// protection_state_dimensions.go 的整段说明。
 func (at *AutoTrader) getProtectionState(symbol, side string) string {
+	at.protectionStateMutex.RLock()
+	defer at.protectionStateMutex.RUnlock()
+	key := positionKey(symbol, side)
+	return deriveProtectionState(at.protectionState[key], at.protectionObservation[key])
+}
+
+// setProtectionState 按写入值的维度归属只写对应那一个维度。
+//
+// 这是"写观测擦掉武装记忆"这类 bug 的结构性堵点:调用方不需要知道自己写的东西会不会
+// 踩到别人的记忆,归属判定在 classifyProtectionStateWrite 里集中一次。
+func (at *AutoTrader) setProtectionState(symbol, side, state string) {
+	at.protectionStateMutex.Lock()
+	defer at.protectionStateMutex.Unlock()
+	key := positionKey(symbol, side)
+	switch classifyProtectionStateWrite(state) {
+	case protectionDimReset:
+		delete(at.protectionState, key)
+		delete(at.protectionObservation, key)
+	case protectionDimArm:
+		if at.protectionState == nil {
+			at.protectionState = make(map[string]string)
+		}
+		at.protectionState[key] = state
+	case protectionDimObservationResetsArm:
+		delete(at.protectionState, key)
+		if at.protectionObservation == nil {
+			at.protectionObservation = make(map[string]string)
+		}
+		at.protectionObservation[key] = state
+	default:
+		if at.protectionObservation == nil {
+			at.protectionObservation = make(map[string]string)
+		}
+		at.protectionObservation[key] = state
+	}
+}
+
+// getProtectionArmState 只读武装维度,供需要区分"武装进度"与"观测"的诊断/日志使用。
+func (at *AutoTrader) getProtectionArmState(symbol, side string) string {
 	at.protectionStateMutex.RLock()
 	defer at.protectionStateMutex.RUnlock()
 	return at.protectionState[positionKey(symbol, side)]
 }
 
-func (at *AutoTrader) setProtectionState(symbol, side, state string) {
+// setProtectionArmState 只写武装维度,供必须显式表达"我在改武装进度"的路径使用
+// (例如 arming 回滚)。与 setProtectionState 传入武装值等价,但意图写在名字上。
+func (at *AutoTrader) setProtectionArmState(symbol, side, state string) {
 	at.protectionStateMutex.Lock()
 	defer at.protectionStateMutex.Unlock()
+	key := positionKey(symbol, side)
+	if state == "" {
+		delete(at.protectionState, key)
+		return
+	}
 	if at.protectionState == nil {
 		at.protectionState = make(map[string]string)
 	}
-	at.protectionState[positionKey(symbol, side)] = state
+	at.protectionState[key] = state
 }
 
 func (at *AutoTrader) clearProtectionState(symbol, side string) {
 	at.protectionStateMutex.Lock()
 	defer at.protectionStateMutex.Unlock()
-	if at.protectionState == nil {
-		return
-	}
-	delete(at.protectionState, positionKey(symbol, side))
+	key := positionKey(symbol, side)
+	delete(at.protectionState, key)
+	delete(at.protectionObservation, key)
 }
 
 func (at *AutoTrader) setImmediateTrailingOrderID(symbol, side, orderID string) {

@@ -2933,7 +2933,7 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 	if isPartial {
 		armingState = "native_partial_trailing_arming"
 	}
-	claimed, previousProtectionState, actualProtectionState := at.claimProtectionArmingState(symbol, side, currentState, armingState)
+	claimed, previousArmState, actualProtectionState := at.claimProtectionArmingState(symbol, side, currentState, armingState)
 	if !claimed {
 		if isNativeTrailingArmingState(actualProtectionState) {
 			logger.Infof("🟣 Native trailing drawdown already arming, skipping duplicate apply (%s %s state=%s)", symbol, side, actualProtectionState)
@@ -2942,16 +2942,10 @@ func (at *AutoTrader) armNativeTrailingDrawdownTier(symbol, side string, entryPr
 		}
 		return true
 	}
-	defer func() {
-		if at.getProtectionState(symbol, side) != armingState {
-			return
-		}
-		if previousProtectionState == "" {
-			at.clearProtectionState(symbol, side)
-			return
-		}
-		at.setProtectionState(symbol, side, previousProtectionState)
-	}()
+	// 回滚只还原武装维度。以前这里是"整格覆盖":previousProtectionState 可能是
+	// exchange_protection_verified 这类观测值,回滚时被当作武装值写回整格;而若
+	// arming 期间 reconciler 往观测维度写了新值,整格覆盖还会把它抹掉。
+	defer at.rollbackProtectionArmingState(symbol, side, armingState, previousArmState)
 
 	if isPartial {
 		positions, err := at.trader.GetPositions()

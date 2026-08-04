@@ -173,7 +173,8 @@ type AutoTrader struct {
 	structSLFiredBar       map[string]int64                          // structural SL close-confirm: symbol_side -> last closed-bar openTime that already fired (dedup)
 	structSLMutex          sync.Mutex                                // protects structSLFiredBar
 	protectionStateMutex   sync.RWMutex                              // Protects last protection reconcile state
-	protectionState        map[string]string                         // symbol_side -> last known protection status
+	protectionState        map[string]string                         // symbol_side -> 动态保护武装进度(native/managed,arming/armed)
+	protectionObservation  map[string]string                         // symbol_side -> 非武装观测(交易所校验通过 / 对账失败 / 回撤已触发)
 	breakEvenStateMutex    sync.RWMutex                              // Protects break-even armed state per position
 	breakEvenState         map[string]string                         // symbol_side -> idle/armed
 	breakEvenFingerprints  map[string]string                         // symbol_side -> entry/qty fingerprint for lifecycle reset
@@ -423,6 +424,7 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		gbPnlHist:             make(map[string][]float64),
 		protectionStateMutex:  sync.RWMutex{},
 		protectionState:       make(map[string]string),
+		protectionObservation: make(map[string]string),
 		breakEvenStateMutex:   sync.RWMutex{},
 		breakEvenState:        make(map[string]string),
 		breakEvenFingerprints: make(map[string]string),
