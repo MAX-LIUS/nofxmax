@@ -1,5 +1,59 @@
 # Production Deployment - Critical Information
 
+## 2026-08-04 Deploy: 剥离进化画像引擎 (pid 896148, commit 4cc1a8f)
+
+前后端都动了。回滚点 `/root/.claude/jobs/5cbb3cf4/tmp/binbak/nofx_prev_9186326_20260804_1035`
+(md5 `618e1bcd30f47a2a7b0bc6358553105e` = 线上 commit `9186326`),新二进制
+md5 `191404d21a36815ead7c336a58996068`,`vcs.revision=4cc1a8f`。
+前端回滚镜像 `nofxmax-nofx-frontend:rollback-pre-evolrm-20260804`。
+`MainPID=896148` == `pgrep -xc nofx`(=1),`NRestarts=0`,health 200 @0.65ms。
+
+**用户诉求**:「历史画像很坑人请完全切断历史画像对系统的作用并去掉这部分代码,
+我不需要他有越来越明确的技术倾向影响系统决定」→ 确认即「进化引擎」/`coin_evolution_profiles`。
+
+**隔离性**:线上 `9186326`(分支 `deploy/protection-state-dimensions`),dev 上夹着 4 个
+research commit(纯 .md + .py)。仍按规矩建 `deploy/evolution-removal` 从 `9186326`
+起 cherry-pick `f92641b`,落地 24 文件、**零 `trader/backtest/`**
+(`git diff --name-only 9186326..HEAD | grep -c trader/backtest/` = 0)。
+
+**删的是两条真实作用路径,不只是提示词**:
+1. 提示词注入 `Historical Performance Profile: 适配度 76/100 | EMA20一致胜率70%…`
+   (`kernel/engine_prompt.go` 两处);
+2. **更危险的那条**:`applyEvolutionAdaptations` 在下单前直接改写 `d.PositionSizeUSD`,
+   含 `allow_confidence_65` → **×1.15 给历史赢家加注**,绕过闸门分数与风险预算。
+删除 6 个文件 1980 行 + 摘掉 store/kernel/trader/api/前端全部引用。
+**`coin_evolution_profiles` 表与数据原样保留**(不删生产数据);库里 5 个策略 config
+仍带 `evolution` 键,Go `json.Unmarshal` 默认忽略未知字段(仓库零 `DisallowUnknownFields`)
+→ 自动失效,**不需要写生产 DB**。回归测试 `TestLegacyEvolutionKeyIgnored` 钉住这条契约。
+
+**⚠️ 二进制必须 stripped**:线上那个是 `stripped`,我第一次 `go build` 出来
+`with debug_info, not stripped` 68.5MB。改用 `-ldflags="-s -w"` 得 48.4MB 与线上同形。
+磁盘 92%,20MB 不是小事;`go version -m` 的 vcs 信息不受 strip 影响,panic 栈也不受影响
+(函数名来自 pclntab 不是符号表)。
+
+**门禁**:`go build`/`go vet` 干净;全量 `go test`(排除 `trader/backtest`)**EXIT=0**;
+`tsc --noEmit` 0;`madge --circular` 162 文件无循环;`vite build` 35.98s。
+
+**部署后核对(10:34:47 起)**:4 traders 全载;`ERRO 12` 全部是既存
+`drawdown_claim_conflict.go:300`(SPCX same-tier fork,基线同源);`WARN 24` 全部
+`drawdown_order_reclaim.go:227`;panic 0。`verified=true` 84 / `verified=false` 24,
+后者只有 SPCX+ETH 各 12,且同一秒有 `(post-reclaim) … all extra stops were reclaimed`
+→ 与基线(54 degraded,同样 SPCX+ETH)同源,**不是本次引入**。
+**关键验证**:4 个 trader 部署后第一轮决策 prompt 全部 `✓clean`
+(查 `input_prompt`/`system_prompt` 是否含 `Historical Performance`/`适配度`/`EMA20一致胜率`,
+10:41-10:46 四条全干净);`/api/evolution/profiles` → **404**;
+`web/dist` 里 `EvolutionProfile`/`evolution/profiles`/`进化引擎` 命中 **0**。
+
+**前端 nginx 坑第 N 次复现**(记忆有效):rebuild 后配置被烤回 `proxy_pass http://nofx:8080/api/`,
+必须 `docker exec … sed` 改 `172.20.0.1:8080` 再 `docker restart`(不是 recreate)。
+改前 `/api/` 502,改后 200。三处 bundle hash 一致:本地 dist / 线上 index.html / 容器内
+均 `index-BTXqFCrh.js`。
+
+回滚:`systemctl stop nofx` → `cp /root/.claude/jobs/5cbb3cf4/tmp/binbak/nofx_prev_9186326_20260804_1035 /opt/webstack/nofx/nofx`
+→ `systemctl start nofx`;前端 `docker tag nofxmax-nofx-frontend:rollback-pre-evolrm-20260804
+nofxmax-nofx-frontend:latest` → `docker compose up -d --no-deps nofx-frontend` → 重做 nginx sed。
+**无 DB 迁移、无配置变更、无数据删除**,回滚不需恢复任何配置。
+
 ## 2026-08-04 Deploy: 挂单量档位归属 + 动态武装记忆不被擦除 (pid 815160, commit f997a6a)
 
 后端 only。回滚点 `/root/.claude/jobs/5cbb3cf4/tmp/binbak/nofx_prev_3d91258_20260804_0240`
@@ -757,7 +811,7 @@ verified no half-deploy state each time (md5 unchanged, pid alive, health 200) a
 manual commands rather than working around the denial.
 
 ## Last Updated
-2026-08-01 - 复盘 ATR 上下文 + 屏蔽低波动独立开关 (pid 579360, md5 69a26400, commit 9a48070)
+2026-08-04 - 剥离进化画像引擎 (pid 896148, md5 191404d2, commit 4cc1a8f)
 
 ## 2026-08-01 Deploy: 复盘面板 ATR/BE/分页 + 屏蔽低波动独立开关 (pid 579360, commit 9a48070)
 md5 69a264009fcd69074dce330453d84321 ← 上一版 37dfd393
