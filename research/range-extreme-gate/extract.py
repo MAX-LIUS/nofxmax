@@ -28,6 +28,12 @@ POC_RE = re.compile(r"^-\s*POC=([\d.]+)")
 PD_RE  = re.compile(r"^-\s*prev_day_(high|low)=([\d.]+)")
 PW_RE  = re.compile(r"^-\s*prev_week_(high|low)=([\d.]+)")
 FIB_RE = re.compile(r"swing_low=([\d.]+)\s+swing_high=([\d.]+)")
+# market/fibonacci.go:57-68 -- swing HIGH before swing LOW means price moved
+# down, so the retracement runs UP. Therefore:
+#   retracement_up   => downtrend  => a LONG is counter-trend
+#   retracement_down => uptrend    => a SHORT is counter-trend
+FIBDIR_RE = re.compile(r"direction=(retracement_up|retracement_down)")
+REGIME_RE = re.compile(r"regime=(\w+)")
 ATRPCT_RE = re.compile(r"ATR14?%?\s*[=:]\s*([\d.]+)")
 
 
@@ -48,6 +54,7 @@ def extract_geometry(block: str, entry: float, is_long: bool):
     res, sup, hvns = [], [], []
     poc = pdh = pdl = pwh = pwl = None
     swing_lo = swing_hi = None
+    fib_dir = regime = None
     section = None
     for raw in block.splitlines():
         line = raw.rstrip()
@@ -81,6 +88,17 @@ def extract_geometry(block: str, entry: float, is_long: bool):
         m = FIB_RE.search(line)
         if m and swing_lo is None:
             swing_lo, swing_hi = float(m.group(1)), float(m.group(2))
+        # Take the FIRST fibonacci_context line only. The block also carries
+        # per-level "src=retracement_up/down" strings for individual price
+        # lines, which are level attributes, not the symbol's trend read.
+        if fib_dir is None and "fibonacci_context" in line:
+            m = FIBDIR_RE.search(line)
+            if m:
+                fib_dir = m.group(1)
+        if regime is None:
+            m = REGIME_RE.search(line)
+            if m:
+                regime = m.group(1)
 
     # ATR in price units: recover by inverting a zone's reported x-ATR distance.
     #
@@ -165,6 +183,9 @@ def extract_geometry(block: str, entry: float, is_long: bool):
         opp_conf=opp["conf"] if opp else None,
         opp_touches=opp["touches"] if opp else None,
         prot_atr=prot,
+        fib_dir=fib_dir, regime=regime,
+        counter_trend=(None if fib_dir is None else
+                       (fib_dir == "retracement_up") == is_long),
         dense_atr=dense_atr, period_atr=per_atr, range_pos=range_pos,
         n_res=len(res), n_sup=len(sup),
     )
