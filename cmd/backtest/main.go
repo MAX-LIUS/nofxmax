@@ -58,6 +58,7 @@ func main() {
 	confirmTFLadder := flag.Bool("confirmtfladder", false, "sweep the CONFIRMATION TIMEFRAME up a ladder (base→2×→4×→...) with a fixed wall-clock horizon, so you can read the best confirm TF RELATIVE to any primary TF (15m/1h/4h). Fetch with -tf 15m and -horizon (e.g. 48). Rule fixed at 1close+wick.")
 	confirmTiming := flag.Bool("confirmtiming", false, "study confirmation TIMING × TIMEFRAME: re-derive each entry from the anchor touch at 1/2/3-close (+wick) rules on 15m and 1h, measure fill%, bars-to-confirm, risk%, MFE/MAE in R and stop-hit% — the too-early(fakes) vs too-late(RR decay) tradeoff. Fetch with -tf 15m.")
 	structTF := flag.Bool("structtf", false, "ISOLATION: replay on the trader's NATIVE-TF bars (from a finer fetch) with ATR/TP/BE/DD/backstop fixed, sweeping ONLY the structural stop's source timeframe DOWN (1h native→1h/30m/15m; 15m native→15m/10m/5m). Requires -liveconfig with a close-confirm structural baseline; native TF is read from the config.")
+	liveATR := flag.Bool("liveatr", false, "pin each entry's ATR to the live engine's regime_atr14_pct (from decision_records) via Entry.ATROverride. REQUIRED for trusting any ATR-unit threshold sweep (BE arm / DD / backstop / floor): otherwise replay derives ATR from its own bars and the threshold is a different price distance than live applied.")
 	exchange := flag.String("exchange", "okx", "bar-data exchange for replay: okx | binance. Binance (proxy-aware) is for binance-type traders like BN so the replay reads the exchange the trades executed on.")
 	flag.Parse()
 
@@ -84,6 +85,17 @@ func main() {
 		fmt.Printf("(warn: could not attach structural plans: %v)\n", aerr)
 	} else {
 		fmt.Printf("attached structural plans (with AI first_target) to %d/%d entries\n", n, len(entries))
+	}
+	// Pin ATR to the value the LIVE engine used, so ATR-unit thresholds (BE arm,
+	// DD tiers, backstop, floor) mean the same price distance in replay as they did
+	// live. Without this the replay's self-derived ATR shifts every threshold and
+	// manufactures a phantom changed-set on trades whose live peak never reached it.
+	if *liveATR {
+		if n, aerr := backtest.AttachLiveATR(db, *traderLike, 5*60*1000, entries); aerr != nil {
+			fmt.Printf("(warn: could not pin live ATR: %v)\n", aerr)
+		} else {
+			fmt.Printf("pinned LIVE ATR (regime_atr14_pct) on %d/%d entries\n", n, len(entries))
+		}
 	}
 	if *limit > 0 && *limit < len(entries) {
 		if *recent {

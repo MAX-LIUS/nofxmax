@@ -134,6 +134,29 @@ func LiveVariants(base ProtectionParams) []ConfigVariant {
 		}
 	}
 
+	// --- COUPLED BE1 arm ladder: move the arm AND scale the rest-offset with it.
+	//     The absolute ladder above varies TriggerATR alone, which silently changes
+	//     TWO things: where BE arms, and how much room the resting stop has. Live is
+	//     arm 1.1 / offset 0.25 ATR, i.e. the stop sits 0.85 ATR BELOW the arming
+	//     price. Setting arm=0.3 while offset stays 0.25 leaves only 0.05 ATR of
+	//     room, so the tier is stopped out by noise the moment it arms — that is a
+	//     broken config, not an "earlier break-even" test, and it is unfalsifiable on
+	//     1h bars because the intrabar fire is invisible. Holding offset/arm at the
+	//     live ratio keeps the tier's geometry intact so the arm LEVEL is the only
+	//     thing under test.
+	if len(base.BELegs) > 0 && base.BELegs[0].TriggerATR > 0 && base.BELegs[0].OffsetATR > 0 {
+		ratio := base.BELegs[0].OffsetATR / base.BELegs[0].TriggerATR
+		for _, a := range []float64{0.3, 0.5, 0.7, 0.9, 1.3, 1.6} {
+			if math.Abs(a-base.BELegs[0].TriggerATR) < 1e-9 {
+				continue
+			}
+			v := clone(base)
+			v.BELegs[0].TriggerATR = a
+			v.BELegs[0].OffsetATR = a * ratio
+			vs = append(vs, ConfigVariant{Name: "be1coup-" + trimHours(a) + "ATR", P: v})
+		}
+	}
+
 	// --- tighter time-stop (cut the -1.5% time exit to fire 25% sooner) ---
 	if base.CloseProxy.Enabled && base.CloseProxy.TimeStopHours > 0 {
 		v := clone(base)
