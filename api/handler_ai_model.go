@@ -203,7 +203,27 @@ func (s *Server) handleUpdateModelConfigs(c *gin.Context) {
 		// Don't return error here since model config was successfully updated to database
 	}
 
-	logger.Infof("✓ AI model config updated: %+v", req.Models)
+	// NEVER log req.Models with %+v: it carries APIKey plus every
+	// FallbackEndpoints[].APIKey in cleartext (fallback keys are stored
+	// unencrypted, so the log would be the plaintext copy), and the log files are
+	// 0644 root-readable and also shipped to /tmp/nofx.log. Log only which models
+	// changed, whether a key was supplied, and the endpoint count.
+	var summary strings.Builder
+	for modelID, m := range req.Models {
+		if summary.Len() > 0 {
+			summary.WriteString(", ")
+		}
+		fallbackKeys := 0
+		for _, fe := range m.FallbackEndpoints {
+			if fe.APIKey != "" {
+				fallbackKeys++
+			}
+		}
+		summary.WriteString(fmt.Sprintf("%s{enabled=%v api_key=%v custom_url=%v fallbacks=%d(with_key=%d)}",
+			modelID, m.Enabled, m.APIKey != "", m.CustomAPIURL != "",
+			len(m.FallbackEndpoints), fallbackKeys))
+	}
+	logger.Infof("✓ AI model config updated: %s", summary.String())
 	c.JSON(http.StatusOK, gin.H{"message": "Model configuration updated"})
 }
 
