@@ -36,8 +36,8 @@ func (t *GateTrader) GetBalance() (map[string]interface{}, error) {
 	walletBalance := total - unrealizedPnl
 
 	result := map[string]interface{}{
-		"totalEquity":           total,           // Total equity INCLUDING unrealized PnL
-		"totalWalletBalance":    walletBalance,   // Wallet balance EXCLUDING unrealized PnL
+		"totalEquity":           total,         // Total equity INCLUDING unrealized PnL
+		"totalWalletBalance":    walletBalance, // Wallet balance EXCLUDING unrealized PnL
 		"availableBalance":      available,
 		"totalUnrealizedProfit": unrealizedPnl,
 	}
@@ -78,7 +78,21 @@ func (t *GateTrader) GetPositions() ([]map[string]interface{}, error) {
 		markPrice, _ := strconv.ParseFloat(pos.MarkPrice, 64)
 		liqPrice, _ := strconv.ParseFloat(pos.LiqPrice, 64)
 		unrealizedPnl, _ := strconv.ParseFloat(pos.UnrealisedPnl, 64)
+
+		// Gate leverage semantics differ from okx/binance: `leverage == "0"` means
+		// CROSS margin and the effective multiplier lives in `cross_leverage_limit`.
+		// A positive `leverage` means ISOLATED margin. Reporting the raw 0 upstream
+		// made every cross position look like 0x, and the generic layer guards on
+		// `lev > 0` (auto_trader_replace.go:93, auto_trader_risk.go:4575), so a 0
+		// silently disabled leverage-aware sizing and risk math.
 		leverage, _ := strconv.ParseFloat(pos.Leverage, 64)
+		mgnMode := "isolated"
+		if leverage == 0 {
+			mgnMode = "cross"
+			if crossLev, err := strconv.ParseFloat(pos.CrossLeverageLimit, 64); err == nil && crossLev > 0 {
+				leverage = crossLev
+			}
+		}
 
 		// Gate returns position size in contracts, need to convert to base currency
 		// Each contract = quanto_multiplier base currency
@@ -100,21 +114,41 @@ func (t *GateTrader) GetPositions() ([]map[string]interface{}, error) {
 		// Convert contract count to actual token quantity
 		positionAmt := contractSize * quantoMultiplier
 
-		// Determine side based on position size
+		// Determine side. In dual-position (hedge) mode Gate reports the direction in
+		// `mode` (dual_long / dual_short) and `size` is always positive for the long
+		// leg, so the size sign alone is not authoritative there. Prefer `mode`, fall
+		// back to the size sign for single-position mode.
 		side := "long"
-		if pos.Size < 0 {
+		switch pos.Mode {
+		case "dual_long":
+			side = "long"
+		case "dual_short":
 			side = "short"
+		default:
+			if pos.Size < 0 {
+				side = "short"
+			}
 		}
 
 		result = append(result, map[string]interface{}{
-			"symbol":           pos.Contract,
+			// MUST be the internal symbol (BTCUSDT), not Gate's native BTC_USDT.
+			// The whole protection stack keys positions/orders by this string; an
+			// unconverted contract name never matches the orders returned by
+			// GetOpenOrders (which does revert), leaving gate positions invisible
+			// to the reconciler.
+			"symbol":           t.revertSymbol(pos.Contract),
 			"positionAmt":      positionAmt,
 			"entryPrice":       entryPrice,
 			"markPrice":        markPrice,
 			"unRealizedProfit": unrealizedPnl,
-			"leverage":         int(leverage),
+			// float64, matching okx/binance. The generic layer type-asserts
+			// pos["leverage"].(float64) in 6 places; an int would fail every one.
+			"leverage":         leverage,
 			"liquidationPrice": liqPrice,
 			"side":             side,
+			"mgnMode":          mgnMode,
+			"createdTime":      pos.OpenTime * 1000, // Gate returns seconds; generic layer expects ms
+			"updatedTime":      pos.UpdateTime * 1000,
 		})
 	}
 

@@ -82,12 +82,42 @@ func (at *AutoTrader) GetProtectionCapabilities() ProtectionCapabilities {
 			ReportsTrailingCallbackRate:   true,
 		}
 	case "gate":
+		// Verified against the adapter, not assumed:
+		//   NativeStopLoss/TakeProfit  price-triggered orders via CreatePriceTriggeredOrder
+		//   NativePartialClose         signed Initial.Size (negative closes a long)
+		//   NativeReduceOnly           Initial.ReduceOnly is set on every protection order
+		//   CanDistinguishStopTP       classifyTriggerOrder decides from (side, rule)
+		//                              TOGETHER. This flag was already true while the
+		//                              classifier read Trigger.Rule alone, which inverts
+		//                              the answer for every SHORT — the flag was
+		//                              untruthful until that was fixed.
+		//
+		// Everything else stays false, deliberately:
+		//   CanAmendProtection            Gate has no amend endpoint for trigger orders;
+		//                                 changes are cancel + re-place.
+		//   SupportsAlgoOrders            no OKX-style algo namespace.
+		//   SupportsNativeFullTrailing    Gate futures has no native trailing order type
+		//   SupportsNativePartialTrailing in this SDK, so DD trailing MUST fall to the
+		//                                 local managed monitor (the native switch in
+		//                                 auto_trader_risk.go handles only
+		//                                 binance/bitget/okx). Declaring either true
+		//                                 would route DD to a venue path that does not
+		//                                 exist and silently drop the protection.
+		//   ReportsTrailingCallbackRate   moot while trailing is managed locally; must
+		//                                 stay false so the fuzzy tier matcher is never
+		//                                 fed a callback rate the venue never returns.
 		return ProtectionCapabilities{
-			NativeStopLoss:       true,
-			NativeTakeProfit:     true,
-			NativePartialClose:   true,
-			NativeReduceOnly:     true,
-			CanDistinguishStopTP: true,
+			NativeStopLoss:                true,
+			NativeTakeProfit:              true,
+			NativePartialClose:            true,
+			NativeReduceOnly:              true,
+			CanAmendProtection:            false,
+			CanDistinguishStopTP:          true,
+			SupportsAlgoOrders:            false,
+			SupportsOCO:                   false,
+			SupportsNativeFullTrailing:    false,
+			SupportsNativePartialTrailing: false,
+			ReportsTrailingCallbackRate:   false,
 		}
 	case "kucoin":
 		return ProtectionCapabilities{
