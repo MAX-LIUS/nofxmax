@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"nofx/config"
 	"nofx/crypto"
@@ -205,7 +206,36 @@ func (s *Server) handleUpdateExchangeConfigs(c *gin.Context) {
 		// Don't return error here since exchange config was successfully updated to database
 	}
 
-	logger.Infof("✓ Exchange config updated: %+v", req.Exchanges)
+	// NEVER log req.Exchanges with %+v: the struct carries APIKey/SecretKey/
+	// Passphrase and every private key field in cleartext, and the log files are
+	// 0644 root-readable and also shipped to /tmp/nofx.log. Log only which
+	// exchanges changed and which credential fields were present.
+	var summary strings.Builder
+	for exchangeID, ex := range req.Exchanges {
+		if summary.Len() > 0 {
+			summary.WriteString(", ")
+		}
+		var set []string
+		for _, f := range []struct{ name, val string }{
+			{"api_key", ex.APIKey},
+			{"secret_key", ex.SecretKey},
+			{"passphrase", ex.Passphrase},
+			{"aster_private_key", ex.AsterPrivateKey},
+			{"lighter_private_key", ex.LighterPrivateKey},
+			{"lighter_api_key_private_key", ex.LighterAPIKeyPrivateKey},
+		} {
+			if f.val != "" {
+				set = append(set, f.name)
+			}
+		}
+		credentials := "none"
+		if len(set) > 0 {
+			credentials = strings.Join(set, "+")
+		}
+		summary.WriteString(fmt.Sprintf("%s{enabled=%v testnet=%v credentials=[%s]}",
+			exchangeID, ex.Enabled, ex.Testnet, credentials))
+	}
+	logger.Infof("✓ Exchange config updated: %s", summary.String())
 	c.JSON(http.StatusOK, gin.H{"message": "Exchange configuration updated"})
 }
 

@@ -7,10 +7,12 @@ services:
     container_name: nofx-trading
     restart: unless-stopped
     stop_grace_period: 30s  # Allow the app 30 seconds for graceful shutdown
-    # Hotfix binary in the data volume overrides the image binary, so a rebuilt
-    # binary can be deployed without rebuilding the whole image. Falls back to
-    # rebuilding the image (drop this line) for a permanent release.
-    entrypoint: ["/app/data/nofx-hotfix"]
+    # NOTE: 这里曾有 `entrypoint: ["/app/data/nofx-hotfix"]`(d1cf0f4 引入),用于让
+    # data 卷里的热修二进制覆盖镜像内的二进制。该文件早已不存在,而 entrypoint 覆盖
+    # 会屏蔽镜像自己的 `CMD ["./nofx"]` —— 任何 `docker compose up nofx` 都会因入口
+    # 文件缺失直接起不来。当前后端跑在 systemd 裸进程(ExecStart=/opt/webstack/nofx/nofx)
+    # 所以一直没暴露。已移除,回落到镜像内的 CMD。
+    # 若将来要恢复热修机制:先确认 /opt/webstack/nofx/data/nofx-hotfix 真实存在且可执行。
     ports:
       - "${NOFX_BACKEND_PORT:-8080}:8080"
       - "6060:6060"  # pprof profiling
