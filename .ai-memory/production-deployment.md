@@ -1,5 +1,59 @@
 # Production Deployment - Critical Information
 
+## 2026-08-05 Deploy: 账户实际价值熔断上线 + claude 实盘 2.8% (pid 998467, commit 1cfc0b5)
+
+用户诉求「实盘开启账户2.8%熔断」→「直接部署上线,百分比就行,暂时不加冻结,先看看效果再说」。
+**只动后端**(前端 6 个字段随 commit 进去但未重建镜像,策略页要看到新面板需下次前端构建)。
+
+**隔离性**:线上是 `4cc1a8f`,dev 上夹着 15 个 `trader/backtest/` 文件。建
+`deploy/equity-breaker` 从 `4cc1a8f` cherry-pick `2764b4b` → `1cfc0b5`,落地 11 文件、
+**零 `trader/backtest/`**。二进制 `-ldflags="-s -w"` = 48380720 bytes,
+md5 `f83b3de12d53a3fc0e9654a5a993d156`,`vcs.revision=1cfc0b5`。
+回滚点 `/root/.claude/jobs/eqdeploy/tmp/binbak/nofx_prev_4cc1a8f_20260805_1226`
+(md5 `191404d21a36815ead7c336a58996068`);config 回滚
+`/root/.claude/jobs/eqdeploy/tmp/config_rollback.json` (10828 bytes)。
+`MainPID=998467`,`NRestarts=0`,`pgrep -xc nofx`=1,health 200 @0.73ms。
+
+**写生产 config 的正确姿势(踩过坑)**:`cmd/strategypatch` 的结构体 round-trip 会
+**静默丢掉 7 个 `evolution.*` 键**(字段已在 `f92641b` 删除,`store.StrategyConfig`
+不再有它们,marshal 就没了)。必须用**裸 JSON deep merge**(Python)写,
+`BEGIN` + `assert rowcount==1` + `commit`。写后核对:恰好 +6 键、0 删、0 改,
+`evol=1` 仍在。策略 `0d1c8446-26c7-40d3-9cc9-ba531b3facb6` (`claude-hhhl`) 最终值:
+`breadth_equity_enabled=1, dd_pct=2.8, dd_abs=0, scope=retracing, cut_pct=100, min_pos=0`,
+并存 `breadth_frac=0.55, atr_mult=1.25, cut_winners=true`,`dry_run` 未设(即实盘)。
+
+**部署后核对(12:37:41 UTC / 20:37:41 +8 起)**:panic 0;`ERRO` 全部是既存
+`drawdown_claim_conflict.go:300`(ZEC 14 / ETH 7,same-tier fork,基线同源);`WARN 0`;
+`equity unavailable` fail-safe **0 次**。138 条事件 **equity_fetch_ok 全 =1**,
+`equity_thr_pct=2.8` / `equity_scope=retracing` 落在每一行(含 quorum `near_miss`,
+这是设计意图:配额没到也能看到权益距离)。峰值 ratchet 到 156.16,
+窗口内 max `equity_dd_pct`=1.177% < 2.8%,未误触发。
+
+**⚠️ 2.8% 的口径与用户预期不一致(已当面提示,用户选择先跑)**:2.8% 来自我那张
+**24h 延迟再入场**的行(-0.11%)。claude 真实的 `entry_cooldown` 是 **45min 且按 symbol**,
+任何亏损平仓都会 arm,所以下一个 20min 轮次可以开**别的币** → 真实再入场窗口 20~60min,
+该档位回测是 **-55%~-60%**、maxDD 64~69%。另:`breadth_cut_winners=true` 意味着权益触发
+也会砍掉回撤组里的赢家,而 `break_even_stop` 是唯一大额正贡献出口(126 笔 +54.13)。
+
+**入口不是 `cmd/server`**:主包就是仓库根 `nofx`(`go build -o … .`)。
+
+## 2026-08-05 Hotfix: 广度熔断状态非触发路径也落盘 (commit c2f0f4d / dev 89a281c)
+
+上线后核对时发现的**既存**(非本次引入)保护缺口。`breadth_velocity_states` 三行
+`equity_peak` 全 =0、`last_bar` 分别停在 07-31 / 07-14 / 07-01,启动日志
+`age=536.2h, stale=true` —— `SaveBreadthVelocityState` **只有一个调用点且在函数尾部**,
+而 `no_quorum` / `near_miss` / `cooldown` 三个常见结局都在尾部之前 `return`,
+`persistNeeded` 被整个丢掉,**只有真正触发的那次循环才落盘**。
+`git show 4cc1a8f:trader/giveback_guard.go` 确认旧版结构完全相同 → 老 bug。
+
+对账户价值熔断这是实质缺口:权益高水位的 ratchet **本质上只发生在安静循环里**
+(没触发才会一直抬高),不落盘 = 重启后 `gbEquityPeak` 归零、以当前(可能已回撤的)
+权益重新起算,**熔断线被悄悄下移**。修法:函数开头装 `defer` 写入器,覆盖全部 return
+路径;放 `defer` 里还顺带覆盖了**触发后的 peak re-base**(它在最后一次 `persistNeeded`
+赋值之后)。回归测试 `TestGivebackGuardEquityPeakPersistsOnNonFirePath`
+(安静循环 + 权益新高 → 断言读回 250),去掉修复后报 `persisted peak = 0.00`。
+新二进制 md5 `c970fce8bf678be50be64932b0ea0c77`,`vcs.revision=c2f0f4d`,48380720 bytes。
+
 ## 2026-08-04 Deploy: 剥离进化画像引擎 (pid 896148, commit 4cc1a8f)
 
 前后端都动了。回滚点 `/root/.claude/jobs/5cbb3cf4/tmp/binbak/nofx_prev_9186326_20260804_1035`
