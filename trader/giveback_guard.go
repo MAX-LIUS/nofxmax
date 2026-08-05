@@ -151,6 +151,42 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 	}
 	persistNeeded := newBar // bar advance changed hist + bar clock; persist below
 
+	// Persist on EVERY exit path, not just the fire path. This function returns
+	// early on the common outcomes (no_quorum / near_miss / cooldown), and those
+	// returns used to discard persistNeeded entirely — so a bar advance or an
+	// equity-peak ratchet was only ever written to disk on the rare cycle that
+	// actually fired. The visible symptom was a restored velocity history stale by
+	// hundreds of hours. For the account-value path this is a protection gap, not
+	// just a cosmetic one: losing the ratcheted peak re-bases the breaker to the
+	// current (possibly already drawn-down) equity on restart, silently moving the
+	// trigger line down. Deferring the write also means it captures the post-fire
+	// peak re-base, which happens after the last persistNeeded assignment.
+	defer func() {
+		if !persistNeeded || at.store == nil {
+			return
+		}
+		// Snapshot under the lock, write after release so the DB write never
+		// blocks the guard.
+		at.gbGuardMutex.Lock()
+		histCopy := make(map[string][]float64, len(at.gbPnlHist))
+		for k, v := range at.gbPnlHist {
+			cp := make([]float64, len(v))
+			copy(cp, v)
+			histCopy[k] = cp
+		}
+		st := store.BreadthVelocityState{
+			PnlHist:       histCopy,
+			LastBarMs:     at.gbLastBreadthBarMs,
+			BarsSinceFire: at.gbBreadthBarsSinceFire,
+			EquityPeak:    at.gbEquityPeak,
+			EquityPeakAt:  at.gbEquityPeakAt,
+		}
+		at.gbGuardMutex.Unlock()
+		if err := at.store.SaveBreadthVelocityState(at.id, st); err != nil {
+			logger.Warnf("⚠️ GivebackGuard Breadth: failed to persist velocity state: %v", err)
+		}
+	}()
+
 	// Resolve ATR% per (symbol, timeframe) once. We use the FROZEN open-time ATR
 	// (frozenATRForPosition) rather than a fresh live fetch: the live fetch could
 	// fail transiently (kline gap / API hiccup) and silently drop a symbol from
@@ -582,26 +618,8 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 	// Persist velocity history + bar clock outside the hot path, but only on a
 	// meaningful change (bar advance or fire). Snapshot under the lock, write
 	// after release so the DB write never blocks the guard.
-	if persistNeeded && at.store != nil {
-		at.gbGuardMutex.Lock()
-		histCopy := make(map[string][]float64, len(at.gbPnlHist))
-		for k, v := range at.gbPnlHist {
-			cp := make([]float64, len(v))
-			copy(cp, v)
-			histCopy[k] = cp
-		}
-		st := store.BreadthVelocityState{
-			PnlHist:       histCopy,
-			LastBarMs:     at.gbLastBreadthBarMs,
-			BarsSinceFire: at.gbBreadthBarsSinceFire,
-			EquityPeak:    at.gbEquityPeak,
-			EquityPeakAt:  at.gbEquityPeakAt,
-		}
-		at.gbGuardMutex.Unlock()
-		if err := at.store.SaveBreadthVelocityState(at.id, st); err != nil {
-			logger.Warnf("⚠️ GivebackGuard Breadth: failed to persist velocity state: %v", err)
-		}
-	}
+	// Persistence happens in the deferred writer installed near the top of this
+	// function, so it also covers the early-return paths and the peak re-base above.
 }
 
 // positionHasArmedProtection reports whether a position already has armed

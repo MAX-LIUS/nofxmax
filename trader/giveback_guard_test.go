@@ -1,8 +1,10 @@
 package trader
 
 import (
-	"nofx/store"
+	"path/filepath"
 	"testing"
+
+	"nofx/store"
 )
 
 func newGuardTrader(fake *fakeProtectionTrader, cfg store.GivebackGuardConfig, peaks map[string]float64) *AutoTrader {
@@ -207,6 +209,56 @@ func TestGivebackGuardEquityRatchetAndFailSafe(t *testing.T) {
 	at2.runGivebackGuard()
 	if fake2.closeLongCalls != 0 {
 		t.Fatalf("unreadable equity must skip the path (fail-safe), got %d", fake2.closeLongCalls)
+	}
+}
+
+// TestGivebackGuardEquityPeakPersistsOnNonFirePath is a regression test for a bug
+// where the equity high-water mark was only ever written to disk on a cycle that
+// actually FIRED. Every non-fire outcome (no_quorum / near_miss / cooldown) returns
+// early, and those returns discarded persistNeeded, so a ratchet advance was lost.
+// On restart the breaker then re-based to the current, possibly already drawn-down
+// equity, silently lowering the trigger line. The ratchet is a quiet-cycle event by
+// nature, so this path — not the fire path — is the one that must persist.
+func TestGivebackGuardEquityPeakPersistsOnNonFirePath(t *testing.T) {
+	st, err := store.New(filepath.Join(t.TempDir(), "gb-equity-persist.db"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer st.Close()
+
+	// Two flat-ish positions: nothing retracing enough to fire, equity at a new
+	// high. This is the ordinary quiet cycle that returns early.
+	fake := &fakeProtectionTrader{
+		positions: []map[string]interface{}{
+			longPos("SOXLUSDT", 100, 101, 10),
+			longPos("SKHYUSDT", 100, 101, 10),
+		},
+		equity: 250,
+	}
+	at := newGuardTrader(fake, equityCfg(5, 0, "retracing"), nil)
+	at.id = "persist-trader"
+	at.store = st
+	at.gbEquityPeak = 200
+
+	at.runGivebackGuard()
+
+	if fake.closeLongCalls != 0 {
+		t.Fatalf("quiet cycle must not fire, got %d closes", fake.closeLongCalls)
+	}
+	if at.gbEquityPeak != 250 {
+		t.Fatalf("in-memory peak should ratchet to 250, got %.2f", at.gbEquityPeak)
+	}
+
+	// The whole point: it must be on disk, not just in memory.
+	loaded, err := st.LoadBreadthVelocityState("persist-trader")
+	if err != nil {
+		t.Fatalf("LoadBreadthVelocityState: %v", err)
+	}
+	if loaded.EquityPeak != 250 {
+		t.Fatalf("persisted peak = %.2f, want 250 (ratchet did not survive)", loaded.EquityPeak)
+	}
+	if loaded.EquityPeakAt == 0 {
+		t.Fatal("persisted EquityPeakAt is 0, want the ratchet timestamp")
 	}
 }
 
