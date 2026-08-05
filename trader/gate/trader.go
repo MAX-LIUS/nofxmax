@@ -28,6 +28,16 @@ type GateTrader struct {
 	contractsCache      map[string]*gateapi.Contract
 	contractsCacheMutex sync.RWMutex
 	cacheDuration       time.Duration
+
+	// crossMargin records the margin mode requested via SetMarginMode. Gate has no
+	// standalone margin-mode endpoint: cross margin IS `leverage=0` plus
+	// `cross_leverage_limit=<n>` on UpdatePositionLeverage. Since the generic layer
+	// calls SetMarginMode *before* OpenLong/OpenShort (auto_trader_orders.go:274,480)
+	// and those then call SetLeverage, the mode has to be remembered here so
+	// SetLeverage can encode it. Without this the leverage call always wrote a
+	// positive value, i.e. isolated margin, silently ignoring is_cross_margin.
+	crossMargin      bool
+	crossMarginMutex sync.RWMutex
 }
 
 // NewGateTrader creates a new Gate trader instance
@@ -112,3 +122,19 @@ func (t *GateTrader) clearCache() {
 
 // Ensure GateTrader implements Trader interface
 var _ types.Trader = (*GateTrader)(nil)
+
+// Compile-time guard for the OPTIONAL tagged-protection contract.
+//
+// The generic protection layer reaches the tagged path only via anonymous interface
+// assertions (protection_execution.go:885,921,1069; auto_trader_risk.go:3786). Those
+// are runtime checks: if a signature here drifts by even the return type, the
+// assertion just evaluates false and gate silently degrades to untagged protection
+// with no protection intent recorded — no build error, no test failure, no log.
+// Restating the exact shape here turns that class of silent regression into a
+// compile error.
+var _ interface {
+	SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error
+	SetStopLossTagged(symbol string, positionSide string, quantity, stopPrice float64, reasonTag string) (string, error)
+	SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error
+	SetTakeProfitTagged(symbol string, positionSide string, quantity, takeProfitPrice float64, reasonTag string) (string, error)
+} = (*GateTrader)(nil)

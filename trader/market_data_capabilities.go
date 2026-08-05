@@ -79,6 +79,14 @@ func (at *AutoTrader) GetMarketDataCapabilities() MarketDataCapabilities {
 			QuoteSpread:              true,
 			FeeFallback:              true,
 		}
+	// NOTE on QuoteMarkPrice: no adapter exposes a GetMarkPrice method, and the only
+	// reader of this flag (execution_constraints_snapshot.go:56) uses it solely as a
+	// bail-out condition alongside QuoteLastPrice — so today the flag is inert
+	// everywhere, including for Binance which declares it true while GetMarketPrice
+	// returns LAST price. Every adapter's GetMarketPrice returns last price; mark price
+	// reaches consumers through pos["markPrice"] from GetPositions instead
+	// (getPositionMarkPrice, protection_reconciler.go:836). Recorded here so the flag is
+	// not mistaken for a live capability claim.
 	case "gate", "kucoin", "bybit", "bitget", "aster", "lighter", "hyperliquid":
 		return MarketDataCapabilities{
 			QuoteLastPrice:  true,
