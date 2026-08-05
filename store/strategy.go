@@ -670,6 +670,51 @@ type GivebackGuardConfig struct {
 	// Enable for a system-wide "go to cash on a correlated crash" policy.
 	BreadthCutWinners bool `json:"breadth_cut_winners,omitempty"`
 
+	// --- Account-value breaker (PARALLEL judgment mode, OR'd with the quorum gate) ---
+	// The quorum gate above is deliberately leverage-free: it measures each symbol's
+	// OWN retracement, so it ignores how much account equity the book is bleeding.
+	// That is correct for noise rejection but it has a real blind spot: with N legs
+	// all on the same side, a large gross-notional book can lose a serious slice of
+	// account value while only a MINORITY of symbols are individually retracing past
+	// BreadthATRMult, so the quorum is never met and nothing is cut.
+	//
+	// Measured case (claude, 2026-08-05): equity 162.40 -> 153.42 (-5.53%) with
+	// gross notional 598.85 on 157 equity (3.8x). Per-symbol from-peak givebacks were
+	// 1.312 / 1.313 / 0.519 / 0.222 ATR — only 2 of 4 legs cleared 1.25, so retr/total
+	// = 0.50 < BreadthFrac 0.55 and the gate correctly reported near_miss 1380 times
+	// in a row while the account dropped 5.5%.
+	//
+	// This breaker closes that blind spot WITHOUT re-introducing the old
+	// leverage-contaminated equity breaker's failure mode. The difference from the
+	// removed L1/L2/L3: those were the ONLY trigger, so a 0.5% price wiggle at 10x
+	// knocked the whole book out. This one is an additional OR'd path with an
+	// absolute-value floor (BreadthEquityDDAbs) available, so it can be set to a
+	// "real money" threshold that noise cannot reach, and it is off by default.
+	//
+	// Trigger (either one suffices, both are drops from the equity high-water mark):
+	//	BreadthEquityDDPct > 0 && (peak-cur)/peak*100 >= BreadthEquityDDPct
+	//	BreadthEquityDDAbs > 0 && (peak-cur)              >= BreadthEquityDDAbs
+	//
+	// Equity = totalEquity (balance + unrealized), the account's real value, so both
+	// realized and unrealized damage count. The peak ratchets up and is persisted;
+	// after a fire it re-bases to the post-cut equity, so re-arming requires another
+	// full drawdown from the new level (no repeat-fire on the same drop).
+	//
+	// Scope is set by BreadthEquityScope: "retracing" (default) cuts the retracing
+	// group only — the same legs the quorum gate would have cut, honoring
+	// BreadthCutWinners for protected winners — or "all", which cuts every open
+	// position (unconditional go-to-cash, ignores retracing classification and
+	// protection state).
+	BreadthEquityEnabled bool    `json:"breadth_equity_enabled,omitempty"`  // master switch; false => complete no-op
+	BreadthEquityDDPct   float64 `json:"breadth_equity_dd_pct,omitempty"`  // fire when equity is this many % below its peak (0 => path off)
+	BreadthEquityDDAbs   float64 `json:"breadth_equity_dd_abs,omitempty"`  // fire when equity is this many USDT below its peak (0 => path off)
+	BreadthEquityScope   string  `json:"breadth_equity_scope,omitempty"`   // "retracing" (default) | "all"
+	BreadthEquityCutPct  float64 `json:"breadth_equity_cut_pct,omitempty"` // % of each in-scope position to cut (0 => 100 = full)
+	// BreadthEquityMinPos is an optional quorum for the equity path only. 0 (the
+	// default) means NO quorum: this is an account-value stop, and a single
+	// oversized leg can breach it just as legitimately as five small ones.
+	BreadthEquityMinPos int `json:"breadth_equity_min_pos,omitempty"`
+
 	// Monitor cadence floor (seconds); 0 => reuse drawdown monitor cadence.
 	PollIntervalSeconds int `json:"poll_interval_seconds,omitempty"`
 }

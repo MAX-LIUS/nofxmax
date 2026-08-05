@@ -20,6 +20,10 @@ import (
 //	"cooldown"     — would have fired but BreadthCooldownBars blocked it
 //	"no_quorum"    — total < BreadthMinPos (only recorded when retracing>0)
 //
+// FirePath records WHICH of the two parallel judgment modes caused a fire:
+// "quorum" (the per-symbol breadth majority) or "equity" (the account-value
+// drawdown breaker). Empty on non-fire outcomes.
+//
 // One row per evaluation cycle that is worth recording (fire / near-miss /
 // cooldown-blocked). Routine "nothing happening" cycles are not persisted.
 type BreadthEvent struct {
@@ -39,6 +43,20 @@ type BreadthEvent struct {
 	CooldownBars  int     `gorm:"column:cooldown_bars;default:0" json:"cooldown_bars"`     // BreadthCooldownBars
 	CutWinners    bool    `gorm:"column:cut_winners;default:false" json:"cut_winners"`     // BreadthCutWinners
 	UseATR        bool    `gorm:"column:use_atr;default:false" json:"use_atr"`             // BreadthUseATR
+
+	// --- Account-value breaker (parallel judgment mode) ---
+	// Recorded on EVERY persisted evaluation when the equity path is enabled, not
+	// just on its fires, so a near-miss row shows how close the account-value path
+	// was at the same instant the quorum path fell short.
+	FirePath      string  `gorm:"column:fire_path;default:''" json:"fire_path"`             // "quorum" | "equity" | "" (no fire)
+	EquityPeak    float64 `gorm:"column:equity_peak;default:0" json:"equity_peak"`          // equity high-water mark at eval time
+	EquityCur     float64 `gorm:"column:equity_cur;default:0" json:"equity_cur"`            // current total equity (balance + unrealized)
+	EquityDDPct   float64 `gorm:"column:equity_dd_pct;default:0" json:"equity_dd_pct"`      // (peak-cur)/peak*100
+	EquityDDAbs   float64 `gorm:"column:equity_dd_abs;default:0" json:"equity_dd_abs"`      // peak-cur in USDT
+	EquityThrPct  float64 `gorm:"column:equity_thr_pct;default:0" json:"equity_thr_pct"`    // BreadthEquityDDPct
+	EquityThrAbs  float64 `gorm:"column:equity_thr_abs;default:0" json:"equity_thr_abs"`    // BreadthEquityDDAbs
+	EquityScope   string  `gorm:"column:equity_scope;default:''" json:"equity_scope"`       // BreadthEquityScope in effect
+	EquityFetchOK bool    `gorm:"column:equity_fetch_ok;default:false" json:"equity_fetch_ok"` // false => equity unavailable, path skipped (fail-safe)
 	// LegsJSON is the per-position detail at eval time: symbol, side, entry, mark,
 	// profit%, peak%, whether classified retracing, the resolved ATR% (0 = ATR
 	// resolution failed for that symbol), and whether it was cut. JSON array.
