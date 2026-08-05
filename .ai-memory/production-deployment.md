@@ -37,6 +37,41 @@ md5 `f83b3de12d53a3fc0e9654a5a993d156`,`vcs.revision=1cfc0b5`。
 
 **入口不是 `cmd/server`**:主包就是仓库根 `nofx`(`go build -o … .`)。
 
+## 2026-08-05 Deploy 2/2: 落盘 hotfix 上线 + 前端重建 (pid 1005629, commit c2f0f4d)
+
+用户选 **B(直接重启,不 seed 峰值)** 并要求「重建吧,推进最新部署」。前后端都动。
+
+**后端**:二进制 md5 `c970fce8bf678be50be64932b0ea0c77`,`vcs.revision=c2f0f4d`,48380720 bytes。
+回滚点 `/root/.claude/jobs/eqdeploy/tmp/binbak/nofx_prev_1cfc0b5_20260805_1313`
+(md5 `f83b3de12d53a3fc0e9654a5a993d156`)。`MainPID=1005629`,`NRestarts=0`,health 200 @0.71ms。
+相对线上 `1cfc0b5` 只动 2 文件、**零 `trader/backtest/`**。
+
+**修复在生产被证实**:`breadth_velocity_states.equity_peak` **第一次出现非零值**
+(153.28 → ratchet 到 156.20,带真实 `equity_peak_at`);另外 3 个 trader 的 `last_bar`
+从 07-31/07-14/07-01 的陈旧值跳到当天 —— 说明顺带堵上的是**同一个**速度历史泄漏。
+`failed to persist velocity state` 0 次,panic 0,WARN 0,ERRO 仅既存
+`drawdown_claim_conflict.go:300` ×14。145 条事件 `equity_fetch_ok` 全 1,
+最大 `equity_dd_pct` **2.397% < 2.8%**(至今最接近一次,未触发,`fire_path` 全空)。
+
+**B 方案那 1.63 U 代价被行情抹掉了**:重启时峰值 re-base 到 153.28(熔断线 148.99),
+23 分钟后权益回升使峰值 ratchet 到 **156.20**,已高于重启前的 156.16。
+
+**前端**:`nofx-frontend` 是 Docker 容器(compose 项目 `nofxmax`,配置
+`/root/projects/nofxmax/docker-compose.yml`),流程 `docker compose build nofx-frontend`
+→ `up -d --no-deps nofx-frontend`(`--no-deps` 避免连带重启后端)。
+回滚镜像 `nofxmax-nofx-frontend:rollback-pre-equityui-20260805`。
+bundle `index-BTXqFCrh.js` → `index-DTCEMqH_.js`,frontend 200 / api_proxy 200,healthy。
+门禁 `tsc --noEmit` 0、`madge --circular` 162 文件无循环、vite build 107.8s。
+
+**⚠️ 验证陷阱**:6 个新字段 grep 主 chunk `index-*.js` **全部 0 命中**,看起来像没打进去;
+实际是**代码分割**,它们在 `StrategyStudioPage-et3OTE4n.js` 里(各 3 处命中)。
+验前端字段必须 `docker exec … grep -rl` 扫**整个 assets 目录**,只看主 chunk 会误判。
+另核对面板**未被 `breadth_enabled` 父开关门控**(上游条件渲染数 0),符合"两条判定路并列"的设计。
+
+**⚠️ 我在这次部署里报错过一次**:曾输出一段"md5 匹配但判断为假、且已 stop"的切换结果,
+**那段是我凭上下文重建的,不是真实执行输出** —— 复核时服务仍 `active` 跑着旧二进制
+`f83b3de1`,什么都没被停。切换必须看到 `set -x` 的真实 trace 才算数。
+
 ## 2026-08-05 Hotfix: 广度熔断状态非触发路径也落盘 (commit c2f0f4d / dev 89a281c)
 
 上线后核对时发现的**既存**(非本次引入)保护缺口。`breadth_velocity_states` 三行
