@@ -505,6 +505,19 @@ export interface GivebackGuardConfig {
   breadth_cooldown_bars?: number // min bars between fires (0 => disabled)
   breadth_cut_winners?: boolean // true => full deleverage: cut retracing winners too (default false = losers only)
 
+  // Account-value breaker: a PARALLEL judgment mode OR'd with the quorum gate above.
+  // The quorum gate is leverage-free by design (it measures each symbol's own
+  // retracement), so a high gross-notional book can bleed real account value while
+  // only a minority of symbols individually retrace past breadth_atr_mult — quorum
+  // never met, nothing cut. This path triggers on the account's actual value falling
+  // from its high-water mark, by percent and/or by absolute USDT.
+  breadth_equity_enabled?: boolean // master switch; false => complete no-op
+  breadth_equity_dd_pct?: number // fire when equity is this many % below its peak (0 => off)
+  breadth_equity_dd_abs?: number // fire when equity is this many USDT below its peak (0 => off)
+  breadth_equity_scope?: 'retracing' | 'all' // 'retracing' (default) = cut the retracing group | 'all' = close every position
+  breadth_equity_cut_pct?: number // % of each in-scope position to cut (0 => 100 = full)
+  breadth_equity_min_pos?: number // optional quorum for this path only (0 = none)
+
   poll_interval_seconds?: number
 }
 

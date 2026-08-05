@@ -120,6 +120,12 @@ export const defaultProtectionConfig: ProtectionConfig = {
     breadth_vel_window: 6,
     breadth_cooldown_bars: 0,
     breadth_cut_winners: false,
+    breadth_equity_enabled: false,
+    breadth_equity_dd_pct: 5,
+    breadth_equity_dd_abs: 0,
+    breadth_equity_scope: 'retracing',
+    breadth_equity_cut_pct: 100,
+    breadth_equity_min_pos: 0,
   },
   // Trend reversal: fleet default is enabled + live for every trader. The UI shows
   // these as overrides; defaults mirror the fleet so the toggles read true on a
@@ -3180,6 +3186,166 @@ export function ProtectionEditor({
             disabled={disabled}
             className="h-4 w-4 mt-0.5 accent-red-500"
           />
+        </div>
+
+        {/* Account-value breaker: parallel judgment mode, OR'd with the quorum gate */}
+        <div
+          className="p-3 rounded-lg space-y-3"
+          style={{ background: '#1E2329', border: '1px solid #F0B90B44' }}
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <label
+                className="block text-xs font-medium"
+                style={{ color: '#F0B90B' }}
+              >
+                {isZh
+                  ? '账户实际价值熔断（与广度判定并列）'
+                  : 'Account-value breaker (parallel to breadth)'}
+              </label>
+              <p className="text-[11px] mt-1" style={{ color: '#848E9C' }}>
+                {isZh
+                  ? '广度判定按币种自身回撤、与杠杆无关，因此高名义敞口下账户可能已亏掉不少实际价值，但达标回撤的币种仍不过半 → 法定人数不成立、一仓不砍。本熔断补上这个盲区：按账户总权益（余额+浮盈）从高水位回撤的百分点或 U 数触发，两个条件任一满足即熔断。与广度判定并列生效（或关系）。触发后高水位重置为砍后权益，需重新走完一轮完整回撤才会再触发。'
+                  : "The breadth gate is leverage-free (it measures each symbol's own retracement), so a high gross-notional book can lose real account value while a minority of symbols individually retrace — quorum never met, nothing cut. This path closes that blind spot: it triggers on total equity (balance + unrealized) falling from its high-water mark by a percent and/or an absolute USDT amount, whichever hits first. Runs in parallel (OR) with the breadth gate. After a fire the peak re-bases to post-cut equity, so re-arming needs a fresh full drawdown."}
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              checked={!!giveback.breadth_equity_enabled}
+              onChange={(e) =>
+                updateGiveback('breadth_equity_enabled', e.target.checked)
+              }
+              disabled={disabled}
+              className="h-4 w-4 mt-0.5 accent-yellow-500"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {isZh ? '权益回撤%(0=关)' : 'Equity DD % (0=off)'}
+              </label>
+              <input
+                type="number"
+                step="0.5"
+                min="0"
+                value={giveback.breadth_equity_dd_pct ?? 0}
+                onChange={(e) =>
+                  updateGiveback(
+                    'breadth_equity_dd_pct',
+                    Number(e.target.value)
+                  )
+                }
+                disabled={disabled}
+                className="w-full px-2 py-2 rounded"
+                style={inputStyle}
+              />
+            </div>
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {isZh ? '权益回撤U(0=关)' : 'Equity DD USDT (0=off)'}
+              </label>
+              <input
+                type="number"
+                step="1"
+                min="0"
+                value={giveback.breadth_equity_dd_abs ?? 0}
+                onChange={(e) =>
+                  updateGiveback(
+                    'breadth_equity_dd_abs',
+                    Number(e.target.value)
+                  )
+                }
+                disabled={disabled}
+                className="w-full px-2 py-2 rounded"
+                style={inputStyle}
+              />
+            </div>
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {isZh ? '砍仓范围' : 'Cut scope'}
+              </label>
+              <select
+                value={giveback.breadth_equity_scope ?? 'retracing'}
+                onChange={(e) =>
+                  updateGiveback(
+                    'breadth_equity_scope',
+                    e.target.value as 'retracing' | 'all'
+                  )
+                }
+                disabled={disabled}
+                className="w-full px-2 py-2 rounded"
+                style={inputStyle}
+              >
+                <option value="retracing">
+                  {isZh ? '回撤组（同广度规则）' : 'Retracing group'}
+                </option>
+                <option value="all">
+                  {isZh ? '全部仓位（清仓）' : 'All positions'}
+                </option>
+              </select>
+            </div>
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {isZh ? '砍仓比例%(默认100)' : 'Cut % (default 100)'}
+              </label>
+              <input
+                type="number"
+                step="5"
+                min="0"
+                max="100"
+                value={giveback.breadth_equity_cut_pct ?? 100}
+                onChange={(e) =>
+                  updateGiveback(
+                    'breadth_equity_cut_pct',
+                    Number(e.target.value)
+                  )
+                }
+                disabled={disabled}
+                className="w-full px-2 py-2 rounded"
+                style={inputStyle}
+              />
+            </div>
+            <div>
+              <label
+                className="block text-xs mb-1"
+                style={{ color: '#848E9C' }}
+              >
+                {isZh ? '最少持仓(0=不限)' : 'Min positions (0=none)'}
+              </label>
+              <input
+                type="number"
+                step="1"
+                min="0"
+                value={giveback.breadth_equity_min_pos ?? 0}
+                onChange={(e) =>
+                  updateGiveback(
+                    'breadth_equity_min_pos',
+                    Number(e.target.value)
+                  )
+                }
+                disabled={disabled}
+                className="w-full px-2 py-2 rounded"
+                style={inputStyle}
+              />
+            </div>
+          </div>
+          <p className="text-[11px]" style={{ color: '#848E9C' }}>
+            {isZh
+              ? '范围「回撤组」= 只砍正在回撤的仓位，沿用上面「盈利盘也杀」的开关判断是否放过有保护的盈利仓；范围「全部仓位」= 无条件清掉所有持仓，忽略回撤判定与保护状态。取不到权益时本路直接跳过（不会用 0 值误触发）。'
+              : 'Scope "retracing group" cuts only retracing legs and honors the cut-winners switch above for protected winners. Scope "all positions" closes everything unconditionally, ignoring both retracement classification and armed protection. If equity cannot be read the path is skipped (it never fires on a zero reading).'}
+          </p>
         </div>
       </div>
 

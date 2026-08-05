@@ -80,10 +80,13 @@ func (at *AutoTrader) runGivebackGuard() {
 		return
 	}
 
-	// Breadth breaker is the sole portfolio guard: per-symbol monitoring +
-	// majority-retrace gate + cut losers only (winners ride break-even). The old
-	// L1/L2/L3 account-equity breakers were removed (leverage-contaminated).
-	if cfg.BreadthEnabled {
+	// The breadth breaker is the portfolio guard. It has two PARALLEL judgment modes,
+	// OR'd together inside gbApplyBreadth:
+	//   1. quorum — per-symbol majority-retrace gate (leverage-free, the default)
+	//   2. equity — account-value drawdown from the equity high-water mark
+	// Either switch alone is enough to run the guard; the old L1/L2/L3 breakers
+	// (equity-only, no per-symbol context) remain removed.
+	if cfg.BreadthEnabled || cfg.BreadthEquityEnabled {
 		at.gbApplyBreadth(cfg, snaps)
 	}
 }
@@ -101,7 +104,15 @@ func (at *AutoTrader) runGivebackGuard() {
 // peak-giveback%), never on account equity — so a 0.5% wiggle at 10x leverage
 // can't knock the book out the way the equity-5% breaker did.
 func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPosition) {
-	if cfg.BreadthFrac <= 0 || cfg.BreadthMinPos <= 0 || len(snaps) == 0 {
+	if len(snaps) == 0 {
+		return
+	}
+	// Which judgment modes are live this cycle. They are independent: the equity
+	// path must still run when the quorum path is unconfigured (frac/minpos unset),
+	// and vice versa, otherwise "parallel" would collapse to "quorum required".
+	quorumOn := cfg.BreadthEnabled && cfg.BreadthFrac > 0 && cfg.BreadthMinPos > 0
+	equityOn := cfg.BreadthEquityEnabled && (cfg.BreadthEquityDDPct > 0 || cfg.BreadthEquityDDAbs > 0)
+	if !quorumOn && !equityOn {
 		return
 	}
 	window := cfg.BreadthVelWindow
@@ -304,6 +315,61 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 		frac = float64(retr) / float64(total)
 	}
 
+	// --- Account-value path: read equity, ratchet the high-water mark ---------
+	// Only touched when the equity path is enabled, so the default configuration
+	// makes no extra exchange call. Equity is fetched fresh (not derived from the
+	// position snapshots) because it must include realized balance, not just
+	// unrealized PnL: a book that already realized its losses has really lost that
+	// account value and the breaker must see it.
+	//
+	// Fail-safe: if equity cannot be read, the path is SKIPPED (never fires on a
+	// zero/garbage reading) and the failure is recorded via EquityFetchOK=false.
+	equityCur, equityPeak, equityDDPct, equityDDAbs := 0.0, 0.0, 0.0, 0.0
+	equityFetchOK := false
+	if equityOn {
+		equityCur = at.fetchEquityForSizing()
+		if equityCur > 0 {
+			equityFetchOK = true
+			at.gbGuardMutex.Lock()
+			if equityCur > at.gbEquityPeak {
+				at.gbEquityPeak = equityCur
+				at.gbEquityPeakAt = time.Now().UnixMilli()
+				persistNeeded = true // ratchet advanced; must survive restart
+			}
+			equityPeak = at.gbEquityPeak
+			at.gbGuardMutex.Unlock()
+			if equityPeak > 0 {
+				equityDDAbs = equityPeak - equityCur
+				equityDDPct = equityDDAbs / equityPeak * 100
+				if equityDDAbs < 0 {
+					equityDDAbs, equityDDPct = 0, 0
+				}
+			}
+		} else {
+			logger.Warnf("⚠️ [GivebackGuard Equity] equity unavailable (got %.4f) — account-value path skipped this cycle (fail-safe)", equityCur)
+		}
+	}
+	equityScope := cfg.BreadthEquityScope
+	if equityScope == "" {
+		equityScope = "retracing"
+	}
+	// equityHit: the account-value trigger. Either threshold suffices; a threshold
+	// left at 0 is OFF (not "fires at any drawdown").
+	equityHit := false
+	if equityOn && equityFetchOK && equityPeak > 0 {
+		if cfg.BreadthEquityDDPct > 0 && equityDDPct >= cfg.BreadthEquityDDPct {
+			equityHit = true
+		}
+		if cfg.BreadthEquityDDAbs > 0 && equityDDAbs >= cfg.BreadthEquityDDAbs {
+			equityHit = true
+		}
+		// Optional quorum for the equity path (0 = none: an account-value stop is
+		// legitimate even with a single oversized leg).
+		if equityHit && cfg.BreadthEquityMinPos > 0 && total < cfg.BreadthEquityMinPos {
+			equityHit = false
+		}
+	}
+
 	// Per-path breadth pressure indices (0–100) for the dashboard gauges. Each
 	// index is that path's retracing fraction relative to the BreadthFrac fire
 	// threshold: index = (pathRetr/total) / BreadthFrac * 100, clamped to 100.
@@ -331,7 +397,7 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 
 	// recordEvent persists a full snapshot of this evaluation. Best-effort; never
 	// blocks the guard. cut legs are marked by the caller before invoking on fire.
-	recordEvent := func(outcome string, cutCount int) {
+	recordEvent := func(outcome, firePath string, cutCount int) {
 		if at.store == nil {
 			return
 		}
@@ -358,35 +424,79 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 			LegsJSON:      legsJSON,
 			ObservedAt:    nowMs,
 			CreatedAt:     nowMs,
+			// Account-value path snapshot: recorded on every persisted row when the
+			// path is enabled, so a quorum near_miss also shows how close equity was.
+			FirePath:      firePath,
+			EquityPeak:    equityPeak,
+			EquityCur:     equityCur,
+			EquityDDPct:   equityDDPct,
+			EquityDDAbs:   equityDDAbs,
+			EquityThrPct:  cfg.BreadthEquityDDPct,
+			EquityThrAbs:  cfg.BreadthEquityDDAbs,
+			EquityScope:   equityScope,
+			EquityFetchOK: equityFetchOK,
+		}
+		if !equityOn {
+			evt.EquityScope = "" // path disabled: don't imply a scope was in effect
 		}
 		if err := at.store.BreadthEvent().Record(evt); err != nil {
 			logger.Warnf("⚠️ [GivebackGuard Breadth] failed to record event: %v", err)
 		}
 	}
 
-	if total < cfg.BreadthMinPos {
-		// Below quorum. Only worth recording when something was retracing (so we
-		// capture "near-misses that never reached quorum") or an ATR fetch failed
-		// (so silent data gaps are visible). Quiet cycles are not persisted.
-		if retr > 0 || atrFailures > 0 {
-			recordEvent("no_quorum", 0)
+	// --- Combine the two parallel judgment modes -----------------------------
+	// quorumHit: per-symbol majority retrace at quorum. equityHit (above): account
+	// value fell far enough from its peak. Either fires the breaker. When both hit,
+	// the quorum path wins the label — it is the more specific, surgical judgment
+	// and its scope rules are the cross-validated ones.
+	quorumHit := quorumOn && total >= cfg.BreadthMinPos && frac >= cfg.BreadthFrac
+	if !quorumHit && !equityHit {
+		// Nothing fired. Record the informative non-fire outcomes only, exactly as
+		// before: below-quorum rows only when something was actually retracing or an
+		// ATR lookup failed; at-quorum shortfalls always (so BreadthFrac stays
+		// tunable). Quiet cycles are still not persisted.
+		switch {
+		case quorumOn && total < cfg.BreadthMinPos:
+			if retr > 0 || atrFailures > 0 {
+				recordEvent("no_quorum", "", 0)
+			}
+		case quorumOn:
+			recordEvent("near_miss", "", 0)
+		case retr > 0 || atrFailures > 0:
+			// Equity-only configuration: keep a near-miss trail so the account-value
+			// path is tunable from recorded data instead of guesswork.
+			recordEvent("near_miss", "", 0)
 		}
-		return // no quorum: "majority" is meaningless with too few positions
-	}
-	if frac < cfg.BreadthFrac {
-		// Quorum reached but the majority threshold was not — a genuine near-miss.
-		// Always recorded so over/under-sensitivity of BreadthFrac is tunable.
-		recordEvent("near_miss", 0)
-		return // not a majority reversal: leave each symbol to its own SL/BE
-	}
-	if cfg.BreadthCooldownBars > 0 && barsSinceFire < cfg.BreadthCooldownBars {
-		recordEvent("cooldown", 0)
 		return
 	}
 
+	// Cooldown applies to the QUORUM path only. The account-value breaker is an
+	// absolute account stop; a bar-clock cooldown must not be able to hold it off
+	// while equity keeps falling. Its own repeat-fire protection is the peak
+	// re-base after a cut (see below), which requires a fresh full drawdown.
+	if quorumHit && !equityHit && cfg.BreadthCooldownBars > 0 && barsSinceFire < cfg.BreadthCooldownBars {
+		recordEvent("cooldown", "", 0)
+		return
+	}
+
+	firePath := "quorum"
+	if !quorumHit {
+		firePath = "equity"
+	}
+	// cutAll: the account-value breaker's "all" scope closes the whole book —
+	// unconditional go-to-cash, ignoring both the retracing classification and any
+	// armed protection. Only reachable when the equity path is the firing path.
+	cutAll := firePath == "equity" && equityScope == "all"
+
+	// Cut fraction: each path has its own knob so tuning one cannot silently change
+	// the other. Equity path falls back to the quorum path's value when unset, and
+	// finally to a full cut.
 	cutPct := cfg.BreadthLoserCutPct / 100.0
+	if firePath == "equity" && cfg.BreadthEquityCutPct > 0 {
+		cutPct = cfg.BreadthEquityCutPct / 100.0
+	}
 	if cutPct <= 0 {
-		cutPct = 1.0 // default: full cut of losers
+		cutPct = 1.0 // default: full cut
 	}
 	if cutPct > 1 {
 		cutPct = 1
@@ -396,38 +506,72 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 	if cfg.BreadthCutWinners {
 		scope = "ALL retracing (winners too — full deleverage)"
 	}
-	logger.Infof("🌐 [GivebackGuard Breadth] gate FIRED: %d/%d positions retracing (>=%.0f%%), cutting %s at %.0f%% (atr_fail=%d)",
-		retr, total, cfg.BreadthFrac*100, scope, cutPct*100, atrFailures)
+	if cutAll {
+		scope = "EVERY open position (go-to-cash)"
+	}
+	if firePath == "equity" {
+		logger.Infof("💰 [GivebackGuard Equity] account-value breaker FIRED: equity %.2f vs peak %.2f = -%.2f (-%.2f%%) [thr %.2f%% / %.2f USDT], cutting %s at %.0f%% (retracing %d/%d, atr_fail=%d)",
+			equityCur, equityPeak, equityDDAbs, equityDDPct,
+			cfg.BreadthEquityDDPct, cfg.BreadthEquityDDAbs, scope, cutPct*100, retr, total, atrFailures)
+	} else {
+		logger.Infof("🌐 [GivebackGuard Breadth] gate FIRED: %d/%d positions retracing (>=%.0f%%), cutting %s at %.0f%% (atr_fail=%d)",
+			retr, total, cfg.BreadthFrac*100, scope, cutPct*100, atrFailures)
+	}
 
+	closeReason := "giveback_guard_breadth"
+	if firePath == "equity" {
+		closeReason = "giveback_guard_equity"
+	}
 	fired := 0
 	for i, s := range snaps {
-		// Winner handling: a retracing WINNER is spared ONLY if it already has armed
-		// downside protection (native trailing / managed drawdown / break-even stop)
-		// — that protection will lock in its gain on the way down. A "naked" winner
-		// (profit but NO armed protection) is exposed exactly like a loser: in a
-		// correlated reversal it would give back the whole unprotected gain, so it
-		// is cut alongside losers. BreadthCutWinners forces cutting ALL retracing
-		// winners regardless of protection (full deleverage).
-		if s.profitPct >= 0 && !cfg.BreadthCutWinners {
-			if at.positionHasArmedProtection(s.symbol, s.side, s.entry) {
-				continue // protected winner rides its own stop
+		if !cutAll {
+			// Winner handling: a retracing WINNER is spared ONLY if it already has armed
+			// downside protection (native trailing / managed drawdown / break-even stop)
+			// — that protection will lock in its gain on the way down. A "naked" winner
+			// (profit but NO armed protection) is exposed exactly like a loser: in a
+			// correlated reversal it would give back the whole unprotected gain, so it
+			// is cut alongside losers. BreadthCutWinners forces cutting ALL retracing
+			// winners regardless of protection (full deleverage).
+			if s.profitPct >= 0 && !cfg.BreadthCutWinners {
+				if at.positionHasArmedProtection(s.symbol, s.side, s.entry) {
+					continue // protected winner rides its own stop
+				}
+				// else: naked winner — fall through and cut like a loser
 			}
-			// else: naked winner — fall through and cut like a loser
-		}
-		if !legRetr[i] {
-			continue
+			if !legRetr[i] {
+				continue
+			}
 		}
 		closeQty := s.quantity * cutPct
 		if closeQty <= 0 {
 			continue
 		}
-		at.gbTrim(cfg, "giveback_guard_breadth", s, closeQty,
-			fmt.Sprintf("breadth %s %s pnl=%.2f%% peak=%.2f%% (%d/%d retracing)",
-				s.symbol, s.side, s.profitPct, s.peakPct, retr, total))
+		detail := fmt.Sprintf("breadth %s %s pnl=%.2f%% peak=%.2f%% (%d/%d retracing)",
+			s.symbol, s.side, s.profitPct, s.peakPct, retr, total)
+		if firePath == "equity" {
+			detail = fmt.Sprintf("equity-DD %s %s pnl=%.2f%% peak=%.2f%% (equity %.2f vs peak %.2f = -%.2f%%, scope=%s)",
+				s.symbol, s.side, s.profitPct, s.peakPct, equityCur, equityPeak, equityDDPct, equityScope)
+		}
+		at.gbTrim(cfg, closeReason, s, closeQty, detail)
 		legs[i].Cut = true
 		fired++
 	}
-	recordEvent("fired", fired)
+	recordEvent("fired", firePath, fired)
+
+	// Re-base the equity peak after an account-value fire. This is the equity path's
+	// repeat-fire protection: without it, every subsequent cycle would still see the
+	// same peak-to-current gap and keep cutting whatever remains. Re-basing to the
+	// post-cut equity means re-arming needs a fresh full BreadthEquityDDPct/Abs
+	// drawdown from here. Done in DRY-RUN too, so dry-run trigger frequency matches
+	// what live would produce instead of firing every cycle forever.
+	if firePath == "equity" && equityFetchOK {
+		at.gbGuardMutex.Lock()
+		at.gbEquityPeak = equityCur
+		at.gbEquityPeakAt = time.Now().UnixMilli()
+		at.gbGuardMutex.Unlock()
+		persistNeeded = true
+		logger.Infof("💰 [GivebackGuard Equity] equity peak re-based to %.2f after fire (re-arm requires a fresh drawdown)", equityCur)
+	}
 	if fired > 0 {
 		at.gbGuardMutex.Lock()
 		at.gbBreadthBarsSinceFire = 0
@@ -450,6 +594,8 @@ func (at *AutoTrader) gbApplyBreadth(cfg store.GivebackGuardConfig, snaps []gbPo
 			PnlHist:       histCopy,
 			LastBarMs:     at.gbLastBreadthBarMs,
 			BarsSinceFire: at.gbBreadthBarsSinceFire,
+			EquityPeak:    at.gbEquityPeak,
+			EquityPeakAt:  at.gbEquityPeakAt,
 		}
 		at.gbGuardMutex.Unlock()
 		if err := at.store.SaveBreadthVelocityState(at.id, st); err != nil {

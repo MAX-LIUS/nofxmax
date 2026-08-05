@@ -170,6 +170,8 @@ type AutoTrader struct {
 	gbBreadthVelIndex      float64                                   // Breadth pressure index (0-100) for the velocity path, last eval cycle
 	gbBreadthPeakIndex     float64                                   // Breadth pressure index (0-100) for the from-peak path, last eval cycle
 	gbBreadthIndexAt       int64                                     // ms timestamp the two breadth indices were last computed
+	gbEquityPeak           float64                                   // Account-value breaker: equity high-water mark (ratchet, persisted)
+	gbEquityPeakAt         int64                                     // ms timestamp the equity high-water mark was set (diagnostic)
 	structSLFiredBar       map[string]int64                          // structural SL close-confirm: symbol_side -> last closed-bar openTime that already fired (dedup)
 	structSLMutex          sync.Mutex                                // protects structSLFiredBar
 	protectionStateMutex   sync.RWMutex                              // Protects last protection reconcile state
@@ -562,8 +564,15 @@ func (at *AutoTrader) loadBreadthVelocityStateFromStore() {
 		at.gbLastBreadthBarMs = st.LastBarMs
 		at.gbBreadthBarsSinceFire = st.BarsSinceFire
 	}
+	// The equity high-water mark is restored REGARDLESS of staleness. Unlike the
+	// velocity history (whose samples become meaningless across a long gap), the peak
+	// is a monotone account-value reference: dropping it would silently re-base the
+	// account-value breaker to the current, possibly already-drawn-down equity and
+	// move the trigger line down exactly when protection matters most.
+	at.gbEquityPeak = st.EquityPeak
+	at.gbEquityPeakAt = st.EquityPeakAt
 	at.gbGuardMutex.Unlock()
-	logger.Infof("🔁 GivebackGuard Breadth: restored velocity history for %d position(s) (age=%.1fh, stale=%v, barsSinceFire=%d)", restored, float64(ageMs)/3600000.0, stale, at.gbBreadthBarsSinceFire)
+	logger.Infof("🔁 GivebackGuard Breadth: restored velocity history for %d position(s) (age=%.1fh, stale=%v, barsSinceFire=%d, equityPeak=%.2f)", restored, float64(ageMs)/3600000.0, stale, at.gbBreadthBarsSinceFire, st.EquityPeak)
 }
 
 // restoreEntryCooldownsFromStore rebuilds post-loss entry cooldowns after a

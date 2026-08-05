@@ -129,6 +129,20 @@ func MigrateUnifiedProtection(db *sql.DB) error {
 		}
 	}
 
+	// Account-value breaker: the equity high-water mark must survive restarts, else a
+	// restart mid-drawdown re-bases the peak to the already-depressed equity and the
+	// breaker silently stops protecting. Idempotent via PRAGMA table_info.
+	for _, col := range []struct{ name, ddl string }{
+		{"equity_peak", "ALTER TABLE breadth_velocity_states ADD COLUMN equity_peak REAL DEFAULT 0"},
+		{"equity_peak_at", "ALTER TABLE breadth_velocity_states ADD COLUMN equity_peak_at INTEGER DEFAULT 0"},
+	} {
+		if !columnExists(db, "breadth_velocity_states", col.name) {
+			if _, err := db.Exec(col.ddl); err != nil {
+				return fmt.Errorf("add column %s failed: %w", col.name, err)
+			}
+		}
+	}
+
 	// Excursion columns on peak_pnl_states: adverse trough + ATR multiples so the full
 	// MFE/MAE survives a restart, not just the favorable peak. Idempotent via PRAGMA.
 	for _, col := range []struct{ name, ddl string }{
@@ -380,6 +394,12 @@ type BreadthVelocityState struct {
 	PnlHist       map[string][]float64 // symbol_side -> 最近的 profit% 采样序列
 	LastBarMs     int64                // 上次推进速度 bar 的毫秒时间戳
 	BarsSinceFire int                  // 距上次熔断触发的 bar 数（冷却计数）
+
+	// EquityPeak 是账户价值熔断路的权益高水位（ratchet）。必须持久化：若重启后
+	// 从当前（已经回撤过的）权益重新起算，熔断线会被悄悄下移，等于在最需要保护
+	// 的时候放弃保护。EquityPeakAt 是该高水位的建立时间（毫秒），仅用于诊断。
+	EquityPeak   float64
+	EquityPeakAt int64
 }
 
 // SaveBreadthVelocityState 持久化广度熔断的速度历史与 bar 时钟。每次 bar 推进后
@@ -394,14 +414,16 @@ func (s *Store) SaveBreadthVelocityState(traderID string, state BreadthVelocityS
 		histJSON = string(b)
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO breadth_velocity_states (trader_id, pnl_hist_json, last_bar_ms, bars_since_fire, updated_at)
-		VALUES (?, ?, ?, ?, datetime('now'))
+		INSERT INTO breadth_velocity_states (trader_id, pnl_hist_json, last_bar_ms, bars_since_fire, equity_peak, equity_peak_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
 		ON CONFLICT(trader_id) DO UPDATE SET
 			pnl_hist_json = excluded.pnl_hist_json,
 			last_bar_ms = excluded.last_bar_ms,
 			bars_since_fire = excluded.bars_since_fire,
+			equity_peak = excluded.equity_peak,
+			equity_peak_at = excluded.equity_peak_at,
 			updated_at = datetime('now')
-	`, traderID, histJSON, state.LastBarMs, state.BarsSinceFire)
+	`, traderID, histJSON, state.LastBarMs, state.BarsSinceFire, state.EquityPeak, state.EquityPeakAt)
 	return err
 }
 
@@ -410,10 +432,15 @@ func (s *Store) SaveBreadthVelocityState(traderID string, state BreadthVelocityS
 func (s *Store) LoadBreadthVelocityState(traderID string) (BreadthVelocityState, error) {
 	state := BreadthVelocityState{PnlHist: make(map[string][]float64)}
 	var histJSON string
+	// COALESCE: equity_peak/equity_peak_at were added later; rows written before the
+	// migration have NULL there, and a NULL scan into float64 would error out and
+	// discard the whole state (including the velocity history).
 	err := s.db.QueryRow(`
-		SELECT pnl_hist_json, last_bar_ms, bars_since_fire
+		SELECT pnl_hist_json, last_bar_ms, bars_since_fire,
+		       COALESCE(equity_peak, 0), COALESCE(equity_peak_at, 0)
 		FROM breadth_velocity_states WHERE trader_id = ?
-	`, traderID).Scan(&histJSON, &state.LastBarMs, &state.BarsSinceFire)
+	`, traderID).Scan(&histJSON, &state.LastBarMs, &state.BarsSinceFire,
+		&state.EquityPeak, &state.EquityPeakAt)
 	if err == sql.ErrNoRows {
 		return state, nil
 	}

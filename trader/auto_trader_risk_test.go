@@ -46,9 +46,19 @@ type fakeProtectionTrader struct {
 	// setTakeProfitErr 注入止盈挂单失败,用于区分"触发价已被越过(应跳过)"与真实拒因。
 	setTakeProfitErr   error
 	setTakeProfitCalls int
+	// equity 非 0 时 GetBalance 返回该总权益,供账户价值熔断测试用。0 保持原
+	// 有"取不到余额"语义(账户价值路会因此跳过,这本身也是要测的 fail-safe)。
+	equity float64
 }
 
-func (f *fakeProtectionTrader) GetBalance() (map[string]interface{}, error) { return nil, nil }
+func (f *fakeProtectionTrader) GetBalance() (map[string]interface{}, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.equity > 0 {
+		return map[string]interface{}{"totalEquity": f.equity}, nil
+	}
+	return nil, nil
+}
 func (f *fakeProtectionTrader) GetPositions() ([]map[string]interface{}, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
