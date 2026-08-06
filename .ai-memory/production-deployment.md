@@ -1,5 +1,86 @@
 # Production Deployment - Critical Information
 
+## 2026-08-06 Deploy: Gate 适配器 12 个缺陷上线 (pid 1082752, commit 6dcfbbf)
+
+用户「直接重建部署提交」。**只动后端**(前端未重建)。
+
+**触发**:用户贴出 5 行持仓,全部 `0m` 持仓、原价平掉。查实是同一个故障:
+gate 交易员 08-06 08:23~10:43 连开 5 笔、每笔 **3~5 秒**内平掉,烧 `0.8884` USDT
+手续费、零敞口,权益 100 → 99.09 (-0.91%)。`close_reason` 是 `close_long`/`close_short`,
+不是任何保护机制 —— 因为**一档保护都没挂上**。
+
+**根因不是新 bug,是修复没上线**。线上二进制 mtime `08-05 13:15:55 UTC`,
+gate 修复 commit `bed9b92` 是 `08-05 19:17:47 UTC`,**晚了 6 小时**。
+旧二进制里查得到 `Margin mode is set through leverage`,查不到任何新特征串 →
+`bed9b92` 的 12 个缺陷线上一个都没生效。日志逐行还原:
+
+```
+10:43:52  [Gate] OpenShort: SKHYNIX_USDT, size=-66          ← 开仓成功
+10:43:54  ⚠️ Ladder placement had 5 tier error(s)
+          AUTO_INVALID_PARAM_INITIAL_SIZE: initial.size close size must zero
+10:43:55  保护计划 2/2 失败 → 兜底 2/2 失败
+10:43:55  🚨 Protection setup failed, closing position immediately
+10:43:56  [Gate] Closed short: fillPrice=1085.1000          ← 平掉
+```
+
+Gate 拒掉**全部 5 档**(1SL@100% + 4TP@20/15/15/15%)。`close size must zero` 全日志
+**135 次**。**系统行为是对的** —— 宁可白付手续费也不持有无保护仓位
+(`auto_trader_orders.go:531`),缺陷纯在 gate 适配器。同时第二个已修缺陷也在发作:
+`XAU_USDT` 原生 symbol 泄漏进 `drawdown_tier_alloc` / `auto_trader_risk` /
+`protection_reconciler` 共 10 行(`GetPositions` 未调 `revertSymbol`)。
+
+**其他四家健康**,24h 平仓归因对比只有 gate 异常:okx 4801de05 `break_even_stop` 8 笔
++7.52 均持 830 分钟;okx 24be455b +0.96 均持 1221 分钟;binance 616e1654 +2.49;
+okx 02273139 `native_trailing` +1.06。gate 均持 **0.1 分钟**。
+
+**隔离性**:线上 `c2f0f4d`,dev HEAD 夹着 **15 个 `trader/backtest/`** 文件 +
+26 个 research 文件。`go list -deps .` 确认 `trader/backtest` **在主二进制依赖图内**
+(会改变二进制),故必须 cherry-pick。建 `deploy/gate-integration` 从 `c2f0f4d`
+摘 `91e2125` → `bed9b92` → `c364652` = `6dcfbbf`,落地 **17 文件、零 `trader/backtest/`、
+零 research**。`git diff dev deploy/gate-integration -- trader/gate/ ... api/` 为空
+(部署分支与 dev 的已部署文件代码完全一致)。
+
+**二进制**:`go build -ldflags="-s -w" -o /tmp/nofx_gate .` = 48409392 bytes,
+md5 `c95b4f23b2b5e7000e6a66b3daa6d10d`,`vcs.revision=6dcfbbf`。
+回滚点 `/root/.claude/jobs/gatedeploy/tmp/binbak/nofx_prev_c2f0f4d_20260806_1110`
+(md5 `c970fce8bf678be50be64932b0ea0c77`,与替换前线上逐字节一致)。
+回滚:`systemctl stop nofx` → `cp 该文件 /opt/webstack/nofx/nofx` → `systemctl start nofx`。
+
+**二进制特征串核对**(比对文件 mtime 更可靠):新增 `Margin mode recorded as`=1、
+`invalid quanto_multiplier for`=1、`(rule=%d size=%d %s id=%s)`=1、
+`0=cross + cross_leverage_limit`=1;旧串 `Margin mode is set through leverage`=**0**。
+旧二进制上后两个新串均为 0。⚠️ 用**运行时格式串**核对,不要用代码注释里的句子
+(`never round a real protection` 是注释,不入二进制,查出 0 是正常的)。
+
+**上线前验证**:`gofmt -l trader/gate/` 干净、`go vet` 干净、`go build ./...` 干净、
+`go test $(go list ./...|grep -v trader/backtest)` 全过、gate 包 **62 用例 0 fail/0 skip**、
+mutation harness **caught 17 / missed 0 / harness-error 0**。
+(`api/handler_ai_model.go` 的 gofmt 差异是**线上 `c2f0f4d` 就有**的既存漂移,非本次引入。)
+
+**新增回归测试** `trader/gate/production_regression_test.go`:用生产真实档位回放
+(SKHYNIXUSDT SHORT 0.066,SL@1150.571827 + TP@1079.58/1063.16/1028.20/1017.27),
+mock 按 Gate 真实校验规则拒绝 `Size≠0 && Close=true`。破坏性验证:把 `initial.Close`
+改回 `true`,两个测试转红,报错文本**与生产日志逐字一致**。
+
+**上线核对(03:24:17 UTC / 11:24:17 +8 停,11:24:57 起)**:优雅关闭日志
+`✅ System shut down safely` 出现;`MainPID=1082752`,`NRestarts=0`,`pgrep -xc nofx`=1,
+health 200 @1.25ms→2.53ms。四个交易员全部恢复。**重启后窗口**内(`/tmp/nofx.log`
+是 append-only 跨重启,必须先按最后一条 `System shut down safely` 切窗口,否则会把
+重启前的 135 次旧报错当成新的):`close size must zero`=**0**、原生 `_USDT` 泄漏=**0**、
+`Margin mode is set through leverage`=**0**、panic/fatal=**0**。WARN 只剩既存基线
+`drawdown_claim_conflict.go:300`(8 次,同源基线)+ 1 次 CoinAnk 空 K 线兜底。
+gate 交易员 `✅ auto-started successfully`,`gate/order_sync` 每 30s 正常拉到 12 笔成交,
+首轮分析对齐到 `11:42:00`(interval=20m,stagger slot=4)。
+`⏳ [gate] Entry cooldown restored for SKHYNIXUSDT (2x, until 12:13:56)` —— 冷却期
+跨重启正确恢复,所以刚出事的币不会立刻再进。
+
+**遗留(不影响交易)**:① `XAU_USDT` 在币安行情兜底报 `cannot unmarshal object`
+(黄金合约币安没有,最终走 CoinAnk,有兜底未断);② gate `order_sync` 对 close 成交
+固定写 `pnl=0` 交给 `position_builder` 反推,而 `GetClosedPnL` 里有交易所真实
+`pos.Pnl` 可用,是精度收敛项;③ 前次会话建议的 **Gate API 密钥旋转仍未做**,
+两行明文仍在 `data/nofx_20260726_095503.log:119764` 与
+`data/nofx_20260726_143418.log:79355`。
+
 ## 2026-08-05 Deploy: 账户实际价值熔断上线 + claude 实盘 2.8% (pid 998467, commit 1cfc0b5)
 
 用户诉求「实盘开启账户2.8%熔断」→「直接部署上线,百分比就行,暂时不加冻结,先看看效果再说」。

@@ -1,6 +1,13 @@
 # Gate 交易所接入 — 首轮审计的 12 个缺陷与对齐结论
 
-> **状态**:代码已修完并提交(`bed9b92`,分支 `dev`),**尚未部署**。
+> **状态**:**已上线** 2026-08-06(pid 1082752,部署 commit `6dcfbbf`,
+> 分支 `deploy/gate-integration` 从线上 `c2f0f4d` cherry-pick,详见
+> `production-deployment.md` 顶部条目)。
+>
+> ⚠️ **代价教训**:`bed9b92` 提交后**晚了 6 小时才部署**,这 6 小时里 gate 连开 5 笔仓、
+> 每笔 3~5 秒内被平掉(Gate 拒掉全部 5 档保护 → 系统正确地拒绝持有无保护仓位),
+> 烧掉 0.8884 USDT 手续费、零敞口。**修复只有部署了才算修复** ——
+> 判断线上跑的是哪版代码,查二进制里的**运行时格式串**,不要只看文件 mtime。
 > **前置**:gate 交易员账户仍需先向 Gate U 本位合约钱包**转一笔 USDT**才能开户,
 > 否则接口一律 `USER_NOT_FOUND: please transfer funds first to create futures account`
 > —— 这不是网络/密钥问题(三个端点实测 200,0.53~0.67s),Gate 是首次转入时惰性建仓户。
